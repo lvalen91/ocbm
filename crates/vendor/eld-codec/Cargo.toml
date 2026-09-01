@@ -1,0 +1,10 @@
+[package]
+name = "eld-codec"
+version = "0.0.0"
+edition = "2021"
+publish = false
+# AAC-ELD encoder for the CarPlay MainAudio mic uplink. A tiny C shim (csrc/eld_shim.c) wraps
+# libfdk-aac using its symbolic enums; build.rs compiles it and links -lfdk-aac. All unsafe FFI is
+# isolated in this crate so `receiver` can stay `#![forbid(unsafe_code)]`.
+
+[dependencies]

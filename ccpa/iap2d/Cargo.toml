@@ -1,0 +1,15 @@
+[package]
+name = "iap2d"
+version = "0.1.0"
+edition = "2021"
+description = "Box-side iAP2 accessory L3 daemon: drives /dev/android_iap2 with carplayd's iap2-core (auth+identify from Apple's CarPlaySimulator.devicekitplugin spec)"
+
+[[bin]]
+name = "iap2d"
+path = "src/main.rs"
+
+[dependencies]
+# Authoritative CarPlay protocol core: message catalog from CarPlaySimulator.devicekitplugin,
+# link framing + accessory auth/identify state machine (carplayd, the reinforcing session ref).
+carplay-iap2-core = { path = "../../crates/vendor/iap2-core" }
+libc = "0.2"

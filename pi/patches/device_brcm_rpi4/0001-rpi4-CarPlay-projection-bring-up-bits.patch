@@ -1,0 +1,60 @@
+From f1446f032f1e328cbedca23bf642e88b8d1dcd59 Mon Sep 17 00:00:00 2001
+From: lvalen91 <40876073+lvalen91@users.noreply.github.com>
+Date: Sat, 22 Aug 2026 02:40:09 -0800
+Subject: [PATCH] rpi4: CarPlay projection bring-up bits
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Application-specific, unlike the platform corrections in the previous commit.
+These belong to the CarPlay/OCBM project, not to the board.
+
+carlink/privapp-permissions-com.carlink.projection.xml — the privileged
+permission allowlist for the projection app. Must be in the image BEFORE the
+APK reaches /system/priv-app: an unallowlisted privileged permission is
+boot-blocking, not a silent denial. Without it addKeyEventHandler is denied and
+the steering-wheel voice and call keys never reach CarPlay.
+
+carlink/carlink_boot.sh + carlink_eth0.rc — static address on eth0. Nothing
+runs DHCP on the direct link to the workstation and Android's EthernetManager
+never claims eth0, so adb-over-TCP on the wire is otherwise unreachable. The
+init service needs `seclabel u:r:su:s0`: init refuses to start a shell service
+because shell_exec has no domain transition from init, and that check fires
+even under permissive SELinux — the service just never runs, with nothing
+obvious in the log.
+---
+ device.mk | 15 +++++++++++++--
+ 1 file changed, 13 insertions(+), 2 deletions(-)
+
+diff --git a/device.mk b/device.mk
+index 9da830c..3484dd0 100644
+--- a/device.mk
++++ b/device.mk
+@@ -212,11 +212,22 @@ PRODUCT_SYSTEM_PROPERTIES += \
+     persist.sys.ethernet.enable=1 \
+     ro.tether.denied=false
+ 
+-# --- Pi 4 platform corrections, 2026-08-22 ---
+-# Hardware-verified; see docs/os-corrections-2026-08-16.md.
++# --- CarPlay port, 2026-08-22 ---
++# See pi/docs/04_IMAGE_REBUILD_GUIDE.md (ccpa_custom) and
++# docs/os-corrections-2026-08-16.md.
+ 
+ # adb root across reboots. `adb remount` refuses on this board ("bootloader
+ # unlocked"), but `mount -o remount,rw /` works once adbd is root, and boot
+ # config under /boot is editable in place from the running system.
+ PRODUCT_SYSTEM_PROPERTIES += \
+     service.adb.root=1
++
++# Privileged-permission allowlist for the projection app. Must be in the image
++# before the APK lands in /system/priv-app — see the file's own header.
++PRODUCT_COPY_FILES += \
++    $(DEVICE_PATH)/carlink/privapp-permissions-com.carlink.projection.xml:$(TARGET_COPY_OUT_SYSTEM)/etc/permissions/privapp-permissions-com.carlink.projection.xml
++
++# eth0 static address (no DHCP on the direct link to the workstation).
++PRODUCT_COPY_FILES += \
++    $(DEVICE_PATH)/carlink/carlink_boot.sh:$(TARGET_COPY_OUT_VENDOR)/bin/carlink_boot.sh \
++    $(DEVICE_PATH)/carlink/carlink_eth0.rc:$(TARGET_COPY_OUT_VENDOR)/etc/init/carlink_eth0.rc
+-- 
+2.34.1
+

@@ -1,0 +1,56 @@
+# 2026-07-25 — wireless Identify ACCEPTED with the full metadata declaration
+#
+# Box:     airplayd 0be62b8cde2a89cd12f54a7542c4ef22
+#          iap2d 735078dd4cb54a39179787cabcb6d639
+#          carplay-wireless 353c7fb3d3e1937f7fdbf8ba9e6e64e4
+# Policy:  /tmp/carplay_metadata = extended
+# Context: docs/carplay/05_METADATA_AND_CONTROLS.md §6.6. The three prior sessions were rejected; the cause was the missing
+#          Stop ids, which the phone named itself (§6.3).
+#
+# PROVENANCE: transcribed from the live UART console during the session. /tmp on the box is
+# tmpfs and the adapter was detached before the log could be copied off, so this is the console
+# read-back rather than a byte copy of /tmp/airplayd_wl.log. The iapreject evidence for the
+# preceding rejection IS a byte copy — see
+# 2026-07-25_iphone_iapreject_requiredinfomissing.txt.
+
+## Identify
+
+[iap-tunnel] TX 0x1D01 IdentificationInformation (340 B, AirPlay tunnel)
+[iap-tunnel] RX 0x1D00 -> IdentSent
+[features] metadata policy: param6=Extended param7=Extended subscribe=Extended
+[events] iAP2-tunnel metadata: 8 subscribes (now_playing, route_guidance, call_state,
+         communications, call_history, power, app_discovery, lane_guidance, destination, device_info)
+[iap-tunnel] RX 0x1D02 -> Identified
+
+## Subscribes, all accepted onto the link
+
+[events] TX iAP2-tunnel 0x5000 now_playing     (56 B, link-framed) -> sent
+[events] TX iAP2-tunnel 0x5200 route_guidance  (30 B, link-framed) -> sent
+[events] TX iAP2-tunnel 0x4154 call_state      (60 B, link-framed) -> sent
+[events] TX iAP2-tunnel 0x4157 communications  (84 B, link-framed) -> sent
+[events] TX iAP2-tunnel 0x4170 call_history    (88 B, link-framed) -> sent
+[events] TX iAP2-tunnel 0xAE00 power           (64 B, link-framed) -> sent
+[events] TX iAP2-tunnel 0xAD00 app_discovery   (30 B, link-framed) -> sent
+[events] TX iAP2-tunnel 0x10DA destination     (20 B, link-framed) -> sent
+
+## Inbound message ids, one session
+
+    229  iAP tunnel msg 0x5001    NowPlayingUpdate
+      9  iAP tunnel msg 0xae01    PowerUpdate
+      3  iAP tunnel msg 0x4171    ListUpdate           (after the Contacts & Favorites consent)
+      1  iAP tunnel msg 0x4158    CommunicationsUpdate
+      1  iAP tunnel msg 0xad01    AppDiscoveryUpdate
+      1  iAP tunnel msg 0x4155    CallStateUpdate
+      1  iAP tunnel msg 0x4e09    DeviceInformationUpdate
+      1  iAP tunnel msg 0x4e0a    DeviceLanguageUpdate
+      1  iAP tunnel msg 0x4e0b    DeviceTimeUpdate
+      1  iAP tunnel msg 0x4e0c    DeviceUUIDUpdate
+      1  iAP tunnel msg 0x4e0d    WirelessCarPlayUpdate
+      1  iAP tunnel msg 0x4e0e    DeviceTransportIdentifierNotification
+
+Album artwork also completed this session (host log: `album artwork received id=129 (113631 B)`).
+
+## Not resolved by this session
+
+The host app's Telephony, Power and Device panes read empty although the records reached the app
+(its log shows `device` records at #1-3). The remaining fault is on the host side — docs/carplay/05_METADATA_AND_CONTROLS.md §6.6.

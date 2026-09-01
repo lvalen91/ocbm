@@ -1,0 +1,111 @@
+# Device state snapshot — captured 2026-08-16 before shutdown
+# Pi 4 / RaspberryVanillaAOSP16-20260413-rpi4_car.img
+
+## kernel
+Linux localhost 6.12.73-g8af794a959ec-v8 #1 SMP PREEMPT Thu Feb 19 17:32:04 UTC 2026 aarch64 Toybox
+16
+36
+
+## kernel config (CarPlay-relevant)
+CONFIG_BT=y
+# CONFIG_BT_RFCOMM is not set
+# CONFIG_BT_HIDP is not set
+CONFIG_V4L2_MEM2MEM_DEV=y
+CONFIG_VIDEO_RPI_HEVC_DEC=y
+CONFIG_DMABUF_HEAPS_CMA=y
+CONFIG_VIDEO_CODEC_BCM2835=y
+
+## selinux
+Permissive
+u:object_r:device:s0       /dev/media0
+u:object_r:video_device:s0 /dev/video19
+
+## video4linux
+video10: bcm2835-codec-decode
+video11: bcm2835-codec-encode
+video12: bcm2835-codec-isp
+video13: bcm2835-isp-output0
+video14: bcm2835-isp-capture0
+video15: bcm2835-isp-capture1
+video16: bcm2835-isp-stats2
+video18: bcm2835-codec-image_fx
+video19: rpi-hevc-dec
+video20: bcm2835-isp-output0
+video21: bcm2835-isp-capture0
+video22: bcm2835-isp-capture1
+video23: bcm2835-isp-stats2
+video31: bcm2835-codec-encode_image
+
+## HEVC decoders registered
+Media type 'video/hevc':
+  Decoder "c2.ffmpeg.hevc.decoder" supports
+    aliases: [
+--
+Media type 'video/hevc':
+  Encoder "c2.android.hevc.encoder" supports
+    aliases: []
+
+## codec2 properties
+[persist.vendor.ffmpeg_codec2.rank.audio]: [16]
+[persist.vendor.ffmpeg_codec2.rank.video]: [256]
+[persist.vendor.ffmpeg_codec2.v4l2.h264]: [false]
+[persist.vendor.ffmpeg_codec2.v4l2.h265]: [true]
+[persist.vendor.v4l2_codec2.rank.decoder]: [128]
+[persist.vendor.v4l2_codec2.rank.encoder]: [128]
+[ro.vendor.v4l2_codec2.decode_concurrent_instances]: [8]
+[ro.vendor.v4l2_codec2.encode_concurrent_instances]: [8]
+
+## audio: cards
+ 0 [Headphones     ]: bcm2835_headpho - bcm2835 Headphones
+ 1 [vc4hdmi0       ]: vc4-hdmi - vc4-hdmi-0
+ 2 [vc4hdmi1       ]: vc4-hdmi - vc4-hdmi-1
+
+## audio: car audio service mode
+    Run in legacy mode? true
+    Rely on core audio for volume? false
+    Rely on core audio for routing? false
+    Configured using audio control? false
+    Car audio configuration path: /vendor/etc/car_audio_configuration.xml
+
+## audio: props
+[persist.vendor.audio.device]: [hdmi0]
+[ro.boot.audio.tinyalsa.simulate_input]: [true]
+
+## display / occupant zones
+ zoneId=0 info=OccupantZoneInfo{zoneId=0 type=0 seat=1}
+ port=0 config={displayType=1 occupantZoneId=0 inputTypes=[210, 100, 101, 10]}
+ port=1 config={displayType=2 occupantZoneId=0 inputTypes=[100]}
+ zoneId=0 config={userId=10 displays={displayId=0 displayType=1} audioZoneId=none}
+
+## wifi / bt
+US
+0
+
+## accessory stack processes
+ 3899    05:54:56 sh -c cd /data/local/tmp && /apex/com.android.hardware.wifi.hostapd.rpi/bin/hw/hostapd -dd hostapd_5g.conf
+ 3901    05:54:56 hostapd -dd hostapd_5g.conf
+ 7081    04:38:04 apdhcpd --iface wlan0
+25114       21:58 sh -c cd /data/local/tmp && CARPLAY_HCI_BACKEND=native CARPLAY_RFCOMM_BACKEND=userspace CARPLAY_MFI_ADDR=192.168.50.2:7789 CARPLAY_HOSTAPD_CONF=/data/local/tmp/hostapd_5g.conf CARPLAY_STATE_DIR=/data/local/tmp/carplay PEERSTORE_PATH=/data/local/tmp/carplay/carplay_peers.bin CARPLAY_CFG_FILE=/data/user/10/com.carlink.projection/files/carplay_cfg.yaml AIRPLAYD_BIN=/data/local/tmp/airplayd RX_CONNECT_BIN=/data/local/tmp/rx-connect nohup ./carplay-wireless > /data/local/tmp/wireless.log 2>&1 < /dev/null &
+25115       21:58 carplay-wireless
+25136       21:49 airplayd
+25148       21:48 rx-connect
+
+## listening sockets
+LISTEN      0      128    127.0.0.1:9115               0.0.0.0:*                  
+LISTEN      0      128    127.0.0.1:9112               0.0.0.0:*                  
+LISTEN      0      128    127.0.0.1:9110               0.0.0.0:*                  
+LISTEN      0      2       [::ffff:127.0.0.1]:9004                     *:*                  
+LISTEN      0      2       [::ffff:127.0.0.1]:9002                     *:*                  
+LISTEN      0      2       [::ffff:127.0.0.1]:9003                     *:*                  
+LISTEN      0      2       [::ffff:127.0.0.1]:9001                     *:*                  
+
+## deployed binaries
+-rwxr-xr-x 1 root root 1677248 2026-08-16 15:43 /data/local/tmp/airplayd
+-rwxr-xr-x 1 root root  301240 2026-08-16 11:27 /data/local/tmp/apdhcpd
+-rwxr-xr-x 1 root root  472600 2026-08-16 15:43 /data/local/tmp/carplay-wireless
+-rwxr-xr-x 1 root root  539128 2026-08-16 10:56 /data/local/tmp/rx-connect
+
+## bonded phones
+total 8
+-rw-rw-rw- 1 root root 25 2026-08-16 11:32 bt_link_keys
+-rw-rw-rw- 1 root root 69 2026-08-16 13:29 carplay_peers.bin

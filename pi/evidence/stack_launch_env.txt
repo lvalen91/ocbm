@@ -1,0 +1,9 @@
+PEERSTORE_PATH=/data/local/tmp/carplay/carplay_peers.bin
+CARPLAY_RFCOMM_BACKEND=userspace
+CARPLAY_MFI_ADDR=192.168.50.2:7789
+CARPLAY_STATE_DIR=/data/local/tmp/carplay
+CARPLAY_HOSTAPD_CONF=/data/local/tmp/hostapd_5g.conf
+CARPLAY_HCI_BACKEND=native
+CARPLAY_CFG_FILE=/data/user/10/com.carlink.projection/files/carplay_cfg.yaml
+AIRPLAYD_BIN=/data/local/tmp/airplayd
+RX_CONNECT_BIN=/data/local/tmp/rx-connect

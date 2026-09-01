@@ -1,0 +1,25 @@
+[package]
+name = "carplay-wireless"
+version = "0.1.0"
+edition = "2021"
+description = "Wireless CarPlay Bluetooth bring-up (Phase A1: discoverability + Just-Works pairing) -- see docs/carplay/05_METADATA_AND_CONTROLS.md"
+
+[[bin]]
+name = "carplay-wireless"
+path = "src/main.rs"
+
+[dependencies]
+# Vendored into ccpa_custom 2026-07-13 from the carplayd PoC (Phase A1+A2, iPhone-verified). Ported
+# for the IW416 + OCBM box: log/env_logger dropped (the crate never used the `log` macros — it logs
+# via local println wrappers), matching the box daemons' stderr/println convention.
+libc = "0.2"
+signal-hook = "0.3"
+sha2 = "0.10" # per-box identity derivation (box_identity.rs, #636)
+carplay-iap2-core = { path = "../iap2-core" }
+# Wire constants only (CT_BT_PHASE / BTP_*), so the phase values the driver publishes and the ones
+# ocbmd forwards are literally the same symbols. Zero transitive deps.
+ocbm-proto = { path = "../../ocbm-proto" }
+# MFI1 framing for the REMOTE MFi backend (mfi_local.rs, `CARPLAY_MFI_ADDR`). Needed by the
+# Raspberry Pi port, which has no coprocessor of its own and reaches the CCPA's over USB-NCM.
+# Zero transitive deps; unused when the env var is unset, i.e. on the CCPA itself.
+mfi-wire = { path = "../../mfi-wire" }

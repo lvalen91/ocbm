@@ -1,0 +1,20 @@
+[package]
+name = "c2air-btattach"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "C2Air (Allwinner V821) Bluetooth HCI line-discipline attach — lib + thin test bin"
+
+# lib FIRST: the attach is bound to the fd's lifetime, so the daemon that owns BT has to hold it.
+# The binary exists only to prove the attach standalone (and to hold it during bring-up).
+[lib]
+name = "c2air_btattach"
+path = "src/lib.rs"
+
+[[bin]]
+name = "c2air-btattach"
+path = "src/main.rs"
+
+# No third-party crates by design — this is four ioctls and a termios. Matches pi/apdhcpd's stance.
+[dependencies]
+libc = "0.2"

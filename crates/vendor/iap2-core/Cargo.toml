@@ -1,0 +1,16 @@
+[package]
+name = "carplay-iap2-core"
+version = "0.1.0"
+edition = "2021"
+description = "Transport-agnostic iAP2 protocol core (link framing, auth/identify state machine, TLV builder, MFi auth-service client) -- shared by the wired (carplayd) and wireless (carplay-wireless) accessory drivers"
+
+[dependencies]
+# rv32 (C2Air/V821) has no 64-bit atomics: no AtomicU64/AtomicI64 in core. Same API, const-new.
+portable-atomic = "1"
+carplay-metadata = { path = "../metadata" }
+# The app-pushed VehicleConfig reader (src/config.rs, docs/carplay/04_CAPABILITIES_AND_CONFIG.md B3/C6). MEASURED cost on iap2d
+# (armv7-musl, release, UPX-3.96): 200,784 -> 268,160 B packed (+66 KB) and 398,968 -> 533,800 B
+# unpacked (+132 KB). Paid once for the whole iAP2 side; collapses to one copy if the CarPlay
+# daemons are ever consolidated into a single multi-applet binary.
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"

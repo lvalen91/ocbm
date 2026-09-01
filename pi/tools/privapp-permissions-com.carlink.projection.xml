@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Privileged-permission allowlist for the CarPlay projection system app.
+
+  Install to /system/etc/permissions/ (pi/tools/install_projection_app.sh, system mode).
+
+  WHY THIS FILE IS REQUIRED, AND WHY IT MUST LAND BEFORE THE APK:
+
+  Declaring a signature|privileged permission in a manifest does not grant it. Since Android 8 the
+  platform additionally requires the package to be listed here. Worse, on many builds an app in
+  /system/priv-app that requests a privileged permission NOT in an allowlist is a BOOT-BLOCKING
+  fatal, not a silent denial — so pushing the APK first and this file second can leave the device
+  in a boot loop.
+
+  Each permission below maps to something the app actually calls; nothing is requested speculatively,
+  because every extra entry here is real attack surface on a system app.
+-->
+<permissions>
+    <privapp-permissions package="com.carlink.projection">
+
+        <!-- CarProjectionManager.updateProjectionStatus and addKeyEventHandler both check this.
+             Without it the platform never learns a CarPlay session exists: the power policy's
+             PROJECTION component, the HMI and every other app see nothing, and the steering-wheel
+             voice and call keys keep their default handling instead of reaching CarPlay. -->
+        <permission name="android.car.permission.CAR_PROJECTION"/>
+
+        <!-- Read back projection status. Needed for the app to observe its own published state and
+             for anything else on the system to be told about it. -->
+        <permission name="android.car.permission.ACCESS_CAR_PROJECTION_STATUS"/>
+
+        <!-- CarUxRestrictionsManager: the drive-state source that becomes iOS setLimitedUI. -->
+        <permission name="android.car.permission.CAR_UX_RESTRICTIONS_CONFIGURATION"/>
+
+        <!-- "Return to CarPlay" without restarting the session. GMCarPlay holds exactly this pair,
+             and it is how an OEM implements the launcher tile: moveTaskToFront on the existing
+             projection task rather than a relaunch. LaunchTileActivity degrades to
+             FLAG_ACTIVITY_REORDER_TO_FRONT without them, so these are quality-of-life rather than
+             load-bearing. -->
+        <permission name="android.permission.REAL_GET_TASKS"/>
+        <permission name="android.permission.MANAGE_ACTIVITY_TASKS"/>
+
+        <!-- Own the audio path and duck for navigation and alerts, matching GMCarPlay. -->
+        <permission name="android.permission.MODIFY_AUDIO_ROUTING"/>
+
+    </privapp-permissions>
+</permissions>

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<lint>
+    <!-- Media3 @UnstableApi tool disagreement (verified AGP 9.x / media3 1.10.x): the
+         Kotlin compiler treats UnstableApi as a NON-opt-in marker (a @file:OptIn would
+         warn "has no effect", so it is intentionally absent), but lint's
+         experimental-annotation check still demands the opt-in and errors on every
+         Media3 use. The code is correct and compiles clean. Scoped to the media
+         package (was a module-global disable). Re-test on each AGP/Media3 bump. -->
+    <issue id="UnsafeOptInUsageError">
+        <ignore path="src/main/kotlin/com/carlink/media" />
+    </issue>
+</lint>

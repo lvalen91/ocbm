@@ -1,0 +1,10 @@
+[package]
+name = "mfi-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Host-side exerciser for `mfid`. Builds native (Mac or Pi) — it is the thing that proves the NCM
+# MFi path works before any of it is wired into a receiver.
+[dependencies]
+mfi-wire = { path = "../../crates/mfi-wire" }

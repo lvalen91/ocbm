@@ -1,0 +1,93 @@
+# Cross-build tuning for the box binaries. `target-cpu=cortex-a7` tunes instruction scheduling to
+# the real CPU (paired with the [profile.release.package.*] opt-level=2 overrides in the root
+# Cargo.toml).
+#
+# NEON is OFF in every Rust binary we ship, and the CPU target does not turn it on. The
+# armv7-unknown-linux-musleabihf spec carries an explicit `-neon`:
+#
+#   $ RUSTC_BOOTSTRAP=1 rustc -Zunstable-options --print target-spec-json \
+#       --target armv7-unknown-linux-musleabihf | grep features
+#   "features": "+v7,+vfp3d16,+thumb2,-neon"
+#
+# An explicit `-neon` in the spec beats the CPU's implied features, so `-C target-cpu=cortex-a7`
+# emits no NEON at all — verified 2026-07-29 across all 64 .s files in airplayd's codegen graph
+# (zero NEON instructions) and by A/B on the shipped binary (identical vld1/vst1 counts to a build
+# with no rustflags at all; those come from the C side, which zig cc does vectorize).
+#
+# The board itself HAS NEON — /proc/cpuinfo on the box reports `neon vfpv3 vfpv4 vfpd32`. Enabling
+# it needs `-C target-feature=+neon` (warns: unstable for target_arch="arm") or a custom target
+# JSON. Measured cost of adding it: +2,096 bytes (+0.13%), ~3,400 memory ops vectorized. Measured
+# benefit to CRYPTO specifically: one function — the keystream XOR. chacha20 0.9's NEON backend is
+# gated on aarch64 and poly1305 0.8's only SIMD backend is x86 AVX2, so the quarter-round core and
+# the MAC stay scalar either way. Measure before assuming a throughput win.
+#
+# Caveat if that changes: `cfg!(target_feature = "neon")` stays FALSE even when +neon is passed
+# (unstable features emit no cfg), so any compile-time NEON dispatch here silently takes the
+# scalar arm.
+[target.armv7-unknown-linux-musleabihf]
+rustflags = ["-C", "target-cpu=cortex-a7"]
+
+# Raspberry Pi / AAOS port. The Pi runs Android, so its binaries are aarch64-linux-android — NOT
+# aarch64-unknown-linux-gnu, and the difference is not cosmetic: `target_os` is "android", which is
+# what silently broke cloexec.rs (it was gated on target_os = "linux", fell through to the macOS
+# branch, and leaked every Bluetooth socket into the detached daemons). See pi/docs/00 §4.
+#
+# API 34 rather than the platform's own 36: nothing here uses a post-34 libc symbol, and linking to
+# the lowest level that works keeps the binaries usable on an older image without a rebuild.
+#
+# The NDK path is not hardcoded — pi/tools/build_pi_binaries.sh resolves it and exports the linker,
+# so this section only has to exist for `cargo build --target aarch64-linux-android` to be a normal
+# thing to type. If you build by hand, export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER yourself.
+# C2Air (Allwinner V821, riscv32). THIS FLAG IS LOAD-BEARING — without it the box crashes.
+#
+# riscv32 Linux is time64-ONLY: the kernel provides no 32-bit time syscalls, and musl's riscv32 port
+# has had a 64-bit `time_t` since the day it was added. The `libc` crate does not know that. Its
+# build.rs force-enables `musl_v1_2_3` (and hence `musl32_time64`) only for loongarch64, hexagon,
+# ohos and pauthtest — riscv32 is missing from that list — so 32-bit musl otherwise falls back to
+# the pre-1.2 `time_t = c_long`. Measured on the box WITHOUT this flag:
+#
+#     time_t = 4 bytes, timespec = 8 bytes, timeval = 8 bytes      (kernel wants 8 / 16 / 16)
+#
+# Consequences, all observed on hardware rather than reasoned about:
+#   * `nanosleep` returns EINVAL, and `std::thread::sleep` asserts the errno is EINTR — so any
+#     thread that sleeps PANICS.
+#   * `carplay-wireless` SIGSEGVs at startup (`sepc: 0`, null jump) — it was the first daemon to
+#     spawn a sleeping thread. ocbmd survived only because it is a single-threaded poll loop.
+#   * `settimeofday`/`clock_settime` return EINVAL, which is the REAL reason ocbmd's CT_SETTIME
+#     failed — not a missing `SYS_settimeofday`, which was an incorrect first diagnosis.
+#   * every `SO_RCVTIMEO`/`SO_SNDTIMEO` in the wireless stack passed a mis-sized `timeval`.
+#
+# With the flag: 8 / 16 / 16, nanosleep OK, thread::sleep OK, settimeofday OK.
+#
+# REQUIRES libc >= 0.2.189. The `musl32_time64` machinery does not exist in 0.2.186, which is what
+# Cargo.lock pinned — so this flag silently did NOTHING and every diagnosis pointed elsewhere for
+# hours. If `time_t` is 4 bytes on the box again, check the LOCKED libc version FIRST.
+# Two traps that hid it, both worth knowing:
+#   * a standalone probe crate resolved 0.2.189 and behaved correctly while the workspace did not —
+#     the difference was the lockfile, not the config;
+#   * `rm -rf target/<triple>` does NOT invalidate the libc build script, which lives in
+#     `target/release/build/libc-*` (build scripts run on the HOST). A stale one keeps emitting the
+#     old cfg set. Remove both when testing this.
+# Confirm with the compiler, not by inspection: under `not(musl32_time64)` `libc::time_t` is
+# `#[deprecated]`, so a build that references it warns. armv7 SHOULD warn (it stays 32-bit);
+# riscv32 should NOT.
+#
+# It is safe here specifically because this target is built with `-Z build-std`, so `std` and every
+# crate are compiled with the same cfg. Do NOT use this target against a prebuilt std — the layouts
+# would disagree across the ABI boundary, which is far worse than the bug it fixes.
+#
+# Scoped to this target on purpose: armv7-musl is ALSO 32-bit, but the CCPA runs an old musl whose
+# `time_t` really is 32-bit, and libc would additionally want the `__*_time64` redirect symbols it
+# does not have. Enabling this globally would break the CCPA. Verified after the change: armv7 still
+# warns (32-bit), riscv32 does not (time64).
+#
+# Note that these types gain PRIVATE PADDING fields under this cfg, so `libc::timeval { .. }` struct
+# literals no longer compile. Build them with `zeroed()` + field assignment; that form works on
+# every target, which is why the armv7 sites were converted too rather than cfg'd apart.
+[target.riscv32gc-unknown-linux-musl]
+rustflags = ["--cfg", "libc_unstable_musl_v1_2_3"]
+
+[target.aarch64-linux-android]
+# Deliberately no rustflags. Unlike the armv7 box target above there is no CPU-tuning story here
+# worth the risk: the Pi 4's Cortex-A72 is the only target, NEON is on by default in the aarch64
+# spec (no explicit -neon to fight), and the crypto crates' aarch64 backends are already selected.

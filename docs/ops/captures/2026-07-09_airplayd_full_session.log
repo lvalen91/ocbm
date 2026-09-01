@@ -1,0 +1,52 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# VERIFICATION NOTE: these logs were produced by ccpa/airplayd, which for the
+# on-hardware validation REUSES ANOTHER PROJECT’S CarPlay receiver as the harness —
+# ncm_carplayd/receiver_core (its proven ControlServer for pair-setup/verify + auth-setup,
+# and, for the full-session capture, its AvSession for SETUP/RECORD/stream handling).
+# This proves the session works on the adapter; it is NOT the committed final design,
+# which forwards the ENCRYPTED A/V + the session key over OCBM to the host app (no on-box
+# decode/IPC). MFi is our own LocalMfiSigner on the genuine local i2c chip. See ./README.md.
+# ─────────────────────────────────────────────────────────────────────────────
+
+[airplayd] pairing server on [::]:5000 · device 'CarLink' (AA:BB:CC:DD:EE:01) · setup 3939
+[airplayd] ── control connection from [fe80::1c76:d88:9cb3:9036%9]:60836 ──
+[receiver] POST /pair-verify (plain, 37 B body)
+[receiver] POST /pair-verify (plain, 125 B body)
+[receiver] POST /pair-setup (plain, 6 B body)
+[receiver] POST /pair-setup (plain, 457 B body)
+[receiver] POST /pair-setup (plain, 159 B body)
+[airplayd] pair-setup: peer saved (36-byte id)
+[receiver] POST /pair-verify (plain, 37 B body)
+[receiver] POST /pair-verify (plain, 125 B body)
+[receiver] pair-verify OK → control channel encrypted
+[receiver] POST /auth-setup (enc, 33 B body)
+[receiver] auth-setup (MFi-SAP) OK → 1113 B M2
+[receiver] SETUP /17897643310287374007 (enc, 764 B body)
+[session] SETUP phase1 → timingPort 33738 eventPort 44165 keepAlivePort 0
+[receiver] GET /info (enc, 0 B body)
+[receiver] RECORD /17897643310287374007 (enc, 0 B body)
+[session] RECORD: event channel accepted from [fe80::1c76:d88:9cb3:9036%9]:60837
+[events] encrypted command channel ready
+[session] RECORD: session-focus handshake sent (requestUI=true, takeScreen=true)
+[session] RECORD done
+[events] ← iPhone event: 'RTSP/1.0 200 OK' (75 B)
+[receiver] POST /command (enc, 287 B body)
+[command] ← iPhone POST /command type='modesChanged' (287 B)
+[events] ← iPhone event: 'RTSP/1.0 200 OK' (345 B)
+[receiver] POST /command (enc, 287 B body)
+[command] ← iPhone POST /command type='modesChanged' (287 B)
+[receiver] POST /command (enc, 115 B body)
+[command] ← iPhone POST /command type='disableBluetooth' (115 B)
+[receiver] POST /command (enc, 287 B body)
+[command] ← iPhone POST /command type='modesChanged' (287 B)
+[receiver] SETUP /17897643310287374007 (enc, 167 B body)
+[session] SETUP phase2 screen(110) scid=10439747549966714275 → dataPort 55046
+[receiver] POST /command (enc, 287 B body)
+[command] ← iPhone POST /command type='modesChanged' (287 B)
+[screen] iPhone connected from [fe80::1c76:d88:9cb3:9036%9]:60838; forwarding video → 127.0.0.1:9001
+[screen] first frame decoded (32 B Annex-B)
+[receiver] SETUP /17897643310287374007 (enc, 201 B body)
+[session] SETUP phase2 audio(100) scid=18291220415742953317 fmt=0x8000 48000Hz 2ch Pcm audioType="media" → dataPort 56115
+[audio] stream 100 Pcm → media :9002 (48000Hz 2ch)
+[receiver] POST /command (enc, 287 B body)
+[command] ← iPhone POST /command type='modesChanged' (287 B)

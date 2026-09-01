@@ -1,0 +1,147 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<issues format="6" by="lint 9.2.1" type="baseline" client="gradle" dependencies="false" name="AGP (9.2.1)" variant="all" version="9.2.1">
+
+    <issue
+        id="OldTargetApi"
+        message="Not targeting the latest versions of Android; compatibility modes apply. Consider testing and updating this version. Consult the `android.os.Build.VERSION_CODES` javadoc for details."
+        errorLine1="        targetSdk = 36"
+        errorLine2="        ~~~~~~~~~~~~~~">
+        <location
+            file="build.gradle.kts"
+            line="19"
+            column="9"/>
+    </issue>
+
+    <issue
+        id="VectorRaster"
+        message="Limit vector icons sizes to 200×200 to keep icon drawing fast; see https://developer.android.com/studio/write/vector-asset-studio#when for more"
+        errorLine1="    android:width=&quot;432dp&quot;"
+        errorLine2="                   ~~~~~">
+        <location
+            file="src/main/res/drawable/ic_phone_projection.xml"
+            line="3"
+            column="20"/>
+    </issue>
+
+    <issue
+        id="GradleDependency"
+        message="A newer version of androidx.compose:compose-bom than 2026.06.00 is available: 2026.06.01"
+        errorLine1="    implementation(platform(&quot;androidx.compose:compose-bom:2026.06.00&quot;))"
+        errorLine2="                            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="build.gradle.kts"
+            line="151"
+            column="29"/>
+    </issue>
+
+    <issue
+        id="GradleDependency"
+        message="A newer version of androidx.compose:compose-bom than 2026.06.00 is available: 2026.06.01"
+        errorLine1="    androidTestImplementation(platform(&quot;androidx.compose:compose-bom:2026.06.00&quot;))"
+        errorLine2="                                       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="build.gradle.kts"
+            line="177"
+            column="40"/>
+    </issue>
+
+    <issue
+        id="DataExtractionRules"
+        message="The attribute `android:allowBackup` is deprecated from Android 12 and may be removed in future versions. Consider adding the attribute `android:dataExtractionRules` specifying an `@xml` resource which configures backups and device transfers on Android 12 and higher."
+        errorLine1="        android:allowBackup=&quot;false&quot;"
+        errorLine2="                             ~~~~~">
+        <location
+            file="src/main/AndroidManifest.xml"
+            line="46"
+            column="30"/>
+    </issue>
+
+    <issue
+        id="UseKtx"
+        message="Use the KTX extension function `SharedPreferences.edit` instead?"
+        errorLine1="        prefs.edit().putBoolean(KEY_HAS_COMPLETED_FIRST_INIT, true).apply()"
+        errorLine2="        ~~~~~~~~~~~~">
+        <location
+            file="src/main/kotlin/com/carlink/ui/settings/AdapterConfigPreference.kt"
+            line="71"
+            column="9"/>
+    </issue>
+
+    <issue
+        id="UseKtx"
+        message="Use the KTX extension function `SharedPreferences.edit` instead?"
+        errorLine1="        prefs.edit().putLong(KEY_LAST_INIT_VERSION_CODE, versionCode).apply()"
+        errorLine2="        ~~~~~~~~~~~~">
+        <location
+            file="src/main/kotlin/com/carlink/ui/settings/AdapterConfigPreference.kt"
+            line="80"
+            column="9"/>
+    </issue>
+
+    <issue
+        id="UseKtx"
+        message="Use the KTX extension function `SharedPreferences.edit` instead?"
+        errorLine1="        prefs.edit().putString(KEY_LAST_STAGED_UUID, uuid).apply()"
+        errorLine2="        ~~~~~~~~~~~~">
+        <location
+            file="src/main/kotlin/com/carlink/ui/settings/AdapterConfigPreference.kt"
+            line="88"
+            column="9"/>
+    </issue>
+
+    <issue
+        id="UseKtx"
+        message="Use the KTX extension function `SharedPreferences.edit` instead?"
+        errorLine1="            prefs"
+        errorLine2="            ^">
+        <location
+            file="src/main/kotlin/com/carlink/ui/settings/AdapterConfigPreference.kt"
+            line="102"
+            column="13"/>
+    </issue>
+
+    <issue
+        id="UseKtx"
+        message="Use the KTX function `createBitmap` instead?"
+        errorLine1="    val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)"
+        errorLine2="                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/kotlin/com/carlink/ui/MainScreen.kt"
+            line="365"
+            column="18"/>
+    </issue>
+
+    <issue
+        id="ComposeModifierMissing"
+        message="This @Composable function emits content but doesn&apos;t have a modifier parameter.&#xA;&#xA;See https://slackhq.github.io/compose-lints/rules/#when-should-i-expose-modifier-parameters for more information."
+        errorLine1="fun MainScreen("
+        errorLine2="    ~~~~~~~~~~">
+        <location
+            file="src/main/kotlin/com/carlink/ui/MainScreen.kt"
+            line="103"
+            column="5"/>
+    </issue>
+
+    <issue
+        id="ComposeModifierMissing"
+        message="This @Composable function emits content but doesn&apos;t have a modifier parameter.&#xA;&#xA;See https://slackhq.github.io/compose-lints/rules/#when-should-i-expose-modifier-parameters for more information."
+        errorLine1="fun PhonesTabContent(carlinkManager: CarlinkManager) {"
+        errorLine2="    ~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/kotlin/com/carlink/ui/settings/PhonesTab.kt"
+            line="80"
+            column="5"/>
+    </issue>
+
+    <issue
+        id="ComposeParameterOrder"
+        message="Parameters in a composable function should be ordered following this pattern: params without defaults, modifiers, params with defaults and optionally, a trailing function that might not have a default param.&#xA;Current params are: `[modifier: Modifier = Modifier, onSurfaceAvailable: (Surface, Int, Int) -> Unit, onSurfaceDestroyed: () -> Unit, onSurfaceSizeChanged: ((Int, Int) -> Unit)? = null, onTouchEvent: ((MotionEvent) -> Boolean)? = null]` but should be `[onSurfaceAvailable: (Surface, Int, Int) -> Unit, onSurfaceDestroyed: () -> Unit, modifier: Modifier = Modifier, onSurfaceSizeChanged: ((Int, Int) -> Unit)? = null, onTouchEvent: ((MotionEvent) -> Boolean)? = null]`.&#xA;See https://slackhq.github.io/compose-lints/rules/#ordering-composable-parameters-properly for more information."
+        errorLine1="fun VideoSurface("
+        errorLine2="                ^">
+        <location
+            file="src/main/kotlin/com/carlink/ui/components/VideoSurface.kt"
+            line="38"
+            column="17"/>
+    </issue>
+
+</issues>

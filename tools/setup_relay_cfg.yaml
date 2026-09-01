@@ -1,0 +1,16 @@
+# Minimal config for `ocbm-host setup-relay` (app-driven SETUP, plan P1 Stage 0).
+#
+# The load-bearing key is accessoryConfig.appDrivenSetup — it is BOTH the box lever
+# (receiver::levers::appsetup → airplayd's RemoteSession delegate selection) and the host's
+# capability declaration ("I will answer RS_REQs on CH_RTSP"). Everything else is optional and
+# overlays the box's built-in defaults exactly like any other SUBSCRIBE-pushed VehicleConfig.
+#
+#   ocbm-host setup-relay 1314 2d00 0 tools/setup_relay_cfg.yaml
+#
+# Env knobs on the BOX side (spawn-scoped / process-cached — restart airplayd to change):
+#   CARPLAY_APP_SETUP=1|0        beats the YAML in both directions (harness override)
+#   CARPLAY_RELAY_TIMEOUT_MS     rpc answer deadline (default 3000)
+#   CARPLAY_RELAY_STRICT=1       host-vs-local SETUP divergence → local fallback instead of warn
+name: SetupRelayStage0
+accessoryConfig:
+  appDrivenSetup: true

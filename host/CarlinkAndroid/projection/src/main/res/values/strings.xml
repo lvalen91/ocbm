@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">CarPlay</string>
+    <string name="projection_settings_title">CarPlay</string>
+    <string name="projection_settings_summary">Connect a phone for projection</string>
+</resources>

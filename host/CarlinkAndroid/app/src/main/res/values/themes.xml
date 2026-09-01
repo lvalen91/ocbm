@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Base theme -->
+    <style name="Theme.CarlinkNative" parent="android:Theme.Material.NoActionBar">
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowBackground">@android:color/black</item>
+    </style>
+
+    <!-- Fullscreen theme for main activity.
+         windowFullscreen removed: it conflicts with the decorFitsSystemWindows control in
+         applyImmersive() and causes cold-start SystemUI visibility races. The cutout mode +
+         immersive system bars are applied at runtime in MainActivity.applyImmersive(). -->
+    <style name="Theme.CarlinkNative.Fullscreen" parent="Theme.CarlinkNative">
+        <item name="android:windowContentOverlay">@null</item>
+    </style>
+</resources>

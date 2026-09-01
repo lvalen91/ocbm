@@ -1,0 +1,20 @@
+[package]
+name = "aa-bridge"
+version = "0.1.0"
+edition = "2021"
+
+# Box-side Android Auto USB bridge (Phase 2). Puts the phone (already OTG-hosted on ci_hdrc.0)
+# into Android Auto accessory mode via the AOAP control sequence, then pumps the raw AA byte
+# stream (VERSION handshake + encapsulated TLS + AA frames) between the phone's bulk endpoints
+# and a TCP socket. The macOS host app's validated AASession drives it unchanged over
+# AA_CONNECT=<box-ip>:5277. Once proven, the transport moves onto OCBM CH_IP/CH_AA.
+#
+# Raw usbdevfs ioctls via libc only — no libusb on the box.
+
+[[bin]]
+name = "aa-bridge"
+path = "src/main.rs"
+
+[dependencies]
+libc = "0.2"
+box-common = { path = "../../crates/box-common" }

@@ -1,0 +1,9 @@
+[package]
+name = "ocbm-proto"
+version = "0.1.0"
+edition = "2021"
+description = "OCBM v1 wire codec — 16-byte framed multiplexer over the CCPA bulk pipe"
+license = "Unlicense"
+
+[lib]
+path = "src/lib.rs"

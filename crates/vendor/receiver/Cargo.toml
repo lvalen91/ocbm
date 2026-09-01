@@ -1,0 +1,66 @@
+[package]
+name = "receiver"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# rv32 (C2Air/V821) has no 64-bit atomics: no AtomicU64/AtomicI64 in core. Same API, const-new.
+portable-atomic = "1"
+pairing = { path = "../pairing" }
+rtsp = { path = "../rtsp" }
+mfi = { path = "../mfi" }
+# Direct local-I2C MFi cert/sign for the AirPlay-tunnel iAP2 handshake (iap_tunnel.rs) — a separate
+# crate (not a module here) because this crate is `#![forbid(unsafe_code)]` and i2c/ioctl access
+# unavoidably isn't. Distinct from this binary's own LocalMfiSigner (ccpa/airplayd/src/main.rs), which
+# serves the one-time AirPlay MFi-SAP pair-verify step — iap_tunnel's cert/sign can run concurrently
+# (different process, potentially overlapping now that BT stays up until disableBluetooth) with
+# carplay-wireless's own chip access, so it shares the same /tmp/carplay_mfi.lock discipline via this
+# crate. CORRECTED 2026-07-25: this used to say LocalMfiSigner "is unlocked" — that was true and was
+# the bug. It now takes the same lock (bounded 10s rather than blocking); all four chip users agree on
+# the path. See its own doc comment.
+# OPTIONAL as of 2026-08-27. Direct /dev/i2c-1 chip access is correct on the BOX and impossible in
+# the Android head-unit app, which has neither `/tmp` for the lock nor system-app rights to the head
+# unit's own coprocessor. Android builds leave `local-mfi` off and install a remote signer instead
+# (see `iap_tunnel::set_remote_signer`); the box keeps it via the `local-mfi` feature.
+mfi-i2c-local = { path = "../mfi-i2c-local", optional = true }
+# Wireless iAP2-over-AirPlay metadata tunnel (docs/wireless/00_WIRELESS_CARPLAY.md gap): reuses the SAME message-id constants,
+# subscribe-body builders and NowPlaying/RouteGuidance/CallState parsers `iap2d` uses on the wired
+# physical iAP2 link, since the wire-level message catalog is transport-agnostic (only the framing
+# around it differs — see events.rs).
+iap2-core = { package = "carplay-iap2-core", path = "../iap2-core" }
+# eld-codec (libfdk-aac) is only the mic-uplink AAC-ELD encoder — gated so the control/pairing plane
+# can cross-compile to the box (armv7-musl, no fdk-aac). Default-on keeps the host receiver unchanged.
+eld-codec = { path = "../eld-codec", optional = true }
+plist = "1"
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+# VehicleConfig authoring schema (task #5): the host pushes an Apple-shape YAML at SUBSCRIBE; the box
+# parses it into DeviceConfig. serde_yaml pulls only pure-Rust unsafe-libyaml, so it cross-compiles to
+# the armv7-musl box (no C libyaml). Unknown Apple fields are ignored (forward-compatible).
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+
+[features]
+# mic-uplink: the head-unit→iPhone mic leg on type-100 `input=true` MainAudio. The WIRED path is raw
+# big-endian PCM (no encoder), so the base feature pulls NOTHING external and cross-compiles to the box.
+# mic-uplink-eld adds the wireless AAC-ELD encoder (libfdk-aac). Default keeps the wired PCM uplink
+# on everywhere.
+#
+# CORRECTED 2026-08-16: this used to say "host/wireless only; the box never enables it (fdk-aac
+# isn't available there)". That is no longer true. The Raspberry Pi / AAOS port builds airplayd WITH
+# this feature against a cross-built libfdk-aac (pi/tools/build_fdk_aac_arm64.sh), because without
+# it iOS negotiates the AAC-ELD mic uplink and receives silence — Siri hears nothing and calls are
+# one-way. Still absent on the armv7-musl CCPA build, which is what the gate is for.
+default = ["mic-uplink", "local-mfi"]
+mic-uplink = []
+# Direct MFi chip access over /dev/i2c-1. ON for box targets, OFF for the Android app. Consumers that
+# set `default-features = false` must opt back in explicitly — `ccpa/airplayd` does.
+local-mfi = ["dep:mfi-i2c-local"]
+mic-uplink-eld = ["mic-uplink", "dep:eld-codec"]
+
+[dev-dependencies]
+# the test controller drives the X25519/Ed25519 sides of pair-verify
+ed25519-dalek = "2"
+x25519-dalek = { version = "2", features = ["static_secrets"] }

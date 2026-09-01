@@ -1,0 +1,49 @@
+[package]
+name = "airplayd"
+version = "0.1.0"
+edition = "2021"
+description = "Box-side AirPlay/CarPlay pairing daemon: terminates the AirPlay session on ncm0, pairs with the LOCAL MFi 2.0C chip, derives session keys, forwards encrypted A/V + key over OCBM. Reuses ncm_carplayd/receiver_core crypto crates."
+
+[[bin]]
+name = "airplayd"
+path = "src/main.rs"
+
+[dependencies]
+# rv32 (C2Air/V821) has no 64-bit atomics: no AtomicU64/AtomicI64 in core. Same API, const-new.
+portable-atomic = "1"
+# receiver_core crates: reuse the proven ControlServer (pair-setup/verify + /info) and the pairing
+# crypto, but back MFi with the LOCAL i2c chip (LocalMfiSigner) instead of the remote NCM auth service.
+# receiver is built default-features=false + features=["mic-uplink-eld"]: BOTH mic-uplink legs are ON —
+# the wired PCM uplink AND the wireless AAC-ELD encoder (mic-uplink-eld → eld-codec → libfdk-aac,
+# statically linked into the binary). Cost: ~1.65 MB unpacked / ~840 KB packed vs the ~230 KB sibling
+# daemons, and building needs FDK_AAC_PREFIX pointing at a cross-compiled fdk-aac prefix (one lives at
+# scratchpad/fdk/install). DELIBERATE, PENDING DECISION: drop this back to ["mic-uplink"] to reclaim
+# the size if the wireless AAC-ELD uplink is not wanted.
+mfi = { path = "../../crates/vendor/mfi" }
+# MFI1 client for the REMOTE coprocessor (`CARPLAY_MFI_ADDR`). Needed by the Raspberry Pi port,
+# which runs this daemon on a host with no MFi chip of its own and reaches the CCPA's over USB-NCM.
+# Zero transitive deps; dormant when the env var is unset, i.e. on the CCPA itself.
+mfi-wire = { path = "../../crates/mfi-wire" }
+pairing = { path = "../../crates/vendor/pairing" }
+# local-mfi is explicit: airplayd runs ON THE BOX where /dev/i2c-1 is the correct chip path, and this
+# dep sets default-features = false so it would not inherit it from `default`.
+receiver = { path = "../../crates/vendor/receiver", default-features = false, features = ["mic-uplink", "local-mfi"] }
+# Direct use: the iAP2-side reader for the app-pushed config (metadata tier, docs/carplay/04_CAPABILITIES_AND_CONFIG.md B3).
+# Already linked transitively via receiver, so this adds no code size.
+iap2-core = { package = "carplay-iap2-core", path = "../../crates/vendor/iap2-core" }
+# HID input wire format (task #20): the CH_INPUT sub-frame consts ocbmd relays; airplayd turns them into
+# hidSendReport. Shared source so the box's two daemons never disagree on the format.
+ocbm-proto = { path = "../../crates/ocbm-proto" }
+libc = "0.2"
+
+# `mic-uplink-eld` statically links a cross-built libfdk-aac, so it needs FDK_AAC_PREFIX for the
+# SAME ABI. Only `install-android-x86_64` and the armv7 box prefix exist today, which is why the
+# aarch64 (Raspberry Pi) build cannot enable it yet.
+#
+# DEFAULT-ON, so the CCPA build is byte-for-byte unaffected and `build.sh` needs no change. The Pi
+# build opts out with `--no-default-features`, costing only the wireless AAC-ELD mic uplink — the
+# wired PCM uplink leg (`receiver/mic-uplink`) stays compiled in either way.
+# To restore it on arm64: cross-build libfdk-aac 2.0.3 for aarch64 and drop the flag.
+[features]
+default = ["mic-uplink-eld"]
+mic-uplink-eld = ["receiver/mic-uplink-eld"]

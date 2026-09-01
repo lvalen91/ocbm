@@ -1,0 +1,16 @@
+::sysinit:/script/early_console.sh
+console::sysinit:/etc/init.d/rcS
+#ttyS0::respawn:/sbin/getty -n -l/bin/sh -L ttyS0 115200 vt100 # GENERIC_SERIAL
+# ttymxc0 console is started by /script/early_console.sh (the ::sysinit action ABOVE,
+# before rcS) as a self-respawning 115200 login shell -- so a diagnostic root shell
+# exists before rcS's mount/mdev/service steps. Replaces the old ttymxc0::respawn line.
+# OCBM stack respawn protection (task #28): PID-1 restarts ocbmd + the session supervisor if they die
+# (crash / OOM). Coexists with ocbm_boot.sh's boot launch — the wrappers relaunch only a DEAD daemon.
+# The early_console UART shell above stays the recovery path if these ever misbehave.
+::respawn:/script/run_ocbmd.sh
+::respawn:/script/run_supervisor.sh
+::askfirst:-/bin/sh
+::restart:/sbin/init
+::ctrlaltdel:/sbin/reboot
+#::shutdown:bin/umount -a -r
+::shutdown:/script/after_shutdown.sh

@@ -1,0 +1,15 @@
+[package]
+name = "rx-connect"
+version = "0.1.0"
+edition = "2021"
+description = "CarPlay receiver discovery: advertise _airplay._tcp + browse _carplay-ctrl + connect-out. Interface/address are env-configurable (RX_IFACE/RX_ADDR) so the SAME binary serves the wired NCM link (ncm0/IPv6) and the wireless AP (wlan0/IPv4). Ported into ccpa_custom 2026-07-13 for wireless CarPlay Phase A3 (docs/wireless/00_WIRELESS_CARPLAY.md)."
+
+[[bin]]
+name = "rx-connect"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt", "macros", "net", "io-util", "time"] }
+mdns-sd = "0.11"
+anyhow = "1"
+libc = "0.2"

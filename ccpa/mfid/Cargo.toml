@@ -1,0 +1,13 @@
+[package]
+name = "mfid"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Box-side bring-up instrument: serves the two MFi chip operations over the USB-NCM link so the Pi
+# can drive them while OCBM is not the transport. Two path deps, no third-party crates.
+[dependencies]
+# rv32 (C2Air/V821) has no 64-bit atomics: no AtomicU64/AtomicI64 in core. Same API, const-new.
+portable-atomic = "1"
+mfi-wire = { path = "../../crates/mfi-wire" }
+mfi-i2c-local = { path = "../../crates/vendor/mfi-i2c-local" }

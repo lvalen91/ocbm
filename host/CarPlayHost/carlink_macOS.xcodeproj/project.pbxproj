@@ -1,0 +1,534 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		AA11110000000000000001 /* AAWire.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11110000000000000002 /* AAWire.swift */; };
+		AA22220000000000000001 /* AATLS.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA22220000000000000002 /* AATLS.swift */; };
+		AA33330000000000000001 /* AASession.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA33330000000000000002 /* AASession.swift */; };
+		AA55550000000000000011 /* AACapability.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA55550000000000000012 /* AACapability.swift */; };
+		AA66660000000000000011 /* ControlServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA66660000000000000012 /* ControlServer.swift */; };
+		02965402BE5F6E60FC703B02 /* CarPlayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74115D4A5CA17DCB44CF3827 /* CarPlayView.swift */; };
+		04FC203473987235385420FD /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82F8C06EB18B82138343F583 /* AppDelegate.swift */; };
+		28969F3960BFC750D789CF9D /* OCBMClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0876A9B25E0763AC0FD2C4BD /* OCBMClient.swift */; };
+		AA5F9E102F9A000100D517FC /* VehicleConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5F9E112F9A000100D517FC /* VehicleConfig.swift */; };
+		AA5F9E122F9A000100D517FC /* OCBMControlRelay.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5F9E132F9A000100D517FC /* OCBMControlRelay.swift */; };
+		AA5F9E142F9A000100D517FC /* AirPlaySetupSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5F9E152F9A000100D517FC /* AirPlaySetupSession.swift */; };
+		7C5803C7CBB4077EA7368C11 /* OCBMSessionCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29A098A6F1EA51CBFAB6817E /* OCBMSessionCoordinator.swift */; };
+		31CF1885DC32094B4E485BEE /* MicCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8FE2E4DC9A235E80E1497F3F /* MicCapture.swift */; };
+		444E1760D6AD23B406513623 /* USBTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = D86F8F134EDEB5EB6D991D9B /* USBTransport.swift */; };
+		51E40C64F05389E56E9F84B9 /* ic_phone_projection.png in Resources */ = {isa = PBXBuildFile; fileRef = D21D5C532BEB88E16FE6FFAB /* ic_phone_projection.png */; };
+		607022A2D4D30B153BADEB76 /* ic_phone_projection_black.png in Resources */ = {isa = PBXBuildFile; fileRef = 592125F2F77AD9CE42339DB6 /* ic_phone_projection_black.png */; };
+		647F8F1DD868B46418754B9C /* MainWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = D029071089340EC638BF453C /* MainWindowController.swift */; };
+		673F37C6D29D1FB16BAD7E43 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 14AC528BB16F44186CD3A10E /* Assets.xcassets */; };
+		67E0850F410D04CF1D656D56 /* VideoDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = CDF253B75D4853ECDE566533 /* VideoDecoder.swift */; };
+		AA5F9F012F9A000100D517FC /* AVCCFastPath.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5F9F022F9A000100D517FC /* AVCCFastPath.swift */; };
+		AA1417953000000000D517FC /* InputTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1417953000000001D517FC /* InputTypes.swift */; };
+		85F5389687B69FF7511D0922 /* OCBMAVBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFAEA6AFA2B0D57CE6F7E562 /* OCBMAVBridge.swift */; };
+		A84FD317611E0236CE7499AA /* OCBMFraming.swift in Sources */ = {isa = PBXBuildFile; fileRef = 526DB240DAD948CE22812B03 /* OCBMFraming.swift */; };
+		AA5F9DD62F96146500D517FC /* SESSION_CAPTURE_FORMAT.md in Resources */ = {isa = PBXBuildFile; fileRef = AA5F9DD52F96146500D517FC /* SESSION_CAPTURE_FORMAT.md */; };
+		AA5F9E022F99000100D517FC /* AdapterInfoWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5F9E032F99000100D517FC /* AdapterInfoWindow.swift */; };
+		AA5F9E042F99AAAA00D517FC /* ControlsWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5F9E052F99AAAA00D517FC /* ControlsWindow.swift */; };
+		AAB1C0DE2F99CCCC00D517FC /* VideoChromeOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAB1C0DF2F99CCCC00D517FC /* VideoChromeOverlay.swift */; };
+		AAB1C0E02F99DDDD00D517FC /* CornerMask.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAB1C0E12F99DDDD00D517FC /* CornerMask.swift */; };
+		AAB1C0E22F99EEEE00D517FC /* ControlPopups.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAB1C0E32F99EEEE00D517FC /* ControlPopups.swift */; };
+		AA5F9E062F99BBBB00D517FC /* MetadataWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5F9E072F99BBBB00D517FC /* MetadataWindow.swift */; };
+		AA5F9E082F99CCCC00D517FC /* SettingsWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5F9E092F99CCCC00D517FC /* SettingsWindow.swift */; };
+		AA5F9E0A2F99DDDD00D517FC /* AltVideoWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5F9E0B2F99DDDD00D517FC /* AltVideoWindow.swift */; };
+		AA5F9E042F99010000D517FC /* KeyboardShortcutsPresenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5F9E052F99010000D517FC /* KeyboardShortcutsPresenter.swift */; };
+		AA5F9E062F99020000D517FC /* FileLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5F9E072F99020000D517FC /* FileLogger.swift */; };
+		AAF2A9BD2F827D5600665C41 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = AAF2A9BC2F827D5600665C41 /* AppIcon.icon */; };
+		AAF2A9BE2F829A1200665C41 /* IOKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 01AF7EE4871B090C37E33231 /* IOKit.framework */; };
+		AAF2A9C12F829A1400665C41 /* VideoToolbox.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = BE69FEB1D4973C53C8A3FDF4 /* VideoToolbox.framework */; };
+		AAF2A9C32F829A1500665C41 /* CoreMedia.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E337D762F9EC4244D2D5F576 /* CoreMedia.framework */; };
+		AAF2A9C52F829A1700665C41 /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 79C3521BF0108E622C954175 /* AVFoundation.framework */; };
+		AAF2A9C72F829A1800665C41 /* AVFAudio.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 301ADFB1C0E192FEA52F8176 /* AVFAudio.framework */; };
+		AAF2A9C92F829A1900665C41 /* AppKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2CD5714AAD5965C739623963 /* AppKit.framework */; };
+		D3BDB0B80244B6170AF3BA73 /* AudioPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = E9B12D9BD7534CCC23E2852D /* AudioPlayer.swift */; };
+		E61D7BE4B6132194E00B591E /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEBE045458DB252D4476DB37 /* main.swift */; };
+		F621BDDDBF1E9D1A423CAD4D /* OCBMAVDecrypt.swift in Sources */ = {isa = PBXBuildFile; fileRef = D83EB7ADF0D3FC747CC5484B /* OCBMAVDecrypt.swift */; };
+		AA5F9E202F9B000100D517FC /* StreamMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5F9E212F9B000100D517FC /* StreamMetrics.swift */; };
+		AA5F9E222F9B000100D517FC /* StreamMetricsMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5F9E232F9B000100D517FC /* StreamMetricsMonitor.swift */; };
+		F8779BC87BCFB9EF9BB50152 /* USBDeviceManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A914C2B05DD40EB5DE6A3E29 /* USBDeviceManager.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		AA11110000000000000002 /* AAWire.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AAWire.swift; sourceTree = "<group>"; };
+		AA22220000000000000002 /* AATLS.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AATLS.swift; sourceTree = "<group>"; };
+		AA33330000000000000002 /* AASession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AASession.swift; sourceTree = "<group>"; };
+		AA55550000000000000012 /* AACapability.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AACapability.swift; sourceTree = "<group>"; };
+		AA66660000000000000012 /* ControlServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlServer.swift; sourceTree = "<group>"; };
+		01AF7EE4871B090C37E33231 /* IOKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = IOKit.framework; path = System/Library/Frameworks/IOKit.framework; sourceTree = SDKROOT; };
+		0876A9B25E0763AC0FD2C4BD /* OCBMClient.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = OCBMClient.swift; sourceTree = "<group>"; };
+		AA5F9E112F9A000100D517FC /* VehicleConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VehicleConfig.swift; sourceTree = "<group>"; };
+		AA5F9E132F9A000100D517FC /* OCBMControlRelay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OCBMControlRelay.swift; sourceTree = "<group>"; };
+		AA5F9E152F9A000100D517FC /* AirPlaySetupSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirPlaySetupSession.swift; sourceTree = "<group>"; };
+		29A098A6F1EA51CBFAB6817E /* OCBMSessionCoordinator.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = OCBMSessionCoordinator.swift; sourceTree = "<group>"; };
+		14AC528BB16F44186CD3A10E /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		2CD5714AAD5965C739623963 /* AppKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AppKit.framework; path = System/Library/Frameworks/AppKit.framework; sourceTree = SDKROOT; };
+		301ADFB1C0E192FEA52F8176 /* AVFAudio.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVFAudio.framework; path = System/Library/Frameworks/AVFAudio.framework; sourceTree = SDKROOT; };
+		526DB240DAD948CE22812B03 /* OCBMFraming.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = OCBMFraming.swift; sourceTree = "<group>"; };
+		592125F2F77AD9CE42339DB6 /* ic_phone_projection_black.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; name = ic_phone_projection_black.png; path = App/ic_phone_projection_black.png; sourceTree = "<group>"; };
+		677C904C52AC3CC806CE8932 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		74115D4A5CA17DCB44CF3827 /* CarPlayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CarPlayView.swift; sourceTree = "<group>"; };
+		79C3521BF0108E622C954175 /* AVFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVFoundation.framework; path = System/Library/Frameworks/AVFoundation.framework; sourceTree = SDKROOT; };
+		82F8C06EB18B82138343F583 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		8FE2E4DC9A235E80E1497F3F /* MicCapture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MicCapture.swift; sourceTree = "<group>"; };
+		A914C2B05DD40EB5DE6A3E29 /* USBDeviceManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = USBDeviceManager.swift; sourceTree = "<group>"; };
+		AA00000000000001ENTITLE0 /* carlink_macOS.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = carlink_macOS.entitlements; sourceTree = "<group>"; };
+		AA5F9DD52F96146500D517FC /* SESSION_CAPTURE_FORMAT.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = SESSION_CAPTURE_FORMAT.md; sourceTree = "<group>"; };
+		AA5F9E032F99000100D517FC /* AdapterInfoWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdapterInfoWindow.swift; sourceTree = "<group>"; };
+		AA5F9E052F99AAAA00D517FC /* ControlsWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlsWindow.swift; sourceTree = "<group>"; };
+		AAB1C0DF2F99CCCC00D517FC /* VideoChromeOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoChromeOverlay.swift; sourceTree = "<group>"; };
+		AAB1C0E12F99DDDD00D517FC /* CornerMask.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CornerMask.swift; sourceTree = "<group>"; };
+		AAB1C0E32F99EEEE00D517FC /* ControlPopups.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlPopups.swift; sourceTree = "<group>"; };
+		AA5F9E072F99BBBB00D517FC /* MetadataWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetadataWindow.swift; sourceTree = "<group>"; };
+		AA5F9E092F99CCCC00D517FC /* SettingsWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsWindow.swift; sourceTree = "<group>"; };
+		AA5F9E0B2F99DDDD00D517FC /* AltVideoWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AltVideoWindow.swift; sourceTree = "<group>"; };
+		AA5F9E052F99010000D517FC /* KeyboardShortcutsPresenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardShortcutsPresenter.swift; sourceTree = "<group>"; };
+		AA5F9E072F99020000D517FC /* FileLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileLogger.swift; sourceTree = "<group>"; };
+		AAF2A9BC2F827D5600665C41 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = AppIcon.icon; sourceTree = "<group>"; };
+		BD9BE797A56D941DC0FE30EB /* carlink_macOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = carlink_macOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		BE69FEB1D4973C53C8A3FDF4 /* VideoToolbox.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = VideoToolbox.framework; path = System/Library/Frameworks/VideoToolbox.framework; sourceTree = SDKROOT; };
+		CDF253B75D4853ECDE566533 /* VideoDecoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoDecoder.swift; sourceTree = "<group>"; };
+		AA5F9F022F9A000100D517FC /* AVCCFastPath.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AVCCFastPath.swift; sourceTree = "<group>"; };
+		AA1417953000000001D517FC /* InputTypes.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = InputTypes.swift; sourceTree = "<group>"; };
+		D029071089340EC638BF453C /* MainWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainWindowController.swift; sourceTree = "<group>"; };
+		D21D5C532BEB88E16FE6FFAB /* ic_phone_projection.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; name = ic_phone_projection.png; path = App/ic_phone_projection.png; sourceTree = "<group>"; };
+		D83EB7ADF0D3FC747CC5484B /* OCBMAVDecrypt.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = OCBMAVDecrypt.swift; sourceTree = "<group>"; };
+		AA5F9E212F9B000100D517FC /* StreamMetrics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamMetrics.swift; sourceTree = "<group>"; };
+		AA5F9E232F9B000100D517FC /* StreamMetricsMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamMetricsMonitor.swift; sourceTree = "<group>"; };
+		D86F8F134EDEB5EB6D991D9B /* USBTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = USBTransport.swift; sourceTree = "<group>"; };
+		DEBE045458DB252D4476DB37 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
+		E337D762F9EC4244D2D5F576 /* CoreMedia.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreMedia.framework; path = System/Library/Frameworks/CoreMedia.framework; sourceTree = SDKROOT; };
+		E9B12D9BD7534CCC23E2852D /* AudioPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioPlayer.swift; sourceTree = "<group>"; };
+		FFAEA6AFA2B0D57CE6F7E562 /* OCBMAVBridge.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = OCBMAVBridge.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		3CDCA1C4C0F64743A4E4317C /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AAF2A9C32F829A1500665C41 /* CoreMedia.framework in Frameworks */,
+				AAF2A9C12F829A1400665C41 /* VideoToolbox.framework in Frameworks */,
+				AAF2A9C52F829A1700665C41 /* AVFoundation.framework in Frameworks */,
+				AAF2A9C92F829A1900665C41 /* AppKit.framework in Frameworks */,
+				AAF2A9C72F829A1800665C41 /* AVFAudio.framework in Frameworks */,
+				AAF2A9BE2F829A1200665C41 /* IOKit.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		AA44440000000000000001 /* AA */ = {
+			isa = PBXGroup;
+			children = (
+				AA11110000000000000002 /* AAWire.swift */,
+				AA22220000000000000002 /* AATLS.swift */,
+				AA33330000000000000002 /* AASession.swift */,
+				AA55550000000000000012 /* AACapability.swift */,
+			);
+			path = AA;
+			sourceTree = "<group>";
+		};
+		06EF325E36113B53B9795BCD /* Video */ = {
+			isa = PBXGroup;
+			children = (
+				CDF253B75D4853ECDE566533 /* VideoDecoder.swift */,
+				AA5F9F022F9A000100D517FC /* AVCCFastPath.swift */,
+			);
+			path = Video;
+			sourceTree = "<group>";
+		};
+		0CBC19857A44BEB103FED157 /* USB */ = {
+			isa = PBXGroup;
+			children = (
+				A914C2B05DD40EB5DE6A3E29 /* USBDeviceManager.swift */,
+				D86F8F134EDEB5EB6D991D9B /* USBTransport.swift */,
+			);
+			path = USB;
+			sourceTree = "<group>";
+		};
+		30B5817AA1A6FE0E72B98AD4 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				82F8C06EB18B82138343F583 /* AppDelegate.swift */,
+				AA66660000000000000012 /* ControlServer.swift */,
+				AA1417953000000001D517FC /* InputTypes.swift */,
+				74115D4A5CA17DCB44CF3827 /* CarPlayView.swift */,
+				D029071089340EC638BF453C /* MainWindowController.swift */,
+				AA5F9E032F99000100D517FC /* AdapterInfoWindow.swift */,
+				AA5F9E052F99AAAA00D517FC /* ControlsWindow.swift */,
+				AAB1C0DF2F99CCCC00D517FC /* VideoChromeOverlay.swift */,
+				AAB1C0E12F99DDDD00D517FC /* CornerMask.swift */,
+				AAB1C0E32F99EEEE00D517FC /* ControlPopups.swift */,
+				AA5F9E072F99BBBB00D517FC /* MetadataWindow.swift */,
+				AA5F9E092F99CCCC00D517FC /* SettingsWindow.swift */,
+				AA5F9E112F9A000100D517FC /* VehicleConfig.swift */,
+				AA5F9E0B2F99DDDD00D517FC /* AltVideoWindow.swift */,
+				AA5F9E052F99010000D517FC /* KeyboardShortcutsPresenter.swift */,
+				AA5F9E072F99020000D517FC /* FileLogger.swift */,
+				AA5F9E232F9B000100D517FC /* StreamMetricsMonitor.swift */,
+				AA5F9DD52F96146500D517FC /* SESSION_CAPTURE_FORMAT.md */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		55F3601B01FEB3975C265AF7 /* carlink_macOS */ = {
+			isa = PBXGroup;
+			children = (
+				DEBE045458DB252D4476DB37 /* main.swift */,
+				677C904C52AC3CC806CE8932 /* Info.plist */,
+				AA00000000000001ENTITLE0 /* carlink_macOS.entitlements */,
+				14AC528BB16F44186CD3A10E /* Assets.xcassets */,
+				AAF2A9BC2F827D5600665C41 /* AppIcon.icon */,
+				D21D5C532BEB88E16FE6FFAB /* ic_phone_projection.png */,
+				592125F2F77AD9CE42339DB6 /* ic_phone_projection_black.png */,
+				30B5817AA1A6FE0E72B98AD4 /* App */,
+				0CBC19857A44BEB103FED157 /* USB */,
+				06EF325E36113B53B9795BCD /* Video */,
+				AA44440000000000000001 /* AA */,
+				B36081E6D3F70BDB034EC854 /* Audio */,
+				57F27BD06EB3848212DF2433 /* OCBM */,
+			);
+			path = carlink_macOS;
+			sourceTree = "<group>";
+		};
+		57F27BD06EB3848212DF2433 /* OCBM */ = {
+			isa = PBXGroup;
+			children = (
+				526DB240DAD948CE22812B03 /* OCBMFraming.swift */,
+				D83EB7ADF0D3FC747CC5484B /* OCBMAVDecrypt.swift */,
+				AA5F9E212F9B000100D517FC /* StreamMetrics.swift */,
+				0876A9B25E0763AC0FD2C4BD /* OCBMClient.swift */,
+				29A098A6F1EA51CBFAB6817E /* OCBMSessionCoordinator.swift */,
+				AA5F9E132F9A000100D517FC /* OCBMControlRelay.swift */,
+				AA5F9E152F9A000100D517FC /* AirPlaySetupSession.swift */,
+				FFAEA6AFA2B0D57CE6F7E562 /* OCBMAVBridge.swift */,
+			);
+			name = OCBM;
+			path = OCBM;
+			sourceTree = "<group>";
+		};
+		9C85F81C277EB2B06451AF04 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				01AF7EE4871B090C37E33231 /* IOKit.framework */,
+				79C3521BF0108E622C954175 /* AVFoundation.framework */,
+				E337D762F9EC4244D2D5F576 /* CoreMedia.framework */,
+				BE69FEB1D4973C53C8A3FDF4 /* VideoToolbox.framework */,
+				301ADFB1C0E192FEA52F8176 /* AVFAudio.framework */,
+				2CD5714AAD5965C739623963 /* AppKit.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		B36081E6D3F70BDB034EC854 /* Audio */ = {
+			isa = PBXGroup;
+			children = (
+				E9B12D9BD7534CCC23E2852D /* AudioPlayer.swift */,
+				8FE2E4DC9A235E80E1497F3F /* MicCapture.swift */,
+			);
+			path = Audio;
+			sourceTree = "<group>";
+		};
+		C9369C0A74C3BAA5C90876FD /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				BD9BE797A56D941DC0FE30EB /* carlink_macOS.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		D1532742289F58AF148B1CA5 = {
+			isa = PBXGroup;
+			children = (
+				55F3601B01FEB3975C265AF7 /* carlink_macOS */,
+				C9369C0A74C3BAA5C90876FD /* Products */,
+				9C85F81C277EB2B06451AF04 /* Frameworks */,
+			);
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		C553D4BBAE044BDAD1293BC4 /* carlink_macOS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = D7BBD09E74F2D76EDCDD2359 /* Build configuration list for PBXNativeTarget "carlink_macOS" */;
+			buildPhases = (
+				3062FA876441CFF12F6EA043 /* Sources */,
+				F4284D0D8872D113086BCB38 /* Resources */,
+				3CDCA1C4C0F64743A4E4317C /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = carlink_macOS;
+			productName = carlink_macOS;
+			productReference = BD9BE797A56D941DC0FE30EB /* carlink_macOS.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		AD133B5BF0BC6C93F2A83609 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 2700;
+			};
+			buildConfigurationList = 45ACFA7EC4C6C2B645267901 /* Build configuration list for PBXProject "carlink_macOS" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = D1532742289F58AF148B1CA5;
+			productRefGroup = C9369C0A74C3BAA5C90876FD /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				C553D4BBAE044BDAD1293BC4 /* carlink_macOS */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		F4284D0D8872D113086BCB38 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				673F37C6D29D1FB16BAD7E43 /* Assets.xcassets in Resources */,
+				AA5F9DD62F96146500D517FC /* SESSION_CAPTURE_FORMAT.md in Resources */,
+				51E40C64F05389E56E9F84B9 /* ic_phone_projection.png in Resources */,
+				607022A2D4D30B153BADEB76 /* ic_phone_projection_black.png in Resources */,
+				AAF2A9BD2F827D5600665C41 /* AppIcon.icon in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		3062FA876441CFF12F6EA043 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E61D7BE4B6132194E00B591E /* main.swift in Sources */,
+				04FC203473987235385420FD /* AppDelegate.swift in Sources */,
+				02965402BE5F6E60FC703B02 /* CarPlayView.swift in Sources */,
+				647F8F1DD868B46418754B9C /* MainWindowController.swift in Sources */,
+				AA5F9E022F99000100D517FC /* AdapterInfoWindow.swift in Sources */,
+				AA5F9E042F99AAAA00D517FC /* ControlsWindow.swift in Sources */,
+				AAB1C0DE2F99CCCC00D517FC /* VideoChromeOverlay.swift in Sources */,
+				AAB1C0E02F99DDDD00D517FC /* CornerMask.swift in Sources */,
+				AAB1C0E22F99EEEE00D517FC /* ControlPopups.swift in Sources */,
+				AA5F9E062F99BBBB00D517FC /* MetadataWindow.swift in Sources */,
+				AA5F9E082F99CCCC00D517FC /* SettingsWindow.swift in Sources */,
+				AA5F9E0A2F99DDDD00D517FC /* AltVideoWindow.swift in Sources */,
+				AA5F9E042F99010000D517FC /* KeyboardShortcutsPresenter.swift in Sources */,
+				AA5F9E062F99020000D517FC /* FileLogger.swift in Sources */,
+				F8779BC87BCFB9EF9BB50152 /* USBDeviceManager.swift in Sources */,
+				444E1760D6AD23B406513623 /* USBTransport.swift in Sources */,
+				67E0850F410D04CF1D656D56 /* VideoDecoder.swift in Sources */,
+				AA5F9F012F9A000100D517FC /* AVCCFastPath.swift in Sources */,
+				AA11110000000000000001 /* AAWire.swift in Sources */,
+				AA22220000000000000001 /* AATLS.swift in Sources */,
+				AA33330000000000000001 /* AASession.swift in Sources */,
+				AA55550000000000000011 /* AACapability.swift in Sources */,
+				AA66660000000000000011 /* ControlServer.swift in Sources */,
+				AA1417953000000000D517FC /* InputTypes.swift in Sources */,
+				D3BDB0B80244B6170AF3BA73 /* AudioPlayer.swift in Sources */,
+				31CF1885DC32094B4E485BEE /* MicCapture.swift in Sources */,
+				A84FD317611E0236CE7499AA /* OCBMFraming.swift in Sources */,
+				F621BDDDBF1E9D1A423CAD4D /* OCBMAVDecrypt.swift in Sources */,
+				AA5F9E202F9B000100D517FC /* StreamMetrics.swift in Sources */,
+				AA5F9E222F9B000100D517FC /* StreamMetricsMonitor.swift in Sources */,
+				28969F3960BFC750D789CF9D /* OCBMClient.swift in Sources */,
+				7C5803C7CBB4077EA7368C11 /* OCBMSessionCoordinator.swift in Sources */,
+				AA5F9E102F9A000100D517FC /* VehicleConfig.swift in Sources */,
+				AA5F9E122F9A000100D517FC /* OCBMControlRelay.swift in Sources */,
+				AA5F9E142F9A000100D517FC /* AirPlaySetupSession.swift in Sources */,
+				85F5389687B69FF7511D0922 /* OCBMAVBridge.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		001385FDEBC5EDA627B36940 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ARCHS = arm64;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = 5MBW9S22SF;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 27.0;
+				SDKROOT = macosx;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		3328159A0811EBF38B8A4190 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CODE_SIGN_ENTITLEMENTS = carlink_macOS/carlink_macOS.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				DEAD_CODE_STRIPPING = YES;
+				ENABLE_APP_SANDBOX = NO;
+				ENABLE_HARDENED_RUNTIME = YES;
+				INFOPLIST_FILE = carlink_macOS/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Carlink;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				MACOSX_DEPLOYMENT_TARGET = 27.0;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = zeno.carlink.mac;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				RUN_CLANG_STATIC_ANALYZER = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = carlink_macOS/USB/USBBridge.h;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		3B51E7185D4FBF00CC907B78 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ARCHS = arm64;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = 5MBW9S22SF;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 27.0;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		6916030BA493CA36FFBE3287 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CODE_SIGN_ENTITLEMENTS = carlink_macOS/carlink_macOS.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				DEAD_CODE_STRIPPING = YES;
+				ENABLE_APP_SANDBOX = NO;
+				ENABLE_HARDENED_RUNTIME = YES;
+				INFOPLIST_FILE = carlink_macOS/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Carlink;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				MACOSX_DEPLOYMENT_TARGET = 27.0;
+				ONLY_ACTIVE_ARCH = NO;
+				PRODUCT_BUNDLE_IDENTIFIER = zeno.carlink.mac;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_OBJC_BRIDGING_HEADER = carlink_macOS/USB/USBBridge.h;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		45ACFA7EC4C6C2B645267901 /* Build configuration list for PBXProject "carlink_macOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				3B51E7185D4FBF00CC907B78 /* Debug */,
+				001385FDEBC5EDA627B36940 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		D7BBD09E74F2D76EDCDD2359 /* Build configuration list for PBXNativeTarget "carlink_macOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				3328159A0811EBF38B8A4190 /* Debug */,
+				6916030BA493CA36FFBE3287 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = AD133B5BF0BC6C93F2A83609 /* Project object */;
+}

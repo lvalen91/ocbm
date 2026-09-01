@@ -1,0 +1,13 @@
+[ocbmd] accessory POLLHUP/POLLERR — USB transport gone; exiting for respawn
+[respawn] ocbmd down -> relaunching (init)
+[ocbmd] accessory POLLHUP/POLLERR — USB transport gone; exiting for respawn
+[respawn] ocbmd down -> relaunching (init)
+[ocbmd] session: SUBSCRIBE (1482 B config)
+[ocbmd] session: host PRESENT
+[ocbmd] pairing code cleared
+[ocbmd] session: phone ABSENT — waiting for plug
+[ocbmd] session: phone PRESENT on bus
+[ocbmd] mic: connected to airplayd 127.0.0.1:9112 (back-channel armed)
+[ocbmd] input: connected to airplayd 127.0.0.1:9110
+[ocbmd] input: forwarded 1 events
+[ocbmd] input: forwarded 60 events

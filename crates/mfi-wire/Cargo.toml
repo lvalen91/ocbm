@@ -1,0 +1,10 @@
+[package]
+name = "mfi-wire"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "Unlicense"
+
+# Deliberately dependency-free: this crate is linked into a box binary that ships on a ~12.5 MB
+# rootfs, and into host tooling. Framing only — no I/O policy, no chip access.
+[dependencies]

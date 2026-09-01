@@ -1,0 +1,23 @@
+[package]
+name = "box-common"
+version = "0.1.0"
+edition = "2021"
+license = "Unlicense"
+
+# Protocol-AGNOSTIC box-side foundation. The overlap between the CarPlay/AirPlay set
+# (iap2d, airplayd, carplay-wireless, rx-connect) and the Android Auto set (aa-bridge,
+# future wireless AA) lives here; each set keeps only its unique protocol logic.
+#
+#   box-common
+#   ├── ocbm   — OCBM framing/channels (re-exports ocbm-proto; ocbmd's mux-core migrates here later)
+#   ├── usb    — usbdevfs USB-host primitives (control/bulk/claim) + descriptor parsing  [linux]
+#   ├── phone  — PhoneType detection (USB idVendor -> Apple/Android/Unknown)
+#   └── flags  — projection ownership + session flags (the arbitration substrate both sets share)
+#
+# Deliberately no_std-friendly where practical and cfg-gated so a host (macOS) `cargo build`
+# of the workspace still compiles (the usbdevfs layer stubs out off-Linux), matching ocbmd's
+# eth-module pattern.
+
+[dependencies]
+libc = "0.2"
+ocbm-proto = { path = "../ocbm-proto" }

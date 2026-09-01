@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- CPC200-CCPA running the open OCBM userspace (0x1314:0x2d00). This is the device this
+         app is built for; the stock-firmware IDs below are kept so an adapter that has not yet
+         been flashed still enumerates and can be told so, rather than silently not appearing. -->
+    <usb-device vendor-id="4884" product-id="11520" />
+    <!-- Carlinkit CPC200-CCPA stock firmware (riddleBox) -->
+    <usb-device vendor-id="4884" product-id="5408" />
+    <usb-device vendor-id="4884" product-id="5409" />
+    <!-- Alternate device ID -->
+    <usb-device vendor-id="2276" product-id="448" />
+</resources>

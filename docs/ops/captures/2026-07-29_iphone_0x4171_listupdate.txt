@@ -1,0 +1,32 @@
+# 2026-07-29 — live 0x4171 ListUpdate frames (wire evidence for the flat repeated-group encoding)
+#
+# Box: airplayd 17cece8a1f3a453ab0454fa055221041, /tmp/carplay_metadata = extended
+# Source: /tmp/airplayd_wl.log, captured live over SSH during the session.
+#
+# NOTE ON TRUNCATION: log_datastream_frame caps its hex dump at 48 bytes. Frame 3 below is
+# 126 bytes on the wire; only its first 48 are shown. The visible prefix covers the iAP2
+# header and the first two entry fields, which is what the encoding question turns on — the
+# remaining 78 bytes (further entry fields) were not dumped and are NOT reproduced anywhere.
+
+## The three 0x4171 messages, in order
+242:[datastream] RX kind=asyn type=comm iAP2 27 B ctrl=0x40 hex=[ff, 5a, 00, 1b, 40, 11, 08, 01, 32, 40, 40, 00, 11, 41, 71, 00, 05, 00, 00, 01, 00, 06, 00, 02, 00, 00, af]
+244:[events] iAP tunnel msg 0x4171 (11 B body)
+245:[datastream] RX kind=asyn type=comm iAP2 27 B ctrl=0x40 hex=[ff, 5a, 00, 1b, 40, 12, 08, 01, 31, 40, 40, 00, 11, 41, 71, 00, 05, 00, 05, 01, 00, 06, 00, 07, 00, 01, a4]
+247:[events] iAP tunnel msg 0x4171 (11 B body)
+248:[datastream] RX kind=asyn type=comm iAP2 126 B ctrl=0x40 hex=[ff, 5a, 00, 7e, 40, 13, 08, 01, cd, 40, 40, 00, 74, 41, 71, 00, 6e, 00, 06, 00, 06, 00, 00, 00, 00, 00, 16, 00, 01, 2b, 31, 20, 28, 39, 30, 37, 29, 20, 33, 38, 35, 2d, 35, 37, 36, 39, 00, 00]
+250:[events] iAP tunnel msg 0x4171 (110 B body)
+
+## Decode of frame 3 (the one carrying an entry)
+  ff 5a 00 7e 40 13 08 01 cd   link header, declared length 0x7e = 126
+  40 40 00 74 41 71            iAP2: length 0x74 = 116, msg id 0x4171 ListUpdate
+  00 6e 00 06                  TLV len 110, id 6 = FavoritesList   (value = 106 B)
+    00 06 00 00  00 00           TLV len 6,  id 0 = Index    = 0
+    00 16 00 01  "+1 (907) 385-5769\0"   TLV len 22, id 1 = RemoteID
+    <78 further bytes not shown by the truncated dump>
+
+  The entry's fields sit DIRECTLY inside the FavoritesList group — there is no per-entry wrapper.
+  That is the flat repeated-group encoding (docs/ops/05_AUDITS.md §2). The pre-fix parser walked one level deeper
+  and emitted ZERO records from this frame.
+
+  Corroboration from the same session: the phone declared FavoritesListCount = 1 in the preceding
+  frame, and exactly one `favorite` record was emitted.

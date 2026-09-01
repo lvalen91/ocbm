@@ -1,0 +1,10 @@
+[package]
+name = "carplay-metadata"
+version = "0.1.0"
+edition = "2021"
+description = "Shared Now Playing / Route Guidance metadata: iAP2 TLV parsing, wire types, and a client -- no GTK/GStreamer/USB dependency, used by both carplayd (producer) and crates/ui (consumer)"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"

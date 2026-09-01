@@ -1,0 +1,116 @@
+From 7bdec9847f988558e50a100e436a25773e821ed9 Mon Sep 17 00:00:00 2001
+From: lvalen91 <40876073+lvalen91@users.noreply.github.com>
+Date: Sat, 22 Aug 2026 04:42:04 -0800
+Subject: [PATCH] rpi4: carlink_boot.sh must call ip by absolute path
+
+init runs this as `/vendor/bin/sh /vendor/bin/carlink_boot.sh`, and a vendor
+shell has PATH=/vendor/bin:/vendor/xbin only. `ip` is not a vendor binary --
+it is /system/bin/ip -- so every bare `ip` call returned 127, "inaccessible or
+not found", and eth0 never got an address.
+
+Two things hid it. The script redirected stderr to /dev/null, and it logged
+"eth0 -> 1.1.1.2/24" unconditionally after the add rather than checking
+whether the address was actually there. So the log claimed success on a boot
+where nothing had happened. `log` resolves because /vendor/bin/log does exist,
+which made the failure look even more like success.
+
+Now uses $IP=/system/bin/ip, checks it is executable up front, verifies the
+address is present before claiming anything, and says so plainly when it is not.
+
+Verified on hardware 2026-08-22 across a reboot: eth0 comes up 1.1.1.2/24,
+ping from the workstation is 0% loss, and `adb connect 1.1.1.2:5555` attaches.
+
+An earlier revision of this fix blamed EthernetManager's IpClient for flushing
+the address and grew a 180s retry loop to outlast it. That was wrong -- the
+address was never being set at all. The retry is kept, much shorter, purely as
+insurance against the interface not being ready.
+---
+ carlink/carlink_boot.sh | 68 ++++++++++++++++++++++++++++++++---------
+ 1 file changed, 53 insertions(+), 15 deletions(-)
+
+diff --git a/carlink/carlink_boot.sh b/carlink/carlink_boot.sh
+index 5b70588..325f31a 100755
+--- a/carlink/carlink_boot.sh
++++ b/carlink/carlink_boot.sh
+@@ -1,25 +1,63 @@
+ #!/vendor/bin/sh
+ #
+-# Give eth0 an address. Nothing runs DHCP on the direct RJ45 link to the
+-# workstation and Android's EthernetManager never claims eth0 on this board, so
+-# without this the interface is up with no address and adb-over-TCP on the wire
+-# is unreachable. persist.adb.tcp.port=5555 already ships enabled.
++# Give eth0 a static address. Nothing runs DHCP on the direct RJ45 link to the
++# workstation, so without this adb-over-TCP on the wire is unreachable.
++# persist.adb.tcp.port=5555 already ships enabled.
+ #
+-# There is no sshd on the image, so adb-over-TCP is the RJ45 shell.
++# USE THE ABSOLUTE PATH TO ip. THIS IS THE WHOLE BUG.
+ #
+-# The regulatory domain is NOT set here: wpa_supplicant issues
+-# NL80211_CMD_REQ_SET_REG from country=US in wpa_supplicant_overlay.conf, which
+-# does not depend on an `iw` binary being present.
++# init starts this as `/vendor/bin/sh /vendor/bin/carlink_boot.sh`, and a vendor
++# shell runs with PATH=/vendor/bin:/vendor/xbin only. `ip` is NOT a vendor
++# binary -- it lives at /system/bin/ip -- so a bare `ip` call returns 127
++# ("inaccessible or not found") on every invocation. `log` happens to exist in
++# /vendor/bin, which is why logging worked while the address silently never
++# appeared. Verified on hardware 2026-08-22.
++#
++# The regulatory domain is NOT set here -- wpa_supplicant issues
++# NL80211_CMD_REQ_SET_REG from country=US in wpa_supplicant_overlay.conf.
+ 
++IP=/system/bin/ip
+ ADDR=1.1.1.2/24
+ IFACE=eth0
++ATTEMPTS=10
++INTERVAL=3
++STABLE_NEEDED=2
+ 
+-# Don't fight anything that has already configured the link.
+-if ip -4 addr show dev "$IFACE" 2>/dev/null | grep -q 'inet '; then
+-    log -t carlink_boot "$IFACE already has an address; leaving it alone"
+-    exit 0
++has_addr() { $IP -4 addr show dev "$IFACE" 2>/dev/null | grep -q 'inet '; }
++
++if [ ! -x "$IP" ]; then
++    log -t carlink_boot "FAILED: $IP is missing; cannot configure $IFACE"
++    exit 1
+ fi
+ 
+-ip link set "$IFACE" up 2>/dev/null
+-ip addr add "$ADDR" dev "$IFACE" 2>/dev/null
+-log -t carlink_boot "$IFACE -> $ADDR"
++$IP link set "$IFACE" up 2>/dev/null
++
++# The retry is cheap insurance against the interface not being ready yet, not a
++# fight with anything: EthernetManager does track eth0 (persist.sys.ethernet.enable=1)
++# and its IpClient runs DHCP on a link with no server, but it was never observed
++# to remove an address we set. The loop exits as soon as the address holds.
++i=0
++stable=0
++while [ "$i" -lt "$ATTEMPTS" ]; do
++    if has_addr; then
++        stable=$((stable + 1))
++        if [ "$stable" -ge "$STABLE_NEEDED" ]; then
++            log -t carlink_boot "$IFACE -> $ADDR"
++            exit 0
++        fi
++    else
++        stable=0
++        $IP addr add "$ADDR" dev "$IFACE" 2>/dev/null
++    fi
++    sleep "$INTERVAL"
++    i=$((i + 1))
++done
++
++# Report what actually happened. An earlier version logged success
++# unconditionally, which is exactly why a 127 from `ip` went unnoticed.
++if has_addr; then
++    log -t carlink_boot "$IFACE has $ADDR but it did not hold steady"
++    exit 0
++fi
++log -t carlink_boot "FAILED: could not set $ADDR on $IFACE after $ATTEMPTS attempts"
++exit 1
+-- 
+2.34.1
+

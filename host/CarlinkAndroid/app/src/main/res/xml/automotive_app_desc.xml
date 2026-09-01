@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    AAOS enumerates apps by the <uses name="..."/> entries here.
+    - media : required so AAOS Media Center lists Carlink as a selectable source
+              (the MediaBrowserService intent-filter is necessary but not sufficient)
+
+    (Removed in cp-stripped: `template` and `navigation` — they belonged to the
+    Car App Library cluster sessions / CarlinkClusterService, which this variant
+    deleted. Stale capability declarations feed GM's app-classification heuristics
+    — e.g. MediaSource.isMediaTemplate() — so they must not outlive the feature.)
+-->
+<automotiveApp>
+    <uses name="media"/>
+</automotiveApp>

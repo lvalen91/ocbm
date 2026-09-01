@@ -1,0 +1,23 @@
+[package]
+name = "ocbm-host"
+version = "0.1.0"
+edition = "2021"
+description = "Host-side OCBM client (libusb/rusb): handshake, ECHO benchmark, MFI relay, CONSOLE rescue"
+
+[[bin]]
+name = "ocbm-host"
+path = "src/main.rs"
+
+[dependencies]
+ocbm-proto = { path = "../../crates/ocbm-proto" }
+rusb = "0.9"
+libc = "0.2"
+# Committed-model validation (`avdec`): decrypt the box-forwarded ENCRYPTED video on the HOST.
+chacha20poly1305 = "0.10"
+# App-driven SETUP host authoring (`setup-relay --author`, plan P2, setup_driver.rs). `plist` is the
+# SAME crate the box uses in session.rs, so authored responses are byte-comparable to the box's local
+# response for the live-oracle diff. `serde`/`serde_yaml` do a MINIMAL parse of the pushed YAML's
+# accessoryConfig feature booleans (NOT a receiver-crate link — a shared config crate is P3 cleanup).
+plist = "1"
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"

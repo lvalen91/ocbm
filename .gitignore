@@ -1,0 +1,11 @@
+/target
+**/target
+*.o
+*.armv7
+*.packed
+.DS_Store
+/build
+/reference
+/scratchpad
+/old
+/.serena

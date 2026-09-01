@@ -1,0 +1,30 @@
+[rx] device id AA:BB:CC:DD:EE:01 = 187723572702721 (dec); pi dd52a0b0-5435-42ea-99dc-0a6b96bb433b; iface=ncm0 adv_addr=addr-auto
+[rx] advertised _airplay._tcp 'CarPlay' :5000
+[rx] resolved _carplay-ctrl Test iPhone._carplay-ctrl._tcp.local. -> Test-iPhone.local:61818 addrs=[fe80::c92:ff0b:1701:492] scope=ncm0(5)
+[rx] connect-out GET /ctrl-int/1/connect -> [fe80::c92:ff0b:1701:492%5]:61818 (devid=187723572702721)
+[rx] connect-out resp 75B: HTTP/1.1 200 OK
+Date: Fri, 24 Jul 2026 17:18:01 GMT
+Content-Length: 0
+
+
+[rx] resolved _carplay-ctrl Test iPhone._carplay-ctrl._tcp.local. -> Test-iPhone.local:61818 addrs=[fe80::c92:ff0b:1701:492, 169.254.139.100] scope=ncm0(5)
+[rx] connect-out 169.254.139.100:61818 failed: Network unreachable (os error 101)
+[rx] connect-out retry 1/10 in 1s (169.254.139.100:61818)
+[rx] connect-out 169.254.139.100:61818 failed: Network unreachable (os error 101)
+[rx] connect-out retry 2/10 in 1s (169.254.139.100:61818)
+[rx] connect-out 169.254.139.100:61818 failed: Network unreachable (os error 101)
+[rx] connect-out retry 3/10 in 1s (169.254.139.100:61818)
+[rx] connect-out 169.254.139.100:61818 failed: Network unreachable (os error 101)
+[rx] connect-out retry 4/10 in 1s (169.254.139.100:61818)
+[rx] connect-out 169.254.139.100:61818 failed: Network unreachable (os error 101)
+[rx] connect-out retry 5/10 in 1s (169.254.139.100:61818)
+[rx] connect-out 169.254.139.100:61818 failed: Network unreachable (os error 101)
+[rx] connect-out retry 6/10 in 1s (169.254.139.100:61818)
+[rx] connect-out 169.254.139.100:61818 failed: Network unreachable (os error 101)
+[rx] connect-out retry 7/10 in 1s (169.254.139.100:61818)
+[rx] connect-out 169.254.139.100:61818 failed: Network unreachable (os error 101)
+[rx] connect-out retry 8/10 in 1s (169.254.139.100:61818)
+[rx] connect-out 169.254.139.100:61818 failed: Network unreachable (os error 101)
+[rx] connect-out retry 9/10 in 1s (169.254.139.100:61818)
+[rx] connect-out 169.254.139.100:61818 failed: Network unreachable (os error 101)
+[rx] connect-out retry 10/10 in 1s (169.254.139.100:61818)

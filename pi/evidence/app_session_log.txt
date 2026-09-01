@@ -1,0 +1,58 @@
+--------- beginning of main
+08-16 15:56:44.650 24987 25012 I NETPROBE: [aac  ] 52500 audio frames played
+08-16 15:56:55.317 24987 25012 I NETPROBE: [aac  ] 53000 audio frames played
+08-16 15:56:59.871 24987 25028 I NETPROBE: [hevc ] 27900 frames rendered (1004564890 B in)
+08-16 15:57:05.904 24987 25012 I NETPROBE: [aac  ] 53500 audio frames played
+08-16 15:57:16.573 24987 25012 I NETPROBE: [aac  ] 54000 audio frames played
+08-16 15:57:27.239 24987 25012 I NETPROBE: [aac  ] 54500 audio frames played
+08-16 15:57:37.983 24987 25012 I NETPROBE: [aac  ] 55000 audio frames played
+08-16 15:57:48.650 24987 25012 I NETPROBE: [aac  ] 55500 audio frames played
+08-16 15:57:59.237 24987 25012 I NETPROBE: [aac  ] 56000 audio frames played
+08-16 15:58:09.984 24987 25012 I NETPROBE: [aac  ] 56500 audio frames played
+08-16 15:58:20.650 24987 25012 I NETPROBE: [aac  ] 57000 audio frames played
+08-16 15:58:31.256 24987 25012 I NETPROBE: [aac  ] 57500 audio frames played
+08-16 15:58:41.906 24987 25012 I NETPROBE: [aac  ] 58000 audio frames played
+08-16 15:58:52.570 24987 25012 I NETPROBE: [aac  ] 58500 audio frames played
+08-16 15:59:03.321 24987 25012 I NETPROBE: [aac  ] 59000 audio frames played
+08-16 15:59:13.983 24987 25012 I NETPROBE: [aac  ] 59500 audio frames played
+08-16 15:59:15.605 24987 25028 I NETPROBE: [hevc ] 28200 frames rendered (1004761007 B in)
+08-16 15:59:24.575 24987 25012 I NETPROBE: [aac  ] 60000 audio frames played
+08-16 15:59:35.237 24987 25012 I NETPROBE: [aac  ] 60500 audio frames played
+08-16 15:59:45.906 24987 25012 I NETPROBE: [aac  ] 61000 audio frames played
+08-16 15:59:56.650 24987 25012 I NETPROBE: [aac  ] 61500 audio frames played
+08-16 16:00:07.317 24987 25012 I NETPROBE: [aac  ] 62000 audio frames played
+08-16 16:00:17.983 24987 25012 I NETPROBE: [aac  ] 62500 audio frames played
+08-16 16:00:28.573 24987 25012 I NETPROBE: [aac  ] 63000 audio frames played
+08-16 16:00:39.236 24987 25012 I NETPROBE: [aac  ] 63500 audio frames played
+08-16 16:00:49.983 24987 25012 I NETPROBE: [aac  ] 64000 audio frames played
+08-16 16:01:00.575 24987 25012 I NETPROBE: [aac  ] 64500 audio frames played
+08-16 16:01:11.317 24987 25012 I NETPROBE: [aac  ] 65000 audio frames played
+08-16 16:01:21.908 24987 25012 I NETPROBE: [aac  ] 65500 audio frames played
+08-16 16:01:32.650 24987 25012 I NETPROBE: [aac  ] 66000 audio frames played
+08-16 16:01:36.727 24987 25028 I NETPROBE: [hevc ] 28500 frames rendered (1004958118 B in)
+08-16 16:01:43.267 24987 25012 I NETPROBE: [aac  ] 66500 audio frames played
+08-16 16:01:53.907 24987 25012 I NETPROBE: [aac  ] 67000 audio frames played
+08-16 16:02:04.571 24987 25012 I NETPROBE: [aac  ] 67500 audio frames played
+08-16 16:02:15.236 24987 25012 I NETPROBE: [aac  ] 68000 audio frames played
+08-16 16:02:25.903 24987 25012 I NETPROBE: [aac  ] 68500 audio frames played
+08-16 16:02:36.572 24987 25012 I NETPROBE: [aac  ] 69000 audio frames played
+08-16 16:02:47.317 24987 25012 I NETPROBE: [aac  ] 69500 audio frames played
+08-16 16:02:57.907 24987 25012 I NETPROBE: [aac  ] 70000 audio frames played
+08-16 16:03:08.650 24987 25012 I NETPROBE: [aac  ] 70500 audio frames played
+08-16 16:03:19.269 24987 25012 I NETPROBE: [aac  ] 71000 audio frames played
+08-16 16:03:29.904 24987 25012 I NETPROBE: [aac  ] 71500 audio frames played
+08-16 16:03:40.650 24987 25012 I NETPROBE: [aac  ] 72000 audio frames played
+08-16 16:03:47.556 24987 25028 I NETPROBE: [hevc ] 28800 frames rendered (1005156500 B in)
+08-16 16:03:51.238 24987 25012 I NETPROBE: [aac  ] 72500 audio frames played
+08-16 16:04:01.904 24987 25012 I NETPROBE: [aac  ] 73000 audio frames played
+08-16 16:04:12.570 24987 25012 I NETPROBE: [aac  ] 73500 audio frames played
+08-16 16:04:23.319 24987 25012 I NETPROBE: [aac  ] 74000 audio frames played
+08-16 16:04:33.908 24987 25012 I NETPROBE: [aac  ] 74500 audio frames played
+08-16 16:04:44.650 24987 25012 I NETPROBE: [aac  ] 75000 audio frames played
+08-16 16:04:55.317 24987 25012 I NETPROBE: [aac  ] 75500 audio frames played
+08-16 16:05:05.907 24987 25012 I NETPROBE: [aac  ] 76000 audio frames played
+08-16 16:05:16.650 24987 25012 I NETPROBE: [aac  ] 76500 audio frames played
+08-16 16:05:27.238 24987 25012 I NETPROBE: [aac  ] 77000 audio frames played
+08-16 16:05:37.984 24987 25012 I NETPROBE: [aac  ] 77500 audio frames played
+08-16 16:05:48.651 24987 25012 I NETPROBE: [aac  ] 78000 audio frames played
+08-16 16:05:59.317 24987 25012 I NETPROBE: [aac  ] 78500 audio frames played

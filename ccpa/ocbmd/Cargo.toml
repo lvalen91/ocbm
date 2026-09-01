@@ -1,0 +1,14 @@
+[package]
+name = "ocbmd"
+version = "0.1.0"
+edition = "2021"
+description = "Box-side OCBM daemon (armv7/musl): owns /dev/usb_accessory; CTRL/ECHO/CONSOLE/MFI channels"
+
+[[bin]]
+name = "ocbmd"
+path = "src/main.rs"
+
+[dependencies]
+ocbm-proto = { path = "../../crates/ocbm-proto" }
+box-common = { path = "../../crates/box-common" }
+libc = "0.2"

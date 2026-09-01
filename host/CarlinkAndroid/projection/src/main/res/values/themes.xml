@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Projection" parent="@android:style/Theme.DeviceDefault.DayNight" />
+
+    <!-- The projection surface owns every pixel of the advertised panel. A non-black window
+         background shows through in the letterbox margins when the stream's aspect ratio does
+         not match the panel, and windowFullscreen keeps system chrome off content that iOS
+         believes is visible. -->
+    <style name="Theme.Projection.Fullscreen" parent="Theme.Projection">
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:windowContentOverlay">@null</item>
+    </style>
+
+    <!-- The launcher trampoline. Transparent, NOT @android:style/Theme.NoDisplay: a NoDisplay
+         activity must finish synchronously inside onCreate/onResume, and LaunchTileActivity cannot
+         — its decision needs the service's session state, which bindService delivers on a later
+         main-loop turn. NoDisplay throws "did not call finish() prior to onResume() completing".
+         The user sees nothing either way. -->
+    <style name="Theme.Projection.Trampoline" parent="Theme.Projection">
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:backgroundDimEnabled">false</item>
+    </style>
+</resources>

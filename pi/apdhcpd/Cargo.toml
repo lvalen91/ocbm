@@ -1,0 +1,10 @@
+[package]
+name = "apdhcpd"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Minimal DHCP server for the Raspberry Pi port's SoftAP. No third-party crates: this replaces a
+# 2009-vintage dnsmasq and should not acquire a dependency surface of its own.
+[dependencies]
+libc = "0.2"

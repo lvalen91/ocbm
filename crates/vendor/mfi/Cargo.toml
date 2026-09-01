@@ -1,0 +1,19 @@
+[package]
+name = "mfi"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+sha1 = "0.10"
+aes = "0.8"
+ctr = "0.9"
+getrandom = "0.2"
+
+[dev-dependencies]
+# the test re-derives the AES key/IV independently to verify the MFi-SAP M2 round-trip
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+sha1 = "0.10"
+aes = "0.8"
+ctr = "0.9"

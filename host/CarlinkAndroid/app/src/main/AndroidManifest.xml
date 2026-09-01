@@ -1,0 +1,192 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Permissions -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <!-- microphone FGS type: on Android 11+ (incl. the 12L target), mic capture from a
+         backgrounded app requires an FGS declaring the microphone type — without it a
+         phone call continues with SILENT uplink if the driver switches to another app
+         mid-call (AudioRecord returns zeroed frames, no error). NOTE: this only covers
+         an FGS STARTED while the app was foreground (the normal CONNECTING path); an
+         FGS started from the background (reconnect path) still captures silence on 11+
+         regardless of type. Permission is API 34+ and inert on 12L. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <!-- Required by connectedDevice foreground service type on Android 14+ -->
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- USB Host. required=false on purpose: the CPC200 adapter needs USB host at
+         runtime, but GM AAOS (gm/gminfo37) does NOT advertise android.hardware.usb.host
+         in its Play device profile, so required=true filtered the truck out of the AAOS
+         track. required=false stops Play filtering on it; the UsbManager API + the
+         usb_device_filter below are unaffected and still work at runtime. -->
+    <uses-feature
+        android:name="android.hardware.usb.host"
+        android:required="false" />
+
+    <!-- Optional Features -->
+    <uses-feature
+        android:name="android.hardware.microphone"
+        android:required="false" />
+    <!-- AAOS-only distribution per developer.android.com/training/cars/distribute:
+         media apps on the Android Automotive OS Play track must declare
+         android.hardware.type.automotive as required=true (or unset). Setting it false
+         would let the same APK install on phones/tablets where the AAOS-specific
+         services have no host. -->
+    <uses-feature
+        android:name="android.hardware.type.automotive"
+        android:required="true" />
+
+    <application
+        android:allowBackup="false"
+        android:appCategory="audio"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.CarlinkNative"
+        tools:targetApi="36">
+
+        <!-- Optional: present on AAOS, absent on a phone. required="false" keeps the APK
+             installable on both; DriveStateMonitor checks FEATURE_AUTOMOTIVE before touching
+             any android.car type. -->
+        <uses-library
+            android:name="android.car"
+            android:required="false" />
+
+        <!-- Main Activity -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:launchMode="singleTop"
+            android:theme="@style/Theme.CarlinkNative.Fullscreen"
+            android:windowSoftInputMode="adjustResize">
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- Separate CAR_MODE filter for automotive launchers -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.CAR_MODE" />
+            </intent-filter>
+
+            <!-- HOME/DEFAULT filter: makes Carlink selectable as the system Home app
+                 (Settings > Apps > Default apps > Home app). No runtime behavior change
+                 yet: MainActivity does not currently branch on a HOME launch. -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.HOME" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+
+            <!-- AAOS Media App Intent Filter -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.APP_MUSIC" />
+            </intent-filter>
+
+            <!-- USB Device Attachment -->
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+            </intent-filter>
+
+            <meta-data
+                android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
+                android:resource="@xml/usb_device_filter" />
+
+            <!-- AAOS Distraction Optimization for Activity -->
+            <meta-data
+                android:name="distractionOptimized"
+                android:value="true" />
+        </activity>
+
+        <!-- Media3 MediaLibraryService for AAOS Integration.
+             Dual intent-filter: the modern `androidx.media3.session.MediaLibraryService`
+             action for Media3-aware controllers, and the legacy
+             `android.media.browse.MediaBrowserService` action for AAOS Media Center and
+             other MediaBrowserCompat clients. Per Media3 migration guide
+             (developer.android.com/media/media3/exoplayer/migration-guide),
+             MediaLibraryService is backwards-compatible with legacy MediaBrowserCompat
+             clients, so declaring both actions covers both controller generations. -->
+        <service
+            android:name=".media.CarlinkMediaBrowserService"
+            android:exported="true"
+            android:foregroundServiceType="mediaPlayback|connectedDevice|microphone"
+            tools:ignore="ExportedService">
+            <intent-filter>
+                <action android:name="androidx.media3.session.MediaLibraryService" />
+                <action android:name="android.media.browse.MediaBrowserService" />
+            </intent-filter>
+            <!-- AAOS CarLauncher opt-in. Required because carlink is BOTH a launcher
+                 app and an MBS: MediaSource.isMediaTemplate() classifies dual-role
+                 apps as "non media template" unless this explicit opt-in is present.
+                 Without it the homescreen Media card hides carlink, and any source
+                 re-election after a force-close fails to promote zeno.carlink (which
+                 in turn leaves ClusterHome with nothing to mirror). -->
+            <meta-data
+                android:name="androidx.car.app.launchable"
+                android:value="true" />
+            <!-- GM Homescreen: Hide from launcher while keeping service functional -->
+            <meta-data
+                android:name="com.gm.homescreen.visibility"
+                android:value="HIDDEN" />
+        </service>
+
+        <meta-data
+            android:name="com.android.automotive"
+            android:resource="@xml/automotive_app_desc" />
+
+        <!-- Tintable monochrome icon used by AAOS Media Center / system UI on media
+             cards. Per developer.android.com/training/cars/media/configure-manifest. -->
+        <meta-data
+            android:name="androidx.car.app.TintableAttributionIcon"
+            android:resource="@drawable/ic_carlink_attribution" />
+
+        <!-- APPLICATION-LEVEL DISTRACTION OPTIMIZATION DECLARATION -->
+        <meta-data
+            android:name="com.android.automotive.application.DISTRACTION_OPTIMIZED"
+            android:value="true" />
+
+        <!-- FileProvider for publishing album art as content:// URIs to AAOS media
+             controllers (Media Center, cluster, system UI) IN ADDITION to the inline
+             METADATA_KEY_ALBUM_ART Bitmap. URI path is additive only — the inline
+             Bitmap is the primary renderer guarantee so that a missing/failed URI
+             does not blank the Media Card.
+
+             grantUriPermissions="true" enables this provider's URIs to be granted via
+             Context.grantUriPermission(). Note (observation as of 2026-05-03 against
+             Media3 1.10.0 source — re-verify on upgrade): a grep of all
+             androidx.media3.session.* sources read on that date did not surface any
+             grantUriPermission or FLAG_GRANT_READ_URI calls, suggesting Media3 does
+             not auto-grant these URIs to bound MediaControllers in 1.10.0. The session
+             appears to resolve artworkUri server-side via BitmapLoader.loadBitmapFromMetadata
+             and ship a decoded Bitmap, so most controllers do not need URI access at
+             all in this configuration. The few consumers that read URIs directly (GM
+             RHMI cluster via its own ContentProvider chain, etc.) get permission from
+             MediaSessionManager's grantUriToConsumers() — which is the mechanism
+             observed to be doing the work for those consumers on the firmware tested. -->
+
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.albumart"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths_albumart" />
+        </provider>
+
+    </application>
+
+</manifest>

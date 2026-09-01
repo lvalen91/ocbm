@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<automotiveApp>
+    <!-- "projection" is the AAOS app-type for a projection receiver. Declaring it lets the
+         launcher and Settings classify this app correctly rather than treating it as a
+         generic media or template app. -->
+    <uses name="projection" />
+</automotiveApp>
