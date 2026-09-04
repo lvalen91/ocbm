@@ -1,6 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <!-- Deliberately generic. This app impersonates a stock system component; a branded label would
-         make it conspicuous in Settings ▸ Apps. Matches the AOSP car-usb-handler label intent. -->
-    <string name="app_name">USB Handler</string>
-</resources>

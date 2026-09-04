@@ -1,7 +1,0 @@
-phase=STREAMING
-host_present=1
-armed=1 healthy=1 stuck=0
-paired=1 record=1
-flaps=0 stuck_fails=0 l1=0 l2=0 fails=0
-reason=
-uptime=282

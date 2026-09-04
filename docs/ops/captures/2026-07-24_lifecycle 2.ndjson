@@ -1,5 +1,0 @@
-t=2 BOOT -> IDLE reason=
-t=49 IDLE -> ARMING reason=
-t=51 ARMING -> WAITING_PHONE reason=plug in the iPhone
-t=278 WAITING_PHONE -> ESTABLISHING reason=paired=0
-t=282 ESTABLISHING -> STREAMING reason=

@@ -25,6 +25,8 @@ SUBJECT="${1:-sync: mirror ccpa_custom @ $(git -C "$SRC" branch --show-current)}
 rsync -a --delete \
   --exclude='.git/' \
   --exclude='.DS_Store' \
+  --exclude='* [0-9].*' \
+  --exclude='* [0-9]' \
   --exclude='target' --exclude='build/' \
   --exclude='.gradle/' --exclude='local.properties' \
   --exclude='xcuserdata/' \
