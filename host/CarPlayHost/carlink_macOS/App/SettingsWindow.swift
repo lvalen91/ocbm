@@ -76,7 +76,10 @@ final class VehicleConfigModel: ObservableObject {
     // posture, no code); true = Numeric Comparison (both the iPhone and the app show a 6-digit code to
     // match — a more OEM-head-unit-like experience, experimental for a dongle). Default false.
     @Published var pairingNumericComparison: Bool { didSet { markDirty() } }
-    // Android Auto (our `android_auto:` YAML extension, docs/host/02_ANDROID_AUTO.mde). The box's session_supervisor reads
+    /// Box waits for this app's Pair/Cancel instead of confirming its own side at once. Unreachable with iOS
+    /// as the peer (it fails the exchange before any human can answer) — off by default, kept for other peers.
+    @Published var pairingInteractiveAnswer: Bool { didSet { markDirty() } }
+    // Android Auto (our `android_auto:` YAML extension, docs/androidauto/02_ARBITRATION.md). The box's session_supervisor reads
     // it: when an Android phone is on the USB bus and no CarPlay transport owns the box, it arms
     // `aa-bridge` (AOAP switch + byte pump) and reports `pmWiredAa`, on which this app runs its own AA
     // head-unit engine over CH_IP. Default ON — the box's own default is opt-out (`android_auto: false`).
@@ -154,10 +157,12 @@ final class VehicleConfigModel: ObservableObject {
 
     // ---- Vehicle identity (docs/carplay/04_CAPABILITIES_AND_CONFIG.md C6/C7) — the EV-telematics foundation ----
     //
-    // Emitted as `accessoryName:` and the `iapConfig:` block. The box PARSES both today but does not
-    // act on them yet (C-3 wires the identity into iap2d's Identify; C-6 applies the name), so
-    // authoring here changes nothing on the wire until those land. That is deliberate: params 20/21
-    // are Identify content, and an iOS `0x1D03` rejection cannot be retried within a session.
+    // Emitted as `accessoryName:` and the `iapConfig:` block. C-3 landed (2026-09-02): iap2d's
+    // Action::SendIdentify handler passes `vehicle_identity_from(&cfg)` into
+    // `message::build_ident_info_with(...)`, so `engineTypes`/`chargingConnectors` reach the wired
+    // Identify (param 20) on the next phone plug. `accessoryName` (C-6, param 21) is still
+    // parse-only — no production caller of `accessory_name_bounded` exists yet. Either way, params
+    // 20/21 are Identify content and an iOS `0x1D03` rejection cannot be retried within a session.
 
     /// The name the owner gives THIS box; the iPhone displays it. Empty = keep the box's built-in
     /// per-device name (`CarLink-<wifi-suffix>`), which is what ships today.
@@ -258,12 +263,21 @@ final class VehicleConfigModel: ObservableObject {
     @Published var touchpadButtonsSupport: Bool { didSet { markDirty() } }
     @Published var touchScreenHighFidelity: Bool { didSet { markDirty() } }
     @Published var touchScreenSupportsCancel: Bool { didSet { markDirty() } }
+    /// `hidConfig.touchScreenSupportsMultiTouch` (verify_06 10-M4, owner decision 2026-09-02): a LIVE
+    /// lever the app never emitted. Box: `vehicle_config.rs:642` parses it, `airplayd main.rs:767`
+    /// swaps the uid-1 touch HID descriptor to two-finger and clears its contact state. Default OFF —
+    /// multi-touch is untested on this project, matching the box's own `#[serde(default)]` (false).
+    @Published var touchScreenSupportsMultiTouch: Bool { didSet { markDirty() } }
     @Published var primaryInput: String { didSet { markDirty() } }
     // Apple's authoritative values only — "Touchscreen" is not a valid CarPlay primaryInput
     // (absent from every CarPlay Simulator vehicle config).
     static let primaryInputs = ["Touchpad", "Knobs"]
 
     // Appearance / display
+    // NOT emitted in `yaml` (verify_06 10 open question #2, owner decision 2026-09-02): the box has
+    // no consumer for either key (`vehicle_config.rs` parses and drops both), so pushing them was
+    // pure noise on every SUBSCRIBE. Persistence stays (UserDefaults + the toggle in the UI) in case
+    // a future box-side consumer lands; only the wire emission was dropped.
     @Published var nightMode: Bool { didSet { markDirty() } }
     @Published var rightHandDrive: Bool { didSet { markDirty() } }
     @Published var enablesUIAppearance: Bool { didSet { markDirty() } }
@@ -358,6 +372,7 @@ final class VehicleConfigModel: ObservableObject {
         wirelessEnabled = b("wirelessEnabled", true)
         hotHandover = b("hotHandover", false)
         pairingNumericComparison = b("pairingNumericComparison", false)
+        pairingInteractiveAnswer = b("pairingInteractiveAnswer", false)
         androidAutoEnabled = b("androidAutoEnabled", true)
         mainWidth = i("mainWidth", 1920); mainHeight = i("mainHeight", 1080); maxFPS = i("maxFPS", 60)
         mainSafeLeft = i("mainSafeLeft", 0); mainSafeTop = i("mainSafeTop", 0)
@@ -411,6 +426,7 @@ final class VehicleConfigModel: ObservableObject {
         touchpadButtonsSupport = b("touchpadButtonsSupport", false)
         touchScreenHighFidelity = b("touchScreenHighFidelity", true)
         touchScreenSupportsCancel = b("touchScreenSupportsCancel", true)
+        touchScreenSupportsMultiTouch = b("touchScreenSupportsMultiTouch", false)
         // Uses the `b(_:_:)` helper like its siblings rather than `ud.bool(forKey:)`: the helper
         // distinguishes "absent" from "false", which is what makes a future default flip
         // actually reach existing installs (the B4 lesson, docs/carplay/04_CAPABILITIES_AND_CONFIG.md).
@@ -455,6 +471,11 @@ final class VehicleConfigModel: ObservableObject {
         oemIconBase64 = ud.string(forKey: Self.prefix + "oemIconBase64") ?? ""
         oemIconW = ud.object(forKey: Self.prefix + "oemIconW") as? Int ?? 0
         oemIconH = ud.object(forKey: Self.prefix + "oemIconH") as? Int ?? 0
+        // Clamp before committing (L-2, verify_06 10-L2): a persisted out-of-range value (e.g. a
+        // stale `maxFPS: 24` from an earlier build, or an out-of-bounds resolution) must not reach
+        // the wire on launch just because the owner hasn't hit Save yet. Idempotent — only assigns
+        // on change — and `loading` is still true, so it does not mark the model dirty.
+        clampInPlace()
         loading = false
         committedYAML = yaml   // the persisted state IS the committed/pushed state at launch
         committedConfig = config   // snapshot the structured config alongside the YAML (audit A4)
@@ -462,11 +483,31 @@ final class VehicleConfigModel: ObservableObject {
 
     /// Commit the current form: clamp, persist to UserDefaults, snapshot the pushed YAML, clear dirty.
     /// This is the ONLY thing that changes what the adapter receives on the next connection.
-    func save() {
-        guard !loading else { return }
+    ///
+    /// Returns `false` (and leaves the previously-committed config untouched) if the rendered YAML
+    /// would exceed the box's SUBSCRIBE frame budget (verify_06 10-L1 / L-1): `OCBMClient.send`
+    /// refuses any payload > `OCBM.maxPayload` (65536 B), and without this guard an oversize document
+    /// (an unbounded `name`/`accessoryName`/`oemIconLabel`/`metadataSkip`/`audioFormats`) wedges every
+    /// SUBSCRIBE silently — the app sits at "waiting" with only a log line, forever.
+    @discardableResult
+    func save() -> Bool {
+        guard !loading else { return true }
         saving = true
         defer { saving = false }
         clampInPlace()
+        let candidateYAML = yaml
+        let candidateSize = Data(candidateYAML.utf8).count
+        // Reserve a few bytes for the OCBM frame header, matching L-1's stated margin.
+        guard candidateSize <= OCBM.maxPayload - 1 else {
+            let alert = NSAlert()
+            alert.messageText = "Configuration Too Large"
+            alert.informativeText = "The generated configuration is \(candidateSize) bytes, over the "
+                + "adapter's \(OCBM.maxPayload) byte SUBSCRIBE limit. Shorten the name, accessory "
+                + "name, OEM icon label, metadata skip list, or audio format list, then Save again."
+            alert.alertStyle = .critical
+            alert.runModal()
+            return false
+        }
         // Keep the PERSISTED name clean, using the SAME set the emitter strips (`YamlEmit`) — this
         // used to be `CharacterSet.controlCharacters`, which is Cc u Cf and silently destroyed
         // legitimate content: an emoji ZWJ sequence collapsed into separate glyphs right in the
@@ -480,6 +521,7 @@ final class VehicleConfigModel: ObservableObject {
         d.set(wirelessEnabled, forKey: s + "wirelessEnabled")
         d.set(hotHandover, forKey: s + "hotHandover")
         d.set(pairingNumericComparison, forKey: s + "pairingNumericComparison")
+        d.set(pairingInteractiveAnswer, forKey: s + "pairingInteractiveAnswer")
         d.set(androidAutoEnabled, forKey: s + "androidAutoEnabled")
         d.set(mainWidth, forKey: s + "mainWidth"); d.set(mainHeight, forKey: s + "mainHeight"); d.set(maxFPS, forKey: s + "maxFPS")
         d.set(mainSafeLeft, forKey: s + "mainSafeLeft"); d.set(mainSafeTop, forKey: s + "mainSafeTop")
@@ -528,6 +570,7 @@ final class VehicleConfigModel: ObservableObject {
         // declines while a CarPlay transport owns the box (see its doc: the box's presence dip would
         // restart a live CarPlay session).
         CCPABridge.shared.client?.repushConfig(data())
+        return true
     }
 
     /// Load an OEM-icon PNG from `url`: keep the ORIGINAL PNG bytes (base64), read the pixel dimensions
@@ -668,6 +711,7 @@ final class VehicleConfigModel: ObservableObject {
          ("telephonyButtonsSupport", telephonyButtonsSupport), ("touchpadSupport", touchpadSupport),
          ("touchpadButtonsSupport", touchpadButtonsSupport),
          ("touchScreenSupportsCancel", touchScreenSupportsCancel),
+         ("touchScreenSupportsMultiTouch", touchScreenSupportsMultiTouch),
          ("touchScreenHighFidelity", touchScreenHighFidelity),
          ("steeringWheelSupport", steeringWheelSupport)]
     }
@@ -709,13 +753,23 @@ final class VehicleConfigModel: ObservableObject {
     /// booleans and can never diverge. `altVideoStreamsPresent` mirrors the YAML's `altVideoStreams[]`
     /// presence (`altVideoEnabled`), which is what arms the box's `altScreen` feature.
     var config: VehicleConfig {
-        VehicleConfig(
+        // 03-M2 fix: mirror the box's `view_areas_enabled()` inset auto-arm — a real main OR (when
+        // the alt stream is enabled) alt safe-area inset arms `viewAreas` even with the toggle off,
+        // exactly as the box already does locally. See `VehicleConfig.hasRealSafeAreaInset`.
+        let mainInset = VehicleConfig.hasRealSafeAreaInset(
+            left: mainSafeLeft, top: mainSafeTop, right: mainSafeRight, bottom: mainSafeBottom,
+            width: mainWidth, height: mainHeight)
+        let altInset = altVideoEnabled && VehicleConfig.hasRealSafeAreaInset(
+            left: altSafeLeft, top: altSafeTop, right: altSafeRight, bottom: altSafeBottom,
+            width: altWidth, height: altHeight)
+        return VehicleConfig(
             enablesHEVC: enablesHEVC,
             enablesViewAreas: enablesViewAreas,
             enablesCornerMasks: enablesCornerMasks,
             enablesLogTransfer: enablesLogTransfer,
             enablesMainBufferedAudio: enablesMainBufferedAudio,
             altVideoStreamsPresent: altVideoEnabled,
+            safeAreaInsetPresent: mainInset || altInset,
             appDrivenSetup: appDrivenSetup,
             mainWidth: mainWidth, mainHeight: mainHeight, maxFPS: maxFPS,
             altWidth: altWidth, altHeight: altHeight, altFPS: altFPS
@@ -749,13 +803,10 @@ final class VehicleConfigModel: ObservableObject {
         }
         var y = """
         name: "\(YamlEmit.quotedBody(name))"
-        version: 1
         wireless: \(wirelessEnabled)
         hot_handover: \(hotHandover)
-        pairing: \(pairingNumericComparison ? "numeric_comparison" : "just_works")
+        pairing: \(pairingNumericComparison ? (pairingInteractiveAnswer ? "numeric_comparison_interactive" : "numeric_comparison") : "just_works")
         android_auto: \(androidAutoEnabled)
-        rightHandDrive: \(rightHandDrive)
-        nightMode: \(nightMode)
         displayPanelsConfig:
           mainDisplayPanel:
             displayPanelID: DisplayPanel.Main
@@ -782,6 +833,7 @@ final class VehicleConfigModel: ObservableObject {
               touchpadButtonsSupport: \(touchpadButtonsSupport)
               touchScreenMode: \(touchScreenHighFidelity ? "High Fidelty" : "Disabled")
               touchScreenSupportsCancel: \(touchScreenSupportsCancel)
+              touchScreenSupportsMultiTouch: \(touchScreenSupportsMultiTouch)
               steeringWheelSupport: \(steeringWheelSupport)
             primaryInput: \(primaryInput)
         """
@@ -903,8 +955,9 @@ final class VehicleConfigModel: ObservableObject {
     /// Identify is byte-identical to what shipped before the feature. It is also the rollback path —
     /// clearing these fields restores baseline bytes with no rebuild and no box-side change.
     ///
-    /// The box PARSES this today but does not act on it yet (C-3 wires it into iap2d), so authoring
-    /// here is safe ahead of that landing.
+    /// C-3 landed (2026-09-02): iap2d builds `engineTypes`/`chargingConnectors` into the wired
+    /// Identify on the next phone plug. `accessoryName` remains parse-only (no production caller of
+    /// `accessory_name_bounded`).
     private var iapConfigYAML: String {
         var s = ""
         // Free text → `YamlEmit.quotedBody`, the same helper `name:` and `oemIconLabel` use. An
@@ -1048,6 +1101,7 @@ final class VehicleConfigModel: ObservableObject {
         wirelessEnabled = true
         hotHandover = false
         pairingNumericComparison = false
+        pairingInteractiveAnswer = false
         androidAutoEnabled = true
         mainWidth = 1920; mainHeight = 1080; maxFPS = 60
         mainSafeLeft = 0; mainSafeTop = 0; mainSafeRight = 0; mainSafeBottom = 0; mainDrawOutsideSafe = false
@@ -1064,7 +1118,7 @@ final class VehicleConfigModel: ObservableObject {
         dPadSupport = true; knobSupport = false; knobSupportsHomeAndBackButton = false
         knobSupportsNudge = false; mediaButtonsSupport = true; telephonyButtonsSupport = false
         touchpadSupport = false; touchpadButtonsSupport = false
-        touchScreenHighFidelity = true; touchScreenSupportsCancel = true; primaryInput = "Touchpad"
+        touchScreenHighFidelity = true; touchScreenSupportsCancel = true; touchScreenSupportsMultiTouch = false; primaryInput = "Touchpad"
         nightMode = false; rightHandDrive = false
         enablesUIAppearance = true; enablesMapAppearance = true; enablesCornerMasks = false
         enablesVideoPlayback = true; enablesViewAreas = false; enablesEnhancedSiri = false
@@ -1111,7 +1165,9 @@ enum FieldInfo {
         // the "un-mark it when it lands" ritual is removing the key here — a hand-written warning in
         // the description would be missed when C-7/C-8 wires the features word.
         "steeringWheelSupport",
-        "enablesUIAppearance", "enablesMapAppearance", "enablesFocusTransfer",
+        // enablesUIAppearance/enablesMapAppearance/enablesFocusTransfer removed 2026-09-02 (verify_06
+        // 10-M1): airplayd arms all three per connection (main.rs:797-799, levers::set_ui_appearance/
+        // map_appearance/focus_transfer) — they were live, not inert.
         "enablesUIContext", "enablesUISync", "enablesFileTransfer",
         "enablesVehicleDataProtocol", "enablesDCX",
     ]
@@ -1139,11 +1195,11 @@ enum FieldInfo {
         // (events.rs::send_set_night_mode, the Display-Appearance feature) — but the VehicleConfig
         // `nightMode` field here is still not wired to it, so both fields still have ZERO on-wire effect.
         // These descriptions are about the config fields, not the separate live appearance command.
-        "rightHandDrive": "Tells CarPlay the driver sits on the right so iOS mirrors driver-focused layout that way. Off = left-hand drive. ⚠️ Not yet implemented on the box — this setting rides the config but currently has no effect on the wire.",
-        "nightMode": "Drives CarPlay's light/dark UI (dark night appearance when on). ⚠️ This VehicleConfig field is not wired to /info and has no effect on the wire. Runtime night mode IS available via the live Night Mode toggle (Display Appearance — Live), which sends the separate setNightMode command; this config field does not.",
+        "rightHandDrive": "Driver seat side. Android Auto: LIVE — declared as driver_position at session start (device-verified 2026-09-04: on = app rail on the right edge, off = left; takes effect on the next AA session). CarPlay: tells iOS the driver sits on the right so it mirrors driver-focused layout. Off = left-hand drive. ⚠️ Not implemented on the box for CarPlay — the box has no consumer for this key, so as of 2026-09-02 it is stored locally but no longer pushed in the config at all.",
+        "nightMode": "Drives CarPlay's light/dark UI (dark night appearance when on). ⚠️ The box has no consumer for this key, so as of 2026-09-02 it is stored locally but no longer pushed in the config at all. Runtime night mode IS available via the live Night Mode toggle (Display Appearance — Live), which sends the separate setNightMode command; this field does not.",
         "mainResolution": "The exact pixel grid CarPlay renders/streams (sets displays[].widthPixels/heightPixels + the touch coordinate space). Primary resolution lever; a change needs a fresh session. W 800–3840, H 480–2160.",
         "maxFPS": "Caps the video refresh rate to this display (Apple uses 60). Higher = smoother but more decode/bandwidth. Advertised as displays[].maxFPS; reconnect-only.",
-        "safeArea": "Insets (px from each edge) of the box CarPlay keeps its UI inside. The video still fills the whole resolution; only interactive UI is held within the safe box — for curved/irregular panels where the corners/edges are occluded. 0 = flush (no inset). iOS honors this only when View areas is on.",
+        "safeArea": "Insets (px from each edge) of the box CarPlay keeps its UI inside. The video still fills the whole resolution; only interactive UI is held within the safe box — for curved/irregular panels where the corners/edges are occluded. 0 = flush (no inset). iOS honors this whenever View areas is negotiated — a real (non-zero, non-full-panel) inset here arms it automatically, even with View areas off, matching the adapter's own local behavior.",
         "drawUIOutsideSafeArea": "Let CarPlay draw non-interactive UI in the gap between the full frame and the safe box. Off (default) = keep all UI strictly inside the safe area.",
         "altResolution": "Pixel size of the secondary (instrument-cluster / navigation) video stream — typically a smaller cluster screen. Omit for single-screen units.",
         "enablesHEVC": "Publishes non-null hevcInfo so iOS can stream efficient HEVC (H.265) instead of only H.264. Requires the unit to decode/forward HEVC.",
@@ -1152,8 +1208,8 @@ enum FieldInfo {
         "audioFormats": "The exact set of audio capabilities the box advertises to iOS (the /info audioFormats). iOS negotiates one entry per audioType from this set. Auto = match the transport (PCM over USB, the AAC set over wireless). Presets are ready-made sets; Custom lets you author any codec/rate/stream-type combination to test a specific head-unit audio config.",
         "metadataTier": "Which metadata feeds the accessory DECLARES to iOS in its iAP2 identification (and then subscribes to): now playing, call state, route guidance, and so on. Proven is the declaration a real iPhone accepted on 2026-07-25 and is what the adapter uses when nothing is pushed — leave it here unless you are deliberately testing a wider set. Extended adds the full paired Start/Stop set — accepted once on a wireless session's tunnel Identify (2026-07-25), but NOT proven on the wired Identify, where an earlier extended form was rejected. All declares everything in the capability table. ⚠️ iOS validates this: a declaration it rejects kills the whole identification for that connection and cannot be retried within it, so raise the tier one step at a time and watch the phone's own log (idevicesyslog -p accessoryd). Applies at the next iAP2 link — unplug/replug the phone, not just a reconnect of this app.",
         "accessoryName": "The name this adapter shows as on the iPhone. Leave empty to keep the adapter's built-in per-box name (CarLink plus the last four characters of its Wi-Fi address), which is what ships today and is what keeps two adapters distinguishable. A name you set is used verbatim, so make it distinct yourself. ⚠️ Not yet applied by the adapter — it is stored and pushed, but changing the advertised name touches the AirPlay /info name, the Bonjour service name and the iAP2 identification together, so it is enabled in a later step with the phone's own log being watched.",
-        "engineTypes": "What powers this vehicle. Sent to iOS as part of the vehicle identification so CarPlay and Maps can adapt — the electric setting is the foundation for EV features such as charging-aware routing. A hybrid is genuinely two selections (for example gasoline AND electric); Apple's format allows several. Selecting nothing keeps the adapter's built-in default of gasoline, which is what it has always sent. ⚠️ Not yet applied by the adapter; a later step enables it with the phone's rejection log being watched, because iOS can refuse a whole identification it dislikes and cannot be asked again until the phone is replugged.",
-        "chargingConnectors": "Which charging connectors this vehicle physically has, and optionally how fast each can charge. Only meaningful for electric or plug-in hybrid vehicles. Each connector type may appear ONCE — Apple's format carries one power rating per type, so a repeated type cannot be represented and the adapter keeps only the first. Set the power to 0 to leave the rating unstated; 0 is sent as \"no rating\", not as zero watts. ⚠️ Recorded in the pushed configuration but not yet applied — the adapter parses it and does not yet present it to the phone.",
+        "engineTypes": "What powers this vehicle. Sent to iOS as part of the vehicle identification so CarPlay and Maps can adapt — the electric setting is the foundation for EV features such as charging-aware routing. A hybrid is genuinely two selections (for example gasoline AND electric); Apple's format allows several. Selecting nothing keeps the adapter's built-in default of gasoline, which is what it has always sent. Applied on the next phone plug — iap2d snapshots the pushed config once per process and builds it into the wired Identify (param 20); watch the phone's rejection log after changing it, because iOS can refuse a whole identification it dislikes and cannot be asked again until the phone is replugged.",
+        "chargingConnectors": "Which charging connectors this vehicle physically has, and optionally how fast each can charge. Only meaningful for electric or plug-in hybrid vehicles. Each connector type may appear ONCE — Apple's format carries one power rating per type, so a repeated type cannot be represented and the adapter keeps only the first. Set the power to 0 to leave the rating unstated; 0 is sent as \"no rating\", not as zero watts. Applied on the next phone plug — iap2d snapshots the pushed config once per process and builds it into the wired Identify (param 20).",
         "vehicleStatusEnabled": "Declares that this vehicle can report live status to the phone — range, temperatures, charge state and so on. ⚠️ DISABLED until the adapter can service it. The adapter does not yet declare the messages that carry this data, so announcing the capability without them is exactly the kind of inconsistency iOS rejects, and a rejected identification kills CarPlay for that connection and cannot be retried until the phone is replugged. The control is shown greyed rather than hidden so you can see the capability is planned; it will unlock when the adapter declares the messages that carry this data.",
         "steeringWheelSupport": "This vehicle has steering-wheel buttons for CarPlay (up/down/left/right/select). Corresponds to the Direction Buttons capability iOS looks for. It is not yet wired to the display capability word the adapter sends — that is a later step, because correcting the word also drops a capability the adapter currently claims without backing it, which is a change worth watching a real session for.",
         "metadataSkip": "Comma-separated feature names to DROP from the declaration above (e.g. call_history). Use this to narrow a tier that iOS rejected, rather than dropping back a whole level. Names are the adapter's feature-table names; anything unrecognized is ignored. Leave empty for the full tier.",
@@ -1173,6 +1229,7 @@ enum FieldInfo {
         "touchpadButtonsSupport": "The touchpad reports press/click buttons in addition to position. Requires touchpad support.",
         "touchScreenHighFidelity": "High-fidelity absolute touch HID streaming continuous coords, so scroll/drag/gestures work like a phone. Maps to the HighFidelityTouch display bit (0x08). Off = no touchscreen (touchScreenMode: Disabled).",
         "touchScreenSupportsCancel": "The touch HID includes a cancel flag so interrupted / palm-rejected touches aren't treated as false taps.",
+        "touchScreenSupportsMultiTouch": "Advertise a two-finger touch HID descriptor instead of single-finger. Live: the box swaps its touch descriptor per connection to match. Default off — multi-touch gestures are untested on this project; enable deliberately and verify on real hardware before shipping it.",
         "primaryInput": "The main input device, so CarPlay optimizes its control model: Touchpad (remote pad drives focus) or Knobs (rotary controller). Maps to displays[].primaryInputDevice.",
         "enablesUIAppearance": "Advertises UI-appearance control so the head unit can drive CarPlay's look (uiAppearanceUpdate). Enabled in every Apple template.",
         "enablesMapAppearance": "Advertises map-appearance control (mapAppearanceUpdate, changeMapZoomLevel); also required for the alt/cluster map stream.",
@@ -1609,6 +1666,8 @@ struct ConfigurationTab: View {
                 InfoToggle(title: "Wireless CarPlay", key: "wireless", isOn: $model.wirelessEnabled)
                 if model.wirelessEnabled {
                     InfoToggle(title: "Numeric Comparison pairing", key: "pairing", isOn: $model.pairingNumericComparison)
+                    InfoToggle(title: "Answer the pairing code in this app (not usable with iPhone)", key: "pairing_interactive", isOn: $model.pairingInteractiveAnswer)
+                        .disabled(!model.pairingNumericComparison)
                     InfoToggle(title: "Hot Hand-Over", key: "hotHandover", isOn: $model.hotHandover)
                 }
                 InfoToggle(title: "Android Auto", key: "android_auto", isOn: $model.androidAutoEnabled)
@@ -1692,6 +1751,7 @@ struct ConfigurationTab: View {
                 }
                 InfoToggle(title: "Touchscreen high-fidelity", key: "touchScreenHighFidelity", isOn: $model.touchScreenHighFidelity)
                 InfoToggle(title: "Touchscreen supports cancel", key: "touchScreenSupportsCancel", isOn: $model.touchScreenSupportsCancel)
+                InfoToggle(title: "Touchscreen multi-touch", key: "touchScreenSupportsMultiTouch", isOn: $model.touchScreenSupportsMultiTouch)
                 InfoToggle(title: "Steering-wheel buttons", key: "steeringWheelSupport", isOn: $model.steeringWheelSupport)
             }
 
@@ -1879,7 +1939,7 @@ struct ConfigurationTab: View {
                 if model.dirty {
                     Label("Unsaved changes", systemImage: "pencil.circle.fill").foregroundStyle(.orange)
                 } else {
-                    Label("Saved — applies on next adapter connection", systemImage: "checkmark.circle.fill")
+                    Label("Saved — pushed to the adapter now (deferred while a CarPlay session is live)", systemImage: "checkmark.circle.fill")
                         .foregroundStyle(.green)
                 }
                 Spacer()
@@ -1924,7 +1984,56 @@ struct ConfigurationTab: View {
     }
 }
 
-// MARK: - CCPA management tab
+// MARK: - CCPA management tab — live box state (CT_BOX_HEALTH / CT_BT_PHASE / CT_PHONE_IDENT)
+
+/// `CT_BOX_HEALTH` bitmask (`OCBM.bh*`), named per docs/carplay/01_OCBM_PROTOCOL.md.
+struct BoxHealth: OptionSet, Codable, Equatable {
+    let rawValue: UInt8
+    static let hciPresent = BoxHealth(rawValue: OCBM.bhHciPresent)
+    static let ssp = BoxHealth(rawValue: OCBM.bhSsp)
+    static let iap2d = BoxHealth(rawValue: OCBM.bhIap2d)
+    static let airplayd = BoxHealth(rawValue: OCBM.bhAirplayd)
+    static let carplayWireless = BoxHealth(rawValue: OCBM.bhCarplayWireless)
+    static let wlanAp = BoxHealth(rawValue: OCBM.bhWlanAp)
+    static let rootfsOk = BoxHealth(rawValue: OCBM.bhRootfsOk)
+
+    /// `(label, ok)` pairs in wire-bit order, for a ✓/✗ list.
+    var checklist: [(label: String, ok: Bool)] {
+        [
+            ("HCI present", contains(.hciPresent)),
+            ("SSP", contains(.ssp)),
+            ("iap2d", contains(.iap2d)),
+            ("airplayd", contains(.airplayd)),
+            ("carplay-wireless", contains(.carplayWireless)),
+            ("Wi-Fi AP", contains(.wlanAp)),
+            ("rootfs OK", contains(.rootfsOk)),
+        ]
+    }
+}
+
+/// `CT_BT_PHASE` value (`OCBM.btp*`). An unrecognised raw byte decodes to `nil` — advisory per
+/// docs/carplay/01_OCBM_PROTOCOL.md, never coerced to a known phase.
+enum BtPhase: UInt8, Codable {
+    case idle = 0x00
+    case linkUp = 0x01
+    case authenticating = 0x02
+    case authenticated = 0x03
+    case identifying = 0x04
+    case identified = 0x05
+    case wifiHandoff = 0x06
+
+    var displayName: String {
+        switch self {
+        case .idle: return "Idle"
+        case .linkUp: return "Link up"
+        case .authenticating: return "Authenticating"
+        case .authenticated: return "Authenticated"
+        case .identifying: return "Identifying"
+        case .identified: return "Identified"
+        case .wifiHandoff: return "Wi-Fi handoff"
+        }
+    }
+}
 
 /// Live bridge between the CCPA tab and the OCBM client (set by AppDelegate on connect, like
 /// `ControlsBridge`). Holds the latest adapter snapshot + drives the box control actions over CH_MGMT.
@@ -1940,6 +2049,18 @@ final class CCPABridge: ObservableObject {
     /// data shown is from BEFORE the unplug/teardown. Cleared by a fresh query / successful receiveInfo.
     @Published var stale = false
 
+    // Live box state — mirrored 1:1 from OCBMClient's CT_BOX_HEALTH/CT_BT_PHASE/CT_PHONE_IDENT
+    // callbacks. Deliberately NOT persisted across a session: `sessionEnded()` clears all three so a
+    // reconnect never shows a phantom carry-over from the previous box/phone — a fresh CT_SUBSCRIBE
+    // always re-emits its own current values (docs/carplay/01_OCBM_PROTOCOL.md, "re-emitted after
+    // each CT_SUBSCRIBE").
+    @Published var boxHealth: BoxHealth?
+    @Published var boxHealthUpdated: Date?
+    @Published var btPhase: BtPhase?
+    @Published var btPhaseUpdated: Date?
+    @Published var phoneIdent: PhoneIdent?
+    @Published var phoneIdentUpdated: Date?
+
     private var busyGen = 0
 
     /// Session teardown (AppDelegate.endSession): the OCBM link is gone, so any latched busy will
@@ -1948,6 +2069,25 @@ final class CCPABridge: ObservableObject {
         clearBusy()
         statusText = "Disconnected"
         if info != nil { stale = true }
+        boxHealth = nil
+        boxHealthUpdated = nil
+        btPhase = nil
+        btPhaseUpdated = nil
+        phoneIdent = nil
+        phoneIdentUpdated = nil
+    }
+
+    func receiveBoxHealth(_ bits: UInt8) {
+        boxHealth = BoxHealth(rawValue: bits)
+        boxHealthUpdated = Date()
+    }
+    func receiveBtPhase(_ phase: UInt8) {
+        btPhase = BtPhase(rawValue: phase)
+        btPhaseUpdated = Date()
+    }
+    func receivePhoneIdent(_ ident: PhoneIdent?) {
+        phoneIdent = ident
+        phoneIdentUpdated = Date()
     }
 
     /// (Re)query the adapter snapshot. Also clears a stuck `busy` (an action whose ACK never arrived —
@@ -1979,12 +2119,16 @@ final class CCPABridge: ObservableObject {
         clearBusy()
         if status != 0 { statusText = "Action failed" }
         // A reboot drops the OCBM link; anything else, re-query to reflect the new state.
-        if verb != OCBM.mgmtReboot { client?.requestBoxInfo() }
+        if verb != OCBM.mgmtReboot && verb != OCBM.mgmtEnterNCM { client?.requestBoxInfo() }
+        if verb == OCBM.mgmtEnterNCM && status == 0 { statusText = "Rebooting into NCM mode…" }
     }
     func restartWireless() { setBusy(); client?.boxRestartWireless() }
     func forgetAll() { setBusy(); client?.boxForgetAll() }
     func forgetDevice(_ mac: String) { setBusy(); client?.boxForgetDevice(mac) }
     func reboot() { setBusy("Rebooting adapter…"); client?.boxReboot() }
+    /// Sticky NCM maintenance mode (ssh/telnet over USB-NCM, no OCBM). Return via ssh:
+    /// `rm /script/ncm_only; reboot`. Also reachable without the UI via `carlink://box/enter-ncm`.
+    func enterNCM() { setBusy("Entering NCM mode…"); client?.boxEnterNCM() }
 
     /// Enter the busy state with a self-healing timeout: if no ACK/info clears it within 6 s (a lost ACK,
     /// or an action that tore the link down before replying), reset so the form isn't stuck disabled.
@@ -2039,6 +2183,7 @@ struct CCPATab: View {
     @ObservedObject var store = CCPABridge.shared
     @State private var confirmReboot = false
     @State private var confirmForgetAll = false
+    @State private var confirmEnterNCM = false
     @State private var forgetMac: String?
 
     var body: some View {
@@ -2091,10 +2236,13 @@ struct CCPATab: View {
                 Button(role: .destructive) { confirmReboot = true } label: {
                     Label("Restart adapter", systemImage: "arrow.clockwise.circle")
                 }
+                Button(role: .destructive) { confirmEnterNCM = true } label: {
+                    Label("Enter NCM maintenance mode", systemImage: "terminal")
+                }
             } header: {
                 Text("Controls")
             } footer: {
-                Text("Restart adapter reboots the CCPA — the reliable recovery if Bluetooth wedges. It interrupts any live CarPlay session.")
+                Text("Restart adapter reboots the CCPA — the reliable recovery if Bluetooth wedges. It interrupts any live CarPlay session. NCM mode reboots the box as a USB network device for ssh maintenance; CarPlay stays off until it is returned with `rm /script/ncm_only; reboot` over ssh.")
                     .font(.caption)
             }
         }
@@ -2118,6 +2266,10 @@ struct CCPATab: View {
             Button("Forget All", role: .destructive) { store.forgetAll() }
             Button("Cancel", role: .cancel) {}
         } message: { Text("Every phone will need to pair again.") }
+        .confirmationDialog("Reboot into NCM maintenance mode?", isPresented: $confirmEnterNCM) {
+            Button("Enter NCM Mode", role: .destructive) { store.enterNCM() }
+            Button("Cancel", role: .cancel) {}
+        } message: { Text("The CCPA reboots as a USB network device with ssh/telnet enabled and no CarPlay. It stays in NCM mode until returned over ssh (rm /script/ncm_only; reboot).") }
         .confirmationDialog("Forget this device?", isPresented: Binding(
             get: { forgetMac != nil }, set: { if !$0 { forgetMac = nil } }
         )) {
@@ -2154,8 +2306,57 @@ struct SettingsRootView: View {
                 .tabItem { Label("Configuration", systemImage: "slider.horizontal.3") }
             CCPATab()
                 .tabItem { Label("CCPA", systemImage: "cpu") }
+            DiagnosticsTab()
+                .tabItem { Label("Diagnostics", systemImage: "text.alignleft") }
         }
         .frame(width: 460, height: 620)
+    }
+}
+
+// MARK: - Box Log settings (CT_LOG_CTL — NOT part of the pushed VehicleConfig YAML)
+
+/// "Stream box log to this app" + cap — persisted directly in UserDefaults (its own keys, not the
+/// `VehicleConfigModel.prefix` namespace) because this does not ride the YAML pushed at SUBSCRIBE: the
+/// box arms/disarms CH_LOG purely from `CT_LOG_CTL` on CH_CTRL (docs/carplay/01_OCBM_PROTOCOL.md
+/// CH_LOG). Default ON / 256 KB matches the box's own CT_LOG_CTL default (cap 0 ⇒ 256 KB).
+@MainActor
+final class BoxLogSettings: ObservableObject {
+    static let shared = BoxLogSettings()
+
+    private static let enabledKey = "boxLogStreamEnabled"
+    private static let capKey = "boxLogCapKB"
+    private let d = UserDefaults.standard
+
+    @Published var streamEnabled: Bool { didSet { d.set(streamEnabled, forKey: Self.enabledKey); applyNow?(streamEnabled, UInt16(clamping: capKB)) } }
+    @Published var capKB: Int { didSet { d.set(capKB, forKey: Self.capKey); applyNow?(streamEnabled, UInt16(clamping: capKB)) } }
+
+    /// Wired by AppDelegate to the live `OCBMClient` (nil when disconnected) — lets a Settings change
+    /// take effect immediately over `sendLogCtl` rather than waiting for the next SUBSCRIBE.
+    var applyNow: ((Bool, UInt16) -> Void)?
+
+    private init() {
+        streamEnabled = d.object(forKey: Self.enabledKey) as? Bool ?? true
+        capKB = d.object(forKey: Self.capKey) as? Int ?? 256
+    }
+}
+
+struct DiagnosticsTab: View {
+    @ObservedObject var settings = BoxLogSettings.shared
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("Stream box log to this app", isOn: $settings.streamEnabled)
+                Stepper("Cap: \(settings.capKB) KB", value: $settings.capKB, in: 32...4096, step: 32)
+                    .disabled(!settings.streamEnabled)
+            } header: {
+                Text("Box Log")
+            } footer: {
+                Text("Streams the box's universal log (/tmp/box.log) over OCBM CH_LOG into Window ▸ Box Log, and into this app's own combined session log. Re-armed automatically after every SUBSCRIBE.")
+                    .font(.caption)
+            }
+        }
+        .formStyle(.grouped)
     }
 }
 
@@ -2178,5 +2379,19 @@ final class SettingsWindowController: NSWindowController {
     func show() {
         window?.center()
         window?.makeKeyAndOrderFront(nil)
+    }
+}
+
+// MARK: - AA projection from the observable model
+
+extension AACapability {
+    /// Snapshot the shared vehicle profile on the main actor, then hand the Sendable value to the
+    /// AA session thread. Lives here, not in AACapability.swift, so that file stays free of the
+    /// UI model and compiles in the hardware-free test harness.
+    @MainActor
+    init(config: VehicleConfigModel, warn: (String) -> Void = { NSLog("[AA] \($0)") }) {
+        self.init(mainWidth: config.mainWidth, mainHeight: config.mainHeight, maxFPS: config.maxFPS,
+                  name: config.name, nightMode: config.nightMode,
+                  rightHandDrive: config.rightHandDrive, warn: warn)
     }
 }

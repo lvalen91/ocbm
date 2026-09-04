@@ -1,9 +1,10 @@
 import AppKit
 import Foundation
 
-/// Presents a snapshot of everything the app currently knows about the connected
-/// adapter and phone: firmware, identifiers, link status, decrypted session-token
-/// telemetry, and raw device-info blob (in hex + base64 + printable strings).
+/// Presents a snapshot of everything the app currently knows about the connected adapter and
+/// phone, sourced live from the box's own `box_info_json` (CH_MGMT GET_INFO), the same data
+/// `CCPABridge.shared.info` (`CCPAInfo`) feeds to Settings ▸ CCPA — not the retired riddlebox
+/// BoxSettings/SWVERSION/session-token/device-info-blob planes, which the box no longer sends.
 ///
 /// Rendered as an `NSAlert` sheet so it picks up the system "liquid glass" material
 /// automatically on macOS 26+, matching the Keyboard Shortcuts dialog.
@@ -11,14 +12,11 @@ enum AdapterInfoPresenter {
 
     struct Snapshot {
         var state: String
-        var phoneType: String
-        var micDecodeType: UInt32
-        var videoEncoderType: UInt32
-        var firmware: String?
-        var adapterBoxInfo: [String: Any]?
-        var phoneBoxInfo: [String: Any]?
-        var decryptedSessionToken: [String: Any]?
-        var rawDeviceInfoBlob: Data?
+        var info: CCPAInfo?
+        var lastUpdated: Date?
+        var boxHealth: BoxHealth?
+        var btPhase: BtPhase?
+        var phoneIdent: PhoneIdent?
     }
 
     /// Present as a sheet on the given window (nil = modal).
@@ -97,94 +95,67 @@ enum AdapterInfoPresenter {
             lines.append("  \(paddedKey) \(v)")
         }
 
-        func dumpDict(_ dict: [String: Any]?, indent: String = "  ") {
-            guard let dict, !dict.isEmpty else {
-                lines.append("\(indent)—")
-                return
-            }
-            for key in dict.keys.sorted() {
-                let value = dict[key]!
-                if let nested = value as? [String: Any] {
-                    lines.append("\(indent)\(key):")
-                    dumpDict(nested, indent: indent + "  ")
-                    continue
-                }
-                let valueStr: String
-                if let array = value as? [Any] {
-                    valueStr = "[\(array.map { String(describing: $0) }.joined(separator: ", "))]"
-                } else {
-                    valueStr = String(describing: value)
-                }
-                lines.append("\(indent)\(key): \(valueStr)")
-            }
-        }
-
-        // No "Captured: <now>" stamp: the legacy info plane that fed this snapshot is gone, so most
-        // fields are static placeholders and a fresh timestamp would falsely present them as live.
-        lines.append("Static placeholder — see Settings ▸ CCPA for live adapter data")
-
         section("Connection")
         field("State", s.state)
-        field("Phone type", s.phoneType)
-        field("Firmware (SWVERSION)", s.firmware)
-        field("Mic decode type", s.micDecodeType)
-        field("Video encoder type", videoEncoderName(s.videoEncoderType))
-
-        section("Adapter (from BoxSettings + SWVERSION)")
-        if let ab = s.adapterBoxInfo {
-            dumpDict(ab)
+        if let updated = s.lastUpdated {
+            field("Snapshot captured", updated.formatted(date: .abbreviated, time: .standard))
         } else {
-            lines.append("  — not yet received")
+            field("Snapshot captured", nil)
         }
 
-        section("Phone (from BoxSettings)")
-        if let pb = s.phoneBoxInfo {
-            dumpDict(pb)
-        } else {
-            lines.append("  — not yet received")
-        }
-
-        section("Session Token (type 0xA3) — Decrypted")
-        if let tok = s.decryptedSessionToken {
-            dumpDict(tok)
-        } else if s.rawDeviceInfoBlob != nil {
-            lines.append("  Decryption failed. Raw blob is shown below.")
-        } else {
-            lines.append("  — not yet received")
-        }
-
-        if let blob = s.rawDeviceInfoBlob {
-            section("Device-Info Blob (raw as received)")
-            lines.append("  Length: \(blob.count) bytes")
-            let printable = blob.prefix(while: { $0 != 0 })
-            if let text = String(data: printable, encoding: .ascii) {
-                lines.append("  Printable ASCII prefix: \(text)")
-                // Only attempt a base64 decode of a string that actually IS base64. Passing
-                // .ignoreUnknownCharacters would "decode" arbitrary ASCII into garbage bytes and
-                // report a bogus length, so decode strictly (no option) — non-base64 yields nil.
-                if let decoded = Data(base64Encoded: text) {
-                    lines.append("  (prefix is valid base64) decoded length: \(decoded.count) bytes")
-                    lines.append("  Base64-decoded hex (first 128B):")
-                    lines.append("    " + hexDump(decoded.prefix(128)))
-                }
+        // Live state (CT_BOX_HEALTH/CT_BT_PHASE/CT_PHONE_IDENT) — box-pushed on CH_CTRL, independent of
+        // the CH_MGMT GET_INFO snapshot below, so this renders even before/without a GET_INFO reply.
+        section("Live state")
+        if let health = s.boxHealth {
+            for (label, ok) in health.checklist {
+                lines.append("  \(ok ? "✓" : "✗") \(label)")
             }
-            lines.append("  Raw hex (first 256B):")
-            lines.append("    " + hexDump(blob.prefix(256)))
+        } else {
+            field("Box health", nil)
+        }
+        field("BT phase", s.btPhase?.displayName)
+        if let ident = s.phoneIdent {
+            field("Phone", "\(ident.model) (\(ident.osName) \(ident.osVersion))")
+            field("Phone name", ident.name)
+        } else {
+            field("Phone", nil)
+        }
+
+        guard let info = s.info else {
+            lines.append("")
+            lines.append("No adapter snapshot yet — connect the adapter or use Settings ▸ CCPA ▸ Refresh.")
+            return lines.joined(separator: "\n")
+        }
+
+        section("Adapter")
+        field("Name", info.name)
+        field("Serial", info.serial)
+        field("BT MAC", info.bt_mac)
+        field("Wi-Fi MAC", info.wifi_mac)
+        field("Transport", info.transport)
+        field("Uptime", "\(info.uptime_s) s")
+        field("Rootfs used", "\(info.rootfs_pct)% (\(info.rootfs_free_kb) KB free)")
+        field("Bluetooth SSP", info.ssp ? "yes" : "no")
+        field("HCI up", info.hci_up ? "yes" : "no")
+        field("Wi-Fi AP up", info.wlan_ap ? "yes" : "no")
+
+        section("Phone")
+        field("Present", info.phone_present ? "yes" : "no")
+        field("Host present", info.host_present ? "yes" : "no")
+
+        section("Daemons")
+        field("ocbmd", info.daemons.ocbmd ? "up" : "down")
+        field("iap2d", info.daemons.iap2d ? "up" : "down")
+        field("airplayd", info.daemons.airplayd ? "up" : "down")
+        field("carplay_wireless", info.daemons.carplay_wireless ? "up" : "down")
+
+        section("Devices")
+        if info.devices.isEmpty {
+            lines.append("  —")
+        } else {
+            for d in info.devices { lines.append("  \(d)") }
         }
 
         return lines.joined(separator: "\n")
-    }
-
-    private static func hexDump(_ data: Data) -> String {
-        data.map { String(format: "%02x", $0) }.joined(separator: " ")
-    }
-
-    private static func videoEncoderName(_ type: UInt32) -> String {
-        switch type {
-        case 1: return "H.264"
-        case 2: return "H.265 (default)"
-        case 4: return "MJPEG"
-        default: return "unknown(\(type))"
-        }
     }
 }

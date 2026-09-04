@@ -5,25 +5,20 @@
 // Why legacy IOKit instead of IOUSBHost.framework
 // ────────────────────────────────────────────────
 // The CPC200-CCPA (Carlinkit) adapter exposes a proprietary bulk-transfer USB
-// protocol — not a standard USB device class. Talking to it requires:
-//
-//   1. Seizing exclusive device access (USBDeviceOpenSeize) — if a previous
-//      app session crashed, the OS still holds the device open. The legacy
-//      IOKit API lets us forcibly reclaim it. IOUSBHost.framework requires the
-//      com.apple.vm.device-access entitlement for .deviceCapture, which needs
-//      a provisioning profile signed by Apple.
-//
-//   2. Forcing re-enumeration (USBDeviceReEnumerate) — on launch we reset any
-//      attached adapter so the firmware returns to its initial state (idle,
-//      phase 0). This is critical because the firmware has a 10-second watchdog
-//      from enumeration to first heartbeat. There is no IOUSBHost equivalent
-//      for triggering re-enumeration from user space.
-//
-//   3. Synchronous bulk pipe I/O (ReadPipe / WritePipe) — the adapter streams
-//      H.264 video and raw PCM audio over bulk endpoints. A blocking read loop
-//      on a dedicated thread is the simplest way to consume this high-throughput
-//      data. IOUSBHostPipe uses an async completion-handler model that adds
-//      complexity without benefit for continuous streaming.
+// protocol — not a standard USB device class. This staying on legacy IOKit is
+// verified working; IOUSBHost migration has not been attempted (07-L5,
+// docs/swift_review_20260902/07_usb_transport.md). Corrected 2026-09:
+// IOUSBHostDevice DOES have a re-enumerate equivalent (`resetWithError:`),
+// `IOUSBHostObjectInitOptionsDeviceSeize` DOES exist (the provisioning-profile
+// entitlement documented by Apple attaches only to `.deviceCapture`, not
+// `.deviceSeize`), and IOUSBHostPipe DOES have a synchronous transfer API
+// (`sendIORequestWithData:bytesTransferred:completionTimeout:error:`) — none of
+// the three reasons this comment used to give for staying on legacy IOKit hold
+// as stated. The real reason to stay is that this path is verified working
+// against the live box and the entitlement-free `.deviceSeize` semantics
+// against a stale/crashed-session handle were never bench-tested under
+// IOUSBHost; migrating is a deliberate future decision, not blocked by a
+// missing API.
 //
 // The IOKit USB API is a COM-style C interface. Swift interacts with it through
 // double pointers: iface.pointee.pointee.Method(iface, ...). The CFUUID
@@ -32,14 +27,12 @@
 // CFUUIDGetConstantUUIDWithBytes() — invisible to Swift. The USBBridge.h
 // bridging header wraps each one as a plain C function returning CFUUIDBytes.
 //
-// Build warnings (expected, harmless)
-// ────────────────────────────────────
-//   • "Unused IOReturn/ULONG result" — IOKit COM Release() and Close() return
-//     ref counts and status codes. In cleanup paths there is nothing to recover
-//     if these fail, so the results are intentionally discarded.
-//   • "Capture of non-Sendable type" — IONotificationPortRef and io_iterator_t
-//     are opaque C types that cannot conform to Sendable. Thread safety is
-//     guaranteed by dispatching all notifications onto the serial notifyQueue.
+// IOReturn/ULONG results in cleanup paths (Release(), Close()) are explicitly
+// discarded with `_ =` — there is nothing to recover if they fail there; each
+// discard site carries a one-word rationale only where the reason is non-obvious.
+// "Capture of non-Sendable type" for IONotificationPortRef/io_iterator_t is
+// expected: those are opaque C types that cannot conform to Sendable, and thread
+// safety is guaranteed by dispatching all notifications onto the serial notifyQueue.
 // ──────────────────────────────────────────────────────────────────────────────
 
 import Foundation
@@ -68,6 +61,30 @@ let kSupportedDevices: [USBDeviceID] = [
     // signature, and a root console, all over this id pair. See c2air/README.md.
     USBDeviceID(vendorID: 0x1f3a, productID: 0xace2), // C2Air V821 — OCBM accessory
 ]
+
+// 07-M2: legacy riddlebox PIDs only — resetDevicesOnLaunch's USBDeviceReEnumerate is the stock
+// firmware's "return to phase 0" kick. On an OCBM box a host-initiated re-enumerate is a bus-level
+// disconnect/reconnect from the gadget's perspective, and ocbmd's own source (main.rs:3065-3069)
+// says only a real cable/gadget teardown HUPs its accessory fd — so this forces an ocbmd
+// exit-and-respawn plus this function's 3s sleep on every launch and every transport-lost recovery,
+// for no benefit (the OCBM box needs no watchdog kick). The OCBM PIDs rely on the existing
+// USBDeviceOpen → kIOReturnExclusiveAccess → OpenSeize path (below) to reclaim a stale handle
+// instead.
+private let kLegacyReEnumeratePIDs: Set<USBDeviceID> = [
+    USBDeviceID(vendorID: 0x1314, productID: 0x1520),
+    USBDeviceID(vendorID: 0x1314, productID: 0x1521),
+    USBDeviceID(vendorID: 0x08E4, productID: 0x01C0),
+]
+
+extension USBDeviceID: Hashable {
+    static func == (lhs: USBDeviceID, rhs: USBDeviceID) -> Bool {
+        lhs.vendorID == rhs.vendorID && lhs.productID == rhs.productID
+    }
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(vendorID)
+        hasher.combine(productID)
+    }
+}
 
 // MARK: - USB Device Manager Delegate
 
@@ -130,7 +147,9 @@ final class USBDeviceManager: @unchecked Sendable {
     /// reinitializeAdapterSession (resolution changes) to force the attached
     /// adapter back through enumeration mid-run.
     func resetDevicesOnLaunch() {
-        for deviceID in kSupportedDevices {
+        // 07-M2: legacy riddlebox PIDs only — see kLegacyReEnumeratePIDs.
+        var didReset = false
+        for deviceID in kSupportedDevices where kLegacyReEnumeratePIDs.contains(deviceID) {
             guard let dict = createMatchingDict(vendorID: deviceID.vendorID,
                                                 productID: deviceID.productID) else {
                 Self.logger.warning("resetDevicesOnLaunch: matching dict creation failed for VID=\(UInt(bitPattern: deviceID.vendorID), format: .hex, privacy: .public) PID=\(UInt(bitPattern: deviceID.productID), format: .hex, privacy: .public)")
@@ -171,9 +190,10 @@ final class USBDeviceManager: @unchecked Sendable {
             // reconnect cycle, which resets its internal state machine to phase 0.
             let openResult = dev.pointee.pointee.USBDeviceOpenSeize(dev)
             if openResult == kIOReturnSuccess {
+                didReset = true
                 let reEnum = dev.pointee.pointee.USBDeviceReEnumerate(dev, 0)
                 Self.logger.info("Re-enumerated device VID=\(UInt(bitPattern: deviceID.vendorID), format: .hex, privacy: .public) PID=\(UInt(bitPattern: deviceID.productID), format: .hex, privacy: .public): \(UInt32(bitPattern: reEnum), format: .hex, privacy: .public)")
-                dev.pointee.pointee.USBDeviceClose(dev)
+                _ = dev.pointee.pointee.USBDeviceClose(dev)
             } else {
                 Self.logger.warning("resetDevicesOnLaunch: USBDeviceOpenSeize failed (\(UInt32(bitPattern: openResult), format: .hex, privacy: .public)) — device NOT reset")
             }
@@ -183,7 +203,11 @@ final class USBDeviceManager: @unchecked Sendable {
         // Wait for the USB bus to settle after re-enumeration. The adapter's
         // NXP i.MX6UL SoC needs time to re-initialize its USB gadget driver.
         // Firmware RE docs recommend ~3 seconds for reliable re-enumeration.
-        Thread.sleep(forTimeInterval: 3.0)
+        // 07-M2: only pay this when a legacy device was actually re-enumerated — an OCBM-only
+        // launch/recovery now reaches this function having reset nothing (loop above skips it).
+        if didReset {
+            Thread.sleep(forTimeInterval: 3.0)
+        }
     }
 
     // MARK: - Scanning
@@ -368,7 +392,7 @@ final class USBInterfaceClaimer {
             uuidDevice,
             &deviceInterfacePtr
         )
-        plugin.pointee?.pointee.Release(plugin)
+        _ = plugin.pointee?.pointee.Release(plugin)
 
         guard hresult == S_OK, let rawDevice = deviceInterfacePtr else {
             logger.error("Failed to get device interface")
@@ -387,15 +411,28 @@ final class USBInterfaceClaimer {
         }
         guard openResult == kIOReturnSuccess else {
             logger.error("Failed to open device: \(UInt32(bitPattern: openResult), format: .hex, privacy: .public)")
-            device.pointee.pointee.Release(device)
+            _ = device.pointee.pointee.Release(device)
             return nil
         }
 
         // Step 4: Activate USB configuration 1 (the only config the CPC200 exposes).
-        // May return an error if already set — safe to ignore.
-        let configResult = device.pointee.pointee.SetConfiguration(device, 1)
-        if configResult != kIOReturnSuccess {
-            logger.warning("SetConfiguration failed: \(UInt32(bitPattern: configResult), format: .hex, privacy: .public) (may be ok if already set)")
+        // 07-M1: query first — IOUSBLib.h's SetConfiguration doc says setting the config (even to the
+        // value already active) DESTROYS and re-creates every IOUSBInterface nub, which races the
+        // CreateInterfaceIterator call below (registry match can run before the new nub registers,
+        // yielding the "No interfaces found" claim-retry loop in AppDelegate). GetConfiguration does
+        // not require the device to be open (header). Only call SetConfiguration when it would
+        // actually change something.
+        var currentConfig: UInt8 = 0
+        let getConfigResult = device.pointee.pointee.GetConfiguration(device, &currentConfig)
+        logger.info("GetConfiguration: result=\(UInt32(bitPattern: getConfigResult), format: .hex, privacy: .public) cur=\(currentConfig, privacy: .public)")
+        if getConfigResult != kIOReturnSuccess || currentConfig != 1 {
+            // May return an error if already set — safe to ignore.
+            let configResult = device.pointee.pointee.SetConfiguration(device, 1)
+            if configResult != kIOReturnSuccess {
+                logger.warning("SetConfiguration failed: \(UInt32(bitPattern: configResult), format: .hex, privacy: .public) (may be ok if already set)")
+            }
+        } else {
+            logger.info("SetConfiguration skipped — already cur=1 (07-M1: avoids interface-nub recreation)")
         }
 
         // Step 5: Find the first USB interface. The CPC200 uses interface 0 for
@@ -412,8 +449,8 @@ final class USBInterfaceClaimer {
         let findResult = device.pointee.pointee.CreateInterfaceIterator(device, &request, &interfaceIterator)
         guard findResult == kIOReturnSuccess else {
             logger.error("CreateInterfaceIterator failed: \(UInt32(bitPattern: findResult), format: .hex, privacy: .public)")
-            device.pointee.pointee.USBDeviceClose(device)
-            device.pointee.pointee.Release(device)
+            _ = device.pointee.pointee.USBDeviceClose(device)
+            _ = device.pointee.pointee.Release(device)
             return nil
         }
 
@@ -422,8 +459,8 @@ final class USBInterfaceClaimer {
 
         guard interfaceService != 0 else {
             logger.error("No interfaces found")
-            device.pointee.pointee.USBDeviceClose(device)
-            device.pointee.pointee.Release(device)
+            _ = device.pointee.pointee.USBDeviceClose(device)
+            _ = device.pointee.pointee.Release(device)
             return nil
         }
 
@@ -437,8 +474,8 @@ final class USBInterfaceClaimer {
 
         guard kr2 == KERN_SUCCESS, let ifPlugin = ifacePlugin else {
             logger.error("Failed to create interface plugin: \(kr2, privacy: .public)")
-            device.pointee.pointee.USBDeviceClose(device)
-            device.pointee.pointee.Release(device)
+            _ = device.pointee.pointee.USBDeviceClose(device)
+            _ = device.pointee.pointee.Release(device)
             return nil
         }
 
@@ -449,12 +486,12 @@ final class USBInterfaceClaimer {
             uuidIface,
             &ifaceRawPtr
         )
-        ifPlugin.pointee?.pointee.Release(ifPlugin)
+        _ = ifPlugin.pointee?.pointee.Release(ifPlugin)
 
         guard hresult2 == S_OK, let rawIface = ifaceRawPtr else {
             logger.error("Failed to get interface interface")
-            device.pointee.pointee.USBDeviceClose(device)
-            device.pointee.pointee.Release(device)
+            _ = device.pointee.pointee.USBDeviceClose(device)
+            _ = device.pointee.pointee.Release(device)
             return nil
         }
 
@@ -471,9 +508,9 @@ final class USBInterfaceClaimer {
         }
         guard openIface == kIOReturnSuccess else {
             logger.error("Failed to open interface: \(UInt32(bitPattern: openIface), format: .hex, privacy: .public)")
-            iface.pointee.pointee.Release(iface)
-            device.pointee.pointee.USBDeviceClose(device)
-            device.pointee.pointee.Release(device)
+            _ = iface.pointee.pointee.Release(iface)
+            _ = device.pointee.pointee.USBDeviceClose(device)
+            _ = device.pointee.pointee.Release(device)
             return nil
         }
 
@@ -482,14 +519,14 @@ final class USBInterfaceClaimer {
         //   • Bulk IN  (direction=1): adapter → host (video, audio, metadata)
         //   • Bulk OUT (direction=0): host → adapter (heartbeat, open, mic, commands)
         var numEndpoints: UInt8 = 0
-        iface.pointee.pointee.GetNumEndpoints(iface, &numEndpoints)
+        _ = iface.pointee.pointee.GetNumEndpoints(iface, &numEndpoints)
         logger.info("Interface has \(numEndpoints, privacy: .public) endpoints")
 
         guard numEndpoints > 0 else {
             logger.error("No endpoints found on interface")
-            iface.pointee.pointee.USBInterfaceClose(iface)
+            _ = iface.pointee.pointee.USBInterfaceClose(iface)
             _ = iface.pointee.pointee.Release(iface)
-            device.pointee.pointee.USBDeviceClose(device)
+            _ = device.pointee.pointee.USBDeviceClose(device)
             _ = device.pointee.pointee.Release(device)
             return nil
         }
@@ -504,7 +541,7 @@ final class USBInterfaceClaimer {
             var maxPacketSize: UInt16 = 0
             var interval: UInt8 = 0
 
-            iface.pointee.pointee.GetPipeProperties(
+            _ = iface.pointee.pointee.GetPipeProperties(
                 iface, pipeIdx, &direction, &number, &transferType, &maxPacketSize, &interval
             )
 
@@ -523,10 +560,10 @@ final class USBInterfaceClaimer {
 
         guard bulkIn != 0 && bulkOut != 0 else {
             logger.error("Could not find bulk IN/OUT endpoints")
-            iface.pointee.pointee.USBInterfaceClose(iface)
-            iface.pointee.pointee.Release(iface)
-            device.pointee.pointee.USBDeviceClose(device)
-            device.pointee.pointee.Release(device)
+            _ = iface.pointee.pointee.USBInterfaceClose(iface)
+            _ = iface.pointee.pointee.Release(iface)
+            _ = device.pointee.pointee.USBDeviceClose(device)
+            _ = device.pointee.pointee.Release(device)
             return nil
         }
 

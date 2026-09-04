@@ -1,13 +1,14 @@
-// InputTypes.swift — live host-side input wire types + little-endian Data helpers.
+// InputTypes.swift — live host-side input wire types.
 //
 // Extracted from the now-deleted Protocol/MessageTypes.swift (the dormant legacy Carlinkit
 // 0x55AA55AA protocol) so the OCBM app keeps only what it actually uses:
 //   • TouchAction / MultiTouchAction — pointer/finger phase enums consumed by CarPlayView + AppDelegate.
 //   • CommandID — the keyboard/host command ids CarPlayView maps and AppDelegate dispatches.
-//   • Data.appendLE / readLE / readFloatLE — small LE (de)serialization helpers.
 //
 // Everything else in the old MessageTypes.swift (USBHeader, MessageType, the framing constants,
 // resolution presets, audio/video headers) was dead legacy framing and was removed with Protocol/.
+// `Data.appendLE/readLE/readFloatLE` were removed too (11-L6, verify_05 fix plan) — no callers;
+// `OCBMFraming` has its own `readLE32/16`.
 
 import Foundation
 
@@ -130,33 +131,4 @@ enum CommandID: UInt32, Sendable {
     case autoConnectEnable = 1001
     case wifiConnect       = 1002
     case getBtOnlineList   = 1013
-}
-
-// MARK: - Data Extension for LE Read/Write
-
-extension Data {
-    mutating func appendLE(_ value: UInt32) {
-        var v = value.littleEndian
-        Swift.withUnsafeBytes(of: &v) { append(contentsOf: $0) }
-    }
-
-    mutating func appendLE(_ value: Float32) {
-        var v = value.bitPattern.littleEndian
-        Swift.withUnsafeBytes(of: &v) { append(contentsOf: $0) }
-    }
-
-    func readLE(at offset: Int) -> UInt32 {
-        guard offset + 4 <= count else { return 0 }
-        var value: UInt32 = 0
-        let start = startIndex + offset
-        _ = Swift.withUnsafeMutableBytes(of: &value) { dst in
-            copyBytes(to: dst, from: start..<(start + 4))
-        }
-        return UInt32(littleEndian: value)
-    }
-
-    func readFloatLE(at offset: Int) -> Float32 {
-        let bits: UInt32 = readLE(at: offset)
-        return Float32(bitPattern: bits)
-    }
 }

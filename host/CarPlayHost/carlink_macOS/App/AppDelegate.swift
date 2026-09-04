@@ -10,6 +10,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private nonisolated static let logger = Logger(subsystem: "com.carlink.app", category: "AppDelegate")
 
+    /// Fallback AA test-cert PKCS#12 password when `AA_P12_PASS` is unset (locally-generated bench
+    /// cert, not device/network credential material — 09-L7). Hoisted to one site so the literal isn't
+    /// duplicated; a Keychain-backed lookup is a separate follow-up, not landed here.
+    private nonisolated static let defaultAAP12Password = "carlink"
+
     private var windowController: MainWindowController!
     private var usbManager: USBDeviceManager!
     private var transport: USBTransport?
@@ -46,6 +51,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var audioPlayer: AudioPlayer?
     private var controlServer: ControlServer?
     private var micCapture: MicCapture?
+    /// The AA-over-OCBM Siri/telephony mic, separate from `micCapture` (09-M1): `startAAOverOCBM` used
+    /// to overwrite `micCapture` with an AA-only instance, so `stopAAOverOCBM` operated on what was by
+    /// then the AA mic and never restored the CarPlay uplink — the next CarPlay `onUplinkGate` fired on
+    /// a `MicCapture` whose `onPCMData` had been nilled, capturing audio into a silent no-op.
+    private var aaMicCapture: MicCapture?
     // Wireless SSP Numeric-Comparison pairing: the live 6-digit code (nil = none) + the last watchdog
     // status, so the code can take priority over "Waiting for phone…" while pairing and restore after.
     private var activePairingCode: String?
@@ -70,6 +80,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// open a CH_IP stream to a bridge the box has already torn down. ocbmd does NOT throttle its
     /// first emission after a SUBSCRIBE reset, so back-to-back modes are reachable in practice.
     private var lastProjModeSeq: UInt64 = 0
+    /// Last projection mode the box reported (wire code). Drives the self-restart below: ocbmd only
+    /// forwards CHANGES of the owner flag (500 ms poll), and a wireless-AA re-bootstrap flips it
+    /// wireless-aa → '' → wireless-aa within 2 ms, so after a session that ended on its own no new
+    /// mode edge ever arrives (device-measured 2026-09-04: the pump dropped the phone every 30 s for
+    /// "no host app opened the AA stream" while the app sat idle). The app owns the retry.
+    private var lastProjMode: UInt8 = 0
+    private var aaRestartWork: DispatchWorkItem?
+    private var aaRestartDelay: TimeInterval = 2
     /// Diagnostic lever — see the touch handler.
     private static let edgeClampBug = ProcessInfo.processInfo.environment["AA_EDGE_CLAMP_BUG"] == "1"
 
@@ -83,6 +101,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool { true }
 
+    /// `carlink://` control URLs (scheme registered in Info.plist). Lets an operator or a tooling
+    /// session drive the few box-management actions without the Settings UI while the app holds the
+    /// USB interface: `open -a <this app> carlink://box/enter-ncm` puts the adapter into sticky NCM maintenance
+    /// (the `-a` form: LaunchServices does not bind the scheme for a bundle living in a build directory)
+    /// mode (same MGMT verb as the Settings button; the button confirms, this path logs). Unknown
+    /// paths are logged and ignored.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls {
+            guard url.scheme?.lowercased() == "carlink" else { continue }
+            let target = "\(url.host ?? "")\(url.path)".lowercased()
+            switch target {
+            case "box/enter-ncm":
+                guard ocbmClient != nil else {
+                    Self.logger.error("carlink://box/enter-ncm: no OCBM client — box not connected")
+                    continue
+                }
+                Self.logger.warning("carlink://box/enter-ncm: sending MGMT_ENTER_NCM — box reboots into NCM (return over ssh)")
+                CCPABridge.shared.enterNCM()
+            case "box/reboot":
+                Self.logger.warning("carlink://box/reboot: sending MGMT_REBOOT")
+                CCPABridge.shared.reboot()
+            default:
+                Self.logger.error("carlink:// URL ignored — unknown target \(target, privacy: .public)")
+            }
+        }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupFileLogging()
         FileLogger.shared.start()
@@ -93,9 +138,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let ctrl = ControlServer() { ctrl.start(); self.controlServer = ctrl }
         // Route scripted taps through the real delegate entry point, so injected touches take the
         // identical path (and identical coordinate scaling) as a tap from the trackpad.
+        // 11-M2: route through the delegate entry point matching whichever protocol is ACTIVE — the AA
+        // path (`didTouch`) is a no-op with `aaSession == nil`, which under CarPlay silently dropped
+        // every scripted tap while `ControlServer.tap` still reported "OK". CarPlay's delegate entry
+        // point is `didMultiTouch`, in normalized 0..1 Float32 (not `didTouch`'s 0..10000 UInt32 AA
+        // space), so convert here rather than at the CarPlayView layer.
         ControlsBridge.shared.injectTouch = { [weak self] action, x, y in
             guard let self else { return }
-            self.carPlayView(self.windowController.carPlayView, didTouch: action, x: x, y: y)
+            if ControlsBridge.shared.isAndroidAuto {
+                self.carPlayView(self.windowController.carPlayView, didTouch: action, x: x, y: y)
+            } else {
+                let mtAction: MultiTouchAction
+                switch action {
+                case .down: mtAction = .down
+                case .up:   mtAction = .up
+                case .move: mtAction = .move
+                }
+                self.carPlayView(self.windowController.carPlayView, didMultiTouch: mtAction,
+                                  x: Float32(x) / 10000, y: Float32(y) / 10000)
+            }
         }
         if let url = FileLogger.shared.currentLogURL {
             Self.logger.info("Session log: \(url.path, privacy: .public)")
@@ -109,7 +170,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The borderless video window's controls live in its attached floating control box, created by
         // the window controller as a child window that moves with the video.
 
-        // AA visual-proof player (docs/host/02_ANDROID_AUTO.md Phase 1): AA_PLAY=/path.h264 plays a captured
+        // AA visual-proof player (docs/androidauto/01_SESSION_AND_AV.md Phase 1): AA_PLAY=/path.h264 plays a captured
         // Android Auto stream through the real decoder+view, no box/phone. Skips USB.
         if let aaPath = ProcessInfo.processInfo.environment["AA_PLAY"] {
             let decoder = VideoDecoder()
@@ -121,7 +182,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        // AA LIVE head-unit session (docs/host/02_ANDROID_AUTO.md Phase 1): AA_CONNECT=host:port runs the
+        // AA LIVE head-unit session (docs/androidauto/01_SESSION_AND_AV.md Phase 1): AA_CONNECT=host:port runs the
         // full AA engine (TLS+GAL+demux) against the phone's head-unit server (adb
         // forward), rendering into the real decoder/view. Skips USB.
         if let aaConn = ProcessInfo.processInfo.environment["AA_CONNECT"] {
@@ -181,7 +242,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let port = UInt16(parts.count >= 2 ? String(parts[1]) : target) ?? 5277
         let p12 = ProcessInfo.processInfo.environment["AA_P12"]
             ?? NSHomeDirectory() + "/Documents/carlink/ccpa_custom/host/aa-headunit/certs/headunit.p12"
-        let password = ProcessInfo.processInfo.environment["AA_P12_PASS"] ?? "carlink"
+        let password = ProcessInfo.processInfo.environment["AA_P12_PASS"] ?? Self.defaultAAP12Password
 
         let decoder = VideoDecoder()
         decoder.label = "aa-live"
@@ -209,13 +270,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let player = self.audioPlayer   // AA's three sinks play through the same engine as CarPlay
         DispatchQueue.global(qos: .userInitiated).async {
             guard let transport = AATCPTransport(host: host, port: port) else {
-                NSLog("[AA] TCP connect to \(host):\(port) failed"); return
+                AASession.defaultLog("TCP connect to \(host):\(port) failed"); return
             }
             guard let session = AASession(transport: transport, decoder: decoder,
                                           p12Path: p12, p12Password: password,
                                           capability: cap, audio: player,
-                                          log: { NSLog("[AA] \($0)") }) else {
-                NSLog("[AA] session init failed (p12?)"); return
+                                          log: AASession.defaultLog) else {
+                AASession.defaultLog("session init failed (p12?)"); return
             }
             DispatchQueue.main.async {
                 self.aaSession = session
@@ -232,7 +293,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.aaSession = nil
                 ControlsBridge.shared.aaSession = nil
                 ControlsBridge.shared.isAndroidAuto = false
-                NSLog("[AA] TCP session ended — Controls handed back")
+                AASession.defaultLog("TCP session ended — Controls handed back")
             }
         }
         Self.logger.info("AA live session -> \(host):\(port, privacy: .public)")
@@ -244,14 +305,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// on the same USB channel as CarPlay. Normally driven by the box's `ctProjMode` mode event
     /// (`pmWiredAa`); `AA_OCBM=1` (+ optional `AA_OCBM_TARGET`, default the box aa-bridge loopback)
     /// forces it for a box whose ocbmd predates that event.
-    private func startAAOverOCBM(client: OCBMClient, target: String) {
+    /// Re-open the AA stream after a session ended on its own while the box still reports an AA mode
+    /// (see `lastProjMode`). Back-off 2 s → 4 s → 8 s → 10 s cap, reset by any mode event or by a
+    /// session that ran long enough to have been real. A mode change to anything else cancels it.
+    private func scheduleAARestart(client: OCBMClient, target: String, transportLabel: String,
+                                   ranFor: TimeInterval) {
+        guard lastProjMode == OCBM.pmWiredAa || lastProjMode == OCBM.pmWirelessAa,
+              client === ocbmClient else { return }
+        if ranFor > 30 { aaRestartDelay = 2 }
+        let delay = aaRestartDelay
+        aaRestartDelay = min(aaRestartDelay * 2, 10)
+        Self.logger.info("AA session ended while the box still reports \(OCBM.projModeName(self.lastProjMode), privacy: .public) — reopening the stream in \(Int(delay), privacy: .public) s")
+        aaRestartWork?.cancel()
+        let work = DispatchWorkItem { [weak self, weak client] in
+            guard let self, let client, client === self.ocbmClient,
+                  self.lastProjMode == OCBM.pmWiredAa || self.lastProjMode == OCBM.pmWirelessAa
+            else { return }
+            self.startAAOverOCBM(client: client, target: target, transportLabel: transportLabel)
+        }
+        aaRestartWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private func startAAOverOCBM(client: OCBMClient, target: String, transportLabel: String = "wired") {
         guard aaSession == nil, parkedCarPlayDecoder == nil else {
             Self.logger.info("AA-over-OCBM already running — ignoring duplicate start")
             return
         }
         let p12 = ProcessInfo.processInfo.environment["AA_P12"]
             ?? NSHomeDirectory() + "/Documents/carlink/ccpa_custom/host/aa-headunit/certs/headunit.p12"
-        let password = ProcessInfo.processInfo.environment["AA_P12_PASS"] ?? "carlink"
+        let password = ProcessInfo.processInfo.environment["AA_P12_PASS"] ?? Self.defaultAAP12Password
 
         let decoder = VideoDecoder()
         decoder.label = "aa-ocbm"
@@ -262,6 +345,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         parkedCarPlayDecoder = mainDecoder
         parkedCarPlayLayer = view.videoLayer
         self.mainDecoder = decoder
+        // Rebind the metrics monitor to the AA decoder — it was bound to the (now-parked) CarPlay
+        // decoder in setupDevice and would otherwise keep sampling a decoder no longer receiving frames,
+        // reporting 0 fps for the whole AA session while AA video plays fine.
+        StreamMetricsMonitor.shared.bindDecoders(main: decoder, alt: altDecoder)
         view.videoLayer.removeFromSuperlayer()
         view.videoLayer = decoder.displayLayer
         decoder.displayLayer.videoGravity = .resizeAspect
@@ -285,16 +372,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Mic source: the phone opens channel 9 on an Assistant tap and waits for audio. Reuse the
         // CarPlay capture engine at AA's advertised 16 kHz mono.
         let aaMic = MicCapture()
-        self.micCapture = aaMic
+        self.aaMicCapture = aaMic
         aaTransport = transport
         let cap = AACapability(config: VehicleConfigModel.shared)   // main-actor snapshot; see above
+        // T4: margins → the window follows the VISIBLE size and the view centre-crops the codec frame.
+        aaVisibleSize = cap.hasMargins ? (Int(cap.touchSize.w), Int(cap.touchSize.h)) : nil
+        view.aaMarginCrop = cap.hasMargins
+        applyAAVideoSize(width: Int(cap.resolution.size.w), height: Int(cap.resolution.size.h))
+        // AA owns the view: assert it visible now (isStreaming true, overlay hidden) so a stale
+        // CarPlay !streaming state or a coordinator phone-ABSENT cannot leave the AA layer hidden.
+        view.setStreaming(true)
         let player = self.audioPlayer   // AA's three sinks play through the same engine as CarPlay
         DispatchQueue.global(qos: .userInitiated).async {
             guard let session = AASession(transport: transport, decoder: decoder,
                                           p12Path: p12, p12Password: password,
-                                          capability: cap, audio: player,
-                                          log: { NSLog("[AA] \($0)") }) else {
-                NSLog("[AA] OCBM session init failed (p12? \(p12))")
+                                          capability: cap, audio: player, transportLabel: transportLabel,
+                                          log: AASession.defaultLog) else {
+                AASession.defaultLog("OCBM session init failed (p12? \(p12))")
                 transport.close()   // the CH_IP stream is already open — don't leak it
                 DispatchQueue.main.async {
                     // Give the window back to CarPlay. Without this the parked state stays set, and
@@ -310,7 +404,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard self.aaGeneration == gen else {
                     // A stop ran while this session was being built. Never adopt it — shut it down
                     // (sends BYEBYE + closes the CH_IP stream) and leave the cleared state alone.
-                    NSLog("[AA] session start superseded — shutting it down without adopting")
+                    AASession.defaultLog("session start superseded — shutting it down without adopting")
                     DispatchQueue.global(qos: .utility).async { session.shutdown() }
                     return
                 }
@@ -319,18 +413,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     // Assistant waits forever for audio that will never come. Say so plainly.
                     let auth = AVCaptureDevice.authorizationStatus(for: .audio)
                     if auth != .authorized {
-                        NSLog("[AA] MIC NOT AUTHORIZED (status=\(auth.rawValue)) — Assistant will hear silence")
+                        AASession.defaultLog("MIC NOT AUTHORIZED (status=\(auth.rawValue)) — Assistant will hear silence")
                     }
                     aaMic.onPCMData = { [weak session] pcm in session?.sendMicPCM(pcm) }
                     aaMic.startCapture(sampleRate: rate, channels: ch)
                 }
                 session.onMicStop = { aaMic.stopCapture(); aaMic.onPCMData = nil }
+                session.onMetadata = { ev in
+                    DispatchQueue.main.async { MetadataStore.shared.applyAndroidAuto(ev) }
+                }
                 self.aaSession = session
                 // The Controls window routes its intents per protocol (see ControlsBridge): point it
                 // at this session so Play/Home/Back/D-Pad become AA key events instead of silently
                 // going to a CarPlay client that does not own the box.
                 ControlsBridge.shared.aaSession = session
                 ControlsBridge.shared.isAndroidAuto = true
+                let startedAt = Date()
                 DispatchQueue.global(qos: .userInitiated).async {
                     session.run()
                     // run() returned on its OWN (stream ended, protocol error) — nothing else clears
@@ -339,6 +437,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     DispatchQueue.main.async {
                         guard self.aaGeneration == gen else { return }
                         self.stopAAOverOCBM(reason: "AA session ended on its own")
+                        MetadataStore.shared.clearAndroidAuto()
+                        self.scheduleAARestart(client: client, target: target,
+                                               transportLabel: transportLabel,
+                                               ranFor: Date().timeIntervalSince(startedAt))
                     }
                 }
             }
@@ -349,7 +451,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Tear the AA-over-OCBM session down and give the window back to CarPlay — the box's mode event
     /// left `pmWiredAa` (Android unplugged, or an iPhone took the box). `shutdown()` sends the AA
     /// BYEBYE, without which the phone keeps the stale session and the next connect hits
-    /// `IllegalStateException: Already connected` (docs/host/02_ANDROID_AUTO.md Phase 1).
+    /// `IllegalStateException: Already connected` (docs/androidauto/01_SESSION_AND_AV.md Phase 1).
     /// `drainTimeout`: how long to wait for the AA BYEBYE to reach the wire. Mid-session (a box mode
     /// change) this runs on the main actor with a live UI, so it stays short; at teardown/quit the UI
     /// is going away and a single USB write can legitimately take up to ~1.5 s to fail, so give it
@@ -373,8 +475,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // unplugged, iPhone took the port, re-arbitration). A phone that vanishes mid-utterance never
         // sends MediaStop on channel 9, so without this the capture engine keeps running — a live
         // microphone with nowhere to send audio, until the app quits.
-        micCapture?.stopCapture()
-        micCapture?.onPCMData = nil
+        aaMicCapture?.stopCapture()
+        aaMicCapture?.onPCMData = nil
+        aaMicCapture = nil
         // shutdown() queues the BYEBYE fire-and-forget on the client's CH_IP write queue; wait (with a
         // bound — see drainIpWrites) for it to reach the wire, because the caller may stop the USB
         // transport immediately after.
@@ -382,6 +485,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mainDecoder?.flush()
         let view = windowController.carPlayView
         view.isAndroidAuto = false
+        view.aaMarginCrop = false
+        aaVisibleSize = nil
         view.clearAndroidAutoVideoMode()
         if let parked = parkedCarPlayLayer {
             view.videoLayer.removeFromSuperlayer()
@@ -392,6 +497,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mainDecoder = parkedCarPlayDecoder
         parkedCarPlayDecoder = nil
         parkedCarPlayLayer = nil
+        // Restore the monitor to the CarPlay decoder now back in `mainDecoder`.
+        StreamMetricsMonitor.shared.bindDecoders(main: mainDecoder, alt: altDecoder)
         // Restore the CarPlay window geometry the AA 800x480 aspect lock replaced.
         let committed = VehicleConfigModel.persistedMainResolution()
         windowController.window?.contentAspectRatio = NSSize(width: committed.width, height: committed.height)
@@ -405,14 +512,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// tell CarPlayView the video aspect so its AA crop/pillarbox math is correct.
     private func applyAAVideoSize(width: Int, height: Int) {
         guard width > 0, height > 0 else { return }
+        // The view needs the CODEC aspect (its fill/crop maths); the window is locked to the
+        // VISIBLE aspect when margins are declared (T4), else to the coded size as before.
         windowController.carPlayView.updateVideoAspect(width: CGFloat(width), height: CGFloat(height))
+        let (ww, wh) = aaVisibleSize ?? (width, height)
         if let win = windowController.window {
-            win.contentAspectRatio = NSSize(width: width, height: height)
+            win.contentAspectRatio = NSSize(width: ww, height: wh)
             var f = win.frame
-            f.size.height = f.size.width * CGFloat(height) / CGFloat(width)
+            f.size.height = f.size.width * CGFloat(wh) / CGFloat(ww)
             win.setFrame(f, display: true, animate: false)
         }
     }
+    /// Visible (margin-cropped) size of the running AA session, nil when the tier is declared whole.
+    private var aaVisibleSize: (Int, Int)?
 
     // MARK: - File Logging
 
@@ -522,6 +634,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         MetadataWindowController.shared.show()
     }
 
+    /// Window ▸ Box Log — live tail of the box's universal log stream (CH_LOG), combined with the
+    /// app's own log via BoxLogStore.
+    @MainActor @objc func showBoxLogWindow(_ sender: Any?) {
+        BoxLogWindowController.shared.show()
+    }
+
     /// Window ▸ Controls — on-screen buttons for the CarPlay HID/command surfaces.
     @MainActor @objc func showControlsWindow(_ sender: Any?) {
         ControlsWindowController.shared.show()
@@ -533,10 +651,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @MainActor @objc func showAdapterInfo(_ sender: Any?) {
-        // The legacy adapter that populated this box-info was removed; the OCBM session doesn't surface
-        // an equivalent info plane yet, so present the default snapshot (window retained for that future).
-        // Minimal honesty fix (U10): the `state` field reflects the REAL session (everything else is
-        // still placeholder, and the window's header says so — live data lives in Settings ▸ CCPA).
+        // Repointed (12-M2) at the live box_info_json snapshot: CCPABridge.shared.info is the same
+        // CCPAInfo Settings ▸ CCPA renders, kept current by OCBMClient.onBoxInfo →
+        // CCPABridge.receiveInfo on every GET_INFO reply. The `state` field still reflects the real
+        // session; the fabricated BoxSettings/SWVERSION/session-token/device-info-blob sections from
+        // the retired riddlebox info plane are gone.
         let state: String
         if ocbmClient == nil {
             state = "disconnected"
@@ -546,9 +665,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             state = "connected — awaiting stream"
         }
         let snapshot = AdapterInfoPresenter.Snapshot(
-            state: state, phoneType: "none", micDecodeType: 0, videoEncoderType: 2,
-            firmware: nil, adapterBoxInfo: nil, phoneBoxInfo: nil,
-            decryptedSessionToken: nil, rawDeviceInfoBlob: nil
+            state: state, info: CCPABridge.shared.info, lastUpdated: CCPABridge.shared.lastUpdated,
+            boxHealth: CCPABridge.shared.boxHealth, btPhase: CCPABridge.shared.btPhase,
+            phoneIdent: CCPABridge.shared.phoneIdent
         )
         AdapterInfoPresenter.present(snapshot: snapshot, on: windowController.window)
     }
@@ -560,9 +679,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// no path can forget a piece (stale voice mode, zombie nav window,
     /// still-ticking call timer, un-nil'd adapter/transport…).
     @MainActor private func endSession() {
+        // HARD requirement: flush + close the box-log session file BEFORE anything below tears the
+        // OCBM link down (ocbmClient?.disconnect() sends CT_STOP, and the box may still have CH_LOG
+        // frames in flight right up to that point) — a flush that ran after disconnect risks losing
+        // the session's last lines to a closed handle. Synchronous by design (BoxLogStore.endSession).
+        BoxLogStore.shared.endSession()
+        BoxLogSettings.shared.applyNow = nil
         // AA first: its BYEBYE must go out while the OCBM link is still up, or the phone keeps a stale
-        // session (docs/host/02_ANDROID_AUTO.md Phase 1 — the next connect then crashes gearhead's :projection process).
+        // session (docs/androidauto/01_SESSION_AND_AV.md Phase 1 — the next connect then crashes gearhead's :projection process).
         stopAAOverOCBM(reason: "session ended", drainTimeout: 2.0)
+        // stopAAOverOCBM already stops/clears aaMicCapture; this covers the CarPlay uplink mic.
         micCapture?.stopCapture()
         audioPlayer?.stop()
         ocbmClient?.disconnect()   // OCBM: STOP + stop the pipe (box tears down → holding pattern)
@@ -600,6 +726,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // on screen while disconnected, and it takes priority over normal status text on reconnect
         // until the box's clear arrives. Numeric mode only; Just-Works never publishes a code.
         activePairingCode = nil
+        // ...and the panel with it, which is what actually takes the Pair/Cancel buttons off screen.
+        // Leaving them up over a dead transport offers the user an answer that can no longer be sent.
+        windowController.carPlayView.showPairingCode(nil)
         windowController.carPlayView.isAndroidAuto = false
         windowController.carPlayView.clearAndroidAutoVideoMode()
     }
@@ -611,12 +740,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Format a 6-digit SSP Numeric-Comparison code for the status area, e.g. "418926" →
     /// "Pairing code 418 926 — confirm it matches your iPhone". Grouped 3+3 for legibility.
-    private static func pairingStatusText(_ code: String) -> String {
-        let grouped: String = code.count == 6
-            ? "\(code.prefix(3)) \(code.suffix(3))"
-            : code
-        return "Pairing code \(grouped) — confirm it matches your iPhone"
+    /// One-line status while a Numeric-Comparison code is on screen (the code itself renders in
+    /// `CarPlayView`'s cell panel — HIG: one piece of information, one place).
+    /// One-line status while a Numeric-Comparison code is on screen (the code itself renders in
+    /// `CarPlayView`'s cell panel). Wording follows who answers: the phone (default) or this app.
+    private static var pairingInstruction: String {
+        UserDefaults.standard.bool(forKey: "vc.pairingInteractiveAnswer")
+            ? "Does this code match the one on your phone?"
+            : "Confirm this code on your phone"
     }
+
 
     /// Task #29: a hard USB transport loss (USBTransport's 5-consecutive-read-error disconnect) means the
     /// OCBM pipe is dead — revive the safety net that was dead in the OCBM path by re-initializing the
@@ -636,7 +769,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard ocbmClient != nil else { return }   // #29: re-init the OCBM session
         Self.logger.info("Re-initializing adapter (\(reason, privacy: .public))...")
         endSession()
-        let mgr = usbManager!
+        // 09-L1: currently unreachable here (ocbmClient != nil implies a USB path already assigned
+        // usbManager), but guard rather than force-unwrap costs nothing.
+        guard let mgr = usbManager else { return }
         DispatchQueue.global(qos: .userInitiated).async {
             mgr.resetDevicesOnLaunch()
         }
@@ -660,7 +795,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         Self.logger.info("[Reset] Reset Session requested")
         guard transport != nil else {
-            // No session — nothing to reset; just refresh the scan.
+            // No session — nothing to reset; just refresh the scan. `usbManager` is an IUO never
+            // assigned on the AA_PLAY/AA_CONNECT debug paths (09-L1) — guard rather than force-unwrap,
+            // or ⌃⌘R with no transport traps here.
+            guard let usbManager else { return }
             Self.logger.info("[Reset] No active session — restarting scan")
             usbManager.stopScanning()
             usbManager.startScanning()
@@ -684,6 +822,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self else { return }
                 Self.logger.info("[Reset] Re-scanning for adapter…")
                 self.resetInProgress = false
+                // 09-L5: a fresh attach overwrites this via setupDevice, but if the re-scan finds
+                // nothing the title was otherwise stuck at "Resetting…" forever.
+                self.windowController.window?.title = "CarLink"
                 self.usbManager.startScanning()
             }
         }
@@ -741,6 +882,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let decoder = VideoDecoder()
         decoder.label = "main"
         self.mainDecoder = decoder
+        // 05-M3 (verify_02, APPROVED): mirror the alt lane's onDimensions wiring below (`altDecoder
+        // .onDimensions`) — without this the main lane's window sizing/aspect never followed the
+        // decoded stream, only the configured resolution, which skewed touch mapping when they diverged.
+        decoder.onDimensions = { [weak self] w, h in
+            self?.windowController.applyResolution(width: CGFloat(w), height: CGFloat(h))
+        }
 
         // Replace the view's video layer with the decoder's layer
         let view = windowController.carPlayView
@@ -810,12 +957,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         coord.onStatus = { [weak self] s in
             guard let self else { return }
             self.lastCoordStatus = s
+            // Same AA-ownership guard as onStreaming: the CarPlay status must not overwrite the AA screen.
+            if self.aaSession != nil || self.parkedCarPlayDecoder != nil { return }
             // A live pairing code takes priority over the watchdog status while the user is matching it.
-            let text = self.activePairingCode.map(Self.pairingStatusText) ?? s
+            let text = self.activePairingCode == nil ? s : Self.pairingInstruction
             self.windowController.carPlayView.updateStatus(text)
         }
         coord.onStreaming = { [weak self] on in
             guard let self else { return }
+            // AA owns the view whenever a session is up or the CarPlay decoder is parked. The
+            // coordinator only tracks the CarPlay A/V lane; on WIRED AA the box emits phone-ABSENT
+            // ~1.3 s after pmWiredAa (the Pixel re-enumerates through the AOAP switch), and a
+            // setStreaming(false) here would hide the swapped-in AA layer — video decodes but never
+            // shows (device-confirmed 2026-09-04, two agents). Leave the AA view alone.
+            if self.aaSession != nil || self.parkedCarPlayDecoder != nil { return }
             self.windowController.carPlayView.setStreaming(on)
             // Controls-window honesty gate: the client silently drops sends until the box accepts
             // the SUBSCRIBE and streams, so `client != nil` alone can't prove a control reached the
@@ -836,6 +991,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         transport.delegate = coord
         self.ocbmCoordinator = coord
         self.ocbmClient = client
+        // Box log stream (CH_LOG / CT_LOG_CTL): a fresh per-session combined-log file, and the setting
+        // from Settings ▸ Diagnostics (arms CH_LOG on the NEXT SUBSCRIBE — see OCBMClient.subscribe).
+        // A live toggle re-sends CT_LOG_CTL immediately via sendLogCtl rather than waiting for a
+        // reconnect. `[weak client]` because `applyNow` outlives this session in BoxLogSettings.shared.
+        BoxLogStore.shared.startSession()
+        client.logStreamEnabled = BoxLogSettings.shared.streamEnabled
+        client.logStreamCapKB = UInt16(clamping: BoxLogSettings.shared.capKB)
+        client.onBoxLog = { entries in BoxLogStore.shared.ingest(entries) }
+        BoxLogSettings.shared.applyNow = { [weak client] enabled, cap in
+            client?.logStreamEnabled = enabled
+            client?.logStreamCapKB = cap
+            client?.sendLogCtl(enabled: enabled, capKB: cap)
+        }
         // Live A/V stream-performance monitor: arm the ~1 Hz sampler on the decrypt layer's per-stream
         // counters. Publishes to Settings ▸ CCPA, writes /tmp/carlink_metrics.json, and logs a throttled
         // "AVmon" summary. Stopped in endSession(). Read-only over the mutex-guarded counters — never
@@ -855,11 +1023,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mic.onPCMData = { [weak client] pcm in client?.sendMicPCM(pcm) }
         self.micCapture = mic
         mic.requestPermission() // surface the TCC prompt now, not mid-Siri
-        client.onUplinkGate = { [weak self] on, rate, channels in
+        client.onUplinkGate = { [weak self] on, rate, channels, codec in
             Task { @MainActor in
                 guard let self, let mic = self.micCapture else { return }
                 if on {
-                    mic.startCapture(sampleRate: Double(rate), channels: UInt32(channels))
+                    // `codec` is 0 (S16LE PCM) for every CarPlay uplink and for HFP narrowband; the box
+                    // sends OCBM.seamCodecMsbc when the call negotiated wideband, and MicCapture then
+                    // ships 60-byte mSBC air packets instead of 20 ms PCM frames.
+                    mic.startCapture(sampleRate: Double(rate), channels: UInt32(channels), codec: codec)
                 } else {
                     mic.stopCapture()
                 }
@@ -871,9 +1042,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task { @MainActor in
                 guard let self else { return }
                 self.activePairingCode = code
-                let text = code.map(Self.pairingStatusText) ?? self.lastCoordStatus
+                // The code itself renders in the overlay's cell panel; the one-line status only carries
+                // the instruction while a code is pending, then restores the watchdog text. Pair/Cancel
+                // only when the box is configured to wait for this app's answer.
+                self.windowController.carPlayView.pairingAnswerEnabled =
+                    UserDefaults.standard.bool(forKey: "vc.pairingInteractiveAnswer")
+                self.windowController.carPlayView.showPairingCode(code)
+                let text = code == nil ? self.lastCoordStatus : Self.pairingInstruction
                 self.windowController.carPlayView.updateStatus(text)
             }
+        }
+        // ...and the answer back. SSP Numeric Comparison is a yes/no a HUMAN makes on BOTH devices;
+        // the box no longer replies for us, it waits ~55 s for this. Repointed per connect like the
+        // callbacks above; `client` is captured weakly so a stale view callback cannot resurrect a
+        // torn-down session's client.
+        windowController.carPlayView.onPairingAnswer = { [weak client] accept in
+            client?.sendPairConfirm(accept: accept)
         }
         // Controls window (2026-07-12): point the SwiftUI bridge at the live client. Repointed on
         // every (re)connect, so a reconnect never leaves a stale send path.
@@ -883,6 +1067,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         CCPABridge.shared.client = client
         client.onBoxInfo = { info in Task { @MainActor in CCPABridge.shared.receiveInfo(info) } }
         client.onBoxAck = { verb, status in Task { @MainActor in CCPABridge.shared.receiveAck(verb: verb, status: status) } }
+        // Box state telemetry (CT_BOX_HEALTH/CT_BT_PHASE/CT_PHONE_IDENT) — same repoint-per-connect,
+        // main-actor-hop pattern as onBoxInfo above.
+        client.onBoxHealth = { bits in Task { @MainActor in CCPABridge.shared.receiveBoxHealth(bits) } }
+        client.onBtPhase = { phase in Task { @MainActor in CCPABridge.shared.receiveBtPhase(phase) } }
+        client.onPhoneIdent = { ident in Task { @MainActor in CCPABridge.shared.receivePhoneIdent(ident) } }
         // Host-authoritative VehicleConfig (task #5 / docs/carplay/04_CAPABILITIES_AND_CONFIG.md): an Apple-schema YAML pushed at SUBSCRIBE.
         // ocbmd lands it at /tmp/carplay_cfg.yaml; airplayd reads the main-panel pixelDimensions per
         // connection to build /info (docs/carplay/06_AV_PIPELINE.md). The box ignores fields it doesn't yet consume, so
@@ -901,10 +1090,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // box-driven, matching P1's lever. The box also gates on its own `appDrivenSetup` YAML field, so
         // this and the box agree via the same pushed config.
         if cfg.appDrivenSetup {
-            // Author from the COMMITTED config (audit A4) — the same snapshot the box was pushed above via
+            // Author from the COMMITTED config (audit A4) — the same source the box was pushed above via
             // cfg.data(). Building from live `cfg.config` would let unsaved form edits make the phone's
             // SETUP response contradict what the box advertised. Falls back to live only pre-first-load.
-            let session = AirPlaySetupSession(config: cfg.committedConfig ?? cfg.config, mode: .author)
+            // Resolved via a provider (10-M3), not a one-time snapshot, so a mid-session Save's
+            // `committedConfig` is what authors the NEXT SETUP, not the config at connect time.
+            let session = AirPlaySetupSession(configProvider: { cfg.committedConfig ?? cfg.config }, mode: .author)
             let relay = OCBMControlRelay(send: { [weak client] _, framed in client?.sendControlRelay(framed) })
             session.log = { s in Self.logger.info("[setup] \(s, privacy: .public)") }
             relay.log = { s in Self.logger.info("[relay] \(s, privacy: .public)") }
@@ -970,10 +1161,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Renderer-driven recovery (task #33): when VideoToolbox reports it needs an IDR to resume
         // (flush-required), actively force one via the box instead of passively waiting for a natural IDR.
         // Reuses the ≤1/500 ms throttle in requestKeyframe(). Complements the seq-gap keyframe path.
-        decoder.onNeedsKeyFrame = { [weak client] in
-            Self.logger.info("decoder needs keyframe — requesting IDR")
-            client?.requestKeyframe()
-        }
+        // 2026-09-03: the per-call `logger.info` here is GONE — it ran unthrottled on the MAIN THREAD at
+        // up to ~50/s during a decode-failure burst (2,289 lines in one 8-minute session), doubling the
+        // main-queue log traffic of the decoder's own warning while carrying no lane tag and no reason.
+        // VideoDecoder now logs the cause itself, lane-tagged and rate-limited; the alt lane below never
+        // had this line, so dropping it also makes the two lanes symmetric. Behaviour is unchanged.
+        decoder.onNeedsKeyFrame = { [weak client] in client?.requestKeyframe() }
 
         // Wire touch/keyboard input (delegate exists; the input uplink over OCBM is the next milestone).
         windowController.carPlayView.delegate = self
@@ -998,8 +1191,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     return
                 }
                 self.lastProjModeSeq = seq
-                if mode == OCBM.pmWiredAa {
-                    self.startAAOverOCBM(client: client, target: aaTarget)
+                self.lastProjMode = mode
+                self.aaRestartWork?.cancel()
+                self.aaRestartWork = nil
+                self.aaRestartDelay = 2
+                // Wired (AOAP pump) and wireless (aa-bridge --wireless TCP pump) both serve the AA
+                // stream on the same box-local port; the transport behind it is the box's business.
+                // Device-proven 2026-09-04: without this arm the phone completed the Bluetooth
+                // bootstrap, joined the AP and dialled the pump, and the pump dropped it after 30 s
+                // because no host ever opened the stream — the phone then re-bootstrapped in a loop.
+                if mode == OCBM.pmWiredAa || mode == OCBM.pmWirelessAa {
+                    self.startAAOverOCBM(client: client, target: aaTarget,
+                                         transportLabel: mode == OCBM.pmWirelessAa ? "wireless" : "wired")
                 } else {
                     self.stopAAOverOCBM(reason: "box mode = \(OCBM.projModeName(mode))")
                 }
@@ -1104,6 +1307,36 @@ extension AppDelegate: CarPlayViewDelegate {
         // D-pad ride the uid-3 HID D-Pad device, which IS advertised (dPadSupport defaults true);
         // knob is uid 4 behind hidConfig.knobSupport. The 2026-07-06 third-HID-device incident no
         // longer gates them. Legacy adapter fallback for the old carlink USB protocol.
+        // 11-M1: under Android Auto, the ocbmClient sends below still ride CH_INPUT to airplayd's
+        // :9110 listener, which only exists inside a CarPlay session — so every key silently no-op'd
+        // under AA. Route through ControlsBridge's dual-mode router instead, which already knows how
+        // to speak AA keycodes on aaSession's input channel (see ControlsBridge.media/nav/siriPress).
+        if ControlsBridge.shared.isAndroidAuto {
+            let bridge = ControlsBridge.shared
+            switch command {
+            case .mediaPlay:      bridge.media(OCBM.mbtnPlay, Wire.play)
+            case .mediaPause:     bridge.media(OCBM.mbtnPause, Wire.pause)
+            case .mediaPlayPause: bridge.media(OCBM.mbtnPlayPause, Wire.playPause)
+            case .mediaNext:      bridge.media(OCBM.mbtnNext, Wire.next)
+            case .mediaPrev:      bridge.media(OCBM.mbtnPrev, Wire.prev)
+            case .mediaHome, .requestHostUI: bridge.nav(OCBM.navHome, Wire.home)
+            case .dpadBack:              bridge.nav(OCBM.navBack, Wire.back)
+            case .dpadUp, .knobUp:       bridge.nav(OCBM.navUp, Wire.up)
+            case .dpadDown, .knobDown:   bridge.nav(OCBM.navDown, Wire.down)
+            case .dpadLeft:              bridge.nav(OCBM.navLeft, Wire.left)
+            case .dpadRight:             bridge.nav(OCBM.navRight, Wire.right)
+            case .dpadEnter:             bridge.nav(OCBM.navSelect, Wire.select)
+            case .siriDown:
+                // ControlsBridge.siriPress() already sends the AA down/up pair itself — no separate
+                // 0.3 s hold synthesis needed here (unlike the CarPlay branch below).
+                bridge.siriPress()
+            case .siriUp:
+                break   // already sent by .siriDown's siriPress() above
+            default:
+                Self.logger.debug("command \(command.rawValue) has no AA backend — dropped")
+            }
+            return
+        }
         guard let client = ocbmClient else { return }
         switch command {
         case .mediaPlay:      client.sendMediaButton(OCBM.mbtnPlay)
@@ -1159,13 +1392,18 @@ extension AppDelegate: NSWindowDelegate {
     // `fullscreenResolutionPromptDeclined` UserDefault is simply left unread.
 }
 
-// MARK: - AA visual-proof player (docs/host/02_ANDROID_AUTO.md Phase 1)
+// MARK: - AA visual-proof player (docs/androidauto/01_SESSION_AND_AV.md Phase 1)
 
 // Plays a captured Android Auto H.264 elementary stream (Annex-B, from host/aa-headunit)
 // through the REAL VideoDecoder + CarPlayView — no box, no live phone. AA video is
 // Annex-B; the app's decoder wants AVCC, so each frame goes through AVCCFastPath (the
 // same shim the box CH_AA path will use). Enable: AA_PLAY=/tmp/aa_tap.h264.
 enum AADebugPlayer {
+    // 09-L2: `CarPlayView` is MainActor-isolated (AppKit default isolation); this synchronous UI setup
+    // block was in a nonisolated static func, which was the source of 7 of the file's 9 build warnings.
+    // The only caller (`applicationDidFinishLaunching`) is already @MainActor, so this costs nothing;
+    // the background decode/pump loop below stays on its own DispatchQueue and never touches `view`.
+    @MainActor
     static func start(path: String, view: CarPlayView, decoder: VideoDecoder) {
         // Host the decoder's display layer in the CarPlayView (mirrors the live wiring).
         view.videoLayer.removeFromSuperlayer()

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android Auto car-app descriptor: lets gearhead surface this app's messaging notifications on
+     the car screen (the NOTIFY test). Without it the package is filtered silently. -->
+<automotiveApp>
+    <uses name="notification" />
+</automotiveApp>

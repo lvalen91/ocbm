@@ -34,10 +34,12 @@
 //
 // Why not IOUSBHost.framework?
 // ────────────────────────────
-// See USBDeviceManager.swift header for the full explanation. In short: the
-// CPC200-CCPA adapter requires USBDeviceOpenSeize (exclusive access recovery),
-// USBDeviceReEnumerate (firmware reset), and synchronous bulk pipe I/O — none
-// of which are available in IOUSBHost without Apple-signed entitlements.
+// See USBDeviceManager.swift header for the full explanation and its 2026-09
+// correction: IOUSBHost DOES have equivalents for exclusive-access recovery
+// (`.deviceSeize`, entitlement-free), forced re-enumeration (`resetWithError:`),
+// and synchronous bulk pipe I/O (`sendIORequestWithData:...`). Staying on
+// legacy IOKit here is "verified working, migration not attempted" — not a
+// missing-API constraint.
 // ──────────────────────────────────────────────────────────────────────────────
 
 #ifndef USBBridge_h

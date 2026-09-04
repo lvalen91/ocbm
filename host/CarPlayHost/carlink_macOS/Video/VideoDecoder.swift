@@ -29,9 +29,22 @@ enum VideoCodec: String {
 ///
 /// Threading: `decodeAndDisplay` may be called from any thread (the USB read queue in practice); all
 /// parsing/conversion runs on a private serial queue, which both guarantees frame ordering and keeps
-/// per-frame work off the main thread. Only the final receiver enqueue hops to main. Both the
-/// decode and enqueue hops are single-slot latest-wins (V4) — a stalled consumer drops frames rather
-/// than buffering them (the live-UI "drop on backpressure, never buffer" rule).
+/// per-frame work off the main thread. The final renderer hand-off runs on its OWN serial queue —
+/// see `renderQueue`; NOTHING on the frame path touches the main thread any more.
+///
+/// V6 (2026-09-03, measured): the renderer hand-off left the main thread. The V5 FIFOs cut the drops to
+/// a start-of-session burst — 30 `evict-oldest-P`, ALL on the enqueue queue, in the first 25 s and then
+/// none for 5 minutes — because the main thread is busy with window/appearance/format-ready work exactly
+/// while the first frames arrive. Deepening the queue would only have delayed those frames; the fix is
+/// that the consumer is no longer the main thread. See `renderQueue` for why that is API-legal.
+///
+/// V5 (2026-09-03): both hops are bounded FIFOs (`AVCCFastPath.FrameFIFO`, depth 3 by default) instead
+/// of the V4 depth-1 latest-wins slots. Neither hop ever blocks its producer — a full queue always
+/// resolves to a drop, so a stalled consumer can still never back-pressure the USB read path. What
+/// changed is WHICH frame is lost: an IDR (and the frame immediately after it) is never discarded, and
+/// the oldest unprotected P goes first, so a two-frame consumer hiccup costs latency instead of
+/// punching a hole in the reference chain (the measured cause of the 2026-09-03 stutter: 13 enqueue-slot
+/// drops in the first 12 s, each followed by a keyframe request and ~1–2 s of corrupted video).
 final class VideoDecoder: @unchecked Sendable {
 
     private static let logger = Logger(subsystem: "com.carlink.video", category: "decoder")
@@ -41,7 +54,9 @@ final class VideoDecoder: @unchecked Sendable {
     /// Lane label for logs ("main" / "alt"), set by the owner. Lets the nav-freeze instrumentation
     /// below distinguish the cluster lane from the main screen.
     var label = "video"
-    /// Edge-trigger for the renderer-wedged log (main-thread-confined, drainEnqueue only).
+    /// Edge-trigger for the renderer-wedged log. renderQueue-confined (drainEnqueue only) — it was
+    /// main-thread-confined until V6 moved the hand-off off main; the confinement discipline is the same
+    /// one, re-homed on the queue that now owns the receiver.
     private var rendererWedgedLogged = false
 
     /// Invoked (on the decode queue) when the renderer requires a fresh IDR
@@ -69,12 +84,61 @@ final class VideoDecoder: @unchecked Sendable {
 
     /// Cross-thread frame accounting (perf 2026-08-09), readable from the metrics monitor on any queue.
     /// `decodedCount` = sample buffers actually built (AD, bumped with frameCount); `slotDrops` = frames
-    /// shed by the depth-1 decode/enqueue slots (latest-wins collisions). AR (decrypted, in the decrypt
-    /// metrics) − AD = decode-slot loss — together they localize whether the cluster lane starves upstream
-    /// of the app or drops in-app. Atomics (not the decodeQueue-confined frameCount) so the ~1 Hz monitor
-    /// can read them off the main queue without a data race.
+    /// shed by the decode/enqueue FIFOs (queue-full evictions + rejected newcomers). AR (decrypted, in
+    /// the decrypt metrics) − AD = decode-queue loss — together they localize whether the cluster lane
+    /// starves upstream of the app or drops in-app. Atomics (not the decodeQueue-confined frameCount) so
+    /// the ~1 Hz monitor can read them off the main queue without a data race.
     let decodedCount = Atomic<UInt64>(0)
     let slotDrops = Atomic<UInt64>(0)
+
+    // MARK: - Pipeline-latency measurement (V5; RENAMED HONESTLY in V6, 2026-09-03)
+    //
+    // The FIFOs trade frame loss for QUEUEING DELAY, so the delay has to be observable or the trade is
+    // unmeasurable (`AVmon` used to print a hard-coded `declat=n/a`). Two EWMAs per lane, both anchored
+    // on the frame's ARRIVAL (the instant `decodeAndDisplay` was called on the USB read queue):
+    //   • `wrapLatencyMs`    = arrival → CMSampleBuffer built (decode-FIFO wait + length-walk + wrap)
+    //   • `handoffLatencyMs` = arrival → handed to the renderer (adds the enqueue-FIFO wait)
+    //
+    // THESE ARE NOT DECODE TIMES, and V5 was wrong to call the first one `decodeLatencyMs` / `declat`:
+    // it measures a zero-copy CMBlockBuffer wrap, comes out around 0.1 ms, and reads like a spectacular
+    // decode time when it is in fact a parse. Real decode happens inside the renderer, AFTER the
+    // hand-off, and this render path cannot observe it: `Receiver` exposes no VTDecompressionSession and
+    // no per-frame completion. Its only feedback channels are `EnqueueResult` (synchronous accept/
+    // reject) and `renderingEventsAfterFinishedEnqueuing`, whose RenderingEvent cases are
+    // didFailToDecode / requiresFlushToResumeDecoding / failed — FAILURES only. So the names now say
+    // what is actually measured; a true decode latency would need an explicit VTDecompressionSession.
+    //
+    // Stored as the IEEE bit pattern of a Double in a relaxed atomic. The read-modify-write is NOT a CAS
+    // loop and does not need to be: each cell has exactly ONE writer queue (wrap cell ← decodeQueue,
+    // handoff cell ← renderQueue), and the ~1 Hz monitor only ever reads. Bit pattern 0 (== +0.0) is the
+    // "no sample yet" sentinel; a real EWMA is never exactly 0 ms.
+    private let wrapLatencyBits = Atomic<UInt64>(0)
+    private let handoffLatencyBits = Atomic<UInt64>(0)
+    private static let ewmaAlpha = 0.125
+
+    /// EWMA of arrival → CMSampleBuffer built, in ms. NOT a decode time (see above). nil until the
+    /// first frame has been wrapped.
+    var wrapLatencyMs: Double? {
+        let b = wrapLatencyBits.load(ordering: .relaxed)
+        return b == 0 ? nil : Double(bitPattern: b)
+    }
+    /// EWMA of arrival → handed to the renderer, in ms. This is the number the FIFO depth actually
+    /// buys or costs. nil until the first frame has been handed off.
+    var handoffLatencyMs: Double? {
+        let b = handoffLatencyBits.load(ordering: .relaxed)
+        return b == 0 ? nil : Double(bitPattern: b)
+    }
+
+    /// Fold one arrival-relative sample into an EWMA cell. Single-writer per cell (see above).
+    private static func updateEWMA(_ cell: borrowing Atomic<UInt64>, sinceNs arrivalNs: UInt64) {
+        let now = DispatchTime.now().uptimeNanoseconds
+        // Monotonic clock, but a nonsensical (negative → wrapped) delta must never poison the average.
+        guard now >= arrivalNs else { return }
+        let ms = Double(now &- arrivalNs) / 1_000_000.0
+        let prev = Double(bitPattern: cell.load(ordering: .relaxed))
+        let next = prev == 0 ? ms : prev + (ms - prev) * ewmaAlpha
+        cell.store(next.bitPattern, ordering: .relaxed)
+    }
 
     /// The session's codec config, retained from `configure(codec:parameterSets:)` — H.264 [SPS, PPS]
     /// or HEVC [VPS, SPS, PPS]. This is the re-seed source for flush-recovery: the flush path nils
@@ -100,32 +164,126 @@ final class VideoDecoder: @unchecked Sendable {
 
     private let decodeQueue = DispatchQueue(label: "video.decode", qos: .userInitiated)
 
-    // MARK: - V4 single-slot latest-wins handoffs
+    /// The single queue that owns `receiver` after construction (V6, 2026-09-03).
+    ///
+    /// WHY THIS IS CORRECT, not merely convenient. `AVSampleBufferVideoRenderer.Receiver` is declared in
+    /// the macOS 27 AVFoundation swiftinterface as a bare `public class Receiver` — it is NOT `Sendable`
+    /// and it is NOT `@MainActor`. What it IS: `sampleBufferReceiver(adding:)` returns it as `sending`
+    /// and `removeReceiver(_:at:)` takes it as `sending`, i.e. Apple models it as a single-owner object
+    /// that is TRANSFERRED into one isolation domain. Any single serial queue is legal; two are not.
+    /// Apple's own usage example (AVSampleBufferRenderSynchronizer.h, "Example use") enqueues from a
+    /// client-chosen `requestMediaDataWhenReadyOnQueue:` queue, not from main.
+    ///
+    /// THE RULE THIS IMPOSES: `receiver` is constructed on the main actor in `init` (the transfer point,
+    /// before any frame can flow) and from then on is touched ONLY here — `enqueueImmediately` and both
+    /// `flush()` call sites. Adding a fourth touch from another queue reintroduces exactly the data race
+    /// the `sending` annotations exist to prevent. `synchronizer` and `displayLayer` stay main-confined
+    /// and are never read after init.
+    ///
+    /// `.userInteractive` because this is the frame-presentation deadline path and it does exactly one
+    /// bounded hand-off per frame; the shared Mutex donates priority, so it cannot invert against
+    /// decodeQueue.
+    private let renderQueue = DispatchQueue(label: "video.render", qos: .userInteractive)
 
-    /// A frame awaiting decode (USB read queue → decodeQueue).
-    private struct PendingAVCC { let avcc: Data; let keyframe: Bool }
+    // MARK: - V5 bounded-FIFO handoffs
+
+    /// A frame awaiting decode (USB read queue → decodeQueue). `arrivalNs` is the uptime the frame was
+    /// submitted, and is the anchor for BOTH latency EWMAs.
+    private struct PendingAVCC { let avcc: Data; let keyframe: Bool; let arrivalNs: UInt64 }
     /// A decoded sample buffer awaiting enqueue (decodeQueue → main). CMSampleBuffer is not Sendable;
     /// this box is a freshly-built, single-owner hand-off (only ever stored/taken under the Mutex), so
     /// @unchecked Sendable is sound and lets the value flow through the `sending` withLock body.
     private final class PendingSB: @unchecked Sendable {
         let sb: CMSampleBuffer; let generation: UInt64; let keyframe: Bool
-        init(sb: CMSampleBuffer, generation: UInt64, keyframe: Bool) {
+        /// `AVCCFastPath.Walk.nalTypeMask` of the AU this sample buffer was built from — carried so the
+        /// decode-failure log can name the NAL types of the frame VideoToolbox rejected.
+        let nalMask: UInt64
+        /// Arrival uptime of the source AU, carried through so the main thread can close the
+        /// arrival → presented measurement.
+        let arrivalNs: UInt64
+        init(sb: CMSampleBuffer, generation: UInt64, keyframe: Bool, nalMask: UInt64, arrivalNs: UInt64) {
             self.sb = sb; self.generation = generation; self.keyframe = keyframe
+            self.nalMask = nalMask; self.arrivalNs = arrivalNs
         }
     }
 
-    /// Decode FIFO. Depth 1 (default) is the original latest-wins single slot: a stalled decodeQueue
-    /// drops frames rather than accumulating (the CarPlay/OCBM path — byte-for-byte unchanged). AA
-    /// raises `maxDecodeDepth` so the opening IDR plus the P-frames that land during VideoToolbox's
-    /// one-time decode warm-up are queued instead of shed; a single shed P-frame there breaks the
-    /// whole P-chain until AA's next (sparse) periodic IDR, which is the startup flash/pixelation.
-    private let pendingDecode = Mutex<[PendingAVCC]>([])
-    /// Max frames the decode FIFO holds before latest-wins dropping resumes. 1 = prior behaviour.
-    /// Set >1 (AA lane only) to absorb the startup burst. Assign once at setup, before frames flow.
-    var maxDecodeDepth = 1
-    /// Depth-1 enqueue slot: a stalled main thread drops decoded frames rather than buffering full
-    /// CMSampleBuffers without bound.
-    private let pendingEnqueue = Mutex<PendingSB?>(nil)
+    /// Default depth for both hand-off FIFOs. 3 = the incoming frame plus a 2-frame consumer cushion:
+    /// deep enough to ride out the main-thread/decodeQueue hiccups that were shedding frames every
+    /// ~1 s on device, shallow enough that a genuinely wedged consumer still sheds (never buffers
+    /// unboundedly) and that the added presentation delay stays inside one frame interval at 30–60 fps.
+    static let defaultQueueDepth = 3
+
+    /// Decode FIFO (USB read queue → decodeQueue). See `AVCCFastPath.FrameFIFO` for the drop policy.
+    private let pendingDecode = Mutex(AVCCFastPath.FrameFIFO<PendingAVCC>(depth: VideoDecoder.defaultQueueDepth))
+    /// Enqueue FIFO (decodeQueue → main). Holds built CMSampleBuffers, so it stays shallow.
+    private let pendingEnqueue = Mutex(AVCCFastPath.FrameFIFO<PendingSB>(depth: VideoDecoder.defaultQueueDepth))
+
+    /// Max frames the DECODE FIFO holds before the drop policy engages. Kept as a knob: AA raises it
+    /// hard (64) so the opening IDR plus every P-frame that lands during VideoToolbox's one-time decode
+    /// warm-up is queued rather than shed, and `1` reproduces the V4 single-slot latest-wins table
+    /// exactly (the harness asserts that against `AVCCFastPath.resolveSlot`). Assign before frames flow.
+    var maxDecodeDepth: Int {
+        get { pendingDecode.withLock { $0.depth } }
+        set { pendingDecode.withLock { $0.depth = newValue } }
+    }
+    /// Max frames the ENQUEUE FIFO holds. Same knob for the decodeQueue → main hop.
+    var maxEnqueueDepth: Int {
+        get { pendingEnqueue.withLock { $0.depth } }
+        set { pendingEnqueue.withLock { $0.depth = newValue } }
+    }
+
+    // MARK: - Throttled diagnostics (2026-09-03)
+    //
+    // WHY: the 2026-09-03 alt-lane investigation could not attribute a single
+    // `Frame enqueued with decode failures` line to a lane, name the VideoToolbox status behind it, or
+    // see the slot drops that punch the P-chain holes those failures report — the line carried no lane
+    // tag, discarded `EnqueueResult.enqueuedWithDecodeFailures`'s `[Error]` payload, and `slotDrops` was
+    // a counter that never reached the log. It also fired UNTHROTTLED at up to ~50/s from the MAIN
+    // THREAD, i.e. straight into the queue whose lateness causes the drops. Every log below is
+    // lane-tagged, carries the evidence, and is rate-limited with a suppressed-since count.
+    /// ns of the last emitted line, per diagnostic kind. Atomics because the producers sit on three
+    /// different queues (submit thread / decodeQueue / main).
+    private let lastDropLogNs = Atomic<UInt64>(0)
+    private let lastFailLogNs = Atomic<UInt64>(0)
+    private let lastNeedsKFLogNs = Atomic<UInt64>(0)
+    private let suppressedFailures = Atomic<UInt64>(0)
+    private static let logThrottleNs: UInt64 = 1_000_000_000
+
+    /// True at most once per `logThrottleNs` per kind. Lock-free: the CAS loser stays silent.
+    private static func throttlePasses(_ gate: borrowing Atomic<UInt64>) -> Bool {
+        let now = DispatchTime.now().uptimeNanoseconds
+        let last = gate.load(ordering: .relaxed)
+        guard now &- last >= logThrottleNs else { return false }
+        return gate.compareExchange(expected: last, desired: now,
+                                    ordering: .relaxed).exchanged
+    }
+
+    /// Account for (and, throttled, log) one FIFO push. THIS is the event that breaks the P-frame chain
+    /// and makes every later frame decode with errors until an IDR lands, so it is the first thing to
+    /// look for when the `decode FAILURES` lines start. The line names WHICH RULE fired, so a live log
+    /// distinguishes "the cushion overflowed and we shed a stale P" (expected, cheap) from
+    /// "everything queued was protected and we had to refuse the newcomer" (the expensive case).
+    ///
+    /// Called on the PRODUCER's thread for each hop (USB read queue for `decode`, decodeQueue for
+    /// `enqueue`) — same as V4, so `onFrameDropped` keeps its existing caller context and its
+    /// client-side ≤1/500 ms request throttle.
+    private func noteAdmission(_ a: AVCCFastPath.FrameAdmission, queue: String) {
+        if a.outcome.shedAFrame {
+            let total = slotDrops.wrappingAdd(1, ordering: .relaxed).newValue
+            if Self.throttlePasses(lastDropLogNs) {
+                let lost = a.droppedWasKeyframe.map { $0 ? "IDR" : "P" } ?? "-"
+                let cost = a.requestKeyframe
+                    ? "P-chain hole; every frame after it decodes with errors until the next IDR"
+                    : "chain repaired by an IDR already in the queue"
+                Self.logger.warning("""
+                [\(self.label, privacy: .public)] \(queue, privacy: .public)-queue DROP \
+                rule=\(a.outcome.rule, privacy: .public) lost=\(lost, privacy: .public) \
+                total=\(total, privacy: .public) — \(cost, privacy: .public)
+                """)
+            }
+        }
+        if a.requestKeyframe { onFrameDropped?() }
+    }
 
     // The display layer's renderer and videoGravity are main-actor-isolated in the macOS 26
     // SDK. Both call sites construct the decoder on the main actor, so isolate init here.
@@ -181,36 +339,28 @@ final class VideoDecoder: @unchecked Sendable {
         }
     }
 
-    // MARK: - Main Entry Point (V1 AVCC fast path + V4 decode slot)
+    // MARK: - Main Entry Point (V1 AVCC fast path + V5 decode FIFO)
 
     /// Submit a length-prefixed (4-byte AVCC) access unit for decode+display. Safe to call from any
-    /// thread. The frame lands in the depth-1 decode slot; a busy decodeQueue drops per the V4 table.
+    /// thread, and NEVER blocks: a full decode FIFO resolves to a drop (per `FrameFIFO`'s policy), so a
+    /// stalled decodeQueue can never stall the USB read path.
     func decodeAndDisplay(avcc: Data, keyframe: Bool) {
-        let (dispatch, requestKF): (Bool, Bool) = pendingDecode.withLock { queue in
-            let wasEmpty = queue.isEmpty
-            if queue.count < maxDecodeDepth {
-                queue.append(PendingAVCC(avcc: avcc, keyframe: keyframe))
-                return (wasEmpty, false)               // room in the FIFO; nothing shed
-            }
-            // FIFO full → latest-wins against the newest queued frame (depth-1: the only frame).
-            let old = queue[queue.count - 1]
-            let d = AVCCFastPath.resolveSlot(oldIsKF: old.keyframe, newIsKF: keyframe)
-            slotDrops.wrappingAdd(1, ordering: .relaxed) // one frame lost per collision
-            if d.store { queue[queue.count - 1] = PendingAVCC(avcc: avcc, keyframe: keyframe) }
-            return (false, d.requestKeyframe)          // dropped a frame; no new drain to dispatch
+        let arrivalNs = DispatchTime.now().uptimeNanoseconds
+        let admission = pendingDecode.withLock { fifo in
+            fifo.push(PendingAVCC(avcc: avcc, keyframe: keyframe, arrivalNs: arrivalNs), keyframe: keyframe)
         }
-        if requestKF { onFrameDropped?() }
-        if dispatch { decodeQueue.async { [weak self] in self?.drainDecode() } }
+        noteAdmission(admission, queue: "decode")
+        // Empty → non-empty is the only transition that needs a fresh drain; every other push is
+        // covered by the in-flight drain's tail re-dispatch below (no lost wakeup: a push that sees a
+        // non-empty FIFO happens-before that drain's own under-lock `isEmpty` check, or before its pop).
+        if admission.wasEmpty { decodeQueue.async { [weak self] in self?.drainDecode() } }
     }
 
-    /// decodeQueue: take whatever frame currently occupies the decode slot (latest-wins) and process
-    /// it. One item per drain; the next empty→occupied submit dispatches the next drain.
+    /// decodeQueue: take the OLDEST queued frame and process it. One item per drain; the drain
+    /// re-dispatches itself while the FIFO still has work, so a burst never strands a frame.
     private func drainDecode() {
-        guard let pending = pendingDecode.withLock({ (queue: inout [PendingAVCC]) -> PendingAVCC? in
-            queue.isEmpty ? nil : queue.removeFirst()
-        }) else { return }
-        performDecodeAVCC(avcc: pending.avcc, keyframe: pending.keyframe)
-        // Depth >1: a drain handles one frame, so re-dispatch while the FIFO still has work.
+        guard let pending = pendingDecode.withLock({ $0.pop() }) else { return }
+        performDecodeAVCC(avcc: pending.avcc, keyframe: pending.keyframe, arrivalNs: pending.arrivalNs)
         // decodeQueue is serial, so this chains cleanly and never runs two drains at once.
         let more = pendingDecode.withLock { !$0.isEmpty }
         if more { decodeQueue.async { [weak self] in self?.drainDecode() } }
@@ -249,7 +399,7 @@ final class VideoDecoder: @unchecked Sendable {
 
     /// One cheap validating pass over the AVCC length prefixes, then either the classify/diff path
     /// (in-band parameter sets) or the zero-copy steady-state path.
-    private func performDecodeAVCC(avcc: Data, keyframe: Bool) {
+    private func performDecodeAVCC(avcc: Data, keyframe: Bool, arrivalNs: UInt64) {
         let isHEVC = codec == .hevc
         let walk = avcc.withUnsafeBytes { AVCCFastPath.walkAVCC($0, isHEVC: isHEVC) }
         guard walk.valid else {
@@ -260,7 +410,8 @@ final class VideoDecoder: @unchecked Sendable {
         if walk.hasParamSets {
             // Mid-stream in-band SPS/PPS (format change): strip/diff/rebuild exactly like the legacy
             // path. One extra classification copy — on format-change frames only, zero in steady state.
-            performDecodeAVCCWithParamSets(avcc: avcc, isHEVC: isHEVC)
+            performDecodeAVCCWithParamSets(avcc: avcc, isHEVC: isHEVC, nalMask: walk.nalTypeMask,
+                                          arrivalNs: arrivalNs)
             return
         }
 
@@ -270,10 +421,12 @@ final class VideoDecoder: @unchecked Sendable {
             // (the AVCC fast path prepends no in-band SPS/PPS to rebuild from). Only a keyframe can
             // re-seed usefully; a P-frame with no format is undecodable → drop + request an IDR.
             guard walk.containsIDR else {
+                noteNeedsKeyFrame("no format (post-flush) — P-frame dropped, nal=\(AVCCFastPath.nalTypeSummary(walk.nalTypeMask))")
                 onNeedsKeyFrame?()
                 return
             }
             guard reseedFormatFromConfigured() else {
+                noteNeedsKeyFrame("no format and no usable session parameter sets — IDR dropped")
                 onNeedsKeyFrame?()
                 return
             }
@@ -281,8 +434,17 @@ final class VideoDecoder: @unchecked Sendable {
 
         guard let fmt = formatDescription else { return }
         if let sb = createSampleBufferZeroCopy(avcc: avcc, containsIDR: walk.containsIDR, formatDescription: fmt) {
-            enqueue(sb, generation: formatGeneration, keyframe: walk.containsIDR)
+            enqueue(sb, generation: formatGeneration, keyframe: walk.containsIDR,
+                    nalMask: walk.nalTypeMask, arrivalNs: arrivalNs)
         }
+    }
+
+    /// Throttled, lane-tagged record of WHY the decoder asked for an IDR. `onNeedsKeyFrame` itself stays
+    /// unthrottled — the client-side ≤1/500 ms throttle owns the request rate and the recovery latency
+    /// must not change; only the logging is rate-limited.
+    private func noteNeedsKeyFrame(_ reason: String) {
+        guard Self.throttlePasses(lastNeedsKFLogNs) else { return }
+        Self.logger.warning("[\(self.label, privacy: .public)] requesting IDR — \(reason, privacy: .public)")
     }
 
     /// Rebuild the format from the retained session parameter sets (the flush-recovery re-seed).
@@ -308,7 +470,8 @@ final class VideoDecoder: @unchecked Sendable {
     /// Format-change path: an AU carrying in-band parameter sets. Diff SPS/PPS(/VPS) against the
     /// current sets, rebuild the format if they changed, and copy the displayable NALs into a
     /// CM-allocated block (one copy — format-change frames only).
-    private func performDecodeAVCCWithParamSets(avcc: Data, isHEVC: Bool) {
+    private func performDecodeAVCCWithParamSets(avcc: Data, isHEVC: Bool, nalMask: UInt64,
+                                               arrivalNs: UInt64) {
         var needsNewFormat = false
         var displayRanges: [Range<Int>] = []
         var avccLength = 0
@@ -330,7 +493,8 @@ final class VideoDecoder: @unchecked Sendable {
                                        avccLength: avccLength,
                                        containsIDR: containsIDR,
                                        formatDescription: fmt) {
-            enqueue(sb, generation: formatGeneration, keyframe: containsIDR)
+            enqueue(sb, generation: formatGeneration, keyframe: containsIDR,
+                    nalMask: nalMask, arrivalNs: arrivalNs)
         }
     }
 
@@ -610,48 +774,51 @@ final class VideoDecoder: @unchecked Sendable {
         return sb
     }
 
-    // MARK: - Layer Enqueue (V4 enqueue slot → Main Thread)
+    // MARK: - Layer Enqueue (V5 enqueue FIFO → Main Thread)
 
-    /// Submit a decoded sample buffer to the depth-1 enqueue slot. A stalled main thread drops
-    /// decoded frames (latest-wins) rather than accumulating full CMSampleBuffers without bound.
-    private func enqueue(_ sampleBuffer: CMSampleBuffer, generation: UInt64, keyframe: Bool) {
+    /// Submit a decoded sample buffer to the bounded enqueue FIFO. Never blocks the decodeQueue: a full
+    /// FIFO resolves to a drop, but (unlike the V4 latest-wins slot) the drop policy protects IDRs and
+    /// the frame after them and sheds the STALEST unprotected P instead of whatever collided.
+    private func enqueue(_ sampleBuffer: CMSampleBuffer, generation: UInt64, keyframe: Bool,
+                         nalMask: UInt64, arrivalNs: UInt64) {
+        // The sample buffer now exists; close the arrival → wrapped EWMA here (decodeQueue — the single
+        // writer of that cell) before the frame joins the enqueue FIFO. This is a WRAP time, not a decode
+        // time: nothing has been decoded yet — the renderer does that after the hand-off.
+        Self.updateEWMA(wrapLatencyBits, sinceNs: arrivalNs)
         // CMSampleBuffer is not Sendable but is freshly created per frame and handed off exclusively
-        // through the Mutex, so parking it in the slot is safe.
+        // through the Mutex, so parking it in the FIFO is safe.
         nonisolated(unsafe) let sb = sampleBuffer
-        let (dispatch, requestKF): (Bool, Bool) = pendingEnqueue.withLock { slot in
-            let d = AVCCFastPath.resolveSlot(oldIsKF: slot?.keyframe, newIsKF: keyframe)
-            let wasEmpty = slot == nil
-            if !wasEmpty { slotDrops.wrappingAdd(1, ordering: .relaxed) } // decoded-but-not-displayed loss
-            if d.store {
-                slot = PendingSB(sb: sb, generation: generation, keyframe: keyframe)
-                return (wasEmpty, d.requestKeyframe)
-            }
-            return (false, d.requestKeyframe)
+        let admission = pendingEnqueue.withLock { fifo in
+            fifo.push(PendingSB(sb: sb, generation: generation, keyframe: keyframe,
+                                nalMask: nalMask, arrivalNs: arrivalNs),
+                      keyframe: keyframe)
         }
-        if requestKF { onFrameDropped?() }
-        if dispatch { DispatchQueue.main.async { [weak self] in self?.drainEnqueue() } }
+        noteAdmission(admission, queue: "enqueue")
+        if admission.wasEmpty { renderQueue.async { [weak self] in self?.drainEnqueue() } }
     }
 
-    /// Main thread: take the latest decoded frame from the enqueue slot and present it through the
-    /// generation-guarded receiver switch.
+    /// renderQueue: take the OLDEST decoded frame from the enqueue FIFO and present it through the
+    /// generation-guarded receiver switch. Re-dispatches itself while the FIFO still has work — without
+    /// that tail dispatch a depth >1 FIFO would strand every frame pushed onto a non-empty queue.
     private func drainEnqueue() {
-        guard let pending = pendingEnqueue.withLock({ (slot: inout PendingSB?) -> PendingSB? in
-            let p = slot; slot = nil; return p
-        }) else { return }
+        guard let pending = pendingEnqueue.withLock({ $0.pop() }) else { return }
+        defer {
+            if pendingEnqueue.withLock({ !$0.isEmpty }) {
+                renderQueue.async { [weak self] in self?.drainEnqueue() }
+            }
+        }
         let generation = pending.generation
+        // Closes the arrival → hand-off EWMA (renderQueue — the single writer of that cell). Measured
+        // here rather than after `enqueueImmediately` so the number is the queueing delay we control,
+        // not the renderer's own call cost.
+        Self.updateEWMA(handoffLatencyBits, sinceNs: pending.arrivalNs)
         // Wrap the freshly built CMSampleBuffer in the typed CMReadySampleBuffer the macOS 26
         // receiver API requires, then present it immediately.
         let ready = CMReadySampleBuffer(unsafeBuffer: pending.sb)
-        // DECODE-LATENCY HOOK (deferred — StreamMetricsMonitor `decodeLatencyMs`): this render path uses
-        // the macOS-26 AVSampleBufferRenderSynchronizer receiver, which exposes no VTDecompressionSession
-        // decode start/finish callback, so a true submit→decoded time is not cleanly observable here. If a
-        // future build routes frames through an explicit VTDecompressionSession, time the decompression
-        // callback and feed the rolling stat out via a `@Sendable (Double) -> Void` hook installed by the
-        // owner. Until then the received-frame `jitterMs` at the decrypt layer is the stutter proxy.
         switch self.receiver.enqueueImmediately(ready) {
         case .enqueued:
             rendererWedgedLogged = false   // clean frame — re-arm the wedged edge log
-        case .enqueuedWithDecodeFailures:
+        case .enqueuedWithDecodeFailures(let errors):
             // Accepted but decoded WITH ERRORS — typically a P-frame that landed on a freshly restarted
             // decompression session (after a format-description swap) with no reference IDR yet. VT does
             // NOT return .cancelledDueToFlushRequiredToResume for this, so the recovery branch below is
@@ -659,9 +826,41 @@ final class VideoDecoder: @unchecked Sendable {
             // Ask the owner for a keyframe so iOS emits a fresh IDR to re-sync; requestKeyframe is
             // throttled client-side (≤1/500 ms), so a burst of failures yields at most ~2 requests/sec.
             // No flush/format-reset — the format is correct; the session just needs an IDR.
-            Self.logger.warning("Frame enqueued with decode failures — requesting keyframe to re-sync")
+            //
+            // The LOG is throttled (2026-09-03) and carries the evidence the untagged one-liner lacked:
+            // which lane, VideoToolbox's own status (`NSOSStatusErrorDomain` code == the OSStatus), the
+            // NAL types of the frame it rejected, and how many failures were suppressed since the last
+            // line. It fired ~50/s from the main thread — the same thread whose lateness sheds the
+            // frames that cause these failures — so rate-limiting it also stops the log feeding the loop.
+            // `onNeedsKeyFrame` stays UNTHROTTLED: recovery latency is the client's ≤1/500 ms to own.
+            let suppressed = suppressedFailures.wrappingAdd(1, ordering: .relaxed).newValue
+            if Self.throttlePasses(lastFailLogNs) {
+                suppressedFailures.store(0, ordering: .relaxed)
+                let detail = errors.map { e -> String in
+                    let ns = e as NSError
+                    return "\(ns.domain):\(ns.code)"
+                }.joined(separator: ",")
+                Self.logger.warning("""
+                [\(self.label, privacy: .public)] decode FAILURES on \(pending.keyframe ? "IDR" : "P", privacy: .public) \
+                frame — vt=[\(detail.isEmpty ? "none" : detail, privacy: .public)] \
+                nal={\(AVCCFastPath.nalTypeSummary(pending.nalMask), privacy: .public)} \
+                gen=\(generation, privacy: .public) (+\(suppressed &- 1, privacy: .public) suppressed) \
+                — requesting keyframe to re-sync
+                """)
+            }
             self.onNeedsKeyFrame?()
-        case .cancelledDueToFlushRequiredToResume:
+        case .cancelledDueToFlushRequiredToResume(let error):
+            // This branch used to log NOTHING, so a session that took it was indistinguishable in the
+            // log from one that only ever hit .enqueuedWithDecodeFailures — the two have completely
+            // different recoveries (format reset vs none). Edge it against the same throttle.
+            if Self.throttlePasses(lastFailLogNs) {
+                let ns = error as NSError
+                Self.logger.error("""
+                [\(self.label, privacy: .public)] renderer requires FLUSH to resume — vt=\(ns.domain, privacy: .public):\(ns.code, privacy: .public) \
+                nal={\(AVCCFastPath.nalTypeSummary(pending.nalMask), privacy: .public)} gen=\(generation, privacy: .public) \
+                — flushing + re-seeding the format on the next IDR
+                """)
+            }
             // Decoder needs an IDR after a flush. Flush the receiver, drop the cached format so the
             // next keyframe re-seeds it (from configuredParameterSets — the AVCC fast path carries no
             // in-band SPS/PPS), and ask the owner to request a keyframe. Generation-guarded: several
@@ -701,14 +900,16 @@ final class VideoDecoder: @unchecked Sendable {
     func flush() {
         // Route through the decode queue first so decodes already in flight
         // (or queued) post their enqueue blocks BEFORE the receiver flush on
-        // the main queue — otherwise stale frames from the old stream would
-        // be enqueued into the freshly flushed renderer.
+        // renderQueue — otherwise stale frames from the old stream would
+        // be enqueued into the freshly flushed renderer. Both queues are serial and the hop is
+        // decodeQueue → renderQueue, so that ordering is now a queue guarantee rather than a race
+        // against unrelated main-thread work.
         decodeQueue.async { [weak self] in
             guard let self else { return }
             self.frameCount = 0
-            self.pendingDecode.withLock { $0 = [] }     // drop any queued-but-undecoded frames
-            DispatchQueue.main.async {
-                self.pendingEnqueue.withLock { $0 = nil } // drop any decoded-but-unenqueued frame
+            self.pendingDecode.withLock { $0.removeAll() }   // drop any queued-but-undecoded frames
+            self.renderQueue.async {
+                self.pendingEnqueue.withLock { $0.removeAll() } // drop decoded-but-unenqueued frames
                 self.receiver.flush()
             }
         }

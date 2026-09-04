@@ -10,37 +10,43 @@
 //! One MFi chip, shared with `iap2d` — but the session arbiter guarantees only one transport is
 //! active at a time, so wired and wireless never drive the chip concurrently.
 
-use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::Once;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 const MFI_ADDR: u16 = 0x11;
 const I2C_M_RD: u16 = 0x0001;
 const I2C_RDWR: libc::c_int = 0x0707;
 
-static G_I2C: AtomicI32 = AtomicI32::new(-1);
-static OPEN_ONCE: Once = Once::new();
+static G_I2C: Mutex<i32> = Mutex::new(-1);
 
-/// Lazily open `/dev/i2c-1` once (O_RDWR). The I2C_RDWR ioctl carries the slave address per message,
-/// so no I2C_SLAVE setup is needed — just the fd. Returns <0 if the device can't be opened.
+/// Open `/dev/i2c-1` (O_RDWR) on first use and cache the fd. The I2C_RDWR ioctl carries the slave
+/// address per message, so no I2C_SLAVE setup is needed — just the fd. Returns <0 if the device
+/// can't be opened.
+///
+/// Retries on the next call after a failure, deliberately: a `Once` latched a transient open failure
+/// for the process lifetime, which disabled MFi — and with it every CarPlay session — until the
+/// daemon restarted, while the caller's own `mfi_retry` could do nothing about it.
 fn i2c_fd() -> i32 {
-    OPEN_ONCE.call_once(|| {
-        // O_CLOEXEC: this is a PROCESS-LIFETIME fd (G_I2C, opened once) and this crate fork+execs the
-        // detached A/V daemons via av::ensure_av_layer(). Without it, airplayd and rx-connect inherit an
-        // open handle to the MFi chip's I2C bus and keep it for as long as they live.
-        let fd = unsafe { libc::open(c"/dev/i2c-1".as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
-        if fd < 0 {
-            eprintln!("[mfi-local] FATAL: cannot open /dev/i2c-1 (MFi chip)");
-        }
-        G_I2C.store(fd, Ordering::Relaxed);
-    });
-    G_I2C.load(Ordering::Relaxed)
+    let mut cached = G_I2C.lock().unwrap_or_else(|p| p.into_inner());
+    if *cached >= 0 {
+        return *cached;
+    }
+    // O_CLOEXEC: this is a PROCESS-LIFETIME fd (G_I2C, opened once) and this crate fork+execs the
+    // detached A/V daemons via av::ensure_av_layer(). Without it, airplayd and rx-connect inherit an
+    // open handle to the MFi chip's I2C bus and keep it for as long as they live.
+    let fd = unsafe { libc::open(c"/dev/i2c-1".as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
+    if fd < 0 {
+        eprintln!("[mfi-local] cannot open /dev/i2c-1 (MFi chip) -- retrying on the next transaction");
+        return fd;
+    }
+    *cached = fd;
+    fd
 }
 
-/// Path of the cross-process advisory lock serializing all MFi I2C access (#109). FOUR users share the
+/// Path of the cross-process advisory lock serializing all MFi I2C access (#109). FIVE users share the
 /// single `/dev/i2c-1` chip (corrected 2026-07-25 — this used to say "both daemons"): wired `iap2d`,
-/// wireless `carplay-wireless` (here), `airplayd`'s `LocalMfiSigner`, and `receiver`'s tunnel handshake
-/// via `mfi-i2c-local`. The cert/sign sequences are stateful (write challenge → go → poll status → read
+/// wireless `carplay-wireless` (here), `airplayd`'s `LocalMfiSigner`, `receiver`'s tunnel handshake
+/// via `mfi-i2c-local`, and `ocbmd`'s `CH_MFI` relay. The cert/sign sequences are stateful (write challenge → go → poll status → read
 /// result), so any interleaving corrupts both transactions. Every user `flock`s this path for the whole
 /// duration of a cert()/sign(), each with a bounded 10s LOCK_NB poll (matching `airplayd`'s `MfiLock`
 /// and `mfi-i2c-local`). The session arbiter also enforces single-transport, but this is the low-level
@@ -325,6 +331,9 @@ pub fn sign(chal: &[u8]) -> Option<Vec<u8>> {
         // validated downstream: a spurious "ready" yields a bogus 0x11 length that the `n == 0 || n >
         // 256` guard below rejects → sign() returns None → the caller's #210 retry re-drives cleanly.
         if i2c_rd(0x10, &mut st) && (st[0] & 0x10) != 0 {
+            if st[0] != 0x10 {
+                eprintln!("[mfi-local] sign status 0x{:02x} (expected 0x10)", st[0]);
+            }
             done = true;
             break;
         }

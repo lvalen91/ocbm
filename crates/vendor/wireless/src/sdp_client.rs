@@ -32,6 +32,22 @@ const IAP2_UUID128: [u8; 16] = [
     0x02, 0x03, 0x03, 0x02, 0x1d, 0x19, 0x41, 0x5f, 0x86, 0xf2, 0x22, 0xa2, 0x10, 0x6a, 0x0a, 0x77,
 ];
 
+/// The Android Auto wireless-projection UUID128, `4de17a00-52cb-11e6-bdf4-0800200c9a66`.
+///
+/// **DIAGNOSTIC SEARCH ONLY — CORRECTED 2026-09-04 (second pass).** An earlier reading had the
+/// PHONE hosting this service and the head unit dialling it. That was wrong in the direction that
+/// matters: gearhead is the CLIENT of this UUID
+/// (`createRfcommSocketToServiceRecord(4de17a00-…)`, `ojk.java:31-35`) and never registers a
+/// server for it, and the bench Pixel's SDP has no such record at all
+/// (`AA-wireless-UUID search -> 2 bytes: 3500`, i.e. an empty attribute list). The record it dials
+/// is OURS — `sdp_server::android_auto_service` on channel 4 — once the wireless-setup gate opens.
+///
+/// The search is kept because the empty answer IS the evidence, and because a peer that DID host it
+/// would be worth knowing about. `reconnect` does not act on the result.
+const AAWG_UUID128: [u8; 16] = [
+    0x4d, 0xe1, 0x7a, 0x00, 0x52, 0xcb, 0x11, 0xe6, 0xbd, 0xf4, 0x08, 0x00, 0x20, 0x0c, 0x9a, 0x66,
+];
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct SockaddrL2 {
@@ -42,8 +58,17 @@ struct SockaddrL2 {
     l2_bdaddr_type: u8,
 }
 
+/// `@<unix_ms> ` write-time stamp (docs/carplay/01_OCBM_PROTOCOL.md CH_LOG): the box.log tailer
+/// parses this prefix and uses it instead of the millisecond it happened to READ the line at.
 fn log(m: &str) {
-    println!("[sdp-client] {m}");
+    println!("@{} [sdp-client] {m}", now_ms());
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn hex(b: &[u8]) -> String {
@@ -115,6 +140,28 @@ fn search_pattern_iap2() -> Vec<u8> {
     p.push(0x11); // length = 17 (1 desc byte + 16 UUID bytes)
     p.push(0x1c); // UUID128 descriptor
     p.extend_from_slice(&IAP2_UUID128);
+    p
+}
+
+/// The Android Auto wireless-projection UUID128 search pattern: `DES { UUID128 AAWG }`. Same shape
+/// as [`search_pattern_iap2`] — the only difference is which 16 bytes go in.
+fn search_pattern_aawg() -> Vec<u8> {
+    let mut p = Vec::with_capacity(19);
+    p.push(0x35); // DES, 1-byte length follows
+    p.push(0x11); // length = 17 (1 desc byte + 16 UUID bytes)
+    p.push(0x1c); // UUID128 descriptor
+    p.extend_from_slice(&AAWG_UUID128);
+    p
+}
+
+/// A UUID16 search pattern: `DES { UUID16 v }`. Used for the audio-gateway searches, which are
+/// 16-bit UUIDs rather than the 128-bit vendor ones above.
+fn search_pattern_uuid16(v: u16) -> Vec<u8> {
+    let mut p = Vec::with_capacity(5);
+    p.push(0x35); // DES, 1-byte length follows
+    p.push(0x03); // length = 3 (1 desc byte + 2 UUID bytes)
+    p.push(0x19); // UUID16 descriptor
+    p.extend_from_slice(&v.to_be_bytes());
     p
 }
 
@@ -226,10 +273,88 @@ fn scan_rfcomm_channel(blob: &[u8]) -> Option<u8> {
     None
 }
 
-/// Discover the iAP2 RFCOMM channel the bonded `peer` exposes. `Ok(Some(ch))` on success, `Ok(None)`
-/// if the phone answered but exposes no iAP2 RFCOMM service (raw response logged for diagnosis),
-/// `Err` on connect/transport failure. Handles SDP continuation by re-requesting with the cookie.
-pub fn query(peer: [u8; 6], timeout_secs: i64) -> std::io::Result<Option<u8>> {
+/// Pull attribute `0x0311 SupportedFeatures` out of an attribute-list blob.
+///
+/// In a returned record an attribute is `<uint16 id><value>`, so the HFP AG's supported-features
+/// bitmap is the byte string `09 03 11 09 HH LL` — attribute-id element, then a uint16 element.
+/// Purely informational for us (we log it and it tells the next session what the AG claims); the
+/// SLC does not depend on it, because HFP carries the same bitmap in `+BRSF` on the wire and THAT
+/// is what `hfp_hf` acts on.
+fn scan_hfp_supported_features(blob: &[u8]) -> Option<u16> {
+    blob.windows(6)
+        .find(|w| w[0] == 0x09 && w[1] == 0x03 && w[2] == 0x11 && w[3] == 0x09)
+        .map(|w| u16::from_be_bytes([w[4], w[5]]))
+}
+
+/// Hold the ACL to `peer` open for `secs` by keeping an L2CAP channel to its SDP PSM alive, then
+/// drop it.
+///
+/// **Its original purpose is closed.** It was an experiment (2026-09-01) built on the assumption
+/// that gearhead would dial OUR Android Auto RFCOMM channel if we just held the link past its 5 s
+/// `waitForHeadUnitConnected` window. It does eventually dial that channel, but not because of
+/// time: it dials it only once `BluetoothProfile.HEADSET` reports us CONNECTED, which no amount of
+/// idle ACL produces. `reconnect::attempt_headset` connects to the phone's audio gateway instead,
+/// and the RFCOMM link that creates holds the ACL by itself.
+///
+/// KEPT, narrowed, for the one case that path does not cover: a bonded peer exposing NEITHER an
+/// iAP2 service NOR any audio gateway ([`Services::has_audio_gateway`]). There is nothing to
+/// connect to there, and holding the link is the only remaining lever for finding out what such a
+/// peer does with time. Gated by `CARPLAY_ACL_HOLD_SECS` / `/tmp/acl_hold_secs`.
+pub fn hold_acl(peer: [u8; 6], secs: u64, timeout_secs: i64) {
+    match connect_sdp(peer, timeout_secs) {
+        Ok(_sock) => {
+            log(&format!("holding the ACL open for {secs}s (experiment)"));
+            std::thread::sleep(std::time::Duration::from_secs(secs));
+            log("releasing the held ACL");
+            // `_sock` drops here, closing the channel.
+        }
+        Err(e) => log(&format!("could not hold the ACL: {e}")),
+    }
+}
+
+/// What a bonded peer turned out to expose, from ONE SDP conversation.
+///
+/// One struct rather than several functions because every search MUST share one L2CAP channel: the
+/// L2CAP connect is what pages the phone, and a second `query`-style call would page again and
+/// spend most of its time on the connect.
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
+pub struct Services {
+    /// RFCOMM channel of the phone's "Wireless iAP v2" service — an iPhone.
+    pub iap2: Option<u8>,
+    /// RFCOMM channel of the phone's Android Auto wireless-projection service ([`AAWG_UUID128`]).
+    ///
+    /// **Diagnostic only.** Kept because its absence is the evidence, not because anything acts on
+    /// it: this Pixel has no such record (`AA-wireless-UUID search -> 2 bytes: 3500`) and gearhead
+    /// never registers one — the phone is the CLIENT of that UUID, not its server
+    /// (`ojk.java:31-35`). Nothing dials this. See `docs/androidauto/03_WIRELESS.md` §2f.
+    pub aawg: Option<u8>,
+    /// RFCOMM channel of the phone's **Handsfree Audio Gateway** (`0x111F`) service. This is the
+    /// one that matters: completing an HFP SLC to it as the hands-free unit is what makes Android's
+    /// `HeadsetService` report our address CONNECTED, which is gearhead's wireless-setup gate.
+    /// Channel 4 on the bench Pixel — read from the search, never assumed.
+    pub hfp_ag: Option<u8>,
+    /// The AG's `0x0311 SupportedFeatures` bitmap, when its record carries one. Logged; the SLC
+    /// uses the `+BRSF` value from the wire instead.
+    pub hfp_ag_features: Option<u16>,
+    /// RFCOMM channel of the phone's **Headset Audio Gateway** (`0x1112`) service — channel 3 on
+    /// the bench Pixel. The no-AT fallback: AOSP opens the service level immediately on an inbound
+    /// connection to an HSP AG channel (`bta_ag_act.cc:533-540`), where the HFP one waits for the
+    /// SLC.
+    pub hsp_ag: Option<u8>,
+}
+
+impl Services {
+    /// Does this peer offer any headset-class gateway to connect to?
+    pub fn has_audio_gateway(&self) -> bool {
+        self.hfp_ag.is_some() || self.hsp_ag.is_some()
+    }
+}
+
+/// Discover what the bonded `peer` exposes, over ONE SDP channel: iAP2 (an iPhone), then the two
+/// audio-gateway records an Android phone answers with. `Err` only on connect/transport failure — a
+/// peer that answers with nothing yields `Services::default()` with the raw catalog logged.
+/// Handles SDP continuation by re-requesting with the cookie.
+pub fn query(peer: [u8; 6], timeout_secs: i64) -> std::io::Result<Services> {
     let mut disp = peer;
     disp.reverse(); // human-readable bdaddr for the log only
     let human = disp.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(":");
@@ -238,16 +363,67 @@ pub fn query(peer: [u8; 6], timeout_secs: i64) -> std::io::Result<Option<u8>> {
     log("L2CAP SDP channel up (phone paged)");
 
     // (1) Targeted: the accessory-side iAP2 UUID. If iOS exposes an iAP2 RFCOMM service by this UUID,
-    //     this pulls its channel directly.
+    //     this pulls its channel directly — and an iPhone is done here, with no Android searches run.
     let iap2 = run_search(&mut sock, &search_pattern_iap2(), 1)?;
     log(&format!("iAP2-UUID search -> {} bytes: {}", iap2.len(), hex(&iap2)));
     if let Some(ch) = scan_rfcomm_channel(&iap2) {
         log(&format!("iAP2 RFCOMM channel on the phone = {ch}"));
-        return Ok(Some(ch));
+        return Ok(Services { iap2: Some(ch), ..Services::default() });
     }
 
-    // (2) Browse-all (L2CAP UUID): dump iOS's ENTIRE SDP catalog so we can see what it DOES expose —
-    //     the decisive diagnostic for docs/wireless/01_BT_AND_RADIO.md's open unknown. Every RFCOMM channel found is logged.
+    let mut out = Services::default();
+
+    // (2) Handsfree Audio Gateway (0x111F) — the primary Android path. The phone is the AG and we
+    //     are the hands-free unit; completing the SLC flips `BluetoothProfile.HEADSET` to
+    //     CONNECTED for our address, which is what gearhead's wireless-setup gate reads
+    //     (`pcl.java:80`, `kzt.java:56-64`, `pco.java:24-29`).
+    let hfp = run_search(&mut sock, &search_pattern_uuid16(0x111F), 20)?;
+    log(&format!("HFP-AG (0x111f) search -> {} bytes: {}", hfp.len(), hex(&hfp)));
+    out.hfp_ag = scan_rfcomm_channel(&hfp);
+    out.hfp_ag_features = scan_hfp_supported_features(&hfp);
+    if let Some(ch) = out.hfp_ag {
+        match out.hfp_ag_features {
+            Some(f) => log(&format!(
+                "phone's HFP audio gateway on RFCOMM channel {ch} (SupportedFeatures 0x{f:04x})"
+            )),
+            None => log(&format!("phone's HFP audio gateway on RFCOMM channel {ch}")),
+        }
+    }
+
+    // (3) Headset Audio Gateway (0x1112) — the no-AT fallback. AOSP arms the SLC timer only for an
+    //     inbound HFP connection; an HSP one goes straight to `bta_ag_svc_conn_open` →
+    //     `BTA_AG_CONN_EVT` → `BTHF_CONNECTION_STATE_SLC_CONNECTED` (`bta_ag_act.cc:533-540`),
+    //     which is how both public dongles satisfy the same gate with no AT traffic at all.
+    let hsp = run_search(&mut sock, &search_pattern_uuid16(0x1112), 30)?;
+    log(&format!("HSP-AG (0x1112) search -> {} bytes: {}", hsp.len(), hex(&hsp)));
+    out.hsp_ag = scan_rfcomm_channel(&hsp);
+    if let Some(ch) = out.hsp_ag {
+        log(&format!("phone's HSP audio gateway on RFCOMM channel {ch}"));
+    }
+
+    // (4) DIAGNOSTIC ONLY: the Android Auto wireless-projection UUID. Kept because its ABSENCE is
+    //     the finding — gearhead is the client of this UUID, never its server, so a hit here would
+    //     mean the phone is doing something no observed Android build does. Nothing dials it.
+    let aawg = run_search(&mut sock, &search_pattern_aawg(), 50)?;
+    log(&format!(
+        "AA-wireless-UUID search (diagnostic) -> {} bytes: {}",
+        aawg.len(),
+        hex(&aawg)
+    ));
+    out.aawg = scan_rfcomm_channel(&aawg);
+    if let Some(ch) = out.aawg {
+        log(&format!(
+            "UNEXPECTED: the phone HOSTS the Android Auto wireless-projection UUID on RFCOMM channel {ch} — no observed gearhead build does this; nothing dials it (docs/androidauto/03_WIRELESS.md §2f)"
+        ));
+    }
+
+    if out.has_audio_gateway() {
+        return Ok(out);
+    }
+
+    // (5) Browse-all (L2CAP UUID): dump the peer's ENTIRE SDP catalog so we can see what it DOES
+    //     expose. Purely a diagnostic for a peer that matched NONE of the targeted searches — every
+    //     service we can actually drive has been ruled out by this point.
     let all = run_search(&mut sock, &search_pattern_l2cap(), 100)?;
     log(&format!("browse-all (L2CAP) -> {} bytes: {}", all.len(), hex(&all)));
     let mut chans = Vec::new();
@@ -261,13 +437,13 @@ pub fn query(peer: [u8; 6], timeout_secs: i64) -> std::io::Result<Option<u8>> {
         }
     }
     if chans.is_empty() {
-        log("browse-all: iOS exposes NO RFCOMM service on BR/EDR — the accessory cannot connect OUT (redirects Model B; see docs/wireless/01_BT_AND_RADIO.md)");
+        log("browse-all: the peer exposes NO RFCOMM service on BR/EDR — the accessory cannot connect OUT (redirects Model B; see docs/wireless/01_BT_AND_RADIO.md)");
     } else {
         log(&format!(
-            "browse-all: iOS exposes RFCOMM channel(s) {chans:?} — but none under the iAP2 UUID; raw catalog above identifies the service UUIDs"
+            "browse-all: the peer exposes RFCOMM channel(s) {chans:?} — but none under the iAP2, HFP-AG or HSP-AG UUIDs; raw catalog above identifies the service UUIDs"
         ));
     }
-    Ok(None)
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -286,6 +462,130 @@ mod tests {
         assert_eq!(&req[21..28], &[0x35, 0x05, 0x0a, 0x00, 0x00, 0xff, 0xff]);
         // trailing continuation
         assert_eq!(req[28], 0x00);
+    }
+
+    /// The AA wireless-projection UUID is single-sourced from the bench Pixel's own SDP catalog and
+    /// is the one thing in this module that CANNOT be re-derived from a spec — pin the bytes.
+    #[test]
+    fn aawg_uuid_is_4de17a00_52cb_11e6_bdf4_0800200c9a66() {
+        assert_eq!(
+            hex(&AAWG_UUID128),
+            "4de17a0052cb11e6bdf40800200c9a66",
+            "the Android Auto wireless-projection UUID must match gearhead's"
+        );
+    }
+
+    #[test]
+    fn ssa_request_has_aawg_uuid_and_range() {
+        let req = build_ssa_request(&search_pattern_aawg(), &[0x00]);
+        // Same DES/UUID128 shape as the iAP2 pattern — only the 16 UUID bytes differ.
+        assert_eq!(&req[0..3], &[0x35, 0x11, 0x1c]);
+        assert_eq!(&req[3..19], &AAWG_UUID128);
+        assert_eq!(&req[19..21], &[0xff, 0xff]);
+        assert_eq!(&req[21..28], &[0x35, 0x05, 0x0a, 0x00, 0x00, 0xff, 0xff]);
+        assert_eq!(req[28], 0x00);
+    }
+
+    /// The two targeted searches must be byte-identical apart from the UUID, because they go through
+    /// the same `run_search`/`build_ssa_request` path and a divergence would only show on hardware.
+    #[test]
+    fn the_two_targeted_patterns_differ_only_in_the_uuid() {
+        let a = search_pattern_iap2();
+        let b = search_pattern_aawg();
+        assert_eq!(a.len(), b.len());
+        assert_eq!(&a[0..3], &b[0..3]);
+        assert_ne!(&a[3..], &b[3..]);
+    }
+
+    /// The Pixel answers the targeted search with the AA record's own ProtocolDescriptorList, so the
+    /// channel scan runs against a single record — L2CAP then RFCOMM ch 8 (its catalog spans 3–8).
+    #[test]
+    fn scan_finds_the_aawg_channel_in_a_single_record_response() {
+        let blob = [
+            0x35, 0x0c, 0x35, 0x03, 0x19, 0x01, 0x00, 0x35, 0x05, 0x19, 0x00, 0x03, 0x08, 0x08,
+        ];
+        assert_eq!(scan_rfcomm_channel(&blob), Some(8));
+    }
+
+    #[test]
+    fn services_default_is_nothing_at_all() {
+        let s = Services::default();
+        assert_eq!(s.iap2, None);
+        assert_eq!(s.aawg, None);
+        assert_eq!(s.hfp_ag, None);
+        assert_eq!(s.hfp_ag_features, None);
+        assert_eq!(s.hsp_ag, None);
+        assert!(!s.has_audio_gateway());
+    }
+
+    #[test]
+    fn has_audio_gateway_is_either_gateway() {
+        assert!(Services { hfp_ag: Some(4), ..Services::default() }.has_audio_gateway());
+        assert!(Services { hsp_ag: Some(3), ..Services::default() }.has_audio_gateway());
+        // an iAP2 or AAWG hit alone is NOT an audio gateway
+        assert!(!Services { iap2: Some(1), aawg: Some(8), ..Services::default() }.has_audio_gateway());
+    }
+
+    /// The 16-bit search pattern, for the two gateway UUIDs. Same `build_ssa_request` tail as the
+    /// 128-bit ones; only the UUID element differs, and getting its length byte wrong yields a
+    /// pattern the phone answers with nothing while looking perfectly plausible in a log.
+    #[test]
+    fn ssa_request_has_the_uuid16_pattern_and_range() {
+        for (uuid, bytes) in [(0x111Fu16, [0x11, 0x1f]), (0x1112, [0x11, 0x12])] {
+            let req = build_ssa_request(&search_pattern_uuid16(uuid), &[0x00]);
+            assert_eq!(&req[0..3], &[0x35, 0x03, 0x19]);
+            assert_eq!(&req[3..5], &bytes);
+            assert_eq!(&req[5..7], &[0xff, 0xff]);
+            assert_eq!(&req[7..14], &[0x35, 0x05, 0x0a, 0x00, 0x00, 0xff, 0xff]);
+            assert_eq!(req[14], 0x00);
+        }
+    }
+
+    /// We search for the GATEWAY UUIDs (`0x111F`, `0x1112`), never the accessory-side ones
+    /// (`0x111E`, `0x1108`) — those are what WE advertise. Searching the wrong side of the pair
+    /// returns an empty list from a phone and looks identical to "no HFP".
+    #[test]
+    fn the_gateway_searches_use_the_gateway_uuids() {
+        assert_eq!(search_pattern_uuid16(0x111F)[3..], [0x11, 0x1f]);
+        assert_eq!(search_pattern_uuid16(0x1112)[3..], [0x11, 0x12]);
+        assert_eq!(bt_common::sdp_record::UUID16_HANDSFREE_AG, 0x111F);
+        assert_eq!(bt_common::sdp_record::UUID16_HEADSET_AG, 0x1112);
+        assert_ne!(bt_common::sdp_record::UUID16_HANDSFREE, 0x111F);
+        assert_ne!(bt_common::sdp_record::UUID16_HEADSET, 0x1112);
+    }
+
+    /// The bench Pixel's own HFP AG record, as our browse read it: RFCOMM channel 4 and
+    /// `SupportedFeatures` — the stock box logged `SDP: Supported features: 12f` for the same
+    /// phone, which is the value pinned here.
+    #[test]
+    fn the_ag_record_yields_its_channel_and_supported_features() {
+        #[rustfmt::skip]
+        let blob = [
+            0x35u8, 0x1a,
+            0x09, 0x00, 0x04, 0x35, 0x0c,
+                0x35, 0x03, 0x19, 0x01, 0x00,
+                0x35, 0x05, 0x19, 0x00, 0x03, 0x08, 0x04,
+            0x09, 0x03, 0x11, 0x09, 0x01, 0x2f,
+        ];
+        assert_eq!(scan_rfcomm_channel(&blob), Some(4));
+        assert_eq!(scan_hfp_supported_features(&blob), Some(0x012f));
+    }
+
+    /// A record with no `0x0311` must read as "unknown", never as zero — a zero bitmap would say
+    /// the AG supports nothing, and `hfp_hf` would skip `AT+CHLD=?` on the strength of it.
+    #[test]
+    fn a_record_without_supported_features_reads_as_none() {
+        let blob = [0x35u8, 0x05, 0x19, 0x00, 0x03, 0x08, 0x03];
+        assert_eq!(scan_hfp_supported_features(&blob), None);
+        assert_eq!(scan_rfcomm_channel(&blob), Some(3));
+    }
+
+    /// The empty attribute list the bench Pixel actually returns for the AA-wireless UUID
+    /// (`2 bytes: 3500`). It must scan as "no channel" rather than tripping the byte search.
+    #[test]
+    fn an_empty_attribute_list_yields_no_channel() {
+        assert_eq!(scan_rfcomm_channel(&[0x35, 0x00]), None);
+        assert_eq!(scan_hfp_supported_features(&[0x35, 0x00]), None);
     }
 
     #[test]

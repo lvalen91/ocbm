@@ -10,6 +10,12 @@
 //!   [SOP1=FF][SOP2=5A][len BE16][ctl][seq][ack][sess][hdr_cks]   (9-byte header)
 //!   [payload...][payload_cks]                                     (only when len > 9)
 //! `len` is the whole packet length; a bare ACK is header-only (len=9) and does NOT consume a seq.
+//!
+//! NO ACCESSORY-SIDE RETRANSMISSION: this module tracks `peer_seq` and builds `ack` fields but never
+//! queues sent packets, inspects `rx.ack`, or retransmits on our own direction — fire-and-forget,
+//! device-proven on all three current carriers (USB char device, AirPlay tunnel, RFCOMM). If a sent
+//! packet is lost, the caller's state machine stalls until its own timeout/retry budget fires; see
+//! the callers' `Action::RetryIdentify`/handshake-budget handling for that layer.
 
 pub const SOP1: u8 = 0xFF;
 pub const SOP2: u8 = 0x5A;

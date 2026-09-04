@@ -41,9 +41,11 @@ echo "built  target/armv7-unknown-linux-musleabihf/release/carplay-wireless  ($(
 cargo zigbuild --target armv7-unknown-linux-musleabihf --release -p rx-connect
 echo "built  target/armv7-unknown-linux-musleabihf/release/rx-connect  ($(wc -c < target/armv7-unknown-linux-musleabihf/release/rx-connect) bytes, armv7 static)"
 
-# aa-bridge (Android Auto AOAP pump, docs/host/02_ANDROID_AUTO.md) — shipped box binary: tools/ocbm_install.sh installs
+# aa-bridge (Android Auto AOAP pump, docs/androidauto/00_ARCHITECTURE.md) — shipped box binary: tools/ocbm_install.sh installs
 # $ARM/aa-bridge to /usr/sbin/aa-bridge, so it has to be built here or the install line finds nothing.
 cargo zigbuild --target armv7-unknown-linux-musleabihf --release -p aa-bridge
+# NOTE: no aa-wireless line. Wireless Android Auto is a LIBRARY linked into carplay-wireless, not a
+# daemon of its own — see ccpa/aa-wireless/src/lib.rs. It builds as part of that binary.
 echo "built  target/armv7-unknown-linux-musleabihf/release/aa-bridge  ($(wc -c < target/armv7-unknown-linux-musleabihf/release/aa-bridge) bytes, armv7 static)"
 
 # iap_role_switch (phone-side 0x51 USB host-role switch helper) — static armv7 C, built with zig cc.

@@ -322,16 +322,39 @@ fn serve(sock: TcpStream, activity: &Activity) -> io::Result<()> {
     let _ = sock.set_nodelay(true);
 
     loop {
+        // Wait for the first byte WITHOUT the chip guard, then take the guard, then read the frame.
+        // Reading the frame first and locking afterwards left a gap in which the watchdog could take
+        // the guard and `exit()` between a request being parsed and its answer — the client saw EOF
+        // on a request the daemon had already read. Blocking on the guard instead of on the socket is
+        // not an option either: `IDLE_FRAME_WAIT` is 300 s and the watchdog treats a held guard as a
+        // live transaction, so a parked connection would defer the idle exit for five minutes.
+        // `peek` does not consume, so `read_frame` below still sees a whole frame.
+        sock.set_read_timeout(Some(IDLE_FRAME_WAIT))?;
+        match sock.peek(&mut [0u8; 1]) {
+            Ok(0) => return Ok(()), // clean close between requests
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
+            Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {
+                eprintln!("[mfid] frame deadline exceeded — dropping a stalled peer");
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        }
+        // Held across the read of the rest of the frame, the chip call AND the response write, so a
+        // shutdown can never land between a request the daemon has parsed and its answer, nor
+        // between a signature the chip has already computed and its delivery to the client.
+        let guard = activity.lock_chip();
         let mut reader = DeadlineReader {
             sock: &sock,
-            deadline: Instant::now() + IDLE_FRAME_WAIT,
-            started: false,
+            // The first byte has already arrived, so this is the tight body deadline, not the
+            // generous inter-request wait.
+            deadline: Instant::now() + FRAME_BODY_TIMEOUT,
+            started: true,
         };
         let (code, payload) = match read_frame(&mut reader) {
             Ok(frame) => frame,
-            // A client that closed cleanly is the normal way a connection ends. Note a peer that
-            // closes MID-frame is indistinguishable from this, and is logged the same way — the
-            // connection is torn down either way and no partial request is ever acted on.
+            // A peer that closes MID-frame. The clean-close case is caught by the `peek` above; both
+            // tear the connection down and no partial request is ever acted on.
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
             // A deadline expiry arrives either as our own TimedOut or, when SO_RCVTIMEO fires
             // first, as the platform's WouldBlock/EAGAIN. Both mean "this peer stalled" — say so,
@@ -344,9 +367,6 @@ fn serve(sock: TcpStream, activity: &Activity) -> io::Result<()> {
         };
         activity.touch();
 
-        // Held across the chip call AND the response write, so a shutdown can never land between a
-        // signature the chip has already computed and its delivery to the client.
-        let guard = activity.lock_chip();
         let (status, response) = match Op::from_u8(code) {
             Some(op) => handle_request(op, &payload),
             None => {

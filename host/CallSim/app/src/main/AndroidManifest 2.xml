@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Telecom self-managed ConnectionService (normal permission, no grant needed). -->
+    <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
+    <!-- Runtime permissions: grant with `adb shell pm grant` (see README). -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <!-- Only for the optional wav-path override (reading an adb-pushed file). -->
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <!-- Foreground service for the ongoing call (phoneCall) and the uplink recorder (microphone). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <!-- Incoming-call full-screen notification (Android 14+ grants this to call apps). -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+
+    <application
+        android:name=".CallSimApp"
+        android:label="CallSim"
+        android:icon="@android:drawable/sym_action_call"
+        android:allowBackup="false">
+        <meta-data android:name="com.google.android.gms.car.application" android:resource="@xml/automotive_app_desc" />
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Bound by Telecom (system_server) for every call. -->
+        <service
+            android:name=".CallSimConnectionService"
+            android:exported="true"
+            android:permission="android.permission.BIND_TELECOM_CONNECTION_SERVICE">
+            <intent-filter>
+                <action android:name="android.telecom.ConnectionService" />
+            </intent-filter>
+        </service>
+
+        <!-- Foreground service carrying the CallStyle notification while a call exists. -->
+        <service
+            android:name=".CallFgService"
+            android:exported="false"
+            android:foregroundServiceType="phoneCall|microphone" />
+
+        <!-- adb entry point. Exported on purpose (test tool); target it explicitly with
+             the component (see README) so it is an explicit broadcast. -->
+        <receiver
+            android:name=".AdbReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.carlink.callsim.INCOMING" />
+                <action android:name="com.carlink.callsim.OUTGOING" />
+                <action android:name="com.carlink.callsim.ANSWER" />
+                <action android:name="com.carlink.callsim.REJECT" />
+                <action android:name="com.carlink.callsim.HANGUP" />
+                <action android:name="com.carlink.callsim.HOLD" />
+                <action android:name="com.carlink.callsim.UNHOLD" />
+                <action android:name="com.carlink.callsim.ROUTE" />
+                <action android:name="com.carlink.callsim.STATUS" />
+                <action android:name="com.carlink.callsim.NOTIFY" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

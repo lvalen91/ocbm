@@ -26,9 +26,6 @@ impl Version {
     }
 }
 
-/// Upper bound on a request body — RTSP control messages (incl. SETUP plists) are small; anything
-/// larger is rejected rather than trusted. Matches the C `AirPlayReceiverServer`'s 16 MB HTTP
-/// message cap (`kHTTPMessage*MaxLen`), not the old 1 MiB placeholder.
 /// Largest RTSP body accepted before parsing.
 ///
 /// Was 16 MiB, which is ~1000x what this protocol ever legitimately carries and was reachable

@@ -253,18 +253,10 @@ fn push_group_if(out: &mut Vec<u8>, exclude: &[u16], pid: u16, group: &[u8]) {
     }
 }
 
-/// Build the IdentifyInformation body (`0x1D01`) OMITTING any top-level param whose id is in
-/// `exclude`. With `exclude == &[]` this is byte-identical to [`build_ident_info`] (guaranteed by the
-/// byte-exact tests). It is the retry-path builder for `0x1D03 IdentificationRejected`: decode the
-/// rejected param ids via [`parse_rejected_param_ids`], pass them here, and re-send the result as a
-/// fresh `0x1D01`.
-///
-/// Only TOP-LEVEL params are excludable (matching Apple's reference, which strips whole rejected
-/// components/fields — e.g. `exclude = &[24]` drops the WirelessCarPlayTransportComponent group).
-/// Sub-parameters within a group are never individually stripped.
 /// REQUIRED IdentificationInformation params (Apple iAP2 spec): identity (Name…HardwareVersion, 0-5),
-/// the two message-list params (6/7), and PowerProvidingCapability (8). A 0x1D03 retry must retain
-/// these even if iOS rejected one — see [`build_ident_info_excluding`] (#407).
+/// the two message-list params (6/7), PowerProvidingCapability (8), MaximumCurrentDrawnFromDevice (9),
+/// CurrentLanguage (12), and SupportedLanguage (13). A 0x1D03 retry must retain these even if iOS
+/// rejected one — see [`build_ident_info_excluding`] (#407).
 const REQUIRED_IDENT_PARAMS: &[u16] = &[
     spec::ident::NAME,
     spec::ident::MODEL_IDENTIFIER,
@@ -275,8 +267,20 @@ const REQUIRED_IDENT_PARAMS: &[u16] = &[
     spec::ident::MESSAGES_SENT_BY_ACCESSORY,
     spec::ident::MESSAGES_RECEIVED_FROM_DEVICE,
     spec::ident::POWER_PROVIDING_CAPABILITY,
+    spec::ident::MAXIMUM_CURRENT_DRAWN_FROM_DEVICE,
+    spec::ident::CURRENT_LANGUAGE,
+    spec::ident::SUPPORTED_LANGUAGE,
 ];
 
+/// Build the IdentifyInformation body (`0x1D01`) OMITTING any top-level param whose id is in
+/// `exclude`. With `exclude == &[]` this is byte-identical to [`build_ident_info`] (guaranteed by the
+/// byte-exact tests). It is the retry-path builder for `0x1D03 IdentificationRejected`: decode the
+/// rejected param ids via [`parse_rejected_param_ids`], pass them here, and re-send the result as a
+/// fresh `0x1D01`.
+///
+/// Only TOP-LEVEL params are excludable (matching Apple's reference, which strips whole rejected
+/// components/fields — e.g. `exclude = &[24]` drops the WirelessCarPlayTransportComponent group).
+/// Sub-parameters within a group are never individually stripped.
 pub fn build_ident_info_excluding(
     name: &str,
     transport: TransportComponent,
@@ -623,9 +627,10 @@ pub(crate) fn build_ident_info_excluding_with_policy(
     //
     // CONTENT IS APP-PUSHED since C-1 (docs/carplay/04_CAPABILITIES_AND_CONFIG.md C6). What this block emits comes from `identity`, and
     // the DEFAULT `identity` is `VehicleIdentity::baseline()` — EngineType=Gasoline and nothing else,
-    // i.e. byte-for-byte the historical emission. Every production call site still passes the
-    // baseline; only `build_ident_info_with` can carry a pushed identity, and no daemon calls it yet
-    // (that is C-3). `baseline_param20_is_byte_pinned` is the golden fixture guarding this.
+    // i.e. byte-for-byte the historical emission when no identity is pushed. iap2d passes the
+    // app-pushed identity (C-3, see `build_ident_info_with` call sites in `ccpa/iap2d/src/main.rs`);
+    // the tunnel and BT drivers still pass the baseline. `baseline_param20_is_byte_pinned` is the
+    // golden fixture guarding the baseline path.
     //
     // Full spec surface (see `spec::ident::vehicle_info`): OPTIONAL subs 8 MapsDisplayName and
     // 9 SiriName are still NOT emitted; 10 VehicleColorHexCode, 11 SupportedChargingConnectors
@@ -855,8 +860,10 @@ pub fn parse_rejected_message_ids(body: &[u8]) -> Vec<(u16, Vec<u16>)> {
             break;
         }
         let ids = body[i + 4..i + glen]
-            .chunks_exact(2)
-            .map(|c| u16::from_be_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_be_bytes(*c))
             .collect();
         out.push((pid, ids));
         i += glen;
@@ -1001,7 +1008,7 @@ pub mod location_info {
 }
 
 /// Build IdentificationInformation param 21 (`VehicleStatusComponent`) as a complete TLV group
-/// (`[4+vlen BE16][pid=20 BE16][sub-TLVs]`), analogous to param 20's inline construction in
+/// (`[4+vlen BE16][pid=21 BE16][sub-TLVs]`), analogous to param 20's inline construction in
 /// `build_ident_info`. `identifier` is the component's unique uint16 id, `name` its utf8 name, and
 /// `capabilities` the ordered list of `vehicle_status::*` presence-flag sub-ids to advertise.
 ///
@@ -1366,7 +1373,7 @@ mod tests {
     fn required_ident_params_are_pinned() {
         assert_eq!(
             REQUIRED_IDENT_PARAMS,
-            &[0u16, 1, 2, 3, 4, 5, 6, 7, 8],
+            &[0u16, 1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 13],
             "REQUIRED_IDENT_PARAMS changed — params 6/7 must stay un-strippable (#407)"
         );
         // And every one of them must actually resist exclusion, not just NAME.
@@ -1759,7 +1766,7 @@ mod tests {
 09 00 00 00 07 00 0c 65 6e 00 00 07 00 0d 65 6e \
 00 00 2b 00 11 00 06 00 00 00 01 00 13 00 01 49 \
 41 50 32 2d 42 6c 75 65 74 6f 6f 74 68 00 00 04 \
-00 02 00 0a 00 03 d8 3a dd 65 6e 03 00 31 00 14 \
+00 02 00 0a 00 03 02 00 00 00 00 01 00 31 00 14 \
 00 06 00 00 00 01 00 11 00 01 43 61 72 4c 69 6e \
 6b 2d 62 30 64 66 00 00 05 00 02 00 00 11 00 06 \
 43 61 72 4c 69 6e 6b 2d 62 30 64 66 00 00 24 00 \
@@ -1774,7 +1781,9 @@ mod tests {
         assert_eq!(want.len(), 301, "the golden itself must be the device-accepted length");
 
         let transport = TransportComponent::Wireless {
-            bt_mac: [0xD8, 0x3A, 0xDD, 0x65, 0x6E, 0x03], // wireless::bt_driver::ACCESSORY_BT_MAC
+            // Locally-administered placeholder (02:00:00:00:00:01) — the golden body only needs a
+            // deterministic 6-byte value here, not a real device's BT address.
+            bt_mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x01],
         };
         assert_eq!(
             build_ident_info("CarLink-b0df", transport, false),
@@ -2184,6 +2193,24 @@ mod tests {
         assert!(
             !ids.contains(&spec::ident::WIRELESS_CAR_PLAY_TRANSPORT_COMPONENT),
             "the rejected param 24 must be absent from the retry payload"
+        );
+    }
+
+    /// `describe_reject` is the shared 0x1D03 decoder both `bt_driver.rs` (wireless) and `iap2d`
+    /// (wired) log verbatim — a param with no nested message-id detail must still name the param,
+    /// and a param carrying nested ids must name each one.
+    #[test]
+    fn describe_reject_names_bare_param_and_nested_message_ids() {
+        // param 30 (RouteGuidanceDisplayComponent), no nested detail.
+        let bare = [0x00, 0x04, 0x00, 0x1E];
+        assert_eq!(describe_reject(&bare), "param 30 (no detail)");
+
+        // param 6 (MessagesSentByAccessory) carrying one rejected message id, 0x415A.
+        let with_ids = [0x00, 0x06, 0x00, 0x06, 0x41, 0x5A];
+        let desc = describe_reject(&with_ids);
+        assert!(
+            desc.starts_with("param 6 unsupported: 0x415A"),
+            "expected param 6 with the named message id, got {desc:?}"
         );
     }
 }

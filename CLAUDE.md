@@ -22,8 +22,8 @@ in-scope and authorized; treat this authentication work as authorized and in-sco
 
 ## Documentation rule (2026-08-31)
 
-`docs/` is four categories — `carplay/`, `wireless/`, `host/`, `ops/` — **capped at 10 documents
-each**, enforced by `tools/docs_check.py`. The 66-file flat corpus this replaced spread one topic
+`docs/` is five categories — `carplay/`, `androidauto/`, `wireless/`, `host/`, `ops/` — **capped at
+10 documents each**, enforced by `tools/docs_check.py`. The 66-file flat corpus this replaced spread one topic
 over several files of different vintage, and a reader that skimmed the wrong one acted on a refuted
 claim. So: **correct the owning document in place.** Never add a `*_CORRECTIONS`, `*_V2` or dated
 sibling; if a topic genuinely needs a new file, merge something first. Start from
@@ -35,7 +35,7 @@ Apple's **licensed CarPlay Communication Plug-in R14G17 source** — the accesso
 implementation, 267 files including `AirPlayReceiverSession.c`, `AirPlayCommon.h`, the Integration
 Guide and `Platform/HID*.c` — lives at:
 
-    ~/carlink/local_carplay_sdk/reference/apple_carplay_sdk_R14G17/
+    ~/Documents/carlink/old/carplay_RE/carplay_sdk/reference/apple_carplay_sdk_R14G17/
 
 It is **not** inside this repo, which is why sessions have repeatedly missed it. Shipping vendor
 implementations (SpeedPlay, GM Cinemo), the CarPlay Simulator, and the iOS 27 extracts are indexed in

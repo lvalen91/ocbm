@@ -78,15 +78,6 @@ fn write_line_bounded(s: &mut TcpStream, line: &[u8]) -> bool {
     s.flush().is_ok()
 }
 
-/// Advertised display geometry, for scaling normalized touch → absolute HID coordinates (must match
-/// the `/info` HID touchscreen descriptor's logical max). Set from the receiver's DeviceConfig.
-static DISPLAY_WH: Mutex<(u16, u16)> = Mutex::new((1920, 720));
-
-/// Set the display geometry used to scale touch coordinates.
-pub fn set_display(width: u16, height: u16) {
-    *crate::plock(&DISPLAY_WH) = (width, height);
-}
-
 /// How the mic PCM is framed for the wire — transport-determined at SETUP.
 enum UplinkCodec {
     /// WIRED: raw big-endian PCM, packetized in fixed `frame` sample counts (no encoder).
@@ -114,7 +105,9 @@ struct UplinkState {
     seq: u16,
     ts: u32,
     nonce: u64,
-    sent: u64, // observability: uplink packets sent
+    sent: u64, // observability: uplink packets actually delivered to the socket
+    /// One-shot latch so a broken `dst` logs once instead of per 20 ms packet.
+    send_failed: bool,
 }
 
 impl UplinkState {
@@ -179,10 +172,23 @@ impl UplinkState {
         let mut aad = [0u8; 8];
         aad.copy_from_slice(&hdr[4..12]); // ts‖ssrc — same AAD as the downlink for modern iOS
         let pkt = encrypt_audio_aad(&self.key, &hdr, au, &nonce8, &aad);
-        let _ = self.sock.send_to(&pkt, self.dst);
+        // The sequence and nonce advance on the ATTEMPT -- the counter-nonce is burned the moment the
+        // packet is encrypted and must never be reused, exactly as `datastream::send` argues.
         self.seq = self.seq.wrapping_add(1);
         self.nonce = self.nonce.wrapping_add(1);
-        self.sent += 1;
+        // `sent`, though, counts DELIVERIES: it feeds the "sent N packets" line, and a wrong `dst` or
+        // a closed socket used to look identical there to a healthy uplink. The first error is logged
+        // once so a silent uplink is diagnosable without a packet capture.
+        match self.sock.send_to(&pkt, self.dst) {
+            Ok(_) => self.sent += 1,
+            Err(e) => {
+                if !self.send_failed {
+                    self.send_failed = true;
+                    eprintln!("[uplink] send to {} failed: {e} (further errors not logged)", self.dst);
+                }
+                return;
+            }
+        }
         if self.sent == 1 || self.sent.is_multiple_of(100) {
             eprintln!("[uplink] sent {} packets → {} (last AU {} B)", self.sent, self.dst, au.len());
         }
@@ -205,7 +211,10 @@ pub fn configure(
         AudioCodec::Pcm => {
             // ~20 ms packets (320 samples @ 16 kHz mono). ch is ~always 1 for voice input; scale so a
             // stereo frame still lands on ~20 ms of wall-clock.
-            let frame = ((sample_rate as usize / 50) * channels as usize).max(1);
+            // `.max(1)` on the WHOLE product turned either degenerate input -- channels == 0, or a
+            // sample rate under 50 -- into one-sample packets, i.e. one encrypted datagram per
+            // sample. Clamp each factor instead, matching `push_pcm`'s own `self.channels.max(1)`.
+            let frame = (sample_rate as usize / 50).max(1) * (channels.max(1)) as usize;
             (UplinkCodec::Pcm { frame }, format!("PCM BE, {frame}-sample packets"))
         }
         #[cfg(feature = "mic-uplink-eld")]
@@ -249,6 +258,7 @@ pub fn configure(
         ts: 0,
         nonce: 0,
         sent: 0,
+        send_failed: false,
     });
     eprintln!("[uplink] mic → iPhone {dst} ({sample_rate}Hz {channels}ch {desc}) — armed");
     // Tell the app to start capturing at the negotiated format (the mic source tracks what iOS picked).
@@ -335,41 +345,13 @@ fn read_control(stream: TcpStream) {
             if let Some(state) = crate::plock(&UPLINK).as_mut() {
                 state.push_pcm(&samples);
             }
-        } else if let Some(rest) = line.trim_end().strip_prefix("touch ") {
-            handle_touch(rest); // touch → HID touchscreen report over the encrypted event channel
         }
-        // `cmd …` (home/back/siri): a separate follow-up over the same event channel.
+        // `touch`/`cmd …` lines: not this seam's concern (see doc comment above), consumed and ignored.
     }
-    // Drop this peer's write-half from the back-channel registry (compare by local+peer addr).
-    if let Ok(la) = r.get_ref().local_addr() {
-        crate::plock(&CONTROL_TX)
-            .retain(|s| s.local_addr().ok() != Some(la) || s.peer_addr().map(|a| a.to_string()).unwrap_or_default() != peer);
-    }
+    // No explicit prune of this peer's write-half: every accepted socket shares the listener's
+    // local address, so the comparison keyed on the FORMATTED peer alone -- and `peer_addr()`
+    // failing at connect made that an empty string, which matches any other entry that also failed.
+    // `notify_control`'s `retain_mut` already drops a write-half whose write fails, and a closed
+    // peer fails immediately with EPIPE rather than stalling.
     eprintln!("[uplink] control-in {peer} closed");
-}
-
-/// Parse a control-in `touch <phase> <nx> <ny> <id>` line (carlink sends normalized 0..1 coords) and
-/// send a HID touchscreen report to the iPhone over the event channel. `down`/`move` = finger down
-/// (button 1), `up` = release (button 0). Mirrors the C ControlInput::Touch →
-/// AirPlayReceiverSessionSendHIDReport (touchscreen device UID 1).
-fn handle_touch(rest: &str) {
-    use std::sync::atomic::{Ordering};
-    use portable_atomic::{AtomicU64};
-    static N: AtomicU64 = AtomicU64::new(0);
-    let mut it = rest.split_whitespace();
-    let phase = it.next().unwrap_or("");
-    let nx: f64 = it.next().and_then(|v| v.parse().ok()).unwrap_or(0.0);
-    let ny: f64 = it.next().and_then(|v| v.parse().ok()).unwrap_or(0.0);
-    let buttons: u8 = if phase == "up" { 0 } else { 1 };
-    let (w, h) = *crate::plock(&DISPLAY_WH);
-    let report = crate::hid::touch_report_normalized(buttons, nx, ny, w, h);
-    let sent = crate::events::send_hid_report(1, &report);
-    let c = N.fetch_add(1, Ordering::Relaxed) + 1;
-    if c == 1 || phase != "move" {
-        eprintln!(
-            "[touch] {c}: {phase} nx={nx:.3} ny={ny:.3} → x={} y={} (event-sent={sent})",
-            (nx.clamp(0.0, 1.0) * w as f64) as u16,
-            (ny.clamp(0.0, 1.0) * h as f64) as u16,
-        );
-    }
 }

@@ -1,0 +1,28 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# VERIFICATION NOTE: these logs were produced by ccpa/airplayd, which for the
+# on-hardware validation REUSES ANOTHER PROJECT’S CarPlay receiver as the harness —
+# ncm_carplayd/receiver_core (its proven ControlServer for pair-setup/verify + auth-setup,
+# and, for the full-session capture, its AvSession for SETUP/RECORD/stream handling).
+# This proves the session works on the adapter; it is NOT the committed final design,
+# which forwards the ENCRYPTED A/V + the session key over OCBM to the host app (no on-box
+# decode/IPC). MFi is our own LocalMfiSigner on the genuine local i2c chip. See ./README.md.
+# ─────────────────────────────────────────────────────────────────────────────
+
+[csa] IDENTIFIED — bringing up ncm0, starting airplayd + rx_connect
+[airplayd] pairing server on [::]:5000 · device 'CarLink' (AA:BB:CC:DD:EE:01) · setup 3939
+[airplayd] ── control connection from [fe80::1c76:d88:9cb3:9036%9]:60748 ──
+[receiver] POST /pair-verify (plain, 37 B body)
+[receiver] POST /pair-setup (plain, 6 B body)
+[receiver] POST /pair-setup (plain, 457 B body)
+[receiver] POST /pair-setup (plain, 159 B body)
+[airplayd] pair-setup: peer saved (36-byte id)
+[receiver] POST /pair-verify (plain, 37 B body)
+[receiver] POST /pair-verify (plain, 125 B body)
+[receiver] pair-verify OK → control channel encrypted
+[receiver] POST /auth-setup (enc, 33 B body)
+[csa] airplayd=3241 rx_connect=3242 iap2d_holding=1
+[csa] ncm0 inet6 addr: fe80::c08e:30ff:fe52:e9a3/64
+[csa] armed — waiting for the iPhone to open AirPlay. tail -f /tmp/airplayd.log for PAIR-VERIFY.
+[receiver] auth-setup (MFi-SAP) OK → 1113 B M2
+[receiver] SETUP /830805269710260531 (enc, 764 B body)
+[airplayd] *** PAIR-VERIFY COMPLETE — session secret derived (first8=482e8fb2d000d3d1) ***

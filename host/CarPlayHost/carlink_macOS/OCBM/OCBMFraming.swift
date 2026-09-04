@@ -37,6 +37,70 @@ enum OCBM {
     static let chMic: UInt16 = 0x0031     // host->box mic uplink PCM (S16LE @ negotiated rate); box RTP-uplinks to iPhone
     static let chMgmt: UInt16 = 0x0040    // box management (the "CCPA" tab): request/response, see mgmt* below
     static let chRtsp: UInt16 = 0x0041    // app-driven SETUP control relay (plan P3) — box<->host RTSP/SETUP seam
+    static let chLog: UInt16 = 0x0042     // box->host: the box's universal log stream (/tmp/box.log), see LogEntry below
+
+    // ── CH_LOG (0x0042) — box's universal log stream ────────────────────────────────────────────
+    // Frame payload = one or more entries: [source u8][flags u8][seq u16 LE][unix_ms u64 LE][len u16
+    // LE][text: len bytes]. `source` 0 = /tmp/box.log (lines carry their own [ocbmd]/[airplayd]/…
+    // prefixes), 255 = tailer-internal (host-synthesized markers, e.g. a seq-gap notice, never sent by
+    // the box). `seq` is a per-channel u16 counter, +1 per entry, wrapping — a gap means loss. Armed
+    // host->box by CT_LOG_CTL (below); the box resets to disabled on STOP/host-gone, so a host must
+    // re-send it after every fresh SUBSCRIBE.
+    // `source` ids (spec extension, box side `LOG_SRC_*` in `ocbm-proto` — reconciled here if the
+    // box's final numbering differs; this table is the ONLY place that maps id -> name host-side).
+    // 0 = /tmp/box.log (universal — lines carry their own [ocbmd]/[airplayd]/… prefixes); 1..8 = the
+    // supervisor's per-daemon logs; 255 = tailer-internal (host-synthesized markers only).
+    static let logSourceBox: UInt8 = 0
+    static let logSourceAirplayd: UInt8 = 1
+    static let logSourceAirplayWl: UInt8 = 2
+    static let logSourceIap2d: UInt8 = 3
+    static let logSourceAaBridge: UInt8 = 4
+    static let logSourceRxConnect: UInt8 = 5
+    static let logSourceBt: UInt8 = 6
+    static let logSourceRadioApDhcp: UInt8 = 7
+    static let logSourceRadioBtAttach: UInt8 = 8
+    static let logSourceRxConnectWl: UInt8 = 9
+    static let logSourceWl: UInt8 = 10
+    static let logSourceTailer: UInt8 = 255
+    static let logFlagDropped: UInt8 = 0x01   // len == 4; text is a u32 LE count of lines the box dropped
+    static let logFlagTruncated: UInt8 = 0x02 // the line was clipped at 1024 B box-side
+    static let logFlagBackfill: UInt8 = 0x04  // replayed from existing box.log at enable time, not live
+
+    /// Human name for a CH_LOG `source` id — the file basename minus `.log`. Unknown ids (a numbering
+    /// the box adds later, before this table is reconciled) fall back to `"src<id>"` rather than being
+    /// dropped, so a new source is still visible instead of vanishing from the Box Log window.
+    static func logSourceName(_ id: UInt8) -> String {
+        switch id {
+        case logSourceBox: return "box"
+        case logSourceAirplayd: return "airplayd"
+        case logSourceAirplayWl: return "airplayd_wl"
+        case logSourceIap2d: return "iap2d"
+        case logSourceAaBridge: return "aa-bridge"
+        case logSourceRxConnect: return "rx-connect"
+        case logSourceBt: return "bt"
+        case logSourceRadioApDhcp: return "radio_ap_dhcp"
+        case logSourceRadioBtAttach: return "radio_bt_attach"
+        case logSourceRxConnectWl: return "rx-connect_wl"
+        case logSourceWl: return "wl"
+        case logSourceTailer: return "internal"
+        default: return "src\(id)"
+        }
+    }
+
+    /// CT_LOG_CTL (0x1B) on CH_CTRL, host->box: [CT_LOG_CTL][enabled u8][cap_kb u16 LE]. cap 0 = box
+    /// default (256 KB). On enable the box streams from offset 0 (everything since boot) then follows;
+    /// disable stops.
+    static let ctLogCtl: UInt8 = 0x1B
+    /// CT_SETTIME (0x05) host->box: [CT_SETTIME][unix_seconds u64 LE]. The CCPA has no RTC battery; every box log
+    /// stamp (read-time and daemon write-time) is bogus until this lands, so it is sent right after each SUBSCRIBE.
+    static let ctSetTime: UInt8 = 0x05
+
+    /// Build the CT_LOG_CTL payload (does not include the CH_CTRL channel wrapper — pass to `send`).
+    static func logCtl(enabled: Bool, capKB: UInt16) -> [UInt8] {
+        var p: [UInt8] = [ctLogCtl, enabled ? 1 : 0, 0, 0]
+        writeLE16(&p, 2, capKB)
+        return p
+    }
 
     // ── App-driven SETUP control-relay constants (plan P3) ──────────────────────────────────────
     // MIRRORED (not imported) from `crates/vendor/receiver/src/relay.rs` — the metadata.rs META_* /
@@ -69,6 +133,7 @@ enum OCBM {
     static let mgmtForgetAll: UInt8 = 0x03
     static let mgmtForgetDevice: UInt8 = 0x04 // + ascii MAC "AA:BB:.."
     static let mgmtRestartWireless: UInt8 = 0x05
+    static let mgmtEnterNCM: UInt8 = 0x06 // box arms /script/ncm_only and reboots into NCM (sticky; return via ssh)
     static let mgmtInfo: UInt8 = 0x81  // + utf8 JSON snapshot
     static let mgmtAck: UInt8 = 0x82   // + [verb u8][status u8]
 
@@ -92,6 +157,7 @@ enum OCBM {
     static let btpIdentifying: UInt8 = 0x04
     static let btpIdentified: UInt8 = 0x05
     static let btpWifiHandoff: UInt8 = 0x06
+    static let btpPairRejected: UInt8 = 0x07
 
     /// CT_BOX_HEALTH (box->host): one bitmask of box-side subsystem liveness.
     /// Read `bhHciPresent` FIRST when Bluetooth looks dead — 0x50 with bit 0 clear is the signature
@@ -109,6 +175,22 @@ enum OCBM {
     static let sevHostGone: UInt8 = 0x02
 
     static let fReplay: UInt8 = 0x04  // replay of a frame the box already sent (dedupe hint)
+    static let fNewSource: UInt8 = 0x08 // first frame from a newly accepted box A/V seam producer — reset reassembly
+
+    // Audio seam v2 markers (`[u32 BE len][SEAM_MAGIC "SEAV"][marker]…`, see OCBMAVDecrypt.drainAudio).
+    // 0x00 SEAM_KEY / 0x01 SEAM_PKT / 0x02 SEAM_FORMAT are parsed as literals in the drain switch; only
+    // the newest one is named here because the AA telephony lane is the first producer outside CarPlay.
+    /// `[0x03][scid 8 LE][payload]` — UNENCRYPTED access unit (no RTP, no key). The box's Android Auto
+    /// telephony lane: HFP/SCO S16LE PCM forwarded verbatim on CH_ALT_AUDIO after a PCM SEAM_FORMAT.
+    static let seamPktPlain: UInt8 = 0x03
+
+    /// SEAM_FORMAT `codec` values. 0 PCM · 1 AAC-LC · 2 AAC-ELD · 3 OPUS ride the wire as literals
+    /// (OCBMAVDecrypt parses the byte, the enum lives in ocbm-proto); only mSBC is named here,
+    /// because it is the one value the HOST has to act on — the payload under it is a compressed
+    /// bitstream this app decodes itself (Audio/MSBCCodec.swift), not something to hand a player.
+    /// `ocbm-proto::SEAM_CODEC_MSBC`. Spelled `Msbc`, not `MSBC`, so tools/proto_check.py's
+    /// camelCase→SCREAMING_SNAKE mapping lands on SEAM_CODEC_MSBC and actually checks the value.
+    static let seamCodecMsbc: UInt8 = 4
 
     // Channels this client does not open, kept for completeness.
     static let chMfi: UInt16 = 0x0001
@@ -224,15 +306,19 @@ enum OCBM {
     static let ctSessionEvent: UInt8 = 0x13
     static let ctUplink: UInt8 = 0x14        // box->host [ctUplink][state u8][rate u32 LE][ch u8] — mic-uplink gate (1=on/0=off)
     static let ctPairingCode: UInt8 = 0x15   // box->host [ctPairingCode][6 ascii digits | empty] — SSP Numeric-Comparison code to show (empty = clear)
+    static let ctPairConfirm: UInt8 = 0x1C   // host->box [ctPairConfirm][accept u8: 1=pair, 0=cancel] — the USER'S
+                                             // answer to the ctPairingCode prompt. SSP Numeric Comparison needs a
+                                             // real yes/no on BOTH devices, so the box waits for this (up to 55 s,
+                                             // inside its 60 s connect hold) instead of auto-accepting.
     static let ctRadio: UInt8 = 0x16         // host->box [ctRadio][0=radios off now | 1=radios on if cfg allows] — docs/carplay/04_CAPABILITIES_AND_CONFIG.md radio gating
-    static let ctProjMode: UInt8 = 0x19      // box->host [ctProjMode][pm*] — WHICH transport owns the box (docs/host/02_ANDROID_AUTO.mde).
+    static let ctProjMode: UInt8 = 0x19      // box->host [ctProjMode][pm*] — WHICH transport owns the box (docs/androidauto/02_ARBITRATION.md).
                                              // Mirrors the box's /tmp/projection_owner arbitration flag; on pmWiredAa the
                                              // app runs its AA head-unit engine over CH_IP instead of the CarPlay decoders.
     static let pmNone: UInt8 = 0x00          // idle — no projection session
     static let pmWiredCp: UInt8 = 0x01       // wired CarPlay
     static let pmWirelessCp: UInt8 = 0x02    // wireless CarPlay
     static let pmWiredAa: UInt8 = 0x03       // wired Android Auto (box aa-bridge AOAP pump)
-    static let pmWirelessAa: UInt8 = 0x04    // reserved — wireless AA (docs/host/02_ANDROID_AUTO.mdf, unbuilt)
+    static let pmWirelessAa: UInt8 = 0x04    // wireless Android Auto (box aa-bridge --wireless TCP pump; device-proven 2026-09-04)
     static let sevHostPresent: UInt8 = 0x01
     static let sevPhonePresent: UInt8 = 0x03 // iPhone on the adapter bus (truthful phone presence)
     static let sevPhoneAbsent: UInt8 = 0x04  // no iPhone on the adapter bus — show "waiting for phone" NOW
@@ -249,6 +335,35 @@ enum OCBM {
         case pmWirelessAa: return "wireless Android Auto"
         default: return "unknown(0x\(String(mode, radix: 16)))"
         }
+    }
+
+    /// Human-readable name for a `btp*` phase (logging only; per docs/carplay/01_OCBM_PROTOCOL.md
+    /// this is advisory — an unrecognised value is reported verbatim, never coerced to IDLE).
+    static func btPhaseName(_ phase: UInt8) -> String {
+        switch phase {
+        case btpIdle: return "IDLE"
+        case btpLinkUp: return "LINK_UP"
+        case btpAuthenticating: return "AUTHENTICATING"
+        case btpAuthenticated: return "AUTHENTICATED"
+        case btpIdentifying: return "IDENTIFYING"
+        case btpIdentified: return "IDENTIFIED"
+        case btpWifiHandoff: return "WIFI_HANDOFF"
+        case btpPairRejected: return "PAIR_REJECTED"
+        default: return "unknown(0x\(String(phase, radix: 16)))"
+        }
+    }
+
+    /// Space-separated names of the SET `bh*` bits in a CT_BOX_HEALTH bitmask (logging only).
+    static func boxHealthNames(_ bits: UInt8) -> String {
+        var out: [String] = []
+        if bits & bhHciPresent != 0 { out.append("hci") }
+        if bits & bhSsp != 0 { out.append("ssp") }
+        if bits & bhIap2d != 0 { out.append("iap2d") }
+        if bits & bhAirplayd != 0 { out.append("airplayd") }
+        if bits & bhCarplayWireless != 0 { out.append("wireless") }
+        if bits & bhWlanAp != 0 { out.append("ap") }
+        if bits & bhRootfsOk != 0 { out.append("rootfs") }
+        return out.isEmpty ? "none" : out.joined(separator: " ")
     }
 
     /// hcheck = XOR of header bytes 0..<11.
@@ -286,6 +401,67 @@ enum OCBM {
     static func readLE32(_ b: [UInt8], _ o: Int) -> UInt32 {
         UInt32(b[o]) | (UInt32(b[o + 1]) << 8) | (UInt32(b[o + 2]) << 16) | (UInt32(b[o + 3]) << 24)
     }
+    static func readLE64(_ b: [UInt8], _ o: Int) -> UInt64 {
+        var v: UInt64 = 0
+        for i in 0..<8 { v |= UInt64(b[o + i]) << (8 * i) }
+        return v
+    }
+}
+
+/// One decoded CH_LOG entry. `source`/`flags` are `OCBM.logSource*`/`OCBM.logFlag*`. `droppedCount` is
+/// non-nil only for a DROPPED marker (`flags & logFlagDropped != 0`); `rawLen` is the wire `len` field
+/// (the encoded byte count of `text`/the dropped-count marker), kept so a caller can account for bytes
+/// consumed without re-deriving it from `text.utf8.count` (which would undercount on invalid UTF-8).
+struct LogEntry: Equatable {
+    let source: UInt8
+    let flags: UInt8
+    let seq: UInt16
+    let unixMs: UInt64
+    let text: String
+    let droppedCount: UInt32?
+    let rawLen: Int
+    /// True ONLY for a HOST-SYNTHESIZED seq-gap marker (never sent by the box, never produced by
+    /// `parseLogEntries`) — `OCBMClient.handleLog` sets this when `seq` jumps, and stamps `source`
+    /// with the SAME source as the entry that revealed the gap, so the marker renders against the
+    /// right per-source log (`[box/<sourceName>] !! seq gap …`) instead of an opaque "internal" tag.
+    var isGapMarker: Bool = false
+
+    var isDropped: Bool { flags & OCBM.logFlagDropped != 0 }
+    var isTruncated: Bool { flags & OCBM.logFlagTruncated != 0 }
+    /// Replayed from `/tmp/box.log`'s existing content at CT_LOG_CTL-enable time, not observed live —
+    /// see `OCBM.logFlagBackfill`. Same "already happened" history on every reconnect, not new events.
+    var isBackfill: Bool { flags & OCBM.logFlagBackfill != 0 }
+}
+
+/// Decode zero or more CH_LOG entries from one frame payload. Pure and bounds-checked: every field is
+/// validated before use, and a malformed/truncated tail simply stops the scan (the valid prefix already
+/// decoded is returned) rather than trapping — mirrors `OCBMReassembler`'s "never trust the wire"
+/// discipline. The caller (`OCBMClient`) is responsible for logging a dropped remainder (throttled).
+func parseLogEntries(_ payload: [UInt8]) -> [LogEntry] {
+    let hdrLen = 14 // source(1) + flags(1) + seq(2) + unix_ms(8) + len(2)
+    var out: [LogEntry] = []
+    var off = 0
+    while off + hdrLen <= payload.count {
+        let source = payload[off]
+        let flags = payload[off + 1]
+        let seq = OCBM.readLE16(payload, off + 2)
+        let unixMs = OCBM.readLE64(payload, off + 4)
+        let len = Int(OCBM.readLE16(payload, off + 12))
+        let textStart = off + hdrLen
+        guard textStart + len <= payload.count else { break } // truncated tail — drop the remainder
+        let bytes = len > 0 ? Array(payload[textStart..<textStart + len]) : []
+        off = textStart + len
+        if flags & OCBM.logFlagDropped != 0 && len == 4 {
+            let count = OCBM.readLE32(bytes, 0)
+            out.append(LogEntry(source: source, flags: flags, seq: seq, unixMs: unixMs,
+                                 text: "", droppedCount: count, rawLen: len))
+        } else {
+            let text = String(bytes: bytes, encoding: .utf8) ?? ""
+            out.append(LogEntry(source: source, flags: flags, seq: seq, unixMs: unixMs,
+                                 text: text, droppedCount: nil, rawLen: len))
+        }
+    }
+    return out
 }
 
 /// A parsed OCBM frame handed to the session layer.

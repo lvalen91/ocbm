@@ -22,7 +22,7 @@ use rtsp::control::{derive_event_keys, ControlChannel};
 static EVENT: Mutex<Option<EventSender>> = Mutex::new(None);
 
 /// Does the receiver currently hold MainScreen focus (#47)? Set true when we take the screen at RECORD;
-/// updated from inbound `modesChanged` on the event channel. Lets a consumer (host status / watchdog)
+/// updated from inbound `modesChanged` on either channel. Lets a consumer (host status / watchdog)
 /// distinguish a deliberate iOS focus-hand-off (a phone call/Siri took the screen → the screen going
 /// quiet is EXPECTED) from a transport stall (link actually broke) — the two look identical from
 /// frame-flow alone. Default true (we own the screen post-RECORD until told otherwise).
@@ -211,19 +211,7 @@ fn handle_inbound_event(pt: &[u8]) {
             }
         }
     } else if ty == "modesChanged" {
-        // `modesChanged` carries the current resource-ownership snapshot. iOS grants us MainScreen while
-        // CarPlay is foregrounded and revokes it when something else (a call/Siri/native UI) takes over.
-        // Best-effort ownership read: the screen is ours unless the message explicitly shows MainScreen
-        // (resourceID 1) taken by a non-accessory owner. Kept conservative so an unrecognized shape
-        // defaults to "still focused" and never spuriously reports focus-loss.
-        let owned = modes_screen_owned(&d);
-        let prev = SCREEN_FOCUSED.swap(owned, Ordering::AcqRel);
-        if owned != prev {
-            eprintln!("[events] modesChanged: MainScreen focus {}", if owned { "REGAINED" } else { "LOST" });
-        }
-        // docs/wireless/00_WIRELESS_CARPLAY.md #2.8: one-shot wireless-metadata re-subscribe, piggybacking on this already-parsed
-        // inbound event as a cheap "something changed, retry" signal (see METADATA_RESUBSCRIBED's doc).
-        modes_changed_tunnel_nudge();
+        modes_changed(&d);
     } else if ty == "disableBluetooth" {
         // docs/wireless/00_WIRELESS_CARPLAY.md: Apple's own Integration Guide says "iAP2 over Bluetooth must not be disconnected
         // until the disableBluetooth command is received" — i.e. this is the phone's signal that it's
@@ -252,10 +240,39 @@ fn inbound_cseq(text: &str) -> Option<&str> {
     text.lines().find_map(|l| l.strip_prefix("CSeq:").map(|v| v.trim()))
 }
 
+/// Handle one inbound `modesChanged`, from EITHER channel.
+///
+/// `modesChanged` carries the current resource-ownership snapshot. iOS grants us MainScreen while
+/// CarPlay is foregrounded and revokes it when something else (a call/Siri/native UI) takes over.
+/// Best-effort ownership read, kept conservative so an unrecognized shape defaults to "still focused"
+/// and never spuriously reports focus-loss.
+///
+/// FIXED 2026-09-01: this lived inline in [`handle_inbound_event`], i.e. only on the EVENT channel —
+/// the same mistake the nudge below was already fixed for. Every observed `modesChanged` arrives on
+/// the CONTROL channel (`session.rs::command`), so the focus flag never updated. Both callers now
+/// come here.
+pub(crate) fn modes_changed(d: &Dictionary) {
+    let owned = modes_screen_owned(d);
+    let prev = SCREEN_FOCUSED.swap(owned, Ordering::AcqRel);
+    if owned != prev {
+        eprintln!("[events] modesChanged: MainScreen focus {}", if owned { "REGAINED" } else { "LOST" });
+    }
+    // docs/wireless/00_WIRELESS_CARPLAY.md #2.8: one-shot wireless-metadata re-subscribe, piggybacking on this already-parsed
+    // inbound event as a cheap "something changed, retry" signal (see METADATA_RESUBSCRIBED's doc).
+    modes_changed_tunnel_nudge();
+}
+
 /// Best-effort read of MainScreen ownership from a `modesChanged` dict. Scans any `resources`/`modes`
-/// array for a `resourceID == 1` (MainScreen) entry and checks whether its owner/appStates mark it
-/// borrowed away. Conservative: returns `true` (we still own it) unless a taken-away MainScreen is
-/// clearly present, so an unverified message shape can never fabricate a focus-loss.
+/// array for a `resourceID == 1` (MainScreen) entry and reads its `entity` — the CURRENT owner.
+/// Conservative: returns `true` (we still own it) unless a taken-away MainScreen is clearly present,
+/// so an unverified message shape can never fabricate a focus-loss.
+///
+/// FIXED 2026-09-01: this read `transferType`, which an INBOUND `modesChanged` never carries — it is a
+/// `changeModes` REQUEST key (`AirPlayCommon.h:1160`, which is why `send_take_screen` writes it), so
+/// the lookup never matched and the function always returned true. Apple's inbound parser
+/// (`AirPlayReceiverSessionMakeModeStateFromDictionary`) reads `resources[]{resourceID, entity}`, and
+/// all 35 `modesChanged` frames in `docs/ops/captures/2026-07-24_carplay_cmd_capture.bin` carry
+/// exactly `{resourceID, entity, permanentEntity}` — no `transferType` anywhere.
 fn modes_screen_owned(d: &Dictionary) -> bool {
     for key in ["resources", "modes"] {
         if let Some(arr) = d.get(key).and_then(|v| v.as_array()) {
@@ -269,10 +286,10 @@ fn modes_screen_owned(d: &Dictionary) -> bool {
                 if !is_main_screen {
                     continue;
                 }
-                // A "borrowed"/non-zero transfer of MainScreen away from us = focus lost.
-                if let Some(tt) = ed.get("transferType").and_then(|v| v.as_signed_integer()) {
-                    // transferType 2 = Untake/Borrow away (we lose it); 1 = Take (ours).
-                    return tt != 2;
+                // `entity` names who holds the resource now: 2 = kAirPlayEntity_Accessory (us),
+                // anything else (controller/host UI) means the screen was taken away.
+                if let Some(ent) = ed.get("entity").and_then(|v| v.as_signed_integer()) {
+                    return ent == 2;
                 }
             }
         }
@@ -311,7 +328,19 @@ pub fn setup(stream: TcpStream, shared: [u8; 32], alive: Arc<AtomicBool>) {
     // other command for minutes. A 2s write timeout turns that into a bounded failure that releases the
     // lock and returns false, letting teardown proceed. Normal tiny commands complete in microseconds.
     stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
-    if let Ok(mut reader) = stream.try_clone() {
+    // Clone for the reader BEFORE `stream` moves into the sender, but install the sender BEFORE the
+    // reader thread starts: an inbound frame decrypted in the gap between the two would otherwise
+    // reach `iap_tunnel::handle_inbound`/`send_event_reply`, find `EVENT == None`, and be dropped
+    // silently. The window is microseconds and the phone rarely speaks first here, so this is
+    // ordering hygiene rather than an observed loss.
+    let reader = stream.try_clone().ok();
+    SCREEN_FOCUSED.store(true, Ordering::Release); // we take the screen at RECORD; reset per session
+    METADATA_RESUBSCRIBED.store(false, Ordering::Release); // fresh one-shot retry budget per session (#2.8)
+    // docs/carplay/02_SESSION_LIFECYCLE.md: not started until `record()` says so. Cleared HERE as well as in `clear()` so a session
+    // that reconnects without a clean teardown can't inherit the previous session's started state.
+    SESSION_STARTED.store(false, Ordering::Release);
+    *crate::plock(&EVENT) = Some(EventSender { stream, chan, cseq: 0 });
+    if let Some(mut reader) = reader {
         // Read timeout + session-liveness check so the drain thread exits when the session ends —
         // otherwise an ABRUPT drop (no FIN) leaves `read()` blocked forever and the thread leaks per
         // session (the `EVENT` sender is cleared on teardown, but this `try_clone` keeps the fd open).
@@ -385,12 +414,6 @@ pub fn setup(stream: TcpStream, shared: [u8; 32], alive: Arc<AtomicBool>) {
             }
         });
     }
-    SCREEN_FOCUSED.store(true, Ordering::Release); // we take the screen at RECORD; reset per session
-    METADATA_RESUBSCRIBED.store(false, Ordering::Release); // fresh one-shot retry budget per session (#2.8)
-    // docs/carplay/02_SESSION_LIFECYCLE.md: not started until `record()` says so. Cleared HERE as well as in `clear()` so a session
-    // that reconnects without a clean teardown can't inherit the previous session's started state.
-    SESSION_STARTED.store(false, Ordering::Release);
-    *crate::plock(&EVENT) = Some(EventSender { stream, chan, cseq: 0 });
     eprintln!("[events] encrypted command channel ready");
     // NOTE 2026-07-25 (docs/carplay/02_SESSION_LIFECYCLE.md): the iAP2-over-AirPlay tunnel used to be opened HERE, immediately after
     // the event channel came up. That was too early and has been moved to the END of `session.rs::
@@ -537,26 +560,10 @@ pub fn send_iap_message(raw: &[u8]) -> bool {
     send_command(&body)
 }
 
-/// Subscribe to the wireless metadata feed (NowPlaying/RouteGuidance/CallState) over the iAP2-over-
-/// AirPlay tunnel — the fix attempt for docs/wireless/00_WIRELESS_CARPLAY.md's wireless-metadata gap. Wired sessions already get
-/// these from `iap2d`'s own physical iAP2 link (over `/dev/android_iap2`) and never call this.
-///
-/// WHY THIS IS NEEDED: the wireless BT identify (`crates/vendor/wireless/src/bt_driver.rs`,
-/// `build_ident_info_excluding`'s `TransportComponent::Wireless` arm) deliberately declares NEITHER
-/// these message ids NOR the `Start*Updates` subscribes over BT — doing so diverts iOS into plain
-/// media-accessory behavior and breaks the WiFi handoff (device-observed, see that file's comment).
-/// Once the handoff has completed and the AirPlay session is up, that risk no longer applies, so this
-/// sends the SAME subscribe bodies `iap2d` sends wired, but over the AirPlay tunnel instead.
-///
-/// UNVERIFIED ON HARDWARE: whether iOS honors a message id as "receivable" only when the ORIGINAL
-/// identify (over BT) declared it, or accepts any subscribe arriving on this tunnel regardless, is an
-/// open question this send is designed to answer — watch `/tmp/carplay_event_capture.bin` (captured by
-/// [`handle_inbound_event`]) on the next live wireless session for a NowPlayingUpdate/RouteGuidanceUpdate/
-/// CallStateUpdate frame coming back. Gated behind `CARPLAY_WIRELESS_METADATA=1` (default off) so
-/// deploying this can't regress the proven wireless session.
 /// One-shot "something changed, retry the tunnel link" nudge, piggybacked on an inbound
-/// `modesChanged` (docs/wireless/00_WIRELESS_CARPLAY.md #2.8, docs/wireless/00_WIRELESS_CARPLAY.md). Callable from BOTH inbound paths, sharing one atomic so it
-/// still fires at most once per session regardless of which channel delivers the event.
+/// `modesChanged` (docs/wireless/00_WIRELESS_CARPLAY.md #2.8, docs/wireless/00_WIRELESS_CARPLAY.md). Reached from [`modes_changed`], which both inbound paths
+/// call, sharing one atomic so it still fires at most once per session regardless of which channel
+/// delivers the event.
 ///
 /// FIXED 2026-07-25: this used to live only in `handle_inbound_event` (the EVENT channel), and the
 /// first successful wireless session showed why that was useless — all 8 `modesChanged` of that
@@ -578,6 +585,23 @@ pub(crate) fn modes_changed_tunnel_nudge() {
     }
 }
 
+/// Subscribe to the wireless metadata feed (NowPlaying/RouteGuidance/CallState) over the iAP2-over-
+/// AirPlay tunnel — the fix attempt for docs/wireless/00_WIRELESS_CARPLAY.md's wireless-metadata gap. Wired sessions already get
+/// these from `iap2d`'s own physical iAP2 link (over `/dev/android_iap2`) and never call this.
+///
+/// WHY THIS IS NEEDED: the wireless BT identify (`crates/vendor/wireless/src/bt_driver.rs`,
+/// `build_ident_info_excluding`'s `TransportComponent::Wireless` arm) deliberately declares NEITHER
+/// these message ids NOR the `Start*Updates` subscribes over BT — doing so diverts iOS into plain
+/// media-accessory behavior and breaks the WiFi handoff (device-observed, see that file's comment).
+/// Once the handoff has completed and the AirPlay session is up, that risk no longer applies, so this
+/// sends the SAME subscribe bodies `iap2d` sends wired, but over the AirPlay tunnel instead.
+///
+/// UNVERIFIED ON HARDWARE: whether iOS honors a message id as "receivable" only when the ORIGINAL
+/// identify (over BT) declared it, or accepts any subscribe arriving on this tunnel regardless, is an
+/// open question this send is designed to answer — watch `/tmp/carplay_event_capture.bin` (captured by
+/// [`handle_inbound_event`]) on the next live wireless session for a NowPlayingUpdate/RouteGuidanceUpdate/
+/// CallStateUpdate frame coming back. Gated behind `CARPLAY_WIRELESS_METADATA=1` (default off) so
+/// deploying this can't regress the proven wireless session.
 pub(crate) fn send_wireless_metadata_subscriptions() {
     // The subscribe list and the Identify declaration are generated from the SAME table
     // (`iap2_core::features`, docs/carplay/05_METADATA_AND_CONTROLS.md) — that is the whole point of the table. Sending a subscribe
@@ -844,10 +868,6 @@ pub fn nav_forward() -> bool {
     NAV_FORWARD.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Set from `load_device_config` per connection (true = the D-Pad device is advertised). Now a thin
-/// wrapper over [`crate::levers::set_dpad`] — the atomic that used to live here was the prototype
-/// for the generalized lever mirror (`crate::levers`), and folding it in keeps ONE cell that both
-/// the `/info` builder and the HID-ingest gate read.
 /// Mirror of [`set_dpad_advertised`] for the two-finger touchscreen. The HID-ingest path and
 /// `info.rs` must agree on this or the report layout will not match the advertised descriptor.
 pub fn set_multi_touch_advertised(on: bool) {
@@ -859,6 +879,10 @@ pub fn multi_touch_advertised() -> bool {
     crate::levers::multi_touch()
 }
 
+/// Set from `load_device_config` per connection (true = the D-Pad device is advertised). Now a thin
+/// wrapper over [`crate::levers::set_dpad`] — the atomic that used to live here was the prototype
+/// for the generalized lever mirror (`crate::levers`), and folding it in keeps ONE cell that both
+/// the `/info` builder and the HID-ingest gate read.
 pub fn set_dpad_advertised(on: bool) {
     crate::levers::set_dpad(on);
 }
@@ -1046,4 +1070,43 @@ pub fn send_hid_report(uid: u32, report: &[u8]) -> bool {
         return false;
     }
     send_command(&body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build one `resources[]` entry in the shape every `modesChanged` in
+    /// `docs/ops/captures/2026-07-24_carplay_cmd_capture.bin` uses: `{resourceID, entity,
+    /// permanentEntity}` — no `transferType`.
+    fn resource(resource_id: i64, entity: i64) -> Value {
+        let mut e = Dictionary::new();
+        e.insert("resourceID".into(), Value::Integer(resource_id.into()));
+        e.insert("entity".into(), Value::Integer(entity.into()));
+        e.insert("permanentEntity".into(), Value::Integer(entity.into()));
+        Value::Dictionary(e)
+    }
+
+    fn modes(resources: Vec<Value>) -> Dictionary {
+        let mut d = Dictionary::new();
+        d.insert("type".into(), Value::String("modesChanged".into()));
+        d.insert("resources".into(), Value::Array(resources));
+        d
+    }
+
+    #[test]
+    fn modes_screen_owned_reads_entity_not_transfer_type() {
+        // MainScreen (resourceID 1) held by the accessory (entity 2) = ours.
+        assert!(modes_screen_owned(&modes(vec![resource(2, 2), resource(1, 2)])));
+        // Same frame with MainScreen handed to the controller = focus lost. Before the 2026-09-01 fix
+        // this returned true for every real frame, because it looked for a `changeModes` request key.
+        assert!(!modes_screen_owned(&modes(vec![resource(2, 2), resource(1, 1)])));
+    }
+
+    #[test]
+    fn modes_screen_owned_defaults_to_focused_on_an_unknown_shape() {
+        assert!(modes_screen_owned(&modes(vec![])));
+        assert!(modes_screen_owned(&modes(vec![resource(2, 1)]))); // MainAudio only, no MainScreen
+        assert!(modes_screen_owned(&Dictionary::new()));
+    }
 }

@@ -59,6 +59,8 @@ let metadataItem = NSMenuItem(title: "Metadata", action: #selector(AppDelegate.s
 windowMenu.addItem(metadataItem)
 let controlsItem = NSMenuItem(title: "Controls", action: #selector(AppDelegate.showControlsWindow(_:)), keyEquivalent: "K")
 windowMenu.addItem(controlsItem)
+let boxLogItem = NSMenuItem(title: "Box Log", action: #selector(AppDelegate.showBoxLogWindow(_:)), keyEquivalent: "L")
+windowMenu.addItem(boxLogItem)
 let hudItem = NSMenuItem(title: "Control Box", action: #selector(AppDelegate.toggleControlHUD(_:)), keyEquivalent: "b")
 windowMenu.addItem(hudItem)
 let altVideoItem = NSMenuItem(title: "Alt Video", action: #selector(AppDelegate.showAltVideoWindow(_:)), keyEquivalent: "")

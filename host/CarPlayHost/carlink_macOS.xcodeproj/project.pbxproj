@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		AA11110000000000000001 /* AAWire.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11110000000000000002 /* AAWire.swift */; };
+		AA1111000000000000000B /* AAMetadata.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1111000000000000000C /* AAMetadata.swift */; };
 		AA22220000000000000001 /* AATLS.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA22220000000000000002 /* AATLS.swift */; };
 		AA33330000000000000001 /* AASession.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA33330000000000000002 /* AASession.swift */; };
 		AA55550000000000000011 /* AACapability.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA55550000000000000012 /* AACapability.swift */; };
@@ -20,6 +21,8 @@
 		AA5F9E142F9A000100D517FC /* AirPlaySetupSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5F9E152F9A000100D517FC /* AirPlaySetupSession.swift */; };
 		7C5803C7CBB4077EA7368C11 /* OCBMSessionCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29A098A6F1EA51CBFAB6817E /* OCBMSessionCoordinator.swift */; };
 		31CF1885DC32094B4E485BEE /* MicCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8FE2E4DC9A235E80E1497F3F /* MicCapture.swift */; };
+		AA1111000000000000011B /* MSBCFramer.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1111000000000000011C /* MSBCFramer.swift */; };
+		AA1111000000000000010B /* MSBCCodec.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1111000000000000010C /* MSBCCodec.swift */; };
 		444E1760D6AD23B406513623 /* USBTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = D86F8F134EDEB5EB6D991D9B /* USBTransport.swift */; };
 		51E40C64F05389E56E9F84B9 /* ic_phone_projection.png in Resources */ = {isa = PBXBuildFile; fileRef = D21D5C532BEB88E16FE6FFAB /* ic_phone_projection.png */; };
 		607022A2D4D30B153BADEB76 /* ic_phone_projection_black.png in Resources */ = {isa = PBXBuildFile; fileRef = 592125F2F77AD9CE42339DB6 /* ic_phone_projection_black.png */; };
@@ -41,6 +44,8 @@
 		AA5F9E0A2F99DDDD00D517FC /* AltVideoWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5F9E0B2F99DDDD00D517FC /* AltVideoWindow.swift */; };
 		AA5F9E042F99010000D517FC /* KeyboardShortcutsPresenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5F9E052F99010000D517FC /* KeyboardShortcutsPresenter.swift */; };
 		AA5F9E062F99020000D517FC /* FileLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5F9E072F99020000D517FC /* FileLogger.swift */; };
+		AA5F9E402FA0000100D517FC /* BoxLogStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5F9E412FA0000100D517FC /* BoxLogStore.swift */; };
+		AA5F9E422FA0000100D517FC /* BoxLogWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5F9E432FA0000100D517FC /* BoxLogWindow.swift */; };
 		AAF2A9BD2F827D5600665C41 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = AAF2A9BC2F827D5600665C41 /* AppIcon.icon */; };
 		AAF2A9BE2F829A1200665C41 /* IOKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 01AF7EE4871B090C37E33231 /* IOKit.framework */; };
 		AAF2A9C12F829A1400665C41 /* VideoToolbox.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = BE69FEB1D4973C53C8A3FDF4 /* VideoToolbox.framework */; };
@@ -58,6 +63,7 @@
 
 /* Begin PBXFileReference section */
 		AA11110000000000000002 /* AAWire.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AAWire.swift; sourceTree = "<group>"; };
+		AA1111000000000000000C /* AAMetadata.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AAMetadata.swift; sourceTree = "<group>"; };
 		AA22220000000000000002 /* AATLS.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AATLS.swift; sourceTree = "<group>"; };
 		AA33330000000000000002 /* AASession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AASession.swift; sourceTree = "<group>"; };
 		AA55550000000000000012 /* AACapability.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AACapability.swift; sourceTree = "<group>"; };
@@ -78,6 +84,8 @@
 		79C3521BF0108E622C954175 /* AVFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVFoundation.framework; path = System/Library/Frameworks/AVFoundation.framework; sourceTree = SDKROOT; };
 		82F8C06EB18B82138343F583 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		8FE2E4DC9A235E80E1497F3F /* MicCapture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MicCapture.swift; sourceTree = "<group>"; };
+		AA1111000000000000011C /* MSBCFramer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MSBCFramer.swift; sourceTree = "<group>"; };
+		AA1111000000000000010C /* MSBCCodec.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MSBCCodec.swift; sourceTree = "<group>"; };
 		A914C2B05DD40EB5DE6A3E29 /* USBDeviceManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = USBDeviceManager.swift; sourceTree = "<group>"; };
 		AA00000000000001ENTITLE0 /* carlink_macOS.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = carlink_macOS.entitlements; sourceTree = "<group>"; };
 		AA5F9DD52F96146500D517FC /* SESSION_CAPTURE_FORMAT.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = SESSION_CAPTURE_FORMAT.md; sourceTree = "<group>"; };
@@ -91,6 +99,8 @@
 		AA5F9E0B2F99DDDD00D517FC /* AltVideoWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AltVideoWindow.swift; sourceTree = "<group>"; };
 		AA5F9E052F99010000D517FC /* KeyboardShortcutsPresenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardShortcutsPresenter.swift; sourceTree = "<group>"; };
 		AA5F9E072F99020000D517FC /* FileLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileLogger.swift; sourceTree = "<group>"; };
+		AA5F9E412FA0000100D517FC /* BoxLogStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoxLogStore.swift; sourceTree = "<group>"; };
+		AA5F9E432FA0000100D517FC /* BoxLogWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoxLogWindow.swift; sourceTree = "<group>"; };
 		AAF2A9BC2F827D5600665C41 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = AppIcon.icon; sourceTree = "<group>"; };
 		BD9BE797A56D941DC0FE30EB /* carlink_macOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = carlink_macOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		BE69FEB1D4973C53C8A3FDF4 /* VideoToolbox.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = VideoToolbox.framework; path = System/Library/Frameworks/VideoToolbox.framework; sourceTree = SDKROOT; };
@@ -130,6 +140,7 @@
 			isa = PBXGroup;
 			children = (
 				AA11110000000000000002 /* AAWire.swift */,
+				AA1111000000000000000C /* AAMetadata.swift */,
 				AA22220000000000000002 /* AATLS.swift */,
 				AA33330000000000000002 /* AASession.swift */,
 				AA55550000000000000012 /* AACapability.swift */,
@@ -174,6 +185,8 @@
 				AA5F9E0B2F99DDDD00D517FC /* AltVideoWindow.swift */,
 				AA5F9E052F99010000D517FC /* KeyboardShortcutsPresenter.swift */,
 				AA5F9E072F99020000D517FC /* FileLogger.swift */,
+				AA5F9E412FA0000100D517FC /* BoxLogStore.swift */,
+				AA5F9E432FA0000100D517FC /* BoxLogWindow.swift */,
 				AA5F9E232F9B000100D517FC /* StreamMetricsMonitor.swift */,
 				AA5F9DD52F96146500D517FC /* SESSION_CAPTURE_FORMAT.md */,
 			);
@@ -234,6 +247,8 @@
 			children = (
 				E9B12D9BD7534CCC23E2852D /* AudioPlayer.swift */,
 				8FE2E4DC9A235E80E1497F3F /* MicCapture.swift */,
+				AA1111000000000000011C /* MSBCFramer.swift */,
+				AA1111000000000000010C /* MSBCCodec.swift */,
 			);
 			path = Audio;
 			sourceTree = "<group>";
@@ -336,11 +351,14 @@
 				AA5F9E0A2F99DDDD00D517FC /* AltVideoWindow.swift in Sources */,
 				AA5F9E042F99010000D517FC /* KeyboardShortcutsPresenter.swift in Sources */,
 				AA5F9E062F99020000D517FC /* FileLogger.swift in Sources */,
+				AA5F9E402FA0000100D517FC /* BoxLogStore.swift in Sources */,
+				AA5F9E422FA0000100D517FC /* BoxLogWindow.swift in Sources */,
 				F8779BC87BCFB9EF9BB50152 /* USBDeviceManager.swift in Sources */,
 				444E1760D6AD23B406513623 /* USBTransport.swift in Sources */,
 				67E0850F410D04CF1D656D56 /* VideoDecoder.swift in Sources */,
 				AA5F9F012F9A000100D517FC /* AVCCFastPath.swift in Sources */,
 				AA11110000000000000001 /* AAWire.swift in Sources */,
+				AA1111000000000000000B /* AAMetadata.swift in Sources */,
 				AA22220000000000000001 /* AATLS.swift in Sources */,
 				AA33330000000000000001 /* AASession.swift in Sources */,
 				AA55550000000000000011 /* AACapability.swift in Sources */,
@@ -348,6 +366,8 @@
 				AA1417953000000000D517FC /* InputTypes.swift in Sources */,
 				D3BDB0B80244B6170AF3BA73 /* AudioPlayer.swift in Sources */,
 				31CF1885DC32094B4E485BEE /* MicCapture.swift in Sources */,
+				AA1111000000000000011B /* MSBCFramer.swift in Sources */,
+				AA1111000000000000010B /* MSBCCodec.swift in Sources */,
 				A84FD317611E0236CE7499AA /* OCBMFraming.swift in Sources */,
 				F621BDDDBF1E9D1A423CAD4D /* OCBMAVDecrypt.swift in Sources */,
 				AA5F9E202F9B000100D517FC /* StreamMetrics.swift in Sources */,

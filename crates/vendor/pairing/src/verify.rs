@@ -182,14 +182,21 @@ impl<'a> PairVerifyServer<'a> {
                 self.done = true;
                 Ok((tlv::encode(&[(tlv_type::STATE, &[4])]), true))
             }
-            Err(_) => Ok((
-                // C emits Error before State on the failure path.
-                tlv::encode(&[
-                    (tlv_type::ERROR, &[tlv_error::AUTHENTICATION]),
-                    (tlv_type::STATE, &[4]),
-                ]),
-                true,
-            )),
+            Err(_) => {
+                // Kill the handshake, matching `setup`'s M3/M5 failure paths: leaving state = 2 let
+                // a peer resend M3 with a different Identifier/Signature indefinitely on one
+                // session, i.e. unbounded `find_peer` probing of the peer store. A restart from M1
+                // regenerates the ephemeral key.
+                self.state = 0xFF;
+                Ok((
+                    // C emits Error before State on the failure path.
+                    tlv::encode(&[
+                        (tlv_type::ERROR, &[tlv_error::AUTHENTICATION]),
+                        (tlv_type::STATE, &[4]),
+                    ]),
+                    true,
+                ))
+            }
         }
     }
 }

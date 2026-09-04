@@ -261,9 +261,24 @@ fn publish_phone_identity(d: &Dictionary) {
         return;
     }
     // Hand-built JSON: the box crates carry no serializer, the field set is fixed, and the values are
-    // short ASCII-ish strings from Apple. Quotes and backslashes are still escaped — a device name is
-    // user-supplied text and `Owner"s iPhone` must not produce a document ocbmd cannot forward.
-    let esc = |v: &str| v.replace('\\', "\\\\").replace('"', "\\\"");
+    // short ASCII-ish strings from Apple. Quotes, backslashes and control characters are all escaped —
+    // a device name is user-supplied text and `Owner"s iPhone` (or one carrying a stray newline) must
+    // not produce a document ocbmd cannot forward. JSON forbids raw U+0000..U+001F inside a string.
+    let esc = |v: &str| {
+        let mut out = String::with_capacity(v.len());
+        for c in v.chars() {
+            match c {
+                '\\' => out.push_str("\\\\"),
+                '"' => out.push_str("\\\""),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+                c => out.push(c),
+            }
+        }
+        out
+    };
     let json = format!(
         r#"{{"name":"{}","deviceID":"{}","model":"{}","osName":"{}","osVersion":"{}"}}"#,
         esc(name),
@@ -281,12 +296,20 @@ fn publish_phone_identity(d: &Dictionary) {
     }
 }
 
+/// A SETUP bind/setup failure. Carries no data — the caller (`server.rs`) only needs to know whether
+/// to answer 200 or 500; the `eprintln!` at the failing bind is the diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetupError;
+
 /// Handles the session-bound control requests after pair-verify (the encrypted ones).
 pub trait SessionDelegate: Send {
     /// Called once when pair-verify succeeds, handing over the ECDH shared secret (stream/event keys).
     fn on_paired(&mut self, _shared_secret: [u8; 32]) {}
-    /// Handle a SETUP request (phase 1 = session, phase 2 = streams). Returns the response plist.
-    fn setup(&mut self, request_plist: &[u8]) -> Vec<u8>;
+    /// Handle a SETUP request (phase 1 = session, phase 2 = streams). Returns the response plist, or
+    /// `Err` on a bind/setup failure — the caller (`server.rs`) answers those with HTTP 500, matching
+    /// `_ControlSetup`'s `require_noerr(err, exit)` (R14G17 `AirPlayReceiverSession.c:900-914`): the C
+    /// never emits a 200 with an empty/absent body on a genuine setup failure.
+    fn setup(&mut self, request_plist: &[u8]) -> Result<Vec<u8>, SetupError>;
     /// Handle RECORD (start streaming). Returns an optional response body (usually empty).
     fn record(&mut self) -> Vec<u8> {
         Vec::new()
@@ -304,13 +327,19 @@ pub trait SessionDelegate: Send {
     fn last_activity(&self) -> Option<Arc<AtomicU64>> {
         None
     }
+
+    /// The advertised main-display resolution/frame-rate (`DeviceConfig.display_width/height/max_fps`),
+    /// threaded in the same way `ControlServer::display_width` already is — purely for the
+    /// consolidated "SETUP negotiated" troubleshooting line; no delegate needs it to function. Default
+    /// no-op so `NoSession`/`RemoteSession` (which log their own SETUP summary) are unaffected.
+    fn set_resolution(&mut self, _w: i64, _h: i64, _fps: i64) {}
 }
 
 /// No-op delegate (default / tests): returns empty responses.
 pub struct NoSession;
 impl SessionDelegate for NoSession {
-    fn setup(&mut self, _req: &[u8]) -> Vec<u8> {
-        Vec::new()
+    fn setup(&mut self, _req: &[u8]) -> Result<Vec<u8>, SetupError> {
+        Ok(Vec::new())
     }
 }
 
@@ -368,6 +397,13 @@ pub struct AvSession {
     /// accumulation on the retry path — which one archived session shows firing 15 times.
     /// A/V streams pass an empty string and keep their supersede-by-type behaviour exactly.
     av_streams: Mutex<HashMap<(i64, String), Arc<AtomicBool>>>,
+    /// `enabledFeatures` echoed at the last phase-1 SETUP — kept only to fold into the phase-2
+    /// consolidated "SETUP negotiated" troubleshooting line (features and streams land in two
+    /// separate RTSP requests, so phase 2 has no other way to name what phase 1 already negotiated).
+    negotiated_features: Vec<String>,
+    /// `(width, height, max_fps)` from the advertised `DeviceConfig`, via [`SessionDelegate::set_resolution`].
+    /// `(0, 0, 0)` = unset (never threaded in — e.g. under `NoSession`/tests).
+    resolution: (i64, i64, i64),
 }
 
 /// How often stream threads wake from a blocking socket read to check the session-liveness flag.
@@ -430,6 +466,8 @@ impl AvSession {
             alive: Arc::new(AtomicBool::new(true)),
             activity: Arc::new(AtomicU64::new(0)),
             av_streams: Mutex::new(HashMap::new()),
+            negotiated_features: Vec::new(),
+            resolution: (0, 0, 0),
         }
     }
 
@@ -489,7 +527,7 @@ impl AvSession {
         self.peer_addr
     }
 
-    fn setup_phase1(&mut self, keep_alive: bool) -> Vec<u8> {
+    fn setup_phase1(&mut self, keep_alive: bool) -> Result<Vec<u8>, SetupError> {
         // Idempotent, per Apple's reference (see `control_setup`). A repeat phase-1 SETUP with no
         // intervening TEARDOWN returns the SAME ports rather than re-binding: the phone is already
         // using them, and re-binding both breaks that and strands the previous threads.
@@ -541,7 +579,7 @@ impl AvSession {
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("[session] bind timing UDP failed: {e} — failing this SETUP");
-                    return Vec::new();
+                    return Err(SetupError);
                 }
             };
             self.timing_port = timing.local_addr().map(|a| a.port()).unwrap_or(0);
@@ -555,7 +593,7 @@ impl AvSession {
                 Ok(l) => l,
                 Err(e) => {
                     eprintln!("[session] bind event TCP failed: {e} — failing this SETUP");
-                    return Vec::new();
+                    return Err(SetupError);
                 }
             };
             self.event_port = events.local_addr().map(|a| a.port()).unwrap_or(0);
@@ -669,6 +707,13 @@ impl AvSession {
         if std::env::var("CARPLAY_SESSION_MGMT").is_ok() {
             feats.push(Value::String("sessionManagement".into()));
         }
+        if crate::relay::features_reverse() {
+            feats.reverse();
+        }
+        self.negotiated_features = feats
+            .iter()
+            .filter_map(|v| v.as_string().map(str::to_string))
+            .collect();
         d.insert("enabledFeatures".into(), Value::Array(feats));
 
         eprintln!(
@@ -682,7 +727,7 @@ impl AvSession {
         Value::Dictionary(d)
             .to_writer_binary(&mut buf)
             .expect("plist");
-        buf
+        Ok(buf)
     }
 
     /// SETUP phase 2 (streams). For each requested stream, open its data socket and answer with the
@@ -1201,6 +1246,15 @@ impl AvSession {
                                                         accepted_one = true;
                                                     }
                                                     eprintln!("[datastream] connected from {peer}");
+                                                    // Undo the listener's non-blocking mode on the
+                                                    // ACCEPTED socket (same as `spawn_screen` and
+                                                    // `record`). Linux does not inherit O_NONBLOCK
+                                                    // across accept, but BSD-derived kernels do — and
+                                                    // Rust std only uses `accept4` on Linux-likes — so
+                                                    // on an Apple target every read below would return
+                                                    // WouldBlock instantly, which `is_timeout` treats
+                                                    // as a poll tick, spinning this thread at 100% CPU.
+                                                    c.set_nonblocking(false).ok();
                                                     c.set_read_timeout(Some(
                                                         std::time::Duration::from_millis(500),
                                                     ))
@@ -1522,6 +1576,17 @@ impl AvSession {
                 }
             }
         }
+        // Consolidated troubleshooting line: streams + features + resolution in one place, rather than
+        // reconstructed by a reader scanning the per-stream lines above plus phase 1's separate log.
+        let negotiated_types: Vec<i64> = resp
+            .iter()
+            .filter_map(|v| v.as_dictionary()?.get("type")?.as_signed_integer())
+            .collect();
+        let (w, h, fps) = self.resolution;
+        eprintln!(
+            "[session] SETUP negotiated: streams={negotiated_types:?} {w}x{h}@{fps} features={:?}",
+            self.negotiated_features
+        );
         let mut d = Dictionary::new();
         d.insert("streams".into(), Value::Array(resp));
         let mut buf = Vec::new();
@@ -1535,6 +1600,10 @@ impl AvSession {
 impl SessionDelegate for AvSession {
     fn on_paired(&mut self, shared_secret: [u8; 32]) {
         self.shared = Some(shared_secret);
+    }
+
+    fn set_resolution(&mut self, w: i64, h: i64, fps: i64) {
+        self.resolution = (w, h, fps);
     }
 
     /// Capture: log + dump every POST /command (duckAudio/unduckAudio/flushAudio/setVolume/… — the
@@ -1617,10 +1686,13 @@ impl SessionDelegate for AvSession {
         // observed "we send DETECT+SYN, nothing ever comes back". Now mirrors the event-channel path
         // in `events.rs`: offer the frame to the handshake state machine FIRST, and fall through to
         // the metadata dispatcher only if the tunnel doesn't claim it.
-        // Same one-shot tunnel nudge the event-channel handler runs — wired here too because THIS is
-        // the channel `modesChanged` actually arrives on (see the note above).
+        // Same `modesChanged` handling the event-channel handler runs (MainScreen focus + the one-shot
+        // tunnel nudge) — wired here too because THIS is the channel `modesChanged` actually arrives on
+        // (see the note above). Uses the dict from the single parse above.
         if ty == "modesChanged" {
-            crate::events::modes_changed_tunnel_nudge();
+            if let Some(d) = parsed.as_ref() {
+                crate::events::modes_changed(d);
+            }
         }
         if is_iap {
             // From the single parse above — no second parse, no dictionary clone.
@@ -1706,7 +1778,9 @@ impl SessionDelegate for AvSession {
                     }
                 }
             }
-            eprintln!("[session] partial TEARDOWN — stopped streams {stopped:?}, session kept");
+            eprintln!(
+                "[session] partial TEARDOWN reason=host-request — stopped streams {stopped:?}, session kept"
+            );
             // The mic uplink is the INPUT leg of the type-100 MainAudio stream, so it dies WITH that
             // stream — not only at session end (`reset()`, which was the sole `clear()` caller).
             // Apple reaches `_TearDownStream` from this same partial path
@@ -1735,7 +1809,9 @@ impl SessionDelegate for AvSession {
             }
             return;
         }
-        eprintln!("[session] full TEARDOWN — stopping stream threads + resetting session state");
+        eprintln!(
+            "[session] full TEARDOWN reason=host-request — stopping stream threads + resetting session state"
+        );
         self.reset();
     }
 
@@ -1743,7 +1819,7 @@ impl SessionDelegate for AvSession {
         Some(self.activity.clone())
     }
 
-    fn setup(&mut self, request_plist: &[u8]) -> Vec<u8> {
+    fn setup(&mut self, request_plist: &[u8]) -> Result<Vec<u8>, SetupError> {
         if let Ok(p) = std::env::var("CARPLAY_SETUP_DUMP") {
             // Dump each raw SETUP request plist (to pin the feature-token array the iPhone proposes,
             // incl. "hevc" — the receiver-side HEVC lever, per the AirPlaySender gate).
@@ -1782,7 +1858,7 @@ impl SessionDelegate for AvSession {
                 let i = SEQ.fetch_add(1, Ordering::Relaxed);
                 let _ = std::fs::write(format!("{p}.{i}"), request_plist);
             }
-            self.setup_phase2(dict.as_ref().unwrap())
+            Ok(self.setup_phase2(dict.as_ref().unwrap()))
         } else {
             self.setup_phase1(keep_alive)
         }
@@ -1907,6 +1983,15 @@ impl Drop for AvSession {
     fn drop(&mut self) {
         // Connection closed (graceful TEARDOWN already ran, or the transport detected an abrupt drop):
         // stop every session thread and reset all per-session state. Idempotent (safe after teardown).
+        // `control_setup` is still true here ONLY if no explicit TEARDOWN ran first (an explicit one
+        // already cleared it in `reset()`), so this is the "reason" signal the explicit-TEARDOWN log
+        // lines above lack: a still-live session hitting `Drop` means the transport lost the
+        // connection (link loss / net.rs error), not a host-initiated TEARDOWN.
+        if self.control_setup.load(Ordering::Acquire) {
+            eprintln!(
+                "[session] TEARDOWN reason=link-loss (Drop with no prior host TEARDOWN) — stopping stream threads + resetting session state"
+            );
+        }
         self.reset();
     }
 }
@@ -1929,11 +2014,14 @@ fn uplink_dst(peer: std::net::SocketAddr, port: u16) -> std::net::SocketAddr {
 /// next session reconnects fresh rather than writing to a stale/closed carlink socket.
 fn clear_sinks() {
     for sink in [&MEDIA_SINK, &VOICE_SINK] {
-        let mut g = crate::plock(sink);
+        let mut g = crate::plock(&sink.slot);
         g.sock = None;
         // Invalidate any socket a `forward_to_sink` caller took out before this clear — it will see
         // the epoch mismatch on restore and drop the socket instead of putting it back.
         g.epoch = g.epoch.wrapping_add(1);
+        // `busy` is deliberately NOT cleared: a writer is still out with that socket and owns the
+        // slot until it returns. Clearing it here would let a waiter connect a second socket, which is
+        // exactly what the busy flag exists to prevent.
     }
     // There is no metadata sink to clear here any more: `metadata::emit_command_plist` owns the one
     // :9004 connection this process makes, because ocbmd keeps a single producer per channel and two
@@ -1997,11 +2085,52 @@ fn spawn_timing(sock: UdpSocket, alive: Arc<AtomicBool>) {
     });
 }
 
-/// Fwd-enc video seam sync marker (task #33 / docs/carplay/06_AV_PIPELINE.md). Each forwarded video message's payload begins
+/// Fwd-enc seam sync marker (task #33 / docs/carplay/06_AV_PIPELINE.md). Each forwarded message's payload begins
 /// with these 4 bytes so the host can **re-align after a lost/torn packet** — the RTP-sequence-number
 /// analogue Apple's screen transport carries. On the wire (via `forward_screen`): `[u32 BE len][SEAM_MAGIC]
 /// [marker]…`. The host normally parses sequentially; on a desync it scans for SEAM_MAGIC and resyncs.
+///
+/// EXTENDED TO THE AUDIO SEAMS 2026-09-03 (:9002 media and :9003 voice, `forward_to_sink` callers in
+/// the `fwd_enc` branch of the audio thread). Their desync source is not a lost packet but a re-SETUP:
+/// ocbmd replaces a seam producer without draining the old one, so the host can be holding half a
+/// message when the new producer's first bytes arrive. Same magic, same resync, one framing.
+/// Only the `fwd_enc` (v2) path carries it — the on-box-decode path below writes raw PCM/ADTS/voice-
+/// tagged AUs, a different wire with no markers, and is deliberately untouched.
 pub const SEAM_MAGIC: [u8; 4] = [0x53, 0x45, 0x41, 0x56]; // "SEAV"
+
+/// Seam-v2 `SEAM_KEY`, framed exactly as the audio thread writes it:
+/// `[u32 BE len][SEAM_MAGIC][0x00][key 32][scid 8 LE]`, len == 45.
+///
+/// Factored out of the audio loop so that length — which the host's resync uses as a STRUCTURAL check
+/// ("magic verified ⇒ this length is trustworthy", `OCBMAVDecrypt.audioLengthPlausible`) — is pinned by
+/// a unit test. A silent change here would make every control message look like a false magic to a
+/// resyncing host and the stream would never re-key.
+fn seam_audio_key_msg(key: &[u8], scid: u64) -> Vec<u8> {
+    let mut m = Vec::with_capacity(4 + 4 + 1 + 32 + 8);
+    m.extend_from_slice(&((4 + 1 + key.len() + 8) as u32).to_be_bytes());
+    m.extend_from_slice(&SEAM_MAGIC);
+    m.push(0x00u8); // SEAM_KEY
+    m.extend_from_slice(key);
+    m.extend_from_slice(&scid.to_le_bytes());
+    m
+}
+
+/// Seam-v2 `SEAM_FORMAT`, framed as the audio thread writes it:
+/// `[u32 BE len][SEAM_MAGIC][0x02][scid 8 LE][codec][rate u32 LE][ch][bits][audio_type]`, len == 21.
+/// Same contract as [`seam_audio_key_msg`].
+fn seam_audio_format_msg(scid: u64, codec: u8, sr: u32, ch: u8, bits: u8, atype: u8) -> Vec<u8> {
+    let mut m = Vec::with_capacity(4 + 4 + 1 + 8 + 8);
+    m.extend_from_slice(&(4u32 + 1 + 8 + 1 + 4 + 1 + 1 + 1).to_be_bytes());
+    m.extend_from_slice(&SEAM_MAGIC);
+    m.push(0x02u8); // SEAM_FORMAT
+    m.extend_from_slice(&scid.to_le_bytes());
+    m.push(codec);
+    m.extend_from_slice(&sr.to_le_bytes());
+    m.push(ch);
+    m.push(bits);
+    m.push(atype);
+    m
+}
 
 /// Forward one screen message (VideoConfig SPS/PPS, or one Annex-B VideoFrame) to the video IPC port
 /// (:9001), **length-prefixed** as `[u32 BE len][annexb bytes]`. Each call is one screen message, so the
@@ -2364,7 +2493,16 @@ fn spawn_screen(
                             }
                         }
                     } else {
-                        body.to_vec()
+                        // Shorter than the 16-byte Poly1305 tag, so it cannot be a valid AEAD frame.
+                        // This used to forward the body verbatim as AVCC — a guess that feeds the
+                        // decoder garbage, and one that leaves `counter` behind the iPhone's for the
+                        // rest of the stream if the phone did count the frame. Skip it instead.
+                        if frames < 6 {
+                            eprintln!(
+                                "[screen] opcode-0 body too short to be an AEAD frame ({body_size} B) — skipping"
+                            );
+                        }
+                        continue;
                     };
                     annexb_from_avcc(&plain, nal_len) // VideoFrame (AVCC → Annex-B)
                 }
@@ -2572,8 +2710,8 @@ fn decode_audio_format(fmt: u64) -> Option<(AudioCodec, u32, u16)> {
 /// loop (`crates/carlink/src/source/carplayd.rs` `serve`), the iPhone's repeated voice re-SETUPs (Siri
 /// re-SETUPs MainAudio ~4×/turn) starved the later, content-bearing connections → voice silence. One
 /// persistent connection per sink — exactly what the working C receiver does — avoids it.
-static MEDIA_SINK: Mutex<SinkSlot> = Mutex::new(SinkSlot { sock: None, epoch: 0 });
-static VOICE_SINK: Mutex<SinkSlot> = Mutex::new(SinkSlot { sock: None, epoch: 0 });
+static MEDIA_SINK: Sink = Sink::new();
+static VOICE_SINK: Sink = Sink::new();
 
 /// A persistent sink slot: the socket plus an epoch bumped by [`clear_sinks`], so a writer that took
 /// the socket out (to do its blocking I/O with the lock RELEASED) can tell whether the slot was
@@ -2582,7 +2720,48 @@ static VOICE_SINK: Mutex<SinkSlot> = Mutex::new(SinkSlot { sock: None, epoch: 0 
 struct SinkSlot {
     sock: Option<TcpStream>,
     epoch: u64,
+    /// Set while a writer holds `sock` out of the slot for unlocked I/O (or is connecting one). A
+    /// second writer on the same sink must WAIT on `Sink::busy`, not connect its own socket — see
+    /// [`forward_to_sink`].
+    busy: bool,
 }
+
+/// A sink slot plus the condvar a writer waits on when a sibling stream holds the socket.
+struct Sink {
+    slot: Mutex<SinkSlot>,
+    busy: std::sync::Condvar,
+}
+
+impl Sink {
+    const fn new() -> Self {
+        Sink {
+            slot: Mutex::new(SinkSlot { sock: None, epoch: 0, busy: false }),
+            busy: std::sync::Condvar::new(),
+        }
+    }
+
+    /// Hand the slot back to any waiting sibling. Must run on EVERY exit from [`forward_to_sink`],
+    /// including the connect-failure path, or the sink stays `busy` forever.
+    fn release(&self, sock: Option<TcpStream>, epoch: u64) {
+        {
+            let mut g = crate::plock(&self.slot);
+            g.busy = false;
+            if let Some(s) = sock {
+                if g.epoch == epoch && g.sock.is_none() {
+                    g.sock = Some(s); // still ours — restore for the next AU
+                }
+                // else: the slot was cleared (session teardown) or refilled while we were unlocked —
+                // drop ours rather than clobber the newer socket or resurrect one teardown meant to kill.
+            }
+        }
+        self.busy.notify_one();
+    }
+}
+
+/// How long a writer waits for a sibling stream to give the sink's socket back before dropping its AU.
+/// The holder is itself bounded by `connect_timeout` (2 s) + SO_SNDTIMEO (2 s), so this only expires
+/// when the seam is already wedged, which is the case the caller's `false` handling exists for.
+const SINK_BUSY_WAIT: Duration = Duration::from_secs(2);
 
 /// Write one already-framed AU to a persistent sink, (re)connecting lazily on first use or after a
 /// dropped connection. Returns `false` if connect/write failed (carlink down/restarted): the socket is
@@ -2593,10 +2772,41 @@ struct SinkSlot {
 /// wedged AU. The socket is taken out under the lock, connected/written unlocked, then restored —
 /// unless [`clear_sinks`] ran in between (epoch mismatch) or another thread already installed a
 /// fresh socket, in which case ours is dropped.
-fn forward_to_sink(sink: &Mutex<SinkSlot>, port: u16, framed: &[u8]) -> bool {
+///
+/// FIXED 2026-09-01: two streams CAN share a sink concurrently (telephony + alert on voice, :9003 —
+/// see the framing note in `spawn_audio`), and the second one used to find `sock == None` while the
+/// first was away writing, and CONNECT ITS OWN. ocbmd keeps one producer per channel and evicts the
+/// previous connection on accept, so that second connect killed the first socket — after which the
+/// first writer restored it into the slot and the second dropped its own, leaving the sink pointing at
+/// a connection ocbmd had already discarded. The material loss is the `SEAM_KEY`/`SEAM_FORMAT` written
+/// on the evicted connection: the owning thread keeps `key_sent = true` until a write FAILS, so the
+/// host could stay unable to decrypt that stream for the rest of its life. A second writer now waits
+/// on `Sink::busy` (bounded by [`SINK_BUSY_WAIT`]) instead, preserving one-connection-per-sink.
+fn forward_to_sink(sink: &Sink, port: u16, framed: &[u8]) -> bool {
+    let deadline = Instant::now() + SINK_BUSY_WAIT;
     let (sock, epoch) = {
-        let mut g = crate::plock(sink);
-        (g.sock.take(), g.epoch)
+        let mut g = crate::plock(&sink.slot);
+        loop {
+            if let Some(s) = g.sock.take() {
+                g.busy = true;
+                break (Some(s), g.epoch);
+            }
+            if !g.busy {
+                g.busy = true; // no socket and nobody out with one: ours to connect
+                break (None, g.epoch);
+            }
+            let Some(rest) = deadline.checked_duration_since(Instant::now()) else {
+                eprintln!("[audio] sink :{port} held by a sibling stream past the wait — dropping AU");
+                // Pass our wakeup on: the notify that woke us is consumed even though we are
+                // bailing, and another waiter would otherwise sit out its whole timeout.
+                sink.busy.notify_one();
+                return false;
+            };
+            g = match sink.busy.wait_timeout(g, rest) {
+                Ok((g, _)) => g,
+                Err(e) => e.into_inner().0,
+            };
+        }
     };
     let mut sock = match sock {
         Some(s) => s,
@@ -2616,21 +2826,15 @@ fn forward_to_sink(sink: &Mutex<SinkSlot>, port: u16, framed: &[u8]) -> bool {
                 }
                 Err(e) => {
                     eprintln!("[audio] connect carlink :{port} failed: {e}");
+                    sink.release(None, epoch);
                     return false;
                 }
             }
         }
     };
     let ok = sock.write_all(framed).is_ok();
-    if ok {
-        let mut g = crate::plock(sink);
-        if g.epoch == epoch && g.sock.is_none() {
-            g.sock = Some(sock); // still ours — restore for the next AU
-        }
-        // else: the slot was cleared (session teardown) or refilled while we were unlocked — drop
-        // ours rather than clobber the newer socket or resurrect one teardown meant to kill.
-    }
     // On write failure the socket is simply dropped; the next AU reconnects.
+    sink.release(if ok { Some(sock) } else { None }, epoch);
     ok
 }
 
@@ -2658,9 +2862,10 @@ fn spawn_audio(
         let key = derive_stream_keys(&shared, scid).output;
         // COMMITTED MODEL: forward encrypted — hand the key once, then the raw RTP packets, so the HOST
         // decrypts (mirror of spawn_screen). Audio needs no counter: its nonce is the packet's trailing
-        // 8 bytes. Framed [u32 BE len][marker][payload] to match the CH_VIDEO wire. BOTH sinks reach
-        // the host: media (:9002 -> CH_MEDIA_AUDIO) and voice (:9003 -> CH_ALT_AUDIO, see :2562 and
-        // ocbmd's seam table). See docs/carplay/02_SESSION_LIFECYCLE.md + docs/carplay/00_ARCHITECTURE.md.
+        // 8 bytes. Framed [u32 BE len][SEAM_MAGIC][marker][payload] — the CH_VIDEO wire exactly. BOTH sinks reach
+        // the host: media (:9002 -> CH_MEDIA_AUDIO) and voice (:9003 -> CH_ALT_AUDIO, see
+        // `forward_to_sink` and ocbmd's seam table). See docs/carplay/02_SESSION_LIFECYCLE.md +
+        // docs/carplay/00_ARCHITECTURE.md.
         //
         // CORRECTED 2026-08-10. This comment previously said voice ":9003 has no OCBM channel yet
         // (forward is a harmless no-op there)" — false since CH_ALT_AUDIO landed, and contradicted 50
@@ -2673,7 +2878,7 @@ fn spawn_audio(
         // Route to the PERSISTENT per-sink connection (shared across all stream SETUPs), not a fresh
         // per-stream socket — see MEDIA_SINK/VOICE_SINK. Route by audioType (media → :9002) not stream
         // type: wired media is stream type 100 (PCM), NOT 102.
-        let (sink, port, label): (&Mutex<SinkSlot>, u16, &str) = if is_media {
+        let (sink, port, label): (&Sink, u16, &str) = if is_media {
             (&MEDIA_SINK, 9002, "media")
         } else {
             (&VOICE_SINK, 9003, "voice")
@@ -2716,21 +2921,23 @@ fn spawn_audio(
                 }
             }
             if fwd_enc {
-                // Seam framing v2 (all-rates/all-streams): EVERY message is scid-tagged so concurrent
-                // streams sharing one sink (telephony + alert on voice) can't clobber each other. The
-                // voice sink (:9003) now has an OCBM channel (CH_ALT_AUDIO) — both sinks speak the
-                // identical framing. (Re)hand key + format whenever the seam (re)connects, so a
-                // mid-stream reconnect never leaves the host keyless or format-blind.
+                // Seam framing v2 (all-rates/all-streams): `[u32 BE len][SEAM_MAGIC][marker][…]`, EVERY
+                // message scid-tagged so concurrent streams sharing one sink (telephony + alert on
+                // voice) can't clobber each other. The voice sink (:9003) now has an OCBM channel
+                // (CH_ALT_AUDIO) — both sinks speak the identical framing. (Re)hand key + format
+                // whenever the seam (re)connects, so a mid-stream reconnect never leaves the host
+                // keyless or format-blind.
+                //
+                // SEAM_MAGIC ADDED 2026-09-03, matching the video seam (`forward_screen`). ocbmd drops a
+                // replaced seam producer WITHOUT draining it, so on a re-SETUP the host's byte-stream
+                // reassembly for this channel can be holding a partial message when our first bytes
+                // arrive — the SEAM_KEY then landed mid-message and the seam desynced for the rest of
+                // the session (device-proven: bogus keys, a "1469658167Hz 232ch" format, no audio).
+                // ocbmd's F_NEW_SOURCE flag covers the normal case; the magic is what lets a host
+                // re-align without it. Wire order and every field are otherwise unchanged.
                 if !key_sent {
-                    let mut km = Vec::with_capacity(1 + 32 + 8);
-                    km.push(0x00u8); // SEAM_KEY
-                    km.extend_from_slice(&key);
-                    km.extend_from_slice(&scid.to_le_bytes());
-                    let mut framed = (km.len() as u32).to_be_bytes().to_vec();
-                    framed.extend_from_slice(&km);
-                    key_sent = forward_to_sink(sink, port, &framed);
+                    key_sent = forward_to_sink(sink, port, &seam_audio_key_msg(&key, scid));
                     if key_sent {
-                        // SEAM_FORMAT: [0x02][scid 8][codec][rate u32 LE][ch][bits][audio_type].
                         // Wired is PCM at various rates; the codec byte is the wireless prestage hook
                         // (AAC-LC/ELD/OPUS forward identically — the box never touches the payload).
                         let codec_w: u8 = match codec {
@@ -2744,17 +2951,8 @@ fn spawn_audio(
                         } else {
                             0
                         };
-                        let mut fm = Vec::with_capacity(1 + 8 + 8);
-                        fm.push(0x02u8); // SEAM_FORMAT
-                        fm.extend_from_slice(&scid.to_le_bytes());
-                        fm.push(codec_w);
-                        fm.extend_from_slice(&sr.to_le_bytes());
-                        fm.push(ch as u8);
-                        fm.push(bits);
-                        fm.push(atype);
-                        let mut framed = (fm.len() as u32).to_be_bytes().to_vec();
-                        framed.extend_from_slice(&fm);
-                        key_sent = forward_to_sink(sink, port, &framed);
+                        let fm = seam_audio_format_msg(scid, codec_w, sr, ch as u8, bits, atype);
+                        key_sent = forward_to_sink(sink, port, &fm);
                     }
                     if key_sent && frames == 0 {
                         eprintln!(
@@ -2762,13 +2960,14 @@ fn spawn_audio(
                         );
                     }
                 }
-                // Single allocation: [len u32 BE][SEAM_PKT 0x01][scid 8][pkt]. Was 3 allocs + 2 copies
-                // per RTP packet (build `fm`, then `to_vec()` a 4-byte Vec and grow it past capacity) —
-                // the audio analogue of the video pfx/head fix (perf audit 2026-08-09). Same bytes on
-                // the wire; wired PCM 48k is the highest packet-rate case so this matters most there.
-                let body_len = 1 + 8 + pkt.len();
+                // Single allocation: [len u32 BE][SEAM_MAGIC][SEAM_PKT 0x01][scid 8][pkt]. Was 3 allocs
+                // + 2 copies per RTP packet (build `fm`, then `to_vec()` a 4-byte Vec and grow it past
+                // capacity) — the audio analogue of the video pfx/head fix (perf audit 2026-08-09).
+                // Wired PCM 48k is the highest packet-rate case so this matters most there.
+                let body_len = 4 + 1 + 8 + pkt.len();
                 framed_buf.clear();
                 framed_buf.extend_from_slice(&(body_len as u32).to_be_bytes());
+                framed_buf.extend_from_slice(&SEAM_MAGIC);
                 framed_buf.push(0x01u8); // SEAM_PKT (raw encrypted RTP)
                 framed_buf.extend_from_slice(&scid.to_le_bytes());
                 framed_buf.extend_from_slice(pkt);
@@ -2903,6 +3102,31 @@ fn ntp_now() -> u64 {
 mod tests {
     use super::*;
 
+    /// The audio seam's control messages must be MAGIC-tagged and exactly the lengths the host's
+    /// resync treats as structural (45 / 21). Both ends hardcode those numbers; this is the only
+    /// place the encoder's copy is checked.
+    #[test]
+    fn audio_seam_control_messages_are_magic_tagged_with_the_pinned_lengths() {
+        let key = [0xABu8; 32];
+        let k = seam_audio_key_msg(&key, 0x0102_0304_0506_0708);
+        assert_eq!(k.len(), 4 + 45, "[len 4][magic 4][marker][key 32][scid 8]");
+        assert_eq!(&k[0..4], &45u32.to_be_bytes(), "length prefix is BIG endian and counts the magic");
+        assert_eq!(&k[4..8], &SEAM_MAGIC, "a host that lost sync re-aligns on this");
+        assert_eq!(k[8], 0x00, "SEAM_KEY");
+        assert_eq!(&k[9..41], &key);
+        assert_eq!(&k[41..49], &0x0102_0304_0506_0708u64.to_le_bytes(), "scid stays LITTLE endian");
+
+        let f = seam_audio_format_msg(0x1122_3344_5566_7788, 1, 44_100, 2, 0, 3);
+        assert_eq!(f.len(), 4 + 21);
+        assert_eq!(&f[0..4], &21u32.to_be_bytes());
+        assert_eq!(&f[4..8], &SEAM_MAGIC);
+        assert_eq!(f[8], 0x02, "SEAM_FORMAT");
+        assert_eq!(&f[9..17], &0x1122_3344_5566_7788u64.to_le_bytes());
+        assert_eq!(f[17], 1, "codec AAC-LC");
+        assert_eq!(&f[18..22], &44_100u32.to_le_bytes(), "rate stays LITTLE endian");
+        assert_eq!((f[22], f[23], f[24]), (2, 0, 3), "ch, bits, audio_type");
+    }
+
     /// Two RemoteControlSession channels are BOTH stream type 130, distinguished only by
     /// `channelID`. Keyed on the bare type, the second evicted the first — killing the live iAP
     /// channel's listener and, via `clear_if`, the outbound sink. Unreachable today, armed the day
@@ -2945,7 +3169,7 @@ mod tests {
     #[test]
     fn repeat_phase1_setup_is_idempotent() {
         let mut s = AvSession::new();
-        let first = s.setup(&[]);
+        let first = s.setup(&[]).unwrap();
         let ports = |resp: &[u8]| -> (u64, u64) {
             let d = Value::from_reader(Cursor::new(resp)).unwrap().into_dictionary().unwrap();
             (
@@ -2956,7 +3180,7 @@ mod tests {
         let arc1 = s.alive.clone();
         let p1 = ports(&first);
 
-        let second = s.setup(&[]); // repeat phase-1 SETUP, no TEARDOWN between
+        let second = s.setup(&[]).unwrap(); // repeat phase-1 SETUP, no TEARDOWN between
         assert_eq!(ports(&second), p1, "a repeat SETUP must reuse the ports the phone is using");
         assert!(Arc::ptr_eq(&arc1, &s.alive), "a repeat SETUP must not re-mint the liveness flag");
         assert!(arc1.load(Ordering::Acquire), "the session must still be live");
@@ -2967,12 +3191,12 @@ mod tests {
     #[test]
     fn setup_after_teardown_rebinds_and_reaps_the_old_flag() {
         let mut s = AvSession::new();
-        let _ = s.setup(&[]);
+        let _ = s.setup(&[]).unwrap();
         let first = s.alive.clone();
         s.reset();
         assert!(!first.load(Ordering::Acquire));
 
-        let _ = s.setup(&[]);
+        let _ = s.setup(&[]).unwrap();
         assert!(!Arc::ptr_eq(&first, &s.alive), "a post-TEARDOWN SETUP must mint a fresh flag");
         assert!(!first.load(Ordering::Acquire), "the old flag must stay false");
         assert!(s.alive.load(Ordering::Acquire));
@@ -2981,7 +3205,7 @@ mod tests {
     #[test]
     fn phase1_response_has_ports_and_opens_sockets() {
         let mut s = AvSession::new();
-        let resp = s.setup(&[]); // empty/invalid plist ⇒ treated as no-streams ⇒ phase 1
+        let resp = s.setup(&[]).unwrap(); // empty/invalid plist ⇒ treated as no-streams ⇒ phase 1
         let d = Value::from_reader(Cursor::new(&resp))
             .unwrap()
             .into_dictionary()
@@ -2994,5 +3218,38 @@ mod tests {
     fn ntp_now_is_after_2020() {
         // 2020-01-01 in NTP seconds ≈ 3786825600
         assert!((ntp_now() >> 32) > 3_786_825_600);
+    }
+
+    /// The busy flag is what stops a second stream on the same sink from connecting its own socket
+    /// (which ocbmd would answer by evicting the first, losing whatever SEAM_KEY/SEAM_FORMAT was
+    /// written on it). It is therefore only safe if EVERY exit path clears it — including the two
+    /// that hand no socket back: a failed connect, and a writer returning after `clear_sinks`.
+    #[test]
+    fn sink_release_always_frees_the_slot_and_honors_the_epoch() {
+        let l = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = l.local_addr().unwrap();
+        let sink = Sink::new();
+
+        // Normal return: socket restored, slot freed.
+        crate::plock(&sink.slot).busy = true;
+        sink.release(Some(TcpStream::connect(addr).unwrap()), 0);
+        assert!(!crate::plock(&sink.slot).busy);
+        assert!(crate::plock(&sink.slot).sock.is_some());
+
+        // Return across a `clear_sinks` epoch bump: stale socket dropped, slot still freed.
+        {
+            let mut g = crate::plock(&sink.slot);
+            g.sock = None;
+            g.epoch = 1;
+            g.busy = true;
+        }
+        sink.release(Some(TcpStream::connect(addr).unwrap()), 0);
+        assert!(!crate::plock(&sink.slot).busy);
+        assert!(crate::plock(&sink.slot).sock.is_none());
+
+        // Connect-failure path.
+        crate::plock(&sink.slot).busy = true;
+        sink.release(None, 1);
+        assert!(!crate::plock(&sink.slot).busy);
     }
 }

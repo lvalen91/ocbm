@@ -40,7 +40,18 @@ pub fn eir_bytes(name: &str) -> Vec<u8> {
     // AD: Complete Local Name — NUL-terminated. The working carlink_linux EIR (byte-identical to a
     // genuine CCPA's /etc/bluetooth/eir_info) appends a trailing 0x00 and its length byte counts it
     // (`0f 09 <name> 00` for a 13-char name). Reproduce that exactly.
-    let name_bytes = name.as_bytes();
+    //
+    // Truncated to fit the AD length byte rather than cast to it: a name long enough to wrap
+    // `len + 2` past 255 would declare a length that disagrees with the bytes that follow, and the
+    // controller parses the rest of the EIR from that number. `hci::write_eir` rejects > 240 bytes
+    // total, so the cut is at the smaller of the two limits.
+    // 240 total, less this AD's len+type+NUL (3) and the two 18-byte UUID ADs below.
+    const MAX_NAME: usize = 240 - 3 - 2 * 18;
+    let mut end = name.len().min(MAX_NAME);
+    while end > 0 && !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    let name_bytes = &name.as_bytes()[..end];
     eir.push((name_bytes.len() + 2) as u8); // type byte + name bytes + trailing NUL
     eir.push(0x09);
     eir.extend_from_slice(name_bytes);
@@ -64,10 +75,15 @@ fn eir_hex(name: &str) -> String {
 }
 
 fn run(args: &[&str]) -> std::io::Result<()> {
-    let status = Command::new("hciconfig").args(args).status()?;
-    if !status.success() {
+    // Captured (not inherited) so a failure's stderr lands in the SAME log line as the argv and exit
+    // status -- `hciconfig`'s own stderr is a few words with no context, and split across a raw
+    // process's inherited stdio it is unattributable once other daemons are logging concurrently.
+    let out = Command::new("hciconfig").args(args).output()?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        eprintln!("[carplay-wireless] hciconfig {args:?} failed: status={} stderr={stderr:?}", out.status);
         return Err(std::io::Error::other(format!(
-            "hciconfig {args:?} failed: {status}"
+            "hciconfig {args:?} failed: {}", out.status
         )));
     }
     Ok(())
@@ -85,8 +101,6 @@ fn stop_conflicting_daemons() {
     }
 }
 
-/// Bring the controller up as a discoverable/connectable CarPlay-style accessory: set class, name,
-/// EIR, then enable page+inquiry scan (discoverable + connectable, no timeout).
 /// Is the HCI UART line discipline registered with the kernel?
 ///
 /// `hci_uart` is a LOADABLE MODULE on the CCPA (RFCOMM/SCO/L2CAP and the BT core are built in; only
@@ -107,6 +121,64 @@ fn hci_ldisc_registered() -> bool {
         .unwrap_or(true) // unreadable /proc: do not block bring-up on a diagnostic
 }
 
+/// Re-apply this unit's own post-attach SCO setup through the radio seam, after the DOWN->UP cycle
+/// above has reset it away.
+///
+/// BEST-EFFORT BY DESIGN, on every axis:
+///   * A unit whose vendor branch carries no SCO mapping exits 3 (`unsupported`) and that is a
+///     finding, not a failure -- CarPlay does not need SCO and Android Auto degrades to no call
+///     audio, which is strictly better than refusing to bring Bluetooth up at all.
+///   * The seam is absent entirely on the Pi/AAOS port and on a dev host. Missing script, missing
+///     `sh`, non-zero exit: all logged, none fatal.
+///
+/// Never composes the commands itself. `hcitool -i hci0 cmd 0x3f 0x1c 0x01 0x02 0x00 0x00 0x00` is
+/// BCM4358's and `0x3f 0x1d 0x00` is NXP's; firing either at the wrong controller is the exact
+/// class of mistake the seam exists to make impossible, so the choice stays in `radio_detect.sh`,
+/// which reads it out of the unit's own `attach_bluetooth.sh`.
+fn restore_sco_setup() {
+    const HAL: &str = "/script/radio_hal.sh";
+    if !std::path::Path::new(HAL).exists() {
+        return; // not a CCPA rootfs (Pi/AAOS port, or a dev host) -- nothing to restore
+    }
+    // BOUNDED, and that bound is load-bearing. `sco_on` takes radio_hal's per-subsystem `bt` lock,
+    // and `bt_on` can legitimately hold that lock for MINUTES against a wedged controller (its
+    // convergence poll is 30 × `timeout 5` across 4 attempts). `lock_take` gives up after 30 s, so
+    // an unbounded call here would stall `bring_up` — which runs once per active session, on the
+    // session's critical path — for half a minute behind a bring-up that is already doing the work.
+    // `timeout` is present on this platform (radio_hal.sh itself uses it); if it somehow is not,
+    // fall back to a direct call rather than silently skipping the restore.
+    let run = Command::new("timeout").args(["20", "sh", HAL, "sco_on"]).output();
+    let run = match run {
+        Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Command::new("sh").arg(HAL).arg("sco_on").output()
+        }
+        other => other,
+    };
+    match run {
+        Ok(out) => {
+            let code = out.status.code().unwrap_or(-1);
+            // The seam logs its own detail to stdout; carry the one-line verdict so a box.log
+            // reader does not have to correlate two files.
+            let detail = String::from_utf8_lossy(&out.stdout);
+            let last = detail.lines().last().unwrap_or("").trim();
+            match code {
+                0 => eprintln!("[bt-bringup] SCO setup restored after the down/up cycle ({last})"),
+                3 => eprintln!(
+                    "[bt-bringup] no SCO mapping for this unit -- HFP call audio will not work ({last})"
+                ),
+                124 => eprintln!(
+                    "[bt-bringup] radio_hal.sh sco_on timed out after 20s (the bt lock is held by a \
+                     concurrent bring-up) -- HFP call audio may be silent this session"
+                ),
+                _ => eprintln!("[bt-bringup] radio_hal.sh sco_on exited {code} ({last})"),
+            }
+        }
+        Err(e) => eprintln!("[bt-bringup] could not run {HAL} sco_on: {e} (HFP call audio may be silent)"),
+    }
+}
+
+/// Bring the controller up as a discoverable/connectable CarPlay-style accessory: set class, name,
+/// EIR, then enable page+inquiry scan (discoverable + connectable, no timeout).
 pub fn bring_up(hci_dev: &str, name: &str) -> std::io::Result<()> {
     // Name the real fault at its source rather than letting it surface as an unexplained EINVAL.
     // Deliberately a LOG, not an early return: this is diagnostic, the controller may already be
@@ -144,15 +216,19 @@ pub fn bring_up(hci_dev: &str, name: &str) -> std::io::Result<()> {
     // bound socket or a live listener. During the quiet period `go_quiet`'s `noscan` prevents any new
     // inbound ACL, so no in-use connection can be severed either.
     //
-    // KNOWN, ACCEPTED SIDE EFFECT: this controller is `hciattach`'d over UART, so it carries
-    // HCI_QUIRK_RESET_ON_CLOSE -- the `down` makes the kernel issue a real HCI_Reset on close, and the
-    // `up` re-reads Read_Buffer_Size. That discards `attach_bluetooth.sh`'s HFP setup (its
-    // `hciconfig scomtu 240:32` plus the two vendor `hcitool` commands: SCO-to-HCI routing and BLE
-    // power). Deliberately NOT re-issued here: CarPlay carries ALL audio -- including telephony -- over
-    // the AirPlay/WiFi session, never over SCO/HFP, so nothing in this project's proven path depends on
-    // them, and re-issuing vendor-opaque raw HCI from this daemon would add untested writes to the
-    // controller for no functional gain. If HFP-over-BT is ever actually exercised, restore them after
-    // this `up`.
+    // KNOWN SIDE EFFECT, NOW REPAIRED (2026-09-03): this controller is `hciattach`'d over UART, so it
+    // carries HCI_QUIRK_RESET_ON_CLOSE -- the `down` makes the kernel issue a real HCI_Reset on close,
+    // and the `up` re-reads Read_Buffer_Size. That discards `attach_bluetooth.sh`'s HFP setup (its
+    // `hciconfig scomtu 240:32` plus the vendor `hcitool` SCO-to-HCI routing command where its chipset
+    // branch has one).
+    //
+    // This comment used to end "deliberately NOT re-issued here: CarPlay carries ALL audio --
+    // including telephony -- over the AirPlay/WiFi session, never over SCO/HFP". That reasoning was
+    // sound and is now OBSOLETE: wireless ANDROID AUTO carries call and Assistant audio over
+    // Bluetooth HFP/SCO (`sco_audio`), so the discarded setup is load-bearing again. It is restored
+    // by `restore_sco_setup` below -- through the radio seam, never by this daemon composing raw HCI,
+    // because which commands a unit needs is a per-chipset fact only that unit's own dispatcher
+    // knows (docs/wireless/01_BT_AND_RADIO.md, the no-chipset-whitelist rule).
     // Native backend (Raspberry Pi port): `hciconfig` is BlueZ userspace and does not exist on
     // Android, so every operation below is done with ioctls + raw HCI command packets instead. The
     // ORDER and the DOWN->UP cycle are identical — see the reasoning above, it is load-bearing.
@@ -165,6 +241,8 @@ pub fn bring_up(hci_dev: &str, name: &str) -> std::io::Result<()> {
         crate::hci::write_local_name(dev, name)?;
         crate::hci::write_eir(dev, &eir_bytes(name))?;
         crate::hci::set_scan(dev, crate::hci::SCAN_PAGE_AND_INQUIRY)?;
+        restore_sco_setup();
+        eprintln!("[carplay-wireless] HCI bring-up OK dev={hci_dev} name={name}");
         return Ok(());
     }
 
@@ -180,6 +258,8 @@ pub fn bring_up(hci_dev: &str, name: &str) -> std::io::Result<()> {
     run(&[hci_dev, "name", name])?;
     run(&[hci_dev, "inqdata", &eir_hex(name)])?;
     run(&[hci_dev, "piscan"])?;
+    restore_sco_setup();
+    eprintln!("[carplay-wireless] HCI bring-up OK dev={hci_dev} name={name}");
     Ok(())
 }
 
@@ -205,6 +285,20 @@ mod tests {
         assert_eq!(&eir[2..9], b"CarLink");
         assert_eq!(eir[9], 0x00); // NUL terminator, counted in the length above
     }
+
+    /// The AD length byte must always describe the bytes that actually follow it: a name long
+    /// enough to overflow it would desync the controller's parse of the rest of the EIR.
+    #[test]
+    fn an_overlong_name_is_truncated_not_wrapped() {
+        let eir = eir_bytes(&"x".repeat(400));
+        assert_eq!(eir[0] as usize, MAX_NAME_FOR_TEST + 2);
+        assert_eq!(eir[1], 0x09);
+        assert_eq!(eir[2 + MAX_NAME_FOR_TEST], 0x00, "NUL must follow the truncated name");
+        assert!(eir.len() <= 240, "EIR is {} bytes", eir.len());
+    }
+
+    /// Mirrors `eir_bytes`'s own cap; kept here so a change to one fails the other.
+    const MAX_NAME_FOR_TEST: usize = 240 - 3 - 2 * 18;
 
     #[test]
     fn eir_contains_both_service_uuids() {

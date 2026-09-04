@@ -36,10 +36,18 @@ enum CarPlayCornerMask {
         guard n > 1, cg.height == n else { return nil }
         var raw = [UInt8](repeating: 0, count: n * n)
         let gray = CGColorSpaceCreateDeviceGray()
-        guard let ctx = CGContext(data: &raw, width: n, height: n, bitsPerComponent: 8,
-                                  bytesPerRow: n, space: gray,
-                                  bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return nil }
-        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: n, height: n))
+        // 05-L1: `&raw` only converts to a valid pointer for the duration of the CGContext(data:)
+        // call itself — the returned context retaining it past that is documented UB. Use the same
+        // withUnsafeMutableBytes pattern maskImage(size:) already uses below to keep the buffer's
+        // pointer alive for the context's whole lifetime, draw included.
+        let drew: Bool = raw.withUnsafeMutableBytes { ptr in
+            guard let ctx = CGContext(data: ptr.baseAddress, width: n, height: n, bitsPerComponent: 8,
+                                      bytesPerRow: n, space: gray,
+                                      bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return false }
+            ctx.draw(cg, in: CGRect(x: 0, y: 0, width: n, height: n))
+            return true
+        }
+        guard drew else { return nil }
         // Normalize orientation independent of any draw flip: put the nub (min-coverage corner) at (0,0).
         let tl = raw[0], tr = raw[n - 1], bl = raw[(n - 1) * n], br = raw[(n - 1) * n + (n - 1)]
         let flipX = min(tr, br) < min(tl, bl)
@@ -94,6 +102,13 @@ enum CarPlayCornerMask {
     /// Build a full-frame alpha mask CGImage for a video of `size`. Prefers iOS's streamed corner
     /// (exact) and falls back to the bundled asset. Nil if neither is available (caller then no-rounds).
     static func maskImage(size: CGSize) -> CGImage? {
+        // 05-M1: the app's own corner carve is only correct once iOS has DECLARED the accessory owns
+        // the corner (enablesCornerMasks). With it off, iOS rounds its own UI at the Apple radius and
+        // streams no mask; carving one here (esp. the width-fraction fallback) cuts INTO live CarPlay
+        // UI at any width other than 1280/1920 (docs/carplay/06_AV_PIPELINE.md §6c). Read the same
+        // persisted VehicleConfigModel field the rest of the app treats as the single source of truth
+        // — no new source of truth introduced.
+        guard VehicleConfigModel.shared.enablesCornerMasks else { return nil }
         let w = Int(size.width.rounded()), h = Int(size.height.rounded())
         guard w > 2, h > 2 else { return nil }
         // Source selection: streamed (exact, cp = width × n/srcWidth) beats bundled (cp = width × 0.0531).

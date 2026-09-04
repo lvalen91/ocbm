@@ -30,6 +30,10 @@ final class CarPlayView: NSView {
 
     /// When true, touch input uses AA protocol (single-touch, 0..10000, type 0x05)
     var isAndroidAuto = false
+    /// AA with declared codec margins (T4): the window is locked to the VISIBLE aspect, the codec
+    /// frame is centre-cropped to it on both axes (gearhead splits margins evenly), and touch is
+    /// mapped bounds-relative — i.e. straight into the visible rect the phone laid its UI out in.
+    var aaMarginCrop = false
 
     /// AA MOVE throttle — 17ms interval matching AutoKit (~60fps)
     private static let aaTouchThrottleNs: UInt64 = 17_000_000
@@ -40,6 +44,24 @@ final class CarPlayView: NSView {
     private let statusIconLayer = CALayer()
     private let statusTextLayer = CATextLayer()
     private var isStreaming = false
+
+    // Pairing-code panel (2026-09-03): the wireless SSP Numeric-Comparison code, one digit per shaded
+    // cell, grouped n/2 + n/2 with a dash for even lengths ≥ 4. Visible only while a code is pending
+    // (CT_PAIRING_CODE non-empty); the one-line status below keeps its normal watchdog text.
+    private let pairingPanel = CALayer()
+    private var pairingCells: [(box: CALayer, digit: CATextLayer)] = []
+    private let pairingDash = CALayer()
+    private var pairingCode: String?
+
+    // The user's half of SSP Numeric Comparison. Real NSButtons rather than more CALayers: this is the
+    // one place in the overlay that takes a decision from the user, and it must look, key-navigate and
+    // speak like a macOS dialog — default button on the right, Return pairs, Escape cancels.
+    private var pairingButtons: NSStackView?
+    private var pairButton: NSButton?
+    private var pairCancelButton: NSButton?
+    /// Called with the user's answer (`true` = Pair). The buttons disable themselves on the way out,
+    /// so this fires at most once per displayed code.
+    var onPairingAnswer: ((Bool) -> Void)?
 
     // Re-apply the corner mask when iOS's streamed mask arrives/changes after first layout.
     // nonisolated so the nonisolated deinit can remove it (NotificationCenter removal is thread-safe).
@@ -105,6 +127,12 @@ final class CarPlayView: NSView {
         statusTextLayer.frame = CGRect(x: 0, y: 0, width: 400, height: 24)
         statusOverlay.addSublayer(statusTextLayer)
 
+        pairingPanel.isHidden = true
+        pairingDash.cornerRadius = 18
+        pairingDash.cornerCurve = .continuous
+        statusOverlay.addSublayer(pairingPanel)
+        setupPairingButtons()
+
         applyAppearance()
     }
 
@@ -129,16 +157,37 @@ final class CarPlayView: NSView {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
 
-        if !isStreaming {
+        if !isStreaming && !isAndroidAuto {
             layer?.backgroundColor = bgCG
             videoLayer.backgroundColor = nil
-            videoLayer.isHidden = true
+            videoLayer.isHidden = true   // never hide the AA layer on a light/dark switch (video bug 2026-09-04)
         }
 
         statusIconLayer.contents = isDark ? iconDark : iconLight
         statusTextLayer.foregroundColor = textCG
+        applyPairingAppearance(isDark: isDark)
 
         CATransaction.commit()
+    }
+
+    /// Cell fill + digit colour from the SEMANTIC system palette, resolved in the view's effective
+    /// appearance (HIG: never hardcode; system fills and label colours track light/dark, Increase
+    /// Contrast and Reduce Transparency on their own). Called inside a transaction.
+    private func applyPairingAppearance(isDark: Bool) {
+        _ = isDark
+        var cellCG = CGColor.clear
+        var dashCG = CGColor.clear
+        var digitCG = CGColor.black
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            cellCG = NSColor.tertiarySystemFill.cgColor
+            dashCG = NSColor.secondarySystemFill.cgColor
+            digitCG = NSColor.labelColor.cgColor
+        }
+        pairingDash.backgroundColor = dashCG
+        for cell in pairingCells {
+            cell.box.backgroundColor = cellCG
+            cell.digit.foregroundColor = digitCG
+        }
     }
 
     override func layout() {
@@ -150,12 +199,30 @@ final class CarPlayView: NSView {
         if let l = layer { CarPlayCornerMask.apply(to: l, bounds: bounds) }
         updateAAVideoGravity()
 
-        // Center the icon and text
+        // Center the icon and text — with the pairing panel stacked above them while a code is pending.
         let iconSize: CGFloat = 120
         let gap: CGFloat = 16
         let textH: CGFloat = 24
-        let totalH = iconSize + gap + textH
-        let centerY = bounds.midY + totalH / 2
+        let panelH = layoutPairingPanelSize().height
+        let panelGap: CGFloat = panelH > 0 ? 40 : 0
+        // The answer buttons sit directly under the code they answer. Zero-height with no code, so
+        // the no-pairing layout is byte-for-byte what it was.
+        let buttonsSize = (panelH > 0 ? pairingButtons?.fittingSize : nil) ?? .zero
+        let buttonsGap: CGFloat = buttonsSize.height > 0 ? 20 : 0
+        let totalH = panelH + buttonsGap + buttonsSize.height + panelGap + iconSize + gap + textH
+        let blockTop = bounds.midY + totalH / 2
+        if panelH > 0 {
+            layoutPairingPanel(top: blockTop, in: bounds)
+        }
+        if buttonsSize.height > 0, let stack = pairingButtons {
+            stack.frame = CGRect(
+                x: (bounds.midX - buttonsSize.width / 2).rounded(),
+                y: (blockTop - panelH - buttonsGap - buttonsSize.height).rounded(),
+                width: buttonsSize.width,
+                height: buttonsSize.height
+            )
+        }
+        let centerY = blockTop - panelH - buttonsGap - buttonsSize.height - panelGap
 
         statusIconLayer.frame = CGRect(
             x: bounds.midX - iconSize / 2,
@@ -172,6 +239,164 @@ final class CarPlayView: NSView {
         CATransaction.commit()
     }
 
+    // MARK: - Pairing answer buttons
+
+    /// Build the Pair/Cancel pair once, hidden. HIG: standard push buttons, action verb as the title,
+    /// the default (Pair) rightmost and Return-keyed, Cancel Escape-keyed. Sized by `fittingSize` and
+    /// positioned in `layout()` — the overlay is frame-driven, so no constraints here.
+    private func setupPairingButtons() {
+        let cancel = NSButton(title: "Cancel", target: self, action: #selector(pairingCancelClicked))
+        cancel.bezelStyle = .rounded
+        cancel.keyEquivalent = "\u{1b}" // Escape
+        cancel.setAccessibilityLabel("Cancel pairing")
+
+        let pair = NSButton(title: "Pair", target: self, action: #selector(pairingPairClicked))
+        pair.bezelStyle = .rounded
+        pair.keyEquivalent = "\r" // Return — makes this the window's default button while visible
+        pair.setAccessibilityLabel("Pair — the codes match")
+
+        let stack = NSStackView(views: [cancel, pair])
+        stack.orientation = .horizontal
+        stack.spacing = 12
+        stack.isHidden = true
+        stack.translatesAutoresizingMaskIntoConstraints = true
+        addSubview(stack)
+
+        pairingButtons = stack
+        pairButton = pair
+        pairCancelButton = cancel
+    }
+
+    @objc private func pairingPairClicked() { answerPairing(true) }
+    @objc private func pairingCancelClicked() { answerPairing(false) }
+
+    /// Deliver the answer and immediately disable both buttons. The box clears the code once it has
+    /// acted, which hides them again — until then a second click must not be able to send a second,
+    /// contradictory answer for the same code.
+    private func answerPairing(_ accept: Bool) {
+        guard pairButton?.isEnabled == true || pairCancelButton?.isEnabled == true else { return }
+        pairButton?.isEnabled = false
+        pairCancelButton?.isEnabled = false
+        onPairingAnswer?(accept)
+    }
+
+    /// Show/hide the answer buttons, re-enabling them for each newly displayed code.
+    /// Pair/Cancel are only meaningful when the box waits for this app's answer (host YAML
+    /// `pairing: numeric_comparison_interactive`). Default off: the box confirms its own side and the
+    /// user compares on the phone, so the panel is display-only.
+    var pairingAnswerEnabled = false
+
+    private func setPairingAnswerVisible(_ visible: Bool) {
+        let visible = visible && pairingAnswerEnabled
+        pairButton?.isEnabled = visible
+        pairCancelButton?.isEnabled = visible
+        pairingButtons?.isHidden = !visible
+        // A hidden NSButton takes no key equivalent, so Return/Escape go back to being CarPlay
+        // D-pad input the moment the prompt is gone (see `keyDown`).
+    }
+
+    // MARK: - Pairing-code panel
+
+    /// Show `code` (any length; nil hides the panel). Digits render one per cell; even lengths ≥ 4 split
+    /// into two groups around a dash, like the iPhone's own pairing sheet.
+    func showPairingCode(_ code: String?) {
+        let trimmed = code?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let code: String? = (trimmed?.isEmpty ?? true) ? nil : trimmed
+        // BEFORE the unchanged-code early return: the box re-emits the live code to a host that
+        // reattaches mid-pairing, and that host must get working buttons, not ones still disabled
+        // from an answer the previous connection sent.
+        setPairingAnswerVisible(code != nil && !isStreaming)
+        guard code != pairingCode else { return }
+        pairingCode = code
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for cell in pairingCells {
+            cell.box.removeFromSuperlayer()
+        }
+        pairingCells.removeAll()
+        pairingDash.removeFromSuperlayer()
+        if let code {
+            let scale = NSScreen.main?.backingScaleFactor ?? 2.0
+            for ch in code {
+                let box = CALayer()
+                box.cornerRadius = 8 // standard macOS control radius family
+                box.cornerCurve = .continuous
+                let digit = CATextLayer()
+                digit.string = String(ch)
+                digit.alignmentMode = .center
+                digit.contentsScale = scale
+                digit.truncationMode = .none
+                box.addSublayer(digit)
+                pairingPanel.addSublayer(box)
+                pairingCells.append((box, digit))
+            }
+            if code.count >= 4 && code.count % 2 == 0 {
+                pairingPanel.addSublayer(pairingDash)
+            }
+            let isDark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            applyPairingAppearance(isDark: isDark)
+            pairingPanel.isHidden = false
+            // VoiceOver: the digits live in layers, so expose the code on the view itself.
+            setAccessibilityLabel("Pairing code " + code.map(String.init).joined(separator: " ") + ". Confirm it matches your phone.")
+        } else {
+            pairingPanel.isHidden = true
+            setAccessibilityLabel(nil)
+        }
+        CATransaction.commit()
+        needsLayout = true
+    }
+
+    /// Cell geometry for the current code and bounds. Cells scale down on narrow windows.
+    private func layoutPairingPanelSize() -> CGSize {
+        guard let code = pairingCode, !code.isEmpty else { return .zero }
+        let n = CGFloat(code.count)
+        let hasDash = code.count >= 4 && code.count % 2 == 0
+        let cellW = min(100, max(44, (bounds.width * 0.6) / (n + (hasDash ? 1.2 : 0))))
+        let cellH = cellW * 1.6
+        let cellGap = cellW * 0.2
+        let dashW: CGFloat = hasDash ? cellW * 0.72 : 0
+        // With a dash the middle seam is [pad][dash][pad] INSTEAD of a cell gap, so the dash sits
+        // exactly between the groups: (n-2) cell gaps + 2 pads, not (n-1) gaps + 2 pads.
+        let width = hasDash
+            ? n * cellW + (n - 2) * cellGap + dashW + 2 * cellGap
+            : n * cellW + (n - 1) * cellGap
+        return CGSize(width: width, height: cellH)
+    }
+
+    /// Position the cells (and dash) with their top edge at `top`, centred horizontally.
+    private func layoutPairingPanel(top: CGFloat, in bounds: CGRect) {
+        guard let code = pairingCode, !code.isEmpty else { return }
+        let size = layoutPairingPanelSize()
+        let n = code.count
+        let hasDash = n >= 4 && n % 2 == 0
+        let cellH = size.height
+        let cellW = cellH / 1.6
+        let cellGap = cellW * 0.2
+        let dashW: CGFloat = hasDash ? cellW * 0.72 : 0
+        let dashH: CGFloat = cellW * 0.36
+        let dashPad: CGFloat = hasDash ? cellGap : 0
+        pairingPanel.frame = CGRect(x: bounds.midX - size.width / 2, y: top - cellH, width: size.width, height: cellH)
+        var x: CGFloat = 0
+        let fontSize = cellH * 0.5
+        for (i, cell) in pairingCells.enumerated() {
+            if hasDash && i == n / 2 {
+                // Middle seam: symmetric [pad][dash][pad] replacing the cell gap.
+                x += dashPad
+                pairingDash.frame = CGRect(x: x, y: (cellH - dashH) / 2, width: dashW, height: dashH)
+                x += dashW + dashPad
+            }
+            cell.box.frame = CGRect(x: x, y: 0, width: cellW, height: cellH)
+            cell.digit.font = NSFont.monospacedDigitSystemFont(ofSize: fontSize, weight: .semibold)
+            cell.digit.fontSize = fontSize
+            cell.digit.frame = CGRect(x: 0, y: (cellH - fontSize * 1.2) / 2, width: cellW, height: fontSize * 1.2)
+            x += cellW
+            let nextIsDash = hasDash && i + 1 == n / 2
+            if i < pairingCells.count - 1 && !nextIsDash {
+                x += cellGap
+            }
+        }
+    }
+
     // MARK: - Status Overlay
 
     func updateStatus(_ text: String) {
@@ -186,6 +411,10 @@ final class CarPlayView: NSView {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         statusOverlay.isHidden = streaming
+        // The buttons are SUBVIEWS, not layers in `statusOverlay`, so hiding the overlay does not
+        // hide them — video would start with a live Pair button floating over it, still owning
+        // Return and Escape.
+        setPairingAnswerVisible(!streaming && pairingCode != nil)
         if streaming {
             layer?.backgroundColor = NSColor.black.cgColor
             videoLayer.backgroundColor = NSColor.black.cgColor
@@ -210,6 +439,7 @@ final class CarPlayView: NSView {
     /// Called on layout() to handle window resize.
     private func updateAAVideoGravity() {
         guard isAndroidAuto, bounds.height > 0 else { return }
+        if aaMarginCrop { videoLayer.videoGravity = .resizeAspectFill; return }
         let viewAspect = bounds.width / bounds.height
         if viewAspect > videoAspect {
             // Window wider than video — crop top/bottom black bars
@@ -542,7 +772,7 @@ final class CarPlayView: NSView {
 
     /// Whether AA crop mode is active (resizeAspectFill, landscape window wider than 16:9 video).
     private var isAACropMode: Bool {
-        isAndroidAuto && bounds.height > 0 && (bounds.width / bounds.height) > videoAspect
+        isAndroidAuto && bounds.height > 0 && (aaMarginCrop || (bounds.width / bounds.height) > videoAspect)
     }
 
     private func normalizePoint(_ locationInView: CGPoint, skipContainmentCheck: Bool = false) -> (Float32, Float32)? {
@@ -557,6 +787,14 @@ final class CarPlayView: NSView {
         // omitted `vRect.origin.y`, mapping taps too high with error growing toward the bottom (audit M-i).
         // Continuation points (drag/up) are pre-clamped into vRect by the caller and pass
         // skipContainmentCheck, since contains() would reject the clamped max-edge coordinate.
+        if aaMarginCrop {
+            // Visible rect == the view (window aspect is locked to it): bounds-relative is the phone's
+            // coordinate space, no overflow arithmetic needed.
+            guard bounds.width > 0, bounds.height > 0 else { return nil }
+            let x = Float32(locationInView.x / bounds.width)
+            let y = Float32(1.0 - locationInView.y / bounds.height)
+            return (max(0, min(1, x)), max(0, min(1, y)))
+        }
         if !isAACropMode && !skipContainmentCheck {
             guard vRect.contains(locationInView) else { return nil }
         }
@@ -572,10 +810,16 @@ final class CarPlayView: NSView {
         let viewAspect = bounds.width / bounds.height
 
         if isAACropMode {
-            // resizeAspectFill: video scaled to fill view, height overflows.
-            let videoHeight = bounds.width / videoAspect
-            let y = (bounds.height - videoHeight) / 2
-            return CGRect(x: 0, y: y, width: bounds.width, height: videoHeight)
+            if viewAspect > videoAspect {
+                // resizeAspectFill: video scaled to fill view, height overflows.
+                let videoHeight = bounds.width / videoAspect
+                let y = (bounds.height - videoHeight) / 2
+                return CGRect(x: 0, y: y, width: bounds.width, height: videoHeight)
+            }
+            // margin crop with a taller-than-video window: width overflows.
+            let videoWidth = bounds.height * videoAspect
+            let x = (bounds.width - videoWidth) / 2
+            return CGRect(x: x, y: 0, width: videoWidth, height: bounds.height)
         }
 
         // resizeAspect: video fits within view bounds

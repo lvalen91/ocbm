@@ -39,14 +39,26 @@ final class AirPlaySetupSession {
 
     private(set) var state: State = .idle
     let mode: Mode
-    private let config: VehicleConfig
+    /// Resolved on every access rather than captured once at init (10-M3): a `let config` snapshot
+    /// meant the SETUP author kept using the connect-time config even after a mid-session Settings
+    /// Save committed a new one. Same actor-crossing shape as `relay.onOpen`'s existing `cfg.data()`
+    /// call (this session is driven from the OCBM background read queue via `feed()`/`dispatch()`,
+    /// same as `onOpen`/`onRequest`).
+    private let configProvider: () -> VehicleConfig
+    private var config: VehicleConfig { configProvider() }
     /// Injected diagnostic sink (nil = muted — the "mute-once" test hook: tests leave it nil to silence
     /// authoring/oracle chatter, prod wires it to os_log). Keeping it a closure keeps this file IOKit-free.
     var log: ((String) -> Void)?
 
-    init(config: VehicleConfig, mode: Mode = .author) {
-        self.config = config
+    init(configProvider: @escaping () -> VehicleConfig, mode: Mode = .author) {
+        self.configProvider = configProvider
         self.mode = mode
+    }
+
+    /// Fixed-config convenience init (tests/main.swift's headless harness, which has no live
+    /// `VehicleConfigModel` to poll) — wraps the value in a constant provider.
+    convenience init(config: VehicleConfig, mode: Mode = .author) {
+        self.init(configProvider: { config }, mode: mode)
     }
 
     /// Reset to Idle — called on full TEARDOWN, RS_CLOSE, and RS_OPEN (a new connection voids any

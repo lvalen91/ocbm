@@ -61,6 +61,7 @@ final class VehicleConfigModel {
     var knobSupportsNudge = false, mediaButtonsSupport = true, telephonyButtonsSupport = false
     var touchpadSupport = false, touchpadButtonsSupport = false
     var touchScreenHighFidelity = true, touchScreenSupportsCancel = true, steeringWheelSupport = true
+    var touchScreenSupportsMultiTouch = false
     var primaryInput = "Touchpad"
     var limitedUIConfigEnabled = true, oemIconEnabled = true, oemIconBase64 = "iVBORw0KGgo="
     // HOSTILE ON PURPOSE. This is the only free text in the document that reaches YamlEmit.quotedBody,

@@ -4,7 +4,7 @@
 # the Rust daemons) asks for "wifi up" / "bt up" and never names a chip, a module, a firmware
 # path or an attach helper.
 #
-# VERBS   probe | status | wifi_ap_on | wifi_ap_off | bt_on | bt_off
+# VERBS   probe | status | wifi_ap_on | wifi_ap_off | bt_on | bt_off | sco_on
 # EXIT    0 converged now   1 ran and failed   2 already converged   3 unsupported on this unit
 #
 # ---------------------------------------------------------------------------------------------
@@ -139,6 +139,7 @@ caps() {
   : "${RADIO_KO_TARBALL:=}"    "${RADIO_WLAN_MODULES:=}"    "${RADIO_WLAN_INSMOD:=}"
   : "${RADIO_BT_LDISC_KO:=}"   "${RADIO_BT_ATTACH_CMD:=}"   "${RADIO_BT_ATTACH:=}"
   : "${RADIO_BT_PRELOAD:=}"    "${RADIO_BT_PRELOAD_CMD:=}"  "${RADIO_BT_AFTER_WLAN:=0}"
+  : "${RADIO_BT_SCO_MTU_CMD:=}"  "${RADIO_BT_SCO_ROUTE_CMD:=}"
   : "${RADIO_BT_UART:=/dev/ttymxc2}"
   return 0
 }
@@ -293,6 +294,65 @@ wlan_driver_up() {
   # set_wifi_mac is the vendor's per-unit MAC applier and is kept by the base install's radio
   # guard on every variant. Harmless where absent.
   command -v set_wifi_mac >/dev/null 2>&1 && set_wifi_mac >/dev/null 2>&1
+  return 0
+}
+
+# ---------------------------------------------------------------------------------------------
+# SCO (HFP call audio). Re-apply THIS UNIT'S OWN post-attach SCO setup.
+#
+# WHY A SEPARATE VERB. `carplay-wireless`'s `bt_bringup::bring_up` forces a DOWN->UP cycle on the
+# controller (it is the only way the kernel re-sends its Set_Event_Mask, without which SSP pairing
+# silently never reaches the host). This controller is hciattach'd over UART, so it carries
+# HCI_QUIRK_RESET_ON_CLOSE and that `down` issues a real HCI_Reset -- discarding everything
+# attach_bluetooth.sh set after ITS attach, the SCO setup included. For as long as nothing carried
+# audio over SCO that was a documented, harmless side effect. Wireless Android Auto carries call
+# and Assistant audio over HFP/SCO, so it is now a real fault, and the daemon calls this verb after
+# every bring-up.
+#
+# The commands are the VENDOR'S, extracted per-branch by radio_detect.sh -- never composed here.
+# On this unit's Realtek branch the vendor sets ONLY the SCO MTU and no routing command at all
+# (Realtek routes SCO over HCI by default); on NXP and BCM4358 there is also a vendor-opaque
+# routing command. Emitting one chip's routing command on another chip is precisely the failure
+# the no-chipset-whitelist rule exists to prevent, so a branch we cannot resolve yields NO mapping
+# and this verb reports `unsupported` (3) rather than guessing.
+#
+# The vendor writes `hci0` literally. Retarget it at the device we actually enumerated rather than
+# firing a command at a node that may not exist -- the ONLY edit made to a captured line, and it is
+# logged when it happens.
+apply_sco() {  # $1 = hci dev; echoes what it did. 0 = applied, 3 = nothing to apply
+  _sd=$1; _did=0
+  for _sc in sco_mtu sco_route; do
+    case "$_sc" in
+      sco_mtu)   _cmd=$RADIO_BT_SCO_MTU_CMD ;;
+      sco_route) _cmd=$RADIO_BT_SCO_ROUTE_CMD ;;
+    esac
+    [ -n "$_cmd" ] || continue
+    case "$_cmd" in
+      *" hci0"*|*" hci0")
+        [ "$_sd" = hci0 ] || { log "retargeting the vendor $_sc line from hci0 to $_sd"
+                               _cmd=$(echo "$_cmd" | sed "s/ hci0/ $_sd/g"); } ;;
+    esac
+    log "$_sc: $_cmd"
+    $_cmd >/dev/null 2>&1 || log "  $_sc returned non-zero (non-fatal)"
+    _did=1
+  done
+  [ "$_did" = 1 ] || return 3
+  return 0
+}
+
+do_sco_on() {
+  caps || { log "no descriptor - cannot restore SCO setup"; return 3; }
+  _d=$(hci_dev 2>/dev/null) || {
+    log "no HCI device - nothing to apply SCO setup to"; return 3; }
+  if ! apply_sco "$_d"; then
+    log "no SCO mapping could be extracted for chipset ${RADIO_SDIO_DEVICE:-unknown} - HFP call audio will not be restored after a controller reset"
+    return 3
+  fi
+  # Read the controller back. `hciconfig <dev>` prints `SCO MTU: 240:32` and `Voice: 0x0060`; those
+  # are the two facts an HFP call depends on, and a readback is the only thing that distinguishes
+  # "applied" from "the command exited 0 and the controller ignored it".
+  _rb=$(timeout 5 hciconfig "$_d" 2>/dev/null | tr -s ' ' | grep -o 'SCO MTU: [0-9]*:[0-9]*')
+  log "SCO setup applied to $_d (${_rb:-SCO MTU unreadable})"
   return 0
 }
 
@@ -506,8 +566,9 @@ do_bt_on() {
       # unit IS a power loss: each move starts from an empty /tmp. `caps()` re-derives the
       # descriptor by running /script/radio_detect.sh, so if that script is absent, unreadable, or
       # its extraction yields nothing, RADIO_BT_LDISC_KO comes back EMPTY -- and this whole block
-      # then no-ops. The supervisor invokes us as `sh /script/radio_hal.sh bt_on >/tmp/bt.log 2>&1`
-      # inside a detached wrapper and never reads the exit status, so the failure is completely
+      # then no-ops. The supervisor invokes us as `sh /script/radio_hal.sh bt_on 2>&1 | tee -a
+      # /tmp/box.log >/tmp/bt.log` inside a detached wrapper and never reads the exit status, so
+      # the failure is completely
       # silent: OCBM, MFi and CT_SUBSCRIBE all succeed, and Bluetooth simply never exists.
       #
       # Diagnosed on hardware 2026-08-28: no hci0, no pairing, and the only visible symptom was
@@ -615,8 +676,11 @@ do_bt_on() {
         log "  attempt $_try did not converge"
       done
       if [ -n "$_d" ] && bt_responsive "$_d"; then
-        # Vendor SCO tuning where the mapping carried it; non-fatal.
-        hciconfig "$_d" scomtu 240:32 2>/dev/null
+        # Vendor SCO tuning where the mapping carried it; non-fatal. Was a HARDCODED
+        # `scomtu 240:32` despite this comment -- which is the Realtek/NXP value and nobody
+        # else's, and which skipped the routing command the NXP and BCM4358 branches need.
+        # Now the extracted per-branch mapping, same as `sco_on`.
+        apply_sco "$_d" >/dev/null 2>&1 || log "no SCO mapping for this chipset (HFP call audio unavailable)"
         bt_set_name "$_d"
         publish "$BT_STATE" "result=ok" "backend=mapped" "chipset=$RADIO_SDIO_DEVICE" "hci_dev=$_d" \
                 "bt_mac=$(cat /sys/class/bluetooth/$_d/address 2>/dev/null)"
@@ -624,7 +688,10 @@ do_bt_on() {
         return 0
       fi
       log "BT attach did not converge in 60s (device ${_d:-absent}); last log:"
-      tail -5 /tmp/radio_bt_attach.log 2>/dev/null | sed "s/^/$LOGP   /"
+      # radio_bt_attach.log stays a small `>`-truncated status file: it is written by a
+      # setsid-backgrounded attach daemon, and piping that daemon's own stdout would change its
+      # lifecycle. Only this readback (the tail below) is universal-logged, via `tee -a`.
+      tail -5 /tmp/radio_bt_attach.log 2>/dev/null | sed "s/^/$LOGP   /" | tee -a /tmp/box.log
       publish "$BT_STATE" "result=fail" "backend=mapped" "chipset=$RADIO_SDIO_DEVICE" "detail=no-convergence"
       return 1
       ;;
@@ -670,5 +737,8 @@ case "$VERB" in
   wifi_ap_off) lock_take wlan || exit 1; do_wifi_ap_off; _r=$?; lock_drop wlan; exit $_r ;;
   bt_on)       lock_take bt   || exit 1; do_bt_on;       _r=$?; lock_drop bt;   exit $_r ;;
   bt_off)      lock_take bt   || exit 1; do_bt_off;      _r=$?; lock_drop bt;   exit $_r ;;
-  *) echo "$LOGP usage: radio_hal.sh probe|status|wifi_ap_on|wifi_ap_off|bt_on|bt_off" >&2; exit 64 ;;
+  # Best-effort and idempotent: the daemon calls it after every bring-up DOWN->UP, and a unit
+  # whose branch carries no SCO mapping must report that (3) rather than fail the caller.
+  sco_on)      lock_take bt   || exit 1; do_sco_on;      _r=$?; lock_drop bt;   exit $_r ;;
+  *) echo "$LOGP usage: radio_hal.sh probe|status|wifi_ap_on|wifi_ap_off|bt_on|bt_off|sco_on" >&2; exit 64 ;;
 esac

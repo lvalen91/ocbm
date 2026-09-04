@@ -1,8 +1,8 @@
 //! carplay-metadata — shared Now Playing / Route Guidance metadata: iAP2 TLV parsing (`tlv`) and the
-//! wire types both ends share (`types`). No GTK/GStreamer/USB dependency -- used by `carplayd`
-//! (the producer, owning the iAP2 link that this data actually rides) and `crates/ui` (the
-//! consumer, displaying it), matching how `carplay-control` is a plain library shared conceptually
-//! across the touch producer/consumer boundary rather than duplicated on each side.
+//! wire types both ends share (`types`). No GTK/GStreamer/USB dependency, so it can sit on both
+//! sides of the producer/consumer boundary. The consumer in this workspace is
+//! `crates/vendor/iap2-core`, which owns the iAP2 link this data rides. (Corrected 2026-09-01: this
+//! used to name `carplayd` and `crates/ui`; neither exists here.)
 
 pub mod destination;
 pub mod location;

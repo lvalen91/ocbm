@@ -21,6 +21,7 @@ use receiver::{events, hid, levers};
 use std::collections::HashMap;
 use std::io;
 use std::io::Read as _;
+use std::io::Write as _;
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -130,7 +131,10 @@ impl LocalMfiSigner {
         ];
         let mut x = I2cRdwr { msgs: m.as_mut_ptr(), nmsgs: 2 };
         for _ in 0..5 {
-            if unsafe { libc::ioctl(self.fd, I2C_RDWR as _, &mut x) } >= 0 {
+            // I2C_RDWR returns the number of messages transferred — require BOTH, as
+            // `mfi-i2c-local` and `wireless/mfi_local.rs` do. `>= 0` accepted a partial transfer in
+            // which the read leg never happened, handing back an all-zero `out` as a success.
+            if unsafe { libc::ioctl(self.fd, I2C_RDWR as _, &mut x) } == 2 {
                 return true;
             }
             unsafe { libc::usleep(5000) };
@@ -145,7 +149,8 @@ impl LocalMfiSigner {
         let mut m = I2cMsg { addr: MFI_ADDR, flags: 0, len: b.len() as u16, buf: b.as_mut_ptr() };
         let mut x = I2cRdwr { msgs: &mut m, nmsgs: 1 };
         for _ in 0..5 {
-            if unsafe { libc::ioctl(self.fd, I2C_RDWR as _, &mut x) } >= 0 {
+            // Require the write to have landed (see `rd`).
+            if unsafe { libc::ioctl(self.fd, I2C_RDWR as _, &mut x) } == 1 {
                 return true;
             }
             unsafe { libc::usleep(5000) };
@@ -154,7 +159,15 @@ impl LocalMfiSigner {
     }
 
     /// DeviceVersion (reg 0x00) — a cheap warm-up/liveness read (=0x03 on this unit).
+    ///
+    /// `None` with no fd: on the remote-coprocessor path `open()` hands back `fd = -1` and there is
+    /// no local register to read, so a raw `rd` here just burns five EBADF retries and reports a
+    /// chip failure the host does not have. `mfid` exposes no DeviceVersion opcode, so the honest
+    /// answer is "unknown", not "failed".
     pub fn device_version(&self) -> Option<u8> {
+        if self.fd < 0 {
+            return None;
+        }
         let mut v = [0u8; 1];
         if self.rd(0x00, &mut v) {
             Some(v[0])
@@ -175,10 +188,14 @@ impl LocalMfiSigner {
 /// trigger/poll completes — both sides then get a garbage signature and pairing fails with no
 /// diagnostic. Note this only serializes; it does not change the (device-proven) register sequence.
 ///
-/// Acquisition is bounded rather than a bare blocking `LOCK_EX`: the worst-case legitimate hold is the
-/// sign path's ~2.1 s poll × 3 MFi retries ≈ 6.3 s, so a 10 s ceiling cannot fire spuriously but still
+/// Acquisition is bounded rather than a bare blocking `LOCK_EX`: the worst-case legitimate hold is
+/// this daemon's own sign path, whose poll is capped at `SIGN_POLL_DEADLINE` (2.5 s) plus the
+/// surrounding register transfers — well under 10 s, so the ceiling cannot fire spuriously but still
 /// stops a wedged holder from hanging pairing forever (the failure then surfaces as a normal signer
-/// error the handshake can report, instead of a silent stall).
+/// error the handshake can report, instead of a silent stall). The earlier "~2.1 s poll × 3 MFi
+/// retries ≈ 6.3 s" figure was wrong twice over: nothing retries this signer (`mfi_retry` wraps
+/// `mfi-i2c-local`, not `LocalMfiSigner`), and the poll was iteration- rather than time-bounded, so
+/// under chip NAK it ran ~7.1 s.
 struct MfiLock(i32);
 impl MfiLock {
     fn acquire() -> io::Result<MfiLock> {
@@ -226,7 +243,7 @@ impl MfiSigner for LocalMfiSigner {
         // reached over USB-NCM. Dispatching INSIDE the impl keeps `LocalMfiSigner`'s type identical,
         // so `ControlServer<_, LocalMfiSigner>` and every other generic instantiation are unchanged.
         if let Some(addr) = mfi_wire::client::addr() {
-            return mfi_wire::client::cert(addr);
+            return mfi_wire::client::cert(addr).map_err(io::Error::from);
         }
         let _lock = MfiLock::acquire()?; // held for the whole 0x30→0x31 transaction
         let mut lb = [0u8; 2];
@@ -248,7 +265,19 @@ impl MfiSigner for LocalMfiSigner {
     /// (0x10=1), poll status (0x10 bit4), read sig (0x11 len / 0x12 data) — genuine 128-byte RSA-1024.
     fn create_signature(&mut self, digest: &[u8]) -> io::Result<Vec<u8>> {
         if let Some(addr) = mfi_wire::client::addr() {
-            return mfi_wire::client::sign(addr, digest);
+            return mfi_wire::client::sign(addr, digest).map_err(io::Error::from);
+        }
+        // Same length guard the remote path applies, so a wrong-length digest is refused here
+        // instead of being written to reg 0x20/0x21 for the chip to NAK opaquely.
+        if digest.len() != mfi_wire::DIGEST_LEN {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "digest is {} bytes, expected {}",
+                    digest.len(),
+                    mfi_wire::DIGEST_LEN
+                ),
+            ));
         }
         // Held across the ENTIRE write→trigger→poll→read sequence, not just the first register: the
         // poll window is exactly where an interleaving writer would corrupt the in-flight challenge.
@@ -264,10 +293,20 @@ impl MfiSigner for LocalMfiSigner {
             return Err(io::Error::other("MFi sign trigger failed"));
         }
         unsafe { libc::usleep(100_000) };
+        // Bounded by WALL CLOCK, not iteration count — the same fix `mfi-i2c-local` already carries
+        // (`SIGN_POLL_DEADLINE`). `for _ in 0..200` with a 10 ms sleep looks like ~2.1 s, and is, but
+        // only while every status read succeeds. `rd` is itself `for _ in 0..5` with a 5 ms sleep, so
+        // under chip NAK each iteration costs ~35 ms and the loop ran ~7.1 s — with the cross-process
+        // chip lock held, 3.4x the worst case the `MfiLock` ceiling below is sized against.
+        const SIGN_POLL_DEADLINE: std::time::Duration = std::time::Duration::from_millis(2500);
+        let poll_start = std::time::Instant::now();
         let mut done = false;
-        for _ in 0..200 {
+        while poll_start.elapsed() < SIGN_POLL_DEADLINE {
             let mut st = [0u8; 1];
             if self.rd(0x10, &mut st) && (st[0] & 0x10) != 0 {
+                if st[0] != 0x10 {
+                    eprintln!("[airplayd] mfi: sign status 0x{:02x} (expected 0x10)", st[0]);
+                }
                 done = true;
                 break;
             }
@@ -368,7 +407,17 @@ impl DiskPeers {
         static PERSIST_SEQ: portable_atomic::AtomicU64 = portable_atomic::AtomicU64::new(0);
         let uniq = PERSIST_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let tmp = self.path.with_extension(format!("tmp.{}.{}", std::process::id(), uniq));
-        if let Err(e) = std::fs::write(&tmp, &out).and_then(|_| std::fs::rename(&tmp, &*self.path)) {
+        // fsync BEFORE the rename: on an ext4/flash rootfs with delayed allocation the rename can be
+        // journalled ahead of the data, publishing a zero-length peerstore across a power cut. The
+        // rename is atomic against a concurrent READER either way; this is the power-loss half.
+        let write_then_rename = || -> std::io::Result<()> {
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(&out)?;
+            f.sync_all()?;
+            drop(f);
+            std::fs::rename(&tmp, &*self.path)
+        };
+        if let Err(e) = write_then_rename() {
             let _ = std::fs::remove_file(&tmp); // don't leave a stray temp on failure
             eprintln!("[airplayd] peerstore: persist to {} failed: {e} (in-memory only)", self.path.display());
         }
@@ -398,8 +447,14 @@ fn mfi_selftest() {
         eprintln!("[airplayd] open /dev/i2c-1: {e}");
         std::process::exit(1);
     });
+    let remote = mfi_wire::client::addr();
     match signer.device_version() {
         Some(v) => println!("[airplayd] MFi chip open (local i2c), DeviceVersion=0x{v:02x}"),
+        // The remote path has no local register to read; cert + sign below still exercise the real
+        // chip over the wire, so failing the whole self-test here would be a false negative.
+        None if remote.is_some() => {
+            println!("[airplayd] MFi via remote coprocessor — DeviceVersion not available, skipped")
+        }
         None => {
             eprintln!("[airplayd] MFi DeviceVersion read failed");
             std::process::exit(1);
@@ -821,14 +876,10 @@ fn load_device_config() -> (DeviceConfig, u32) {
             base
         }
     };
-    // Keep the HID-input scaling geometry in lockstep with what we advertise (task #20).
+    // Keep the HID-input scaling geometry in lockstep with what we advertise (task #20). Touch rides
+    // the :9110 HID seam only — `receiver::uplink`'s :9112 control socket never carried a live touch
+    // sender and its dead copy of this geometry was removed.
     *plock(&DISPLAY_WH) = (dev.display_width as u16, dev.display_height as u16);
-    // `receiver::uplink` keeps its OWN copy for the touch path on its control socket (:9112), and
-    // nothing was calling its setter — it sat at the compiled default 1920x720 forever. That path is
-    // unused today (we drive touch through the :9110 HID seam, which uses the DISPLAY_WH above), but
-    // a 1920x1080 panel would have had every Y coordinate scaled against 720 the moment anyone wired
-    // it up, silently and only in the vertical axis. Set both from one place so they cannot disagree.
-    receiver::uplink::set_display(dev.display_width as u16, dev.display_height as u16);
     (dev, cfg_crc)
 }
 
@@ -842,29 +893,75 @@ fn load_device_config() -> (DeviceConfig, u32) {
 /// never share framing or contend for the port.
 const MIC_INGEST_ADDR: &str = "127.0.0.1:9112";
 
+/// Generation counter for accepted :9110 connections — the same one-producer discipline
+/// `receiver::relay`'s `SEAM_GEN` enforces on :9106. ocbmd is the only legitimate producer, but two
+/// can overlap across an ocbmd respawn, and the accept loop used to RETAIN every reader: both then
+/// injected HID for the same touch uid, interleaving DOWN/MOVE/UP for two different fingers into one
+/// report stream. A new accept supersedes the older reader, which exits at its next read or timeout.
+static INPUT_GEN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// True while this reader is still the newest accepted connection.
+fn input_gen_current(gen: u32) -> bool {
+    INPUT_GEN.load(std::sync::atomic::Ordering::Relaxed) == gen
+}
+
 fn start_input_listener() {
     std::thread::spawn(|| {
         let listener = match TcpListener::bind("127.0.0.1:9110") {
             Ok(l) => l,
             Err(e) => {
+                // EXIT, don't just kill the thread: the overwhelmingly likely cause is a second
+                // airplayd (a duplicate ARM / respawn race) whose predecessor still holds the port,
+                // and returning here left that duplicate serving A/V with NO touch input at all —
+                // silently, since everything else binds fine. The supervisor re-ARMs any of the
+                // three session daemons that dies while the host is PRESENT (session_supervisor.sh,
+                // `exited while PRESENT -> re-ARM`, 5–30 s backoff), and its `kill_session` reaps
+                // the stale airplayd first, so exiting IS the repair, not a crash loop.
                 eprintln!("[airplayd] HID input ingest bind 127.0.0.1:9110 failed: {e}");
-                return;
+                eprintln!("[airplayd] FATAL: no HID input seam (duplicate airplayd?) — exiting for re-ARM");
+                std::process::exit(1);
             }
         };
         eprintln!("[airplayd] HID input ingest on 127.0.0.1:9110 (task #20)");
         for stream in listener.incoming().flatten() {
-            std::thread::spawn(move || read_input(stream));
+            // Read timeout so a SUPERSEDED reader notices it lost the seam even when its (stale)
+            // producer has gone quiet, instead of parking in read() for the process lifetime.
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+            let gen = INPUT_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            if gen > 1 {
+                eprintln!("[input] ingest connection accepted (gen {gen}) — evicting gen {}", gen - 1);
+            }
+            std::thread::spawn(move || read_input(stream, gen));
         }
     });
 }
 
-/// Read length-prefixed input sub-frames off one ocbmd connection until it closes/errors.
-fn read_input(mut stream: TcpStream) {
+/// Fill `buf`, treating a read timeout as "keep waiting" — unless a newer connection has superseded
+/// this reader. Hand-rolled rather than `read_exact`, which on a timeout mid-buffer has already
+/// consumed bytes it cannot hand back and would desync the length-prefixed framing.
+fn read_input_exact(stream: &mut TcpStream, buf: &mut [u8], gen: u32) -> Result<(), String> {
+    let mut off = 0;
+    while off < buf.len() {
+        if !input_gen_current(gen) {
+            return Err(format!("superseded by a newer ingest connection (was gen {gen})"));
+        }
+        match stream.read(&mut buf[off..]) {
+            Ok(0) => return Err("peer closed".to_string()),
+            Ok(n) => off += n,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {}
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Ok(())
+}
+
+/// Read length-prefixed input sub-frames off one ocbmd connection until it closes/errors/is evicted.
+fn read_input(mut stream: TcpStream, gen: u32) {
     let mut hdr = [0u8; 2];
     loop {
         // Every exit is LOGGED (was three silent `break`s): a dying ingest connection looked
         // identical to "no input arriving", which cost real debugging time.
-        if let Err(e) = stream.read_exact(&mut hdr) {
+        if let Err(e) = read_input_exact(&mut stream, &mut hdr, gen) {
             eprintln!("[input] ingest connection closed on header read ({e})");
             break;
         }
@@ -875,8 +972,14 @@ fn read_input(mut stream: TcpStream) {
             break;
         }
         let mut pl = vec![0u8; len];
-        if let Err(e) = stream.read_exact(&mut pl) {
+        if let Err(e) = read_input_exact(&mut stream, &mut pl, gen) {
             eprintln!("[input] ingest connection closed mid-payload ({len} B expected: {e})");
+            break;
+        }
+        // Re-checked HERE, not just before the reads: this is the last instant before the frame
+        // becomes a HID report, so a reader superseded while its frame was in flight delivers nothing.
+        if !input_gen_current(gen) {
+            eprintln!("[input] superseded ingest connection (gen {gen}) — frame dropped, reader exiting");
             break;
         }
         handle_input_frame(&pl);
@@ -893,7 +996,10 @@ fn handle_input_frame(pl: &[u8]) {
     // channel — the box owns that channel, so only it can issue the command. No-op between sessions.
     if pl.first() == Some(&ocbm_proto::INPUT_KEYFRAME) {
         if events::send_force_key_frame() {
-            eprintln!("[input] video gap → ForceKeyFrame requested");
+            eprintln!(
+                "[input] video gap → ForceKeyFrame requested (screen_focused={})",
+                events::screen_focused()
+            );
         }
         return;
     }
@@ -903,7 +1009,11 @@ fn handle_input_frame(pl: &[u8]) {
     // undecodable P-frames — the same stream-specific call session.rs uses for the cluster on reconnect.
     if pl.first() == Some(&ocbm_proto::INPUT_KEYFRAME_ALT) {
         if events::send_force_key_frame_stream(Some(events::CLUSTER_STREAM_ID)) {
-            eprintln!("[input] ALT/cluster video gap → ForceKeyFrame requested for {}", events::CLUSTER_STREAM_ID);
+            eprintln!(
+                "[input] ALT/cluster video gap → ForceKeyFrame requested for {} (screen_focused={})",
+                events::CLUSTER_STREAM_ID,
+                events::screen_focused()
+            );
         }
         return;
     }
@@ -1295,11 +1405,18 @@ fn run_pairing_server() -> io::Result<()> {
     // An accept thread does exactly that here — each new connection shuts down the current session's
     // stream (unblocking its serve_connection at once, whose AvSession then Drops → reset()), then hands
     // the new stream to the serve loop. Last-connect-wins, no backlog starvation.
-    let (tx, rx) = std::sync::mpsc::channel::<TcpStream>();
-    let current: std::sync::Arc<std::sync::Mutex<Option<TcpStream>>> =
+    // Registration happens in the ACCEPT thread, under the same lock that shuts the incumbent down,
+    // and each connection carries a generation so the serve loop only ever clears its OWN
+    // registration. Registering in the serve loop instead left `current` empty from the moment a
+    // session ended until the next one had done peer_addr + the transport-flag write + try_clone: a
+    // connection accepted inside that window found nothing to preempt and then queued behind the
+    // one already being set up, for that connection's whole session.
+    let (tx, rx) = std::sync::mpsc::channel::<(u64, TcpStream)>();
+    let current: std::sync::Arc<std::sync::Mutex<Option<(u64, TcpStream)>>> =
         std::sync::Arc::new(std::sync::Mutex::new(None));
     let accept_current = current.clone();
     std::thread::spawn(move || {
+        let mut generation = 0u64;
         for conn in listener.incoming() {
             let stream = match conn {
                 Ok(s) => s,
@@ -1308,36 +1425,50 @@ fn run_pairing_server() -> io::Result<()> {
                     continue;
                 }
             };
-            if let Some(s) = plock(&accept_current).as_ref() {
-                let _ = s.shutdown(std::net::Shutdown::Both);
-                eprintln!("[airplayd] hijack: new control connection preempts the current session");
+            generation += 1;
+            {
+                let mut cur = plock(&accept_current);
+                if let Some((_, s)) = cur.as_ref() {
+                    let _ = s.shutdown(std::net::Shutdown::Both);
+                    eprintln!(
+                        "[airplayd] hijack: new control connection preempts the current session"
+                    );
+                }
+                *cur = stream.try_clone().ok().map(|c| (generation, c));
             }
-            if tx.send(stream).is_err() {
+            if tx.send((generation, stream)).is_err() {
                 break; // serve loop gone
             }
         }
     });
 
-    while let Ok(mut stream) = rx.recv() {
+    // Clear `current` only if it is still OUR registration — a newer connection may already have
+    // replaced it while this session was tearing down.
+    let unregister = |generation: u64| {
+        let mut cur = plock(&current);
+        if cur.as_ref().map(|(g, _)| *g) == Some(generation) {
+            *cur = None;
+        }
+    };
+
+    while let Ok((mut generation, mut stream)) = rx.recv() {
         // Fix #8 (queued-connection starvation): the accept thread shuts down only the *registered
         // serving* stream, never streams still queued in the channel. Drain to the NEWEST queued
         // connection here, shutting down the older ones, so a connection can't wait behind an older
         // queued one for a full session lifetime — true last-connect-wins, matching the hijack model.
-        while let Ok(newer) = rx.try_recv() {
+        while let Ok((newer_gen, newer)) = rx.try_recv() {
             let _ = stream.shutdown(std::net::Shutdown::Both);
             eprintln!("[airplayd] hijack: superseded a queued control connection with a newer one");
+            generation = newer_gen;
             stream = newer;
         }
         let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
         println!("[airplayd] ── control connection from {peer} ──");
-        // Register as the current (hijackable) session + publish the bearer IMMEDIATELY — before the
-        // per-connection setup (config read, MFi open) — so a connection preempting this one during that
-        // setup window still finds a `current` to shut down (narrows the registration race the verifier
-        // flagged). Cleared on EVERY exit below (serve end, hijack, or the signer-open early-out).
+        // Already registered as the current (hijackable) session by the accept thread; publish the
+        // bearer here, before the per-connection setup (config read, MFi open). The registration is
+        // cleared on EVERY exit below (serve end or the signer-open early-out), but only if it is
+        // still ours.
         write_transport_flag(&stream);
-        if let Ok(c) = stream.try_clone() {
-            *plock(&current) = Some(c);
-        }
         // Resolve the effective /info for THIS connection from the host's ephemeral YAML (or the
         // built-in default when idle). Per-connection so a SUBSCRIBE-pushed config lands on the next
         // session — the reconnect-consumed class the resolution lever lives in (docs/carplay/06_AV_PIPELINE.md / docs/carplay/04_CAPABILITIES_AND_CONFIG.md).
@@ -1355,7 +1486,7 @@ fn run_pairing_server() -> io::Result<()> {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("[airplayd] MFi open: {e}");
-                *plock(&current) = None; // drop the early-out registration
+                unregister(generation); // drop the early-out registration
                 clear_transport_flag();
                 continue;
             }
@@ -1396,12 +1527,14 @@ fn run_pairing_server() -> io::Result<()> {
             } else {
                 Box::new(av)
             };
+        let mut session = session;
+        session.set_resolution(dev.display_width, dev.display_height, dev.max_fps);
         let mut server = ControlServer::new(&identity, b"3939".to_vec(), peers.clone(), signer, info)
             .verbose(true)
             .display_width(dev.display_width as u32)
             .session(session);
         let result = serve_connection(stream, &mut server);
-        *plock(&current) = None;
+        unregister(generation);
         clear_transport_flag();
         match result {
             Ok(()) => match server.session_secret() {
@@ -1454,7 +1587,18 @@ fn start_host_present_watcher() {
     });
 }
 
+/// `panic = "abort"` (workspace-wide) means the default hook's stderr line is the only trace of a
+/// crash the supervisor sees — prefix it so it's greppable in the merged host log stream.
+fn install_panic_hook(name: &'static str) {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        eprintln!("[{name}] PANIC: {info}");
+        default_hook(info);
+    }));
+}
+
 fn main() {
+    install_panic_hook("airplayd");
     if std::env::args().nth(1).as_deref() == Some("mfi") {
         mfi_selftest();
     } else {

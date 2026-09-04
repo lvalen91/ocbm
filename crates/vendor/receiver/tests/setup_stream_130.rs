@@ -86,7 +86,7 @@ fn type_130_setup_without_a_stream_connection_id_is_answered_with_a_transport_to
 
     // ---- (a) the shared-connection shape: no sockets bound, no threads spawned. -------------------
     let mut s = AvSession::new();
-    let resp = s.setup(&rcs_setup_request(false));
+    let resp = s.setup(&rcs_setup_request(false)).unwrap();
     let streams = streams_of(&resp);
     assert_eq!(
         streams.len(),
@@ -111,7 +111,7 @@ fn type_130_setup_without_a_stream_connection_id_is_answered_with_a_transport_to
 
     // ---- (b) the shape every capture on record actually uses: wantsDedicatedSocket=true. ----------
     let mut s = AvSession::new();
-    let resp = s.setup(&rcs_setup_request(true));
+    let resp = s.setup(&rcs_setup_request(true)).unwrap();
     let streams = streams_of(&resp);
     assert_eq!(streams.len(), 1, "the dedicated-socket shape must be answered too");
     let e = &streams[0];
@@ -132,7 +132,7 @@ fn type_130_setup_without_a_stream_connection_id_is_answered_with_a_transport_to
     let mut req = Dictionary::new();
     req.insert("streams".into(), Value::Array(vec![Value::Dictionary(screen)]));
     let mut s = AvSession::new();
-    let resp = s.setup(&bin(req));
+    let resp = s.setup(&bin(req)).unwrap();
     assert!(
         streams_of(&resp).is_empty(),
         "a zero scid on an A/V stream must still be skipped (kVersionErr in Apple's receiver)"

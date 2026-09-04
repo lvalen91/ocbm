@@ -6,13 +6,13 @@
 //! symbols — e.g. `_iAP2NowPlayingUpdate_MediaItemAttributes_MediaItemAlbumTitleParameterName`,
 //! `_iAP2RouteGuidanceUpdate_DestinationNameParameterName`, `_iAP2CallStateUpdate_DisplayName…`,
 //! `_iAP2ListUpdate_RecentsList_…`, `_iAP2CommunicationsUpdate_…`. Every field this module parses
-//! is one of Apple's declared parameters; ids are the wire-verified ones (docs/20 §1.2–1.5).
+//! is one of Apple's declared parameters; ids are the wire-verified ones (docs/carplay/05_METADATA_AND_CONTROLS.md).
 //!
 //! WHY iAP2 AND NOT AIRPLAY: wired CarPlay splits its control planes. Media text/artwork, route
 //! guidance and call state ride **iAP2** (this file); the AirPlay `/command` channel carries only
-//! UI/session state (airplayd forwards those separately). See docs/20 §1.0.
+//! UI/session state (airplayd forwards those separately). See docs/carplay/05_METADATA_AND_CONTROLS.md.
 //!
-//! FOUR LOAD-BEARING PREREQS for any of this to arrive (learned the hard way, docs/20 §1.2):
+//! FOUR LOAD-BEARING PREREQS for any of this to arrive (learned the hard way, docs/carplay/05_METADATA_AND_CONTROLS.md):
 //!   1. iAP2 auth + identify complete;
 //!   2. the update ids are declared receivable in `0x1D01` `MessagesReceivedFromDevice` (iap2-core's
 //!      `RCV_MSG_IDS` already declares 0x5001/0x5201/0x5202/0x4155 — iOS sends NOTHING otherwise);
@@ -208,7 +208,7 @@ fn group(id: u16, subs: &[Vec<u8>]) -> Vec<u8> {
 
 /// `0x5000 StartNowPlayingUpdates` — MediaItem (group 0) + Playback (group 1) field selectors.
 ///
-/// **EXACTLY the wire-captured stock-CCPA subscribe** (40 B; `WIRED_METADATA_PLANE.md` ttylog:4272),
+/// **EXACTLY the wire-captured stock-CCPA subscribe** (40 B; docs/carplay/05_METADATA_AND_CONTROLS.md ttylog:4272),
 /// byte-for-byte. This is deliberate and was learned twice: iOS only streams the fields of a request
 /// it fully accepts, and a subscribe carrying selectors it doesn't like degrades **silently** — you
 /// keep getting elapsed-time deltas with no title/artist forever (observed 2026-07-12 when this
@@ -230,7 +230,7 @@ pub fn start_now_playing() -> Vec<u8> {
 }
 
 /// `0x5200 StartRouteGuidanceUpdates` — echoes the RouteGuidanceDisplayComponent id (42) the
-/// identify declared (param 30); iOS withholds guidance unless both match (docs/20 §1.3).
+/// identify declared (param 30); iOS withholds guidance unless both match (docs/carplay/05_METADATA_AND_CONTROLS.md).
 pub fn start_route_guidance() -> Vec<u8> {
     let mut o = tlv(0x0000, &42u16.to_be_bytes()); // RouteGuidanceDisplayComponentID
                                                    // Spec 0x5200 selectors: id 1 = SourceName, id 2 = SourceSupportsRouteGuidance (NOT
@@ -412,6 +412,9 @@ pub fn now_playing(body: &[u8]) -> String {
         }),
         _ => {}
     });
+    if j.0.is_empty() {
+        return String::new();
+    }
     j.finish("nowPlaying")
 }
 
@@ -500,6 +503,9 @@ pub fn route_guidance(body: &[u8]) -> String {
         }
         _ => {}
     });
+    if j.0.is_empty() {
+        return String::new();
+    }
     j.finish("routeGuidance")
 }
 
@@ -544,6 +550,9 @@ pub fn maneuver(body: &[u8]) -> String {
         13 => j.s("exitInfo", s(v)),
         _ => {}
     });
+    if j.0.is_empty() {
+        return String::new();
+    }
     j.finish("maneuver")
 }
 
@@ -588,6 +597,9 @@ pub fn call_state(body: &[u8]) -> String {
         }
         _ => {}
     });
+    if j.0.is_empty() {
+        return String::new();
+    }
     j.finish("callState")
 }
 
@@ -681,6 +693,9 @@ pub fn communications(body: &[u8]) -> String {
         }
         _ => {}
     });
+    if j.0.is_empty() {
+        return String::new();
+    }
     j.finish("communications")
 }
 
@@ -799,17 +814,24 @@ pub fn dispatch(msg_id: u16, body: &[u8]) -> bool {
             emit_json(&r);
         }
     };
+    // Parsers that decoded nothing return an empty string (I-6); skip the seam write rather than
+    // emit a no-op `{"kind":"..."}` record.
+    let one = |s: String| {
+        if !s.is_empty() {
+            emit_json(&s);
+        }
+    };
     match msg_id {
-        MSG_NOW_PLAYING_UPDATE => emit_json(&now_playing(body)),
-        MSG_ROUTE_GUIDANCE_UPDATE => emit_json(&route_guidance(body)),
-        MSG_ROUTE_GUIDANCE_MANEUVER_INFORMATION => emit_json(&maneuver(body)),
+        MSG_NOW_PLAYING_UPDATE => one(now_playing(body)),
+        MSG_ROUTE_GUIDANCE_UPDATE => one(route_guidance(body)),
+        MSG_ROUTE_GUIDANCE_MANEUVER_INFORMATION => one(maneuver(body)),
         MSG_LANE_GUIDANCE_INFORMATION => {
             let mut r = Vec::new();
             lane_guidance(body, &mut r);
             many(r);
         }
-        MSG_CALL_STATE_UPDATE => emit_json(&call_state(body)),
-        MSG_COMMUNICATIONS_UPDATE => emit_json(&communications(body)),
+        MSG_CALL_STATE_UPDATE => one(call_state(body)),
+        MSG_COMMUNICATIONS_UPDATE => one(communications(body)),
         MSG_LIST_UPDATE => {
             let mut r = Vec::new();
             list_update(body, &mut r);
@@ -823,13 +845,13 @@ pub fn dispatch(msg_id: u16, body: &[u8]) -> bool {
         }
         MSG_APP_DISCOVERY_APP_ICON => emit_json(&app_icon(body)),
         MSG_DESTINATION_INFORMATION => emit_json(&destination(body)),
-        MSG_BLUETOOTH_CONNECTION_UPDATE => emit_json(&bluetooth_connection(body)),
+        MSG_BLUETOOTH_CONNECTION_UPDATE => one(bluetooth_connection(body)),
         MSG_DEVICE_INFORMATION_UPDATE
         | MSG_DEVICE_LANGUAGE_UPDATE
         | MSG_DEVICE_TIME_UPDATE
         | MSG_DEVICE_UUID_UPDATE
         | MSG_WIRELESS_CAR_PLAY_UPDATE
-        | MSG_DEVICE_TRANSPORT_IDENTIFIER_NOTIFICATION => emit_json(&device_update(msg_id, body)),
+        | MSG_DEVICE_TRANSPORT_IDENTIFIER_NOTIFICATION => one(device_update(msg_id, body)),
         MSG_VOICE_OVER_UPDATE => emit_json(&voice_over(body)),
         MSG_VOICE_OVER_CURSOR_UPDATE => emit_json(&voice_over_cursor(body)),
         MSG_ASSISTIVE_TOUCH_INFORMATION => emit_json(&assistive_touch(body)),
@@ -904,7 +926,9 @@ pub fn app_discovery(body: &[u8], out: &mut Vec<String>) {
         }
         _ => {}
     });
-    out.push(head.finish("appList"));
+    if !head.0.is_empty() {
+        out.push(head.finish("appList"));
+    }
 
     // `1 CarPlayAppList` / `4 ExternalAccessoryAppList` are REPEATED groups: one TLV per app, fields
     // directly inside. See the note in `list_update` — the extra nesting emitted zero app records.
@@ -989,10 +1013,14 @@ pub fn lane_guidance(body: &[u8], out: &mut Vec<String>) {
                     j.n("laneStatus", n)
                 }
             }
+            // LaneAngle (2) is Apple-repeatable `[0+]`; emit only the first occurrence to avoid
+            // duplicate JSON keys (unpredictable per RFC 8259, and Foundation keeps only the last).
             2 | 3 => {
                 if let (Some(a), Some(b)) = (v.first(), v.get(1)) {
                     let key = if id == 2 { "laneAngle" } else { "laneAngleHighlight" };
-                    j.i(key, i16::from_be_bytes([*a, *b]) as i64)
+                    if !j.0.iter().any(|f| f.starts_with(&format!("\"{key}\""))) {
+                        j.i(key, i16::from_be_bytes([*a, *b]) as i64)
+                    }
                 }
             }
             _ => {}
@@ -1099,6 +1127,9 @@ pub fn device_update(msg_id: u16, body: &[u8]) -> String {
         }),
         _ => {}
     }
+    if j.0.is_empty() {
+        return String::new();
+    }
     j.finish("device")
 }
 
@@ -1140,6 +1171,9 @@ pub fn bluetooth_connection(body: &[u8]) -> String {
         _ => {}
     });
     j.s("profiles", connected.join(","));
+    if j.0.is_empty() {
+        return String::new();
+    }
     j.finish("bluetoothConnection")
 }
 
@@ -1226,14 +1260,14 @@ pub fn media_library(msg_id: u16, body: &[u8]) -> String {
 
 // ---------------------------------------------------------------------------------------------
 // Artwork — iAP2 File Transfer (link session 2). NowPlaying attr 26 carries only a transfer id;
-// the JPEG arrives as session-2 datagrams (docs/20 §1.2, WIRED_ALBUM_ART.md — wire-decoded).
+// the JPEG arrives as session-2 datagrams (docs/carplay/05_METADATA_AND_CONTROLS.md — wire-decoded).
 //   iPhone→box  [id][04][size u64 BE]   Setup   (size 0 = probe → ignore)
 //   box→iPhone  [id][01]                Accept  (REQUIRED or no data flows)
 //   iPhone→box  [id][flags][data…]      Data    flags: bit7 First, bit6 Last, low nibble = type
 //   box→iPhone  [id][05]                Success (after the Last fragment)
 // KNOWN GATE: the iPhone may never OFFER artwork (no attr 26, no session-2 frames) until the
 // accessory declares a supported-artwork-format list in `0x1D01` — that param is unresolved in the
-// grounded sources (WIRED_ALBUM_ART.md "STATUS"). This receiver is complete and will light up the
+// grounded sources (docs/carplay/05_METADATA_AND_CONTROLS.md "STATUS"). This receiver is complete and will light up the
 // moment the offer arrives; the host window reports the absence and this reason.
 // ---------------------------------------------------------------------------------------------
 
@@ -1287,15 +1321,12 @@ impl Artwork {
                 // Aggregate ceiling across ALL in-flight transfers, checked after the append.
                 // The 8 MiB per-transfer cap bounds one image; nothing bounded the sum.
                 const MAX_TOTAL_BUFFERED: usize = 12 << 20; // 12 MiB, ~10% of box RAM
-                #[allow(unused_assignments)]
-                let mut over_budget = false;
                 let done = {
                     let (size, buf) = self.xfers.get_mut(&id)?;
                     buf.extend_from_slice(&payload[2..]);
-                    over_budget = buf.len() > MAX_TOTAL_BUFFERED;
                     (flags & 0x40) != 0 || buf.len() as u64 >= *size
                 };
-                if over_budget || self.buffered() > MAX_TOTAL_BUFFERED {
+                if self.buffered() > MAX_TOTAL_BUFFERED {
                     eprintln!(
                         "[art] aggregate buffer {} B across {} transfers exceeds \
                          {MAX_TOTAL_BUFFERED} B — dropping all in flight",
@@ -1380,6 +1411,14 @@ mod tests {
         assert!(j.contains("\"kind\":\"nowPlaying\""), "{j}");
         assert!(j.contains("\"title\":\"Hi\""), "{j}");
         assert!(j.contains("\"artist\":\"A\""), "{j}");
+    }
+
+    #[test]
+    fn now_playing_emits_nothing_for_an_undecoded_body() {
+        // No fields decoded (an unknown group id) — a no-op record costs a seam write and can
+        // mislead a host that keys "last update time" off record arrival (I-6).
+        let body = group(0xFFFF, &[]);
+        assert_eq!(now_playing(&body), "");
     }
 
     #[test]
@@ -1613,6 +1652,22 @@ mod tests {
         assert!(out[1].contains("\"laneAngle\":90"));
     }
 
+    #[test]
+    fn lane_guidance_dedupes_repeated_lane_angle() {
+        // Apple marks LaneAngle `[0+]` (repeatable). A lane naming two angles must emit only the
+        // first "laneAngle" key, never a duplicate JSON key.
+        let mut lane = tlv(0, &0u16.to_be_bytes());
+        lane.extend(tlv(2, &(-45i16).to_be_bytes()));
+        lane.extend(tlv(2, &90i16.to_be_bytes()));
+        let mut body = tlv(1, &0u16.to_be_bytes());
+        body.extend(tlv(2, &lane));
+        let mut out = Vec::new();
+        lane_guidance(&body, &mut out);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].matches("\"laneAngle\"").count(), 1, "{}", out[0]);
+        assert!(out[0].contains("\"laneAngle\":-45"), "{}", out[0]);
+    }
+
     /// The dispatcher must own every id the feature table declares receivable — an update we asked
     /// for but do not parse reaches the host as nothing at all.
     #[test]
@@ -1829,7 +1884,7 @@ mod tests {
     #[test]
     fn call_state_parses_display_name_and_status() {
         let mut body = tlv(1, b"Jane");
-        body.extend_from_slice(&tlv(2, &[3])); // Status = connected
+        body.extend_from_slice(&tlv(2, &[3])); // Status = connecting
         let j = call_state(&body);
         assert!(j.contains("\"displayName\":\"Jane\""), "{j}");
         assert!(j.contains("\"status\":3"), "{j}");

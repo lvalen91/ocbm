@@ -122,4 +122,11 @@ fn pair_verify_rejects_unknown_controller() {
     let m4i = tlv::decode(&m4).unwrap();
     assert_eq!(first(&m4i, tlv_type::ERROR).unwrap(), vec![0x02]); // Authentication
     assert!(server.shared_secret().is_none());
+
+    // The session is DEAD, not retryable: resending M3 with another identity must not get another
+    // `find_peer` probe out of the store.
+    assert_eq!(
+        server.exchange(&m3, &empty).unwrap_err(),
+        pairing::verify::PairError::BadState
+    );
 }

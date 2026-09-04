@@ -69,7 +69,8 @@ fn i2c_fd() -> i32 {
 pub const MFI_LOCK_PATH: &[u8] = b"/tmp/carplay_mfi.lock\0";
 
 /// RAII holder of the exclusive MFi lock — released (LOCK_UN + close) on drop, i.e. when the cert/sign
-/// scope ends. Returns `None` if the lockfile can't be opened/locked (caller then aborts the op).
+/// scope ends. [`MfiLock::acquire`] returns [`MfiError::LockUnavailable`] if the lockfile can't be
+/// opened and [`MfiError::LockBusy`] if it can't be locked in time (caller then aborts the op).
 struct MfiLock(i32);
 impl MfiLock {
     fn acquire() -> Result<MfiLock, MfiError> {
@@ -205,7 +206,6 @@ fn i2c_wr(reg: u8, data: &[u8]) -> bool {
     false
 }
 
-/// Fetch the accessory certificate. CopyCertificate: reg `0x30` len (2 BE), reg `0x31` cert.
 /// Why an MFi operation failed. The distinction matters upstream: retrying a chip NAK is the point of
 /// `mfi_retry`, but retrying a LOCK TIMEOUT just multiplies a stall by the retry count — 3 x 10 s of
 /// the tunnel's SESSION mutex held, for a wait that cannot succeed any sooner the second time.
@@ -231,15 +231,26 @@ pub enum MfiError {
     Chip,
 }
 
+/// Map a remote failure onto the same variants a local one produces.
+///
+/// A box-side lock timeout must NOT come back as [`MfiError::Chip`]: `mfi_retry` retries `Chip`
+/// three times, so contention on the remote box would cost 3 x (connect + the box's own 10 s lock
+/// deadline) with the tunnel's SESSION mutex held — the stall this enum exists to prevent, moved
+/// one hop down the wire.
+fn remote_err(what: &str, e: mfi_wire::client::Error) -> MfiError {
+    eprintln!("[mfi-i2c-local] remote {what} failed: {e}");
+    match e {
+        mfi_wire::client::Error::Status(mfi_wire::Status::LockBusy) => MfiError::LockBusy,
+        _ => MfiError::Chip,
+    }
+}
+
 /// [`cert`] with the failure reason. `cert` is kept as the `Option` shim for existing callers.
 pub fn try_cert() -> Result<Vec<u8>, MfiError> {
     // Remote coprocessor: no /dev/i2c-1 on this host, and the lock that matters lives on the box
     // that holds the chip (mfid takes it there), so the local lock is skipped deliberately.
     if let Some(addr) = mfi_wire::client::addr() {
-        return mfi_wire::client::cert(addr).map_err(|e| {
-            eprintln!("[mfi-i2c-local] remote cert failed: {e}");
-            MfiError::Chip
-        });
+        return mfi_wire::client::cert(addr).map_err(|e| remote_err("cert", e));
     }
     let _lock = MfiLock::acquire()?;
     cert_locked().ok_or(MfiError::Chip)
@@ -248,10 +259,7 @@ pub fn try_cert() -> Result<Vec<u8>, MfiError> {
 /// [`sign`] with the failure reason.
 pub fn try_sign(chal: &[u8]) -> Result<Vec<u8>, MfiError> {
     if let Some(addr) = mfi_wire::client::addr() {
-        return mfi_wire::client::sign(addr, chal).map_err(|e| {
-            eprintln!("[mfi-i2c-local] remote sign failed: {e}");
-            MfiError::Chip
-        });
+        return mfi_wire::client::sign(addr, chal).map_err(|e| remote_err("sign", e));
     }
     let _lock = MfiLock::acquire()?;
     sign_locked(chal).ok_or(MfiError::Chip)
@@ -265,6 +273,7 @@ pub fn sign(chal: &[u8]) -> Option<Vec<u8>> {
     try_sign(chal).ok()
 }
 
+/// Fetch the accessory certificate. CopyCertificate: reg `0x30` len (2 BE), reg `0x31` cert.
 fn cert_locked() -> Option<Vec<u8>> {
     let mut lb = [0u8; 2];
     if !i2c_rd(0x30, &mut lb) {
@@ -307,6 +316,9 @@ fn sign_locked(chal: &[u8]) -> Option<Vec<u8>> {
     while poll_start.elapsed() < SIGN_POLL_DEADLINE {
         let mut st = [0u8; 1];
         if i2c_rd(0x10, &mut st) && (st[0] & 0x10) != 0 {
+            if st[0] != 0x10 {
+                eprintln!("[mfi-i2c-local] sign status 0x{:02x} (expected 0x10)", st[0]);
+            }
             done = true;
             break;
         }
@@ -328,4 +340,36 @@ fn sign_locked(chal: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
     Some(sig)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The whole point of the typed `mfi_wire::client::Error`: only a lock timeout may map to
+    /// `LockBusy`, and `LockBusy` must never be reported as `Chip` (which `mfi_retry` retries).
+    #[test]
+    fn remote_lock_busy_is_not_a_chip_error() {
+        use mfi_wire::client::Error;
+        assert_eq!(
+            remote_err("sign", Error::Status(mfi_wire::Status::LockBusy)),
+            MfiError::LockBusy
+        );
+        assert_eq!(
+            remote_err("sign", Error::Status(mfi_wire::Status::Chip)),
+            MfiError::Chip
+        );
+        assert_eq!(
+            remote_err("cert", Error::Status(mfi_wire::Status::BadRequest)),
+            MfiError::Chip
+        );
+        assert_eq!(remote_err("cert", Error::UnknownStatus(0x7f)), MfiError::Chip);
+        assert_eq!(
+            remote_err(
+                "sign",
+                Error::Io(std::io::Error::from(std::io::ErrorKind::TimedOut))
+            ),
+            MfiError::Chip
+        );
+    }
 }

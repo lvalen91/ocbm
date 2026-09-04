@@ -436,11 +436,14 @@ ask for it.
 The 6.3 session prompted the user for **Contacts & Favorites** on the iPhone, from declaring
 `0x4170 StartListUpdates` alone.
 
-This closes the question of whether call history needs a Bluetooth phonebook profile. It does not. The
-adapter advertises exactly one SDP service — "Wireless iAPv2", `00000000-deca-fade-deca-deafdecacaff`,
-SerialPort descriptor, no HFP, no PBAP, no MAP (`sdp_server.rs:51`) — and the consent prompt appeared
-anyway. The grant is driven by the iAP2 declaration and is held against the Bluetooth device identity,
-which iOS joins to the CarPlay vehicle entry (forgetting one removes the other).
+This closes the question of whether call history needs a Bluetooth phonebook profile. It does not. At
+the time of this session the adapter advertised exactly one SDP service — "Wireless iAPv2",
+`00000000-deca-fade-deca-deafdecacaff`, SerialPort descriptor, no HFP, no PBAP, no MAP
+(`crates/bt-common/src/sdp_server.rs` `iap2_service`) — and the consent prompt appeared anyway. (Since
+2026-09-03 the same responder additionally advertises an Android Auto SDP record — `sdp_server::run_services`
+in `crates/vendor/wireless/src/main.rs` — but that record carries no phonebook profile either, so the
+conclusion is unaffected.) The grant is driven by the iAP2 declaration and is held against the Bluetooth
+device identity, which iOS joins to the CarPlay vehicle entry (forgetting one removes the other).
 
 It also explains 6.2's `0x4171` complaint: consent had not yet been granted when that session ran.
 

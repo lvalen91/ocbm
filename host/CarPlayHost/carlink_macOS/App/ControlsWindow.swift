@@ -88,7 +88,7 @@ final class ControlsBridge: ObservableObject {
         case .callExtras, .navAppearance, .keyframe, .altDisplay:
             return false           // no AA counterpart exists
         case .cluster:
-            return false           // AA supports it; WE do not yet (docs/host/02_ANDROID_AUTO.md Phase 4)
+            return false           // AA supports it; WE do not yet (docs/androidauto/01_SESSION_AND_AV.md Phase 4)
         }
     }
 
@@ -164,7 +164,7 @@ final class ControlsBridge: ObservableObject {
             return true   // handled: AA owns the box, so the CarPlay path must NOT also fire
         }
         session.tapKey(key)
-        report(.sent, wire + " [AA \(key)]")
+        reportQueued(wire + " [AA \(key)]")
         return true
     }
 
@@ -175,7 +175,7 @@ final class ControlsBridge: ObservableObject {
             report(.droppedNotSubscribed, wire); return
         }
         session.tapKey(.microphone1)
-        report(.sent, wire)
+        reportQueued(wire)
     }
 
     /// True while the OCBM session is live (AppDelegate sets it from the coordinator's streaming
@@ -218,6 +218,13 @@ final class ControlsBridge: ObservableObject {
     // rather than a guess: the client tells us whether the control reached the wire (`sent`), was
     // swallowed for lack of a session (`droppedNotSubscribed`), or hit a USB write failure. Reporting
     // the outcome kills the old lie where a pre-subscribe command showed "Sent to iPhone: …".
+    /// AA sends are fire-and-forget enqueues (`tapKey`/`enqueueScroll`/sensor batch) with no wire
+    /// confirmation from the phone, unlike CarPlay's `SendOutcome`-driven `.sent` — so report it as
+    /// queued, not sent (L5, verify_05 fix plan).
+    private func reportQueued(_ wire: String) {
+        lastSent = "Queued — \(wire)"
+    }
+
     private func report(_ outcome: SendOutcome, _ wire: String) {
         switch outcome {
         case .sent:
@@ -256,10 +263,17 @@ final class ControlsBridge: ObservableObject {
         // InputService.cpp:146 — NOT a plain button code, contrary to an earlier note), unbuilt.
         if isAndroidAuto {
             // A detent is a RELATIVE event with a signed delta, not a key — so it is sent directly
-            // rather than through sendAA's key path.
-            if rotation != 0, let session = aaSession {
+            // rather than through sendAA's key path. Handled BEFORE the key computation below (L2):
+            // a nil-session rotation used to fall into that computation with no flags/nudge set, so
+            // `key` resolved to nil and sendAA reported "[Android Auto cannot express this]" — the
+            // wrong reason, since a detent IS expressible, there's just no session yet.
+            if rotation != 0 {
+                guard let session = aaSession else {
+                    report(.droppedNotSubscribed, wire + " [Android Auto session not ready]")
+                    return
+                }
                 session.enqueueScroll(delta: rotation > 0 ? 1 : -1)
-                report(.sent, wire + " [AA SCROLL_WHEEL \(rotation > 0 ? "+1" : "-1")]")
+                reportQueued(wire + " [AA SCROLL_WHEEL \(rotation > 0 ? "+1" : "-1")]")
                 return
             }
             let key: AACapability.Key? =
@@ -305,7 +319,7 @@ final class ControlsBridge: ObservableObject {
     /// detectors miss: frames arriving and decoding, but the PICTURE wrong. Nothing new on the wire.
     /// No-op between sessions, by the box's own check.
     func requestKeyframe() {
-        // AA has NO head-unit keyframe request (docs/host/02_ANDROID_AUTO.md): there is no message to send, and recovery
+        // AA has NO head-unit keyframe request (docs/androidauto/01_SESSION_AND_AV.md): there is no message to send, and recovery
         // waits for the phone's periodic IDR. Sending the OCBM one during an AA session would command
         // a CarPlay path that does not own the box.
         guard keyframeRequestAvailable else { return }
@@ -329,7 +343,7 @@ final class ControlsBridge: ObservableObject {
     /// cards; None releases focus + hides the window. Mirrors the Simulator's Content picker.
     func setClusterContent(_ c: ClusterContent) {
         // AA serves its cluster from NAVIGATION METADATA, not a video stream we can point at content
-        // (docs/host/02_ANDROID_AUTO.md) — so there is nothing to select until we render a cluster ourselves.
+        // (docs/androidauto/01_SESSION_AND_AV.md) — so there is nothing to select until we render a cluster ourselves.
         if refuseIfUnavailable(.cluster, "cluster content \(c)") { return }
         let cmd: UInt8
         switch c {
@@ -384,10 +398,17 @@ final class ControlsBridge: ObservableObject {
         // AA's nearest equivalent is driving_status — ONE bit where CarPlay has a whole catalogue of
         // what stays available while moving. Committed immediately: unlike the CarPlay path there is
         // no per-command outcome to wait on.
-        if isAndroidAuto, let session = aaSession {
+        if isAndroidAuto {
+            // L1: do NOT fall through to the CarPlay path below when AA owns the box but the session
+            // isn't up yet (bring-up window) — that would emit a CarPlay /command to a client that
+            // does not own the box.
+            guard let session = aaSession else {
+                report(.droppedNotSubscribed, "SensorBatch{driving_status}")
+                return
+            }
             session.setDrivingRestricted(on)
             limitedUIOn = on
-            report(.sent, "SensorBatch{driving_status: \(on ? "restricted" : "unrestricted")}")
+            reportQueued("SensorBatch{driving_status: \(on ? "restricted" : "unrestricted")}")
             return
         }
         let wire = "/command setLimitedUI {limitedUI: \(on)}"
@@ -456,8 +477,12 @@ final class ControlsBridge: ObservableObject {
             UserDefaults.standard.set(dark, forKey: ApKey.mainMap)
             nightModeOn = dark
             UserDefaults.standard.set(dark, forKey: ApKey.night)
+            // L3: this was missing markTouched(), so a night-mode change made under AA was persisted
+            // (the UserDefaults writes above) but never re-pushed by the next CarPlay session's
+            // syncAppearance(), which is gated on appearanceTouched.
+            markTouched()
             session.setNightMode(dark)
-            report(.sent, "SensorBatch{night_mode: \(dark)}")
+            reportQueued("SensorBatch{night_mode: \(dark)}")
             return
         }
         setUIAppearance(alt: alt, dark: dark)
@@ -495,9 +520,15 @@ final class ControlsBridge: ObservableObject {
         markTouched()
         // Android Auto has no light/dark control of its own — `night_mode` on the sensor channel IS
         // the lever, and gearhead derives its theme (and Maps' Day/Night "Auto") from it.
-        if isAndroidAuto, let session = aaSession {
+        if isAndroidAuto {
+            // L1: same nil-session guard as setLimitedUI — don't fall through to the CarPlay /command
+            // below while AA owns the box but its session isn't up yet.
+            guard let session = aaSession else {
+                report(.droppedNotSubscribed, "SensorBatch{night_mode: \(on)}")
+                return
+            }
             session.setNightMode(on)
-            report(.sent, "SensorBatch{night_mode: \(on)}")
+            reportQueued("SensorBatch{night_mode: \(on)}")
             return
         }
         let wire = "/command setNightMode {nightMode: \(on)}"
@@ -638,40 +669,9 @@ private struct WireReadout: View {
     }
 }
 
-/// A press-and-hold button — fires `onDown` on press and `onUp` on release, however long the hold.
-/// Used for Siri (requestSiri buttondown/buttonup) via a drag gesture with min distance 0.
-private struct HoldButton: View {
-    let label: String
-    var systemImage: String? = nil
-    let onDown: () -> Void
-    let onUp: () -> Void
-    @State private var held = false
-
-    var body: some View {
-        HStack(spacing: 6) {
-            if let systemImage { Image(systemName: systemImage) }
-            Text(label)
-        }
-        .frame(width: 150, height: 34)
-        .background(held ? Color.accentColor.opacity(0.35) : Color(nsColor: .controlColor),
-                    in: RoundedRectangle(cornerRadius: 7))
-        .overlay(RoundedRectangle(cornerRadius: 7).stroke(.separator))
-        .contentShape(Rectangle())
-        .gesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { _ in if !held { held = true; onDown() } }
-                .onEnded { _ in held = false; onUp() }
-        )
-        // Safety net: if the gesture is interrupted or the view is torn down mid-hold (window
-        // deactivates, SwiftUI cancels the drag, or the row rebuilds), onEnded may never fire —
-        // which would leave the phone with Siri held down forever. Force the buttonup on disappear.
-        .onDisappear { if held { held = false; onUp() } }
-    }
-}
-
 // MARK: - Sections
 
-private struct Section<Content: View>: View {
+private struct ControlSection<Content: View>: View {
     let title: String
     let note: String?
     @ViewBuilder var content: Content
@@ -692,38 +692,6 @@ private struct Section<Content: View>: View {
     }
 }
 
-/// The D-pad: Select in the center, arrows in cardinal positions (Up top; Left · SEL · Right; Down).
-private struct DirectionalPad: View {
-    let bridge: ControlsBridge
-    private let cell: CGFloat = 52
-
-    private func key(_ symbol: String, _ nav: UInt8, _ wire: String) -> some View {
-        Button { bridge.nav(nav, wire) } label: {
-            Image(systemName: symbol).font(.title3).frame(width: cell, height: cell)
-        }
-        .buttonStyle(.bordered)
-    }
-    private func center() -> some View {
-        Button { bridge.nav(OCBM.navSelect, Wire.select) } label: {
-            Text("SEL").font(.headline).frame(width: cell, height: cell)
-        }
-        .buttonStyle(.borderedProminent)
-    }
-    private var spacer: some View { Color.clear.frame(width: cell, height: cell) }
-
-    var body: some View {
-        VStack(spacing: 6) {
-            HStack(spacing: 6) { spacer; key("chevron.up", OCBM.navUp, Wire.up); spacer }
-            HStack(spacing: 6) {
-                key("chevron.left", OCBM.navLeft, Wire.left)
-                center()
-                key("chevron.right", OCBM.navRight, Wire.right)
-            }
-            HStack(spacing: 6) { spacer; key("chevron.down", OCBM.navDown, Wire.down); spacer }
-        }
-    }
-}
-
 /// Tabs mirror the CarPlay SIMULATOR's own HID control views (`HIDContainerTabView` → `HIDMediaView`,
 /// `HIDDPadView`, `HIDKnobView`/`HIDComplexKnobControlView`, `HIDSteeringWheelView`, `HIDTelephonyView`,
 /// `HIDTouchpadView`). We reimplement the ones our stack drives; the rest show their real control
@@ -739,8 +707,9 @@ struct ControlsRootView: View {
             // navigation; the discrete HIDDPad was redundant and not driven. Steering-Wheel tab removed
             // (empty placeholder — wheels carry nav/media controls already present in other tabs). The
             // "UI" tab removed too: cluster Content now lives inline in the Nav/Alt Video titlebar, and
-            // Limited UI is a niche runtime toggle. (`DPadControlView`/`SteeringWheelControlView`/
-            // `UIControlView` structs are retained below, unused, for reference.)
+            // Limited UI is a niche runtime toggle. `DirectionalPad`/`DPadControlView`/
+            // `SteeringWheelControlView`/`UIControlView` deleted (11-L6, verify_05 fix plan) — they had
+            // no callers left.
             KnobControlView(bridge: bridge)
                 .tabItem { Label("Knob", systemImage: "dial.medium") }
             TelephonyControlView(bridge: bridge)
@@ -753,65 +722,13 @@ struct ControlsRootView: View {
     }
 }
 
-/// Runtime CarPlay-UI controls that don't map to a physical HID: the cluster (type-111) CONTENT
-/// selector — mirroring the CarPlay Simulator's own realtime picker (None / Instruction Card / Map /
-/// Navigation App), each a `requestUI` with a `maps:/car/instrumentcluster…` URL — and the limitedUI
-/// (Drive) restriction toggle. Both are `/command`s on the live event channel; no reconnect.
-private struct UIControlView: View {
-    @ObservedObject var bridge: ControlsBridge
-    var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            // Cluster content — the info cards ("Instruction Card") are a content type iOS renders
-            // into the cluster VIDEO; select it here at runtime.
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Cluster Content").font(.headline)
-                Picker("", selection: Binding(get: { bridge.clusterContent },
-                                              set: { bridge.setClusterContent($0) })) {
-                    ForEach(ClusterContent.allCases) { c in
-                        Label(c.rawValue, systemImage: c.systemImage).tag(c)
-                    }
-                }
-                .pickerStyle(.radioGroup)
-                .labelsHidden()
-                Text(bridge.clusterContent == .none
-                     ? "Cluster idle — no frames encoded, Nav window closed."
-                     : "iOS encodes the “\(bridge.clusterContent.rawValue)” surface into the cluster stream; the Nav window opens when frames arrive.")
-                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                if !VehicleConfigModel.shared.altVideoEnabled {
-                    Label("Enable “Alt / Navigation Video” in Settings → Configuration and reconnect first, so iOS advertises the cluster display.",
-                          systemImage: "exclamationmark.triangle")
-                        .font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
-                }
-            }
-
-            Divider()
-
-            // limitedUI — restrict the CarPlay UI as if shifted into Drive.
-            VStack(alignment: .leading, spacing: 6) {
-                Toggle(isOn: Binding(get: { bridge.limitedUIOn }, set: { bridge.setLimitedUI($0) })) {
-                    Text("Limited UI (Drive)")
-                }
-                .toggleStyle(.switch)
-                Text("Restricts CarPlay UI as if the vehicle is in Drive — hides the on-screen keyboard, phone keypad and long scrollable lists. Off = parked (full UI).")
-                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                Text("Wire: /command setLimitedUI {limitedUI: bool}")
-                    .font(.system(size: 9, design: .monospaced)).foregroundStyle(.tertiary)
-            }
-
-            Spacer()
-        }
-        .padding()
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-    }
-}
-
 /// HIDMediaView — media transport (uid 2) + Home/Back (D-Pad AC Home/Back usages).
 /// Reusable control surface — hosted both in the Controls TabView and in a standalone Control-Box popup.
 struct MediaControlView: View {
-    let bridge: ControlsBridge
+    @ObservedObject var bridge: ControlsBridge
     var body: some View {
         VStack(spacing: 18) {
-            Section("Transport", note: "HID media buttons (uid 2). Single-press taps.") {
+            ControlSection("Transport", note: "HID media buttons (uid 2). Single-press taps.") {
                 VStack(spacing: 8) {
                     HStack(spacing: 8) {
                         CtrlButton(label: "Play", systemImage: "play.fill", width: 84, wire: Wire.play) { bridge.media(OCBM.mbtnPlay, Wire.play) }
@@ -832,35 +749,13 @@ struct MediaControlView: View {
     }
 }
 
-/// HIDDPadView — the discrete directional pad + Select (Apple's exact HIDDPad device, uid 3).
-private struct DPadControlView: View {
-    let bridge: ControlsBridge
-    var body: some View {
-        VStack(spacing: 16) {
-            Text("D-Pad").font(.headline)
-            Text("Apple HIDDPad device (uid 3): Menu Up/Down/Left/Right + Pick (Select), AC Home/Back. Discrete directional navigation — distinct from the rotary Knob.")
-                .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
-                .frame(maxWidth: 360)
-            DirectionalPad(bridge: bridge)
-                .padding(.vertical, 8)
-            HStack(spacing: 8) {
-                CtrlButton(label: "Home", systemImage: "house.fill", width: 90, wire: Wire.home) { bridge.nav(OCBM.navHome, Wire.home) }
-                CtrlButton(label: "Back", systemImage: "chevron.backward", width: 90, wire: Wire.back) { bridge.nav(OCBM.navBack, Wire.back) }
-            }
-            Spacer()
-            WireReadout(bridge: bridge)
-        }
-        .padding(16)
-    }
-}
-
 /// HIDKnobView — the ROTARY knob (uid 4), Apple's exact HIDKnobCreateDescriptor. The CarPlay
 /// Simulator drives ALL navigation through this device: rotation moves the selector, the four nudge
 /// arrows move 4-way, and the center button selects. Requires "Knob support" in Settings (advertises
 /// the 4th HID device, behind the reconnect-incident guard).
 /// Reusable control surface — hosted both in the Controls TabView and in a standalone Control-Box popup.
 struct KnobControlView: View {
-    let bridge: ControlsBridge
+    @ObservedObject var bridge: ControlsBridge
     @State private var dragAngle: Double? = nil   // last touch angle (deg), nil when not dragging
     @State private var accum: Double = 0          // accumulated rotation until a detent fires
     @State private var visualRotation: Double = 0 // the knob's on-screen spin (follows the drag 1:1)
@@ -960,25 +855,10 @@ private struct RidgedKnob: View {
     }
 }
 
-/// HIDSteeringWheelView — steering-wheel buttons. Not advertised; shown with the requirement.
-private struct SteeringWheelControlView: View {
-    var body: some View {
-        VStack(spacing: 14) {
-            Image(systemName: "steeringwheel").font(.system(size: 54)).foregroundStyle(.tertiary)
-            Text("Steering-Wheel Controls").font(.headline)
-            Text("Select / Back + Menu directions + a wheel axis (Apple HIDSteeringWheel device). Requires an additional HID device; not enabled. Media, Home/Back, D-Pad and Siri are available on the other tabs.")
-                .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
-                .frame(maxWidth: 360)
-            Spacer()
-        }
-        .padding(16)
-    }
-}
-
 /// HIDTelephonyView — call control. Needs the HID Telephony device; call state shows in Metadata.
 /// Reusable control surface — hosted both in the Controls TabView and in a standalone Control-Box popup.
 struct TelephonyControlView: View {
-    let bridge: ControlsBridge
+    @ObservedObject var bridge: ControlsBridge
     // DTMF keypad rows: (label, telephony index, wire). Digit d → OCBM.telDigit0 + d; * / # are separate.
     private let keypad: [[(String, UInt8, String)]] = [
         [("1", OCBM.telDigit0 + 1, Wire.telDigit(1)), ("2", OCBM.telDigit0 + 2, Wire.telDigit(2)), ("3", OCBM.telDigit0 + 3, Wire.telDigit(3))],
@@ -989,7 +869,7 @@ struct TelephonyControlView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Section("Call Control", note: "Apple HID Telephony (uid 5). Arm “Telephony buttons” in Settings ▸ Configuration ▸ Input, then reconnect.") {
+            ControlSection("Call Control", note: "Apple HID Telephony (uid 5). Arm “Telephony buttons” in Settings ▸ Configuration ▸ Input, then reconnect.") {
                 HStack(spacing: 10) {
                     CtrlButton(label: "Answer", systemImage: "phone.fill", width: 92, wire: Wire.telAnswer) { bridge.telephony(OCBM.telAnswer, Wire.telAnswer) }
                     CtrlButton(label: "End", systemImage: "phone.down.fill", width: 92, wire: Wire.telEnd) { bridge.telephony(OCBM.telEnd, Wire.telEnd) }
@@ -1001,7 +881,7 @@ struct TelephonyControlView: View {
                         .help(bridge.unavailableReason(.callExtras) ?? "")
                 }
             }
-            Section("DTMF Keypad", note: "Telephony PhoneKey usages (0xB0–0xBB) — in-call tone dialing.") {
+            ControlSection("DTMF Keypad", note: "Telephony PhoneKey usages (0xB0–0xBB) — in-call tone dialing.") {
                 VStack(spacing: 8) {
                     ForEach(keypad.indices, id: \.self) { r in
                         HStack(spacing: 8) {
@@ -1026,7 +906,7 @@ struct TelephonyControlView: View {
 /// Siri — a simple press that invokes Siri (requestSiri buttondown then buttonup). Press-and-hold is only
 /// meaningful on dual-function call-pickup buttons (press = answer, hold = Siri), not a dedicated button.
 private struct SiriControlView: View {
-    let bridge: ControlsBridge
+    @ObservedObject var bridge: ControlsBridge
     var body: some View {
         VStack(spacing: 16) {
             Image(systemName: "waveform").font(.system(size: 48)).foregroundStyle(.tint)

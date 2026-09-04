@@ -1,0 +1,114 @@
+2026-08-10 — REGRESSION CAPTURE: the box refuses iOS's RCS iAP-channel SETUP (stream type 130)
+===============================================================================================
+
+Source box file: /tmp/airplayd_wl.log (tmpfs), pulled over the root UART console during a live
+wireless session with an iPhone on iOS 27, Apple Music PLAYING. Excerpted by grep with original
+line numbers preserved (the "N:" prefix is the line number in the source log).
+
+WHY THIS CAPTURE EXISTS
+-----------------------
+docs/carplay/05_METADATA_AND_CONTROLS.md established (2026-07-25) that inbound wireless iAP2 — i.e. the ENTIRE metadata plane —
+rides an RCS DataStream, SETUP stream type 130. A guard committed in 5ce9d1c (2026-07-31) rejected
+any SETUP stream whose `streamConnectionID` was 0 or absent. Type 130 legitimately carries NO
+`streamConnectionID` (docs/carplay/05_METADATA_AND_CONTROLS.md §1.3; it keys off `seed` instead), so the guard rejected every one.
+
+Effect: no `streamID` transport token was ever returned, so the phone's outbound iAP2 path never
+existed, so the tunnel never left `Init` and NOT ONE metadata record could arrive — while A/V
+looked perfect, which is why it hid for ten days. The owner reported "no metadata for several
+sessions"; this capture is what closed the diagnosis.
+
+Fix: narrow the guard to an ALLOWLIST of the types whose key derivation actually consumes scid —
+`if scid == 0 && matches!(ty, 100..=102 | 110 | 111)` (crates/vendor/receiver/src/session.rs).
+Deliberately NOT the deny-list form `ty != 130`: a deny-list re-applies an A/V-only rule to every
+stream type Apple adds next, which is precisely how this outage happened. See docs/carplay/05_METADATA_AND_CONTROLS.md §1.3.
+
+SESSION-LEVEL FACTS (measured on the box, same session)
+-------------------------------------------------------
+  * type-130 SETUPs rejected .................. 33
+  * total SETUP requests ...................... 37   (33 x 328 B are the type-130 retries;
+                                                      the other 4 are 167/234/791/4372 B — the
+                                                      real A/V + session SETUPs)
+  * all 33 request bodies are EXACTLY 328 B, i.e. byte-length identical. A phone minting fresh
+    channel indices (…-RCS-1, -RCS-2, … -RCS-33) would grow the body by one byte at -RCS-10, so
+    the channelID is STABLE across retries. (Inference from body length, not direct observation —
+    the skip happens before channelID is parsed, so nothing logs it. Confirm on the post-fix soak.)
+  * iap_tunnel state .......................... Init  (for the whole 10-minute session)
+  * 0x5001 / NowPlayingUpdate records ......... 0
+  * iAPSendMessage 400s ....................... 0     (there were no sends to reject)
+  * A/V over the same 10 minutes .............. mainVideo 32-37 fps, altVideo 31-40 fps,
+                                                decryptFail=0, gaps=0 — the metadata plane died
+                                                alone, which is exactly why this went unnoticed.
+  * airplayd /proc/<pid>/environ carries CARPLAY_WIRELESS_METADATA=1 — the env gate at
+    session.rs:881 was OPEN. The stream was killed BEFORE reaching that arm, by the scid guard.
+
+THE CAUSAL SEQUENCE (note lines 28 -> 32 -> 44)
+-----------------------------------------------
+20:[receiver] SETUP /14349885033149057699 (enc, 791 B body)
+22:[relay] SETUP host-authored in 4477 µs (conn 1 cseq 1, 201 B)
+28:[iap-tunnel] TX detect+SYN over AirPlay tunnel (detect_sent=true syn_sent=true) — starting fresh iAP2 session
+30:[relay] RECORD host-authored in 2068 µs (conn 1 cseq 2, 0 B)
+31:[receiver] SETUP /14349885033149057699 (enc, 328 B body)
+32:[session] SETUP stream type=130 has streamConnectionID=0 — INVALID (it is the HKDF salt); skipping. Apple returns kVersionErr for this.
+33:[relay] SETUP host-authored in 1488 µs (conn 1 cseq 3, 55 B)
+34:[receiver] SETUP /14349885033149057699 (enc, 167 B body)
+38:[relay] SETUP host-authored in 3807 µs (conn 1 cseq 4, 85 B)
+44:[iap-tunnel] resent SYN only (state=Init, sent=true)
+45:[receiver] SETUP /14349885033149057699 (enc, 328 B body)
+46:[session] SETUP stream type=130 has streamConnectionID=0 — INVALID (it is the HKDF salt); skipping. Apple returns kVersionErr for this.
+47:[relay] SETUP host-authored in 1433 µs (conn 1 cseq 5, 55 B)
+50:[receiver] SETUP /14349885033149057699 (enc, 328 B body)
+51:[session] SETUP stream type=130 has streamConnectionID=0 — INVALID (it is the HKDF salt); skipping. Apple returns kVersionErr for this.
+52:[relay] SETUP host-authored in 1611 µs (conn 1 cseq 6, 55 B)
+55:[receiver] SETUP /14349885033149057699 (enc, 328 B body)
+56:[session] SETUP stream type=130 has streamConnectionID=0 — INVALID (it is the HKDF salt); skipping. Apple returns kVersionErr for this.
+57:[relay] SETUP host-authored in 2507 µs (conn 1 cseq 7, 55 B)
+64:[receiver] SETUP /14349885033149057699 (enc, 4372 B body)
+68:[relay] SETUP host-authored in 2108 µs (conn 1 cseq 8, 85 B)
+84:[receiver] SETUP /14349885033149057699 (enc, 234 B body)
+87:[relay] SETUP host-authored in 2803 µs (conn 1 cseq 9, 138 B)
+89:[receiver] SETUP /14349885033149057699 (enc, 328 B body)
+90:[session] SETUP stream type=130 has streamConnectionID=0 — INVALID (it is the HKDF salt); skipping. Apple returns kVersionErr for this.
+91:[relay] SETUP host-authored in 1321 µs (conn 1 cseq 10, 55 B)
+102:[receiver] SETUP /14349885033149057699 (enc, 328 B body)
+103:[session] SETUP stream type=130 has streamConnectionID=0 — INVALID (it is the HKDF salt); skipping. Apple returns kVersionErr for this.
+104:[relay] SETUP host-authored in 2028 µs (conn 1 cseq 11, 55 B)
+107:[receiver] SETUP /14349885033149057699 (enc, 328 B body)
+108:[session] SETUP stream type=130 has streamConnectionID=0 — INVALID (it is the HKDF salt); skipping. Apple returns kVersionErr for this.
+109:[relay] SETUP host-authored in 1807 µs (conn 1 cseq 12, 55 B)
+111:[receiver] SETUP /14349885033149057699 (enc, 328 B body)
+112:[session] SETUP stream type=130 has streamConnectionID=0 — INVALID (it is the HKDF salt); skipping. Apple returns kVersionErr for this.
+113:[relay] SETUP host-authored in 2900 µs (conn 1 cseq 13, 55 B)
+117:[receiver] SETUP /14349885033149057699 (enc, 328 B body)
+118:[session] SETUP stream type=130 has streamConnectionID=0 — INVALID (it is the HKDF salt); skipping. Apple returns kVersionErr for this.
+119:[relay] SETUP host-authored in 3709 µs (conn 1 cseq 14, 55 B)
+122:[receiver] SETUP /14349885033149057699 (enc, 328 B body)
+123:[session] SETUP stream type=130 has streamConnectionID=0 — INVALID (it is the HKDF salt); skipping. Apple returns kVersionErr for this.
+  … the same 328 B request / skip / 55 B answer triple repeats through cseq 38 …
+
+CONTRAST — the last known-good session, BEFORE the guard existed
+----------------------------------------------------------------
+docs/ops/captures/2026-07-25_SUCCESS_airplayd_wl_handshake.txt:25,36 —
+
+  [session] SETUP phase2 DataStream(130) scid=0 channelID="5E:F7:F7:A9:CB:CD-RCS-1"
+      clientTypeUUID="E9459FD0-BCAD-4C45-820F-1E72447EF2F2" controlType=2
+      wantsDedicatedSocket=true seed=839141951896294626
+      reqKeys=["controlType","channelID","seed","clientUUID","type","wantsDedicatedSocket",
+               "sendMessageAsIs","clientTypeUUID"]                      <-- NO streamConnectionID
+      → streamID=1  [iAP channel]
+  [session] DataStream(130) dedicated socket listening on 51305
+  [datastream] key schedule SOLVED: DataStream-Salt839141951896294626 (seed), read=output
+
+Same scid=0. ACCEPTED, transport token issued, socket bound, key schedule solved from `seed`,
+and the metadata plane ran. Same hardware, same phone, opposite outcome.
+
+IMPORTANT SCOPE NOTE — this capture does NOT prove the current code path works
+------------------------------------------------------------------------------
+At the last 2026-07-25 commit (c1c5901) `session.rs` contained NO type-130 handling, NO scid
+guard and NO key probe, and `datastream.rs` did not exist. The code that produced the SUCCESS
+capture above was never committed in that form; it was folded into — and substantially rewritten
+by — 5ce9d1c, the same commit that added the guard that made it unreachable.
+
+So the 2026-07-25 capture proves the PROTOCOL SHAPE (the phone omits streamConnectionID, expects
+`streamID` back, wants a dedicated socket, salts from `seed`). It does NOT prove the present
+implementation of the 130 arm, which has ZERO hardware hours. Removing the guard makes that arm
+reachable for the first time; treat the next session as a first-run of it, not a restoration.

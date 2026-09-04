@@ -253,6 +253,21 @@ mod tests {
         );
     }
 
+    /// The property `mfi-i2c-local` matches on: a non-`Ok` status survives as a variant, so
+    /// `LockBusy` can still be told apart from a chip NAK downstream.
+    #[test]
+    fn client_error_preserves_status() {
+        let e = client::Error::Status(Status::LockBusy);
+        assert!(matches!(e, client::Error::Status(Status::LockBusy)));
+        assert_eq!(e.to_string(), "mfid returned lock-busy");
+        let io_err: io::Error = client::Error::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "digest is 4 bytes, expected 20",
+        ))
+        .into();
+        assert_eq!(io_err.kind(), io::ErrorKind::InvalidInput);
+    }
+
     #[test]
     fn code_conversions() {
         assert_eq!(Op::from_u8(0x02), Some(Op::Cert));
@@ -276,6 +291,57 @@ pub mod client {
     use std::net::{TcpStream, ToSocketAddrs};
     use std::time::Duration;
 
+    /// A client-side failure, with the daemon's [`Status`] kept as a VARIANT rather than flattened
+    /// into an `io::Error` message.
+    ///
+    /// The distinction is load-bearing: `mfi-i2c-local` maps this onto `MfiError`, and
+    /// `receiver::iap_tunnel::mfi_retry` retries `MfiError::Chip` three times while returning
+    /// immediately on a lock timeout. While every status collapsed to `io::Error::other("mfid
+    /// returned lock-busy")`, a remote [`Status::LockBusy`] arrived there as `Chip` and was retried —
+    /// 3 x the box's 10 s lock deadline with the tunnel's `SESSION` mutex held, which is the exact
+    /// stall the `MfiError` split was introduced to remove.
+    #[derive(Debug)]
+    pub enum Error {
+        Io(io::Error),
+        Status(Status),
+        UnknownStatus(u8),
+    }
+
+    impl std::fmt::Display for Error {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Error::Io(e) => write!(f, "{e}"),
+                Error::Status(st) => write!(f, "mfid returned {}", st.as_str()),
+                Error::UnknownStatus(c) => write!(f, "mfid returned unknown status 0x{c:02x}"),
+            }
+        }
+    }
+
+    impl std::error::Error for Error {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            match self {
+                Error::Io(e) => Some(e),
+                _ => None,
+            }
+        }
+    }
+
+    impl From<io::Error> for Error {
+        fn from(e: io::Error) -> Self {
+            Error::Io(e)
+        }
+    }
+
+    /// Keeps the `io::Result` call sites (airplayd's `MfiSigner` impl) one-liners.
+    impl From<Error> for io::Error {
+        fn from(e: Error) -> io::Error {
+            match e {
+                Error::Io(e) => e,
+                other => io::Error::other(other.to_string()),
+            }
+        }
+    }
+
     const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
     /// Generous on purpose: the daemon bounds a contended chip lock at 10 s and the sign path itself
     /// measures ~1.5 s over USB-NCM. A tighter timeout would report false failures.
@@ -289,7 +355,7 @@ pub mod client {
     /// See `receiver::iap_tunnel::set_remote_signer`, which spells out the calibration.
     const IO_TIMEOUT: Duration = Duration::from_secs(30);
 
-    fn exchange(addr: &str, op: Op, payload: &[u8]) -> io::Result<Vec<u8>> {
+    fn exchange(addr: &str, op: Op, payload: &[u8]) -> Result<Vec<u8>, Error> {
         let sa = addr
             .to_socket_addrs()
             .ok()
@@ -306,24 +372,24 @@ pub mod client {
         let (code, body) = read_frame(&mut s)?;
         match Status::from_u8(code) {
             Some(Status::Ok) => Ok(body),
-            Some(st) => Err(io::Error::other(format!("mfid returned {}", st.as_str()))),
-            None => Err(io::Error::other(format!("mfid returned unknown status 0x{code:02x}"))),
+            Some(st) => Err(Error::Status(st)),
+            None => Err(Error::UnknownStatus(code)),
         }
     }
 
     /// Fetch the accessory's MFi certificate (DER).
-    pub fn cert(addr: &str) -> io::Result<Vec<u8>> {
+    pub fn cert(addr: &str) -> Result<Vec<u8>, Error> {
         exchange(addr, Op::Cert, &[])
     }
 
     /// Sign a [`DIGEST_LEN`]-byte SHA-1 digest. Rejects a wrong-length digest locally rather than
     /// letting the coprocessor answer with an opaque NAK.
-    pub fn sign(addr: &str, digest: &[u8]) -> io::Result<Vec<u8>> {
+    pub fn sign(addr: &str, digest: &[u8]) -> Result<Vec<u8>, Error> {
         if digest.len() != DIGEST_LEN {
-            return Err(io::Error::new(
+            return Err(Error::Io(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("digest is {} bytes, expected {DIGEST_LEN}", digest.len()),
-            ));
+            )));
         }
         exchange(addr, Op::Sign, digest)
     }

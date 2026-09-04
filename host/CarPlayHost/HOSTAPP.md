@@ -16,8 +16,10 @@ ENCRYPTED A/V + hands the per-stream ChaCha20 key over OCBM**; the host decrypts
   bulk read/write (see wiring #2).
 - `Video/VideoDecoder.swift` (renamed from `H264Decoder.swift`, rewritten for the macOS-26 render
   model) — decode (H.264 + HEVC) rendered via `AVSampleBufferRenderSynchronizer` +
-  `AVSampleBufferVideoRenderer.Receiver` (no `VTDecompressionSession`); depth-1 latest-wins decode +
-  enqueue slots. One instance per video lane (main + alt/cluster).
+  `AVSampleBufferVideoRenderer.Receiver` (no `VTDecompressionSession`); bounded decode + enqueue FIFOs
+  (`AVCCFastPath.FrameFIFO`, depth 3, non-blocking, IDR-protecting — V5, 2026-09-03; superseded the
+  depth-1 latest-wins slots), drained on a dedicated serial `renderQueue` that owns the `Receiver` — the
+  frame path never touches the main thread (V6). One instance per video lane (main + alt/cluster).
 - `App/CarPlayView.swift` — the `AVSampleBufferDisplayLayer` host NSView (render surface).
 - `Audio/AudioPlayer.swift` — media audio playback.
 - App shell: `main.swift`, `App/AppDelegate.swift`, `App/MainWindowController.swift`.

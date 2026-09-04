@@ -297,7 +297,10 @@ enum AnomalyKind: String, Sendable, CaseIterable {
 
 /// One ring entry. `tWall` is unix seconds (for correlating with logs); `tMonoMs` is monotonic ms
 /// (ordering + inter-event deltas). `stream` is the label of the stream it happened on (nil = global).
-struct AnomalyEvent: Sendable, Equatable {
+struct AnomalyEvent: Sendable, Equatable, Identifiable {
+    /// Monotonic append order (from `State.total` at insert time) — stable SwiftUI row identity
+    /// independent of the ring's position, unlike an array-offset id (04-L7).
+    var id: UInt64
     var tWall: Double
     var tMonoMs: Double
     var kind: AnomalyKind
@@ -445,19 +448,21 @@ final class AVAnomalyLog: @unchecked Sendable {
             let key = Key(kind: kind, stream: stream?.label)
             if let last = st.lastEmitMs[key], tMonoMs - last < Self.cooldownMs(kind) { return false }
             st.lastEmitMs[key] = tMonoMs
-            st.ring.append(AnomalyEvent(tWall: tWall, tMonoMs: tMonoMs, kind: kind,
+            st.total &+= 1
+            st.ring.append(AnomalyEvent(id: st.total, tWall: tWall, tMonoMs: tMonoMs, kind: kind,
                                         stream: stream?.label, detail: detail))
             if st.ring.count > Self.capacity { st.ring.removeFirst(st.ring.count - Self.capacity) }
-            st.total &+= 1
             st.counts[kind.rawValue, default: 0] += 1
             return true
         }
     }
 
     /// Pure per-buffer audio anomaly detection (silence / click / clip) with per-stream run state.
-    /// `active` gates silence to a live session. Called from AudioPlayer's decoded-PCM tap.
+    /// Called only while a buffer is actually flowing (from AudioPlayer's decoded-PCM tap), so silence
+    /// detection is always live here — the real idle protection is the cross-idle `idleGapMs` reset
+    /// below, not a caller-supplied activity flag (04-M1: the flag was always `true` in production).
     func recordAudioBuffer(_ stream: StreamKind, _ dsp: AudioBufferDSP,
-                           active: Bool, tMonoMs: Double, tWall: Double) {
+                           tMonoMs: Double, tWall: Double) {
         // Read + update the per-stream detector state under the lock, deciding which events to emit;
         // emit via `record` (its own lock section) after — record() re-locks, which is fine (no nesting).
         enum Fire { case silence(Double); case click(String); case clip(String) }
@@ -482,7 +487,7 @@ final class AVAnomalyLog: @unchecked Sendable {
                 fires.append(.click(String(format: "Δ%.2f fs", jump)))
             }
             // SILENCE — RMS floor sustained for silenceMinMs while the session is streaming.
-            if active && dsp.rms < AudioDSP.silenceRMS {
+            if dsp.rms < AudioDSP.silenceRMS {
                 let start = d.silenceStartMs ?? tMonoMs
                 d.silenceStartMs = start
                 let dur = tMonoMs - start + dsp.durationMs   // include this buffer's own span
@@ -607,9 +612,84 @@ final class AVAnomalyLog: @unchecked Sendable {
     /// For the log summary: how many events appended since `total` was last read, the newest event, and
     /// the current total to remember for next time.
     func delta(sinceTotal prior: UInt64) -> (new: Int, latest: AnomalyEvent?, total: UInt64) {
-        s.withLock { st in (Int(st.total - prior), st.ring.last, st.total) }
+        // L1: wrapping subtraction — `total` is monotonic in normal use (only `reset()` zeroes it,
+        // always immediately after `lastEventTotal = 0` today), but a future caller ordering that
+        // isn't true anymore must not trap a diagnostics path.
+        s.withLock { st in (st.total >= prior ? Int(st.total - prior) : 0, st.ring.last, st.total) }
     }
 
     /// Monotonic clock in ms (mach uptime) — one source used by every emitter so `tMonoMs` is comparable.
     static func monoMs() -> Double { Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000.0 }
+}
+
+// MARK: - Android Auto lane (AA traffic never touches OCBMAVDecrypt)
+//
+// AA rides CH_IP → AASession, so NONE of the accumulator above sees it and the Settings ▸ stream
+// performance panel read empty for a whole AA session. AASession already keeps the cumulative
+// counters for its own 1 Hz "AA stats" line; it publishes them as this snapshot each tick and
+// `AARates.between` does the same cumulative→per-second conversion the CarPlay path does. Kept here,
+// beside the CarPlay math and away from AppKit, so the harness can test it.
+
+/// One tick of AASession's cumulative counters. Sendable value — crosses from the session thread to
+/// the monitor's main-actor sampler through a Mutex box, never a live object reference.
+struct AAStatsSnapshot: Sendable, Equatable {
+    /// `ProcessInfo.systemUptime` when the counters were read — the ONLY time base, so a missed tick
+    /// (AA's loop is driven by inbound frames, not a timer) divides by the real interval.
+    var t: Double = 0
+    var videoRx: UInt64 = 0        // video MediaData messages received
+    var videoDecoded: UInt64 = 0   // sample buffers built by the AA decoder
+    var videoDropped: UInt64 = 0   // decoder slot drops
+    var audioMedia: UInt64 = 0     // ch 4
+    var audioGuidance: UInt64 = 0  // ch 5
+    var audioSystem: UInt64 = 0    // ch 6
+    var audioTelephony: UInt64 = 0 // the AA_TELEPHONY_SINK experiment's sink; 0 unless the phone opens it
+    var micFrames: UInt64 = 0      // mic MediaData messages sent to the phone (ch 9)
+    var bytesRx: UInt64 = 0
+    var bytesTx: UInt64 = 0
+    var backlog: Int = 0           // CH_IP / transport write backlog RIGHT NOW (a level, not a rate)
+    /// "wired" / "wireless" — from the box's projection mode, for the panel's transport label.
+    var transport: String = "wired"
+}
+
+/// Per-second view of two AA snapshots. Rates, not totals: the panel's CarPlay rows are rates and a
+/// mixed panel is unreadable.
+struct AARates: Sendable, Equatable {
+    var dt: Double = 0
+    var videoRxPerSec = 0.0
+    var videoDecodedPerSec = 0.0
+    var videoDropPerSec = 0.0
+    var audioMediaPerSec = 0.0
+    var audioGuidancePerSec = 0.0
+    var audioSystemPerSec = 0.0
+    var audioTelephonyPerSec = 0.0
+    var micPerSec = 0.0
+    var rxMbps = 0.0
+    var txMbps = 0.0
+    var backlog = 0
+    var transport = "wired"
+
+    /// Cumulative → per-second. `dt ≤ 0` (same tick twice, or a snapshot published before the clock
+    /// moved) yields all-zero rates rather than an infinity the UI would render as "inf/s". Counter
+    /// diffs are wrapping-safe and clamped at 0: a session restart resets AASession's counters, and a
+    /// negative rate is worse than a one-tick zero.
+    static func between(_ a: AAStatsSnapshot, _ b: AAStatsSnapshot) -> AARates {
+        var r = AARates()
+        r.backlog = b.backlog
+        r.transport = b.transport
+        let dt = b.t - a.t
+        guard dt > 0 else { return r }
+        r.dt = dt
+        func per(_ x: UInt64, _ y: UInt64) -> Double { x >= y ? Double(x - y) / dt : 0 }
+        r.videoRxPerSec = per(b.videoRx, a.videoRx)
+        r.videoDecodedPerSec = per(b.videoDecoded, a.videoDecoded)
+        r.videoDropPerSec = per(b.videoDropped, a.videoDropped)
+        r.audioMediaPerSec = per(b.audioMedia, a.audioMedia)
+        r.audioGuidancePerSec = per(b.audioGuidance, a.audioGuidance)
+        r.audioSystemPerSec = per(b.audioSystem, a.audioSystem)
+        r.audioTelephonyPerSec = per(b.audioTelephony, a.audioTelephony)
+        r.micPerSec = per(b.micFrames, a.micFrames)
+        r.rxMbps = per(b.bytesRx, a.bytesRx) * 8.0 / 1_000_000.0
+        r.txMbps = per(b.bytesTx, a.bytesTx) * 8.0 / 1_000_000.0
+        return r
+    }
 }

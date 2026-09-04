@@ -36,6 +36,8 @@
 //!   {"cmd":"connect","address":"AA:BB:.."} -> {"ok":true}    // address optional: omit = first-to-connect
 //!   {"cmd":"policy","autoConnect":false,"order":["AA:BB:.."]} -> {"ok":true}
 //!   {"cmd":"forget","address":"AA:BB:.."}  -> {"ok":true}
+//!   {"cmd":"pair_answer","accept":true}    -> {"ok":true}    // the head unit's yes/no for the
+//!                                                            // Numeric-Comparison code on screen
 //! ```
 //!
 //! ## Address byte order — the thing that will bite
@@ -77,8 +79,17 @@ const CLIENT_TIMEOUT: Duration = Duration::from_secs(5);
 /// A request line longer than this is not a request we understand. Bounded before allocation.
 const MAX_REQUEST_BYTES: usize = 8 * 1024;
 
+/// `@<unix_ms> ` write-time stamp (docs/carplay/01_OCBM_PROTOCOL.md CH_LOG): the box.log tailer
+/// parses this prefix and uses it instead of the millisecond it happened to READ the line at.
 fn log(m: &str) {
-    println!("[control] {m}");
+    println!("@{} [control] {m}", now_ms());
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 // ---- address formatting ---------------------------------------------------------------------
@@ -93,7 +104,7 @@ pub fn fmt_addr(a: &[u8; 6]) -> String {
 
 /// Display form -> mgmt little-endian bdaddr. Accepts `:` or `-` separators, any case.
 pub fn parse_addr(s: &str) -> Option<[u8; 6]> {
-    let parts: Vec<&str> = s.split(|c| c == ':' || c == '-').collect();
+    let parts: Vec<&str> = s.split([':', '-']).collect();
     if parts.len() != 6 {
         return None;
     }
@@ -264,6 +275,11 @@ pub struct Control {
     /// and every phone-initiated connect — report `active:false`, and the app then offered
     /// **Forget** for the phone that was actively projecting, which deletes a live phone's link key.
     session_active: Arc<AtomicBool>,
+    /// The head unit's yes/no for a Numeric-Comparison pairing prompt, read by the SSP agent's mgmt
+    /// loop. PROCESS-lifetime like the rest of this struct, and cloned into each session's agent
+    /// thread — pairing happens on the accept path, before any session exists, so a per-session
+    /// answer slot would be created after the prompt it is meant to answer.
+    pair_answer: Arc<ssp_agent::PairAnswer>,
 }
 
 impl Control {
@@ -274,6 +290,12 @@ impl Control {
             session_active,
             ..Default::default()
         }
+    }
+
+    /// The slot the SSP agent polls for the head unit's pairing answer. Clone it into the agent
+    /// thread; `handle_request`'s `pair_answer` verb writes it.
+    pub fn pair_answer(&self) -> Arc<ssp_agent::PairAnswer> {
+        self.pair_answer.clone()
     }
 
     /// True while a session is live on EITHER path, named peer or not.
@@ -295,6 +317,12 @@ impl Control {
     /// Take any pending connect request. Called by the reconnect loop each round.
     pub fn take_request(&self) -> Option<Option<[u8; 6]>> {
         self.pending.lock().ok().and_then(|mut p| p.take())
+    }
+
+    /// Is a connect request waiting? Peeks rather than takes, so the reconnect loop's backoff sleep
+    /// can cut short without consuming the request it is about to act on.
+    pub fn has_request(&self) -> bool {
+        self.pending.lock().map(|p| p.is_some()).unwrap_or(false)
     }
 
     pub fn request_connect(&self, addr: Option<[u8; 6]>) {
@@ -518,6 +546,25 @@ pub fn handle_request(ctrl: &Control, line: &str) -> String {
             ctrl.set_policy(p);
             r#"{"ok":true}"#.to_string()
         }
+        // The user's answer to the Numeric-Comparison prompt (macOS app → CT_PAIR_CONFIRM → ocbmd →
+        // here). FAIL CLOSED, like `policy`: a malformed or absent `accept` is refused, never read
+        // as "pair" — an unparseable request must not be able to complete a bond nobody confirmed.
+        //
+        // Answering is always `{"ok":true}` even with no prompt outstanding: this port cannot see
+        // whether the agent still has one pending (it may have just timed out), and reporting an
+        // error for a race the caller cannot avoid would only teach the app to ignore the field.
+        // The agent drops a stray answer rather than banking it.
+        "pair_answer" => match json_bool(line, "accept") {
+            Some(accept) => {
+                ctrl.pair_answer.set(accept);
+                log(&format!(
+                    "pairing answer from the head unit: {}",
+                    if accept { "PAIR" } else { "CANCEL" }
+                ));
+                r#"{"ok":true}"#.to_string()
+            }
+            None => r#"{"ok":false,"error":"pair_answer: accept must be true or false"}"#.to_string(),
+        },
         "forget" => match json_str(line, "address").as_deref().and_then(parse_addr) {
             Some(a) => {
                 if ssp_agent::forget_bond(&a) {
@@ -651,6 +698,19 @@ mod tests {
         assert!(r.contains("\\r"), "CR should be escaped: {r}");
     }
 
+    /// `has_request` exists so the reconnect backoff sleep can cut short on a tap; it must PEEK,
+    /// or the request it woke for would be gone by the time the loop reads it.
+    #[test]
+    fn has_request_peeks_and_take_request_consumes() {
+        let c = Control::default();
+        assert!(!c.has_request());
+        c.request_connect(Some([1, 2, 3, 4, 5, 6]));
+        assert!(c.has_request());
+        assert!(c.has_request(), "peeking must not consume");
+        assert_eq!(c.take_request(), Some(Some([1, 2, 3, 4, 5, 6])));
+        assert!(!c.has_request());
+    }
+
     #[test]
     fn json_str_handles_an_escaped_quote() {
         assert_eq!(json_str(r#"{"n":"a\"b"}"#, "n").as_deref(), Some("a\"b"));
@@ -716,6 +776,28 @@ mod tests {
         let c = Control::default();
         assert!(handle_request(&c, r#"{"cmd":"connect","address":"nope"}"#).contains("\"ok\":false"));
         assert_eq!(c.take_request(), None);
+    }
+
+    #[test]
+    fn a_pair_answer_reaches_the_slot_the_ssp_agent_polls() {
+        let c = Control::new(Arc::new(AtomicBool::new(false)));
+        let slot = c.pair_answer();
+        assert!(handle_request(&c, r#"{"cmd":"pair_answer","accept":true}"#).contains("\"ok\":true"));
+        assert_eq!(slot.take(), Some(true));
+        assert!(handle_request(&c, r#"{"cmd":"pair_answer","accept":false}"#).contains("\"ok\":true"));
+        assert_eq!(slot.take(), Some(false));
+        assert_eq!(slot.take(), None);
+    }
+
+    #[test]
+    fn a_malformed_pair_answer_is_refused_and_confirms_nothing() {
+        // The failure that matters: junk being read as "pair" would complete a bond no human
+        // approved, which is the whole reason this path exists.
+        let c = Control::new(Arc::new(AtomicBool::new(false)));
+        let slot = c.pair_answer();
+        assert!(handle_request(&c, r#"{"cmd":"pair_answer","accept":"yes"}"#).contains("\"ok\":false"));
+        assert!(handle_request(&c, r#"{"cmd":"pair_answer"}"#).contains("\"ok\":false"));
+        assert_eq!(slot.take(), None);
     }
 
     #[test]

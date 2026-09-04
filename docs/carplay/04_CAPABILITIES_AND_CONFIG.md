@@ -309,7 +309,7 @@ reintroduce drops → desync. Durable hardening (separate task): make the decryp
 #### Operational gotcha — app/box boot race
 The host app connecting at box-uptime ≈18 s can beat the OCBM gadget being fully ready: the app's HELLO is
 lost, ocbmd never handshakes, the app SUBSCRIBEs optimistically anyway (≈20 s gap in its log), and the box
-stays `host_present=0` with an empty ocbmd.log. Fix = quit + reopen the app for a fresh HELLO once the box
+stays `host_present=0` with no ocbmd lines in `/tmp/box.log`. Fix = quit + reopen the app for a fresh HELLO once the box
 is fully booted (no box surgery). A real fix would have the app retry HELLO until HELLO_ACK.
 
 #### Deploy/build gotchas hit during validation (for next time)
@@ -420,6 +420,8 @@ Informational `OSInfo` string in `/info` describing the accessory's own OS/stack
 
 #### rightHandDrive
 Steering side of the vehicle: on = right-hand-drive.
+**Live for Android Auto since 2026-09-04** (declared as `driver_position`, rail side device-verified —
+see `docs/androidauto/01_SESSION_AND_AV.md`). The CarPlay statement below is unchanged:
 Tells CarPlay the driver sits on the right, so iOS would mirror driver-focused layout (e.g. control/handle placement) toward that side — if wired. **Currently inert**: it is not an `/info` key and `vehicle_config.rs` does not parse it, so the toggle rides the YAML config with no effect on the wire (corrected 2026-08-01: was described as sent in `/info` and updatable live).
 [E] `VehicleConfig.rightHandDrive : Swift.Bool` (Swift/YAML field only — no `/info` key, no parser; grep of `info.rs`/`vehicle_config.rs` confirms); SettingsWindow.swift's own comment: "Not yet implemented on the box — this setting rides the config but currently has no effect on the wire."
 

@@ -166,6 +166,71 @@ BT_ATTACH_CMD=""
 BT_AFTER_WLAN=0
 grep -qE 'while \[ ! -e /sys/class/net/' /script/attach_bluetooth.sh 2>/dev/null && BT_AFTER_WLAN=1
 
+# ---- 4c. THE SCO / HFP VOICE SETUP THIS UNIT'S OWN DISPATCHER APPLIES ------------------------
+# The bring-up in carplay-wireless forces a DOWN->UP cycle on the controller, and this controller
+# is hciattach'd over UART, so it carries HCI_QUIRK_RESET_ON_CLOSE: the `down` makes the kernel
+# issue a real HCI_Reset, which DISCARDS everything attach_bluetooth.sh set after its own attach --
+# including the SCO setup HFP call audio needs (docs/wireless/01_BT_AND_RADIO.md "Accepted side
+# effect"). Those lines are the vendor's OBSERVATIONS, per-chip and not re-derivable by us, so they
+# are extracted here exactly like the insmod/attach mapping and re-applied by `radio_hal.sh sco_on`.
+#
+# SCOPE THE EXTRACTION TO THIS UNIT'S OWN BRANCH. Unlike the insmod and attach lines -- which are
+# discriminated by the module tarball and by attach-helper presence -- the SCO lines appear in
+# SEVERAL of the dispatcher's chipset branches with DIFFERENT contents:
+#     0xb822/0xc822/0xb733 (Realtek):  scomtu only, no routing command at all
+#     0x4358/0xaa31 (BCM4358):         hcitool -i hci0 cmd 0x3f 0x1c 0x01 0x02 0x00 0x00 0x00
+#     0x9149/0x9141/0x9159 (NXP):      hcitool -i hci0 cmd 0x3f 0x1d 0x00
+# A whole-file `head -1` would hand one chip another chip's vendor-opaque HCI command -- exactly
+# the failure the no-chipset-whitelist rule exists to prevent, arrived at from the other side. So
+# `attach_branch` selects the branch by THIS UNIT'S OWN SDIO id against the dispatcher's own
+# if/elif chain: no table, no whitelist, and an id the dispatcher does not mention simply yields
+# NOTHING (the seam then reports `unsupported`, honestly). A single-branch attach script -- the
+# owned IW416 rewrite, which has no sdioCardID dispatch at all -- is its own branch.
+attach_branch() {
+  [ -f /script/attach_bluetooth.sh ] || return 0
+  if ! grep -q 'sdioCardID' /script/attach_bluetooth.sh 2>/dev/null; then
+    cat /script/attach_bluetooth.sh; return 0
+  fi
+  [ -n "$SDIO_DEV" ] || return 0
+  # Nesting-aware: the branch ends at the next elif/else/fi AT ITS OWN LEVEL. Counting matters --
+  # the NXP branches close an inner `if [ $configBurned -eq 0 ]` BEFORE their scomtu line, so a
+  # naive "stop at the first fi" would drop the very lines we came for.
+  awk -v id="$SDIO_DEV" '
+    !inb {
+      if ($0 ~ /sdioCardID/ && index($0, "\"" id "\"") > 0 && $0 ~ /^[ \t]*(el)?if[ \t]/) { inb=1; depth=0 }
+      next
+    }
+    {
+      if (depth == 0 && $0 ~ /^[ \t]*(elif|else|fi)([ \t]|$)/) exit
+      if ($0 ~ /^[ \t]*if[ \t]/) depth++
+      else if ($0 ~ /^[ \t]*fi([ \t]|$)/) depth--
+      print
+    }' /script/attach_bluetooth.sh
+}
+
+# Strip a TRAILING comment before anything else. The owned rewrite annotates these lines inline
+# (`hcitool -i hci0 cmd 0x3f 0x1d 0x00              # route SCO to HCI`) while the vendor puts the
+# comment on the line above. `#` is only a comment marker in the SHELL'S INPUT -- the result of a
+# variable expansion is never re-scanned for one -- so a captured trailing comment would reach
+# hcitool as four extra positional arguments, not as a comment.
+decomment() { sed 's/[[:space:]]*#.*$//; s/[[:space:]]*$//'; }
+
+_SCO_BRANCH=$(attach_branch)
+BT_SCO_MTU_CMD=$(echo "$_SCO_BRANCH" \
+  | grep -E '^[[:space:]]*hciconfig[[:space:]]+[^[:space:]]+[[:space:]]+scomtu[[:space:]]' \
+  | head -1 | sed 's/^[[:space:]]*//' | decomment | safe_cmd)
+# The routing command is identified by the VENDOR'S OWN annotation ("route sco data to hci"),
+# same line or the line above -- never by matching raw hcitool opcodes, which would be a chipset
+# table in disguise. An unannotated variant yields nothing and the seam says so.
+BT_SCO_ROUTE_CMD=$(echo "$_SCO_BRANCH" | awk '
+  {
+    if ($0 ~ /^[ \t]*hcitool[ \t].*[ \t]cmd[ \t]/ \
+        && (tolower($0) ~ /#.*sco/ || tolower(prev) ~ /^[ \t]*#.*sco/)) {
+      sub(/^[ \t]+/, ""); print; exit
+    }
+    prev = $0
+  }' | decomment | safe_cmd)
+
 # ---- 5. post-load facts: enumerate, never assume -------------------------------------------
 # The WLAN interface name is an INSMOD PARAMETER that differs per chip - Realtek passes
 # if2name=sta0, Broadcom iface_name=sta, and on Broadcom STA units wlan0 does not exist until
@@ -206,6 +271,8 @@ BT_MAC=""
   echo "RADIO_BT_LDISC_KO=$BT_LDISC"
   echo "RADIO_BT_ATTACH_CMD=\"$BT_ATTACH_CMD\""
   echo "RADIO_BT_AFTER_WLAN=$BT_AFTER_WLAN"
+  echo "RADIO_BT_SCO_MTU_CMD=\"$BT_SCO_MTU_CMD\""
+  echo "RADIO_BT_SCO_ROUTE_CMD=\"$BT_SCO_ROUTE_CMD\""
   echo "RADIO_WLAN_INSMOD=\"$(echo "$WLAN_INSMOD" | sed '/^$/d' | tr '\n' ';')\""
   echo "RADIO_WIRELESS=$WIRELESS"
   echo "RADIO_WLAN_IF=$WLAN_IF"

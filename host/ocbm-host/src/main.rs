@@ -137,11 +137,28 @@ fn open(vid: u16, pid: u16) -> Link {
     }
 }
 
+/// This process's HOST INSTANCE NONCE — `CT_HELLO` bytes 2..6 (`ocbm_proto::CT_HELLO`,
+/// docs/carplay/01_OCBM_PROTOCOL.md). The box compares it across reattaches to tell a relaunched
+/// host from the same host reconnecting, so it must be stable for the life of the process and
+/// differ between runs; 0 means "not supplied", hence the `max(1)`. It is NOT a capability word —
+/// there is no host->box capability field, and sending one here (this used to send `0x13`) made
+/// every run look like the same host, so the box could never latch `host_replaced`.
+fn host_instance_nonce() -> u32 {
+    static NONCE: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *NONCE.get_or_init(|| {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        ((std::process::id() as u64 ^ nanos) as u32).max(1)
+    })
+}
+
 fn do_hello(link: &mut Link) {
     let mut hi = [0u8; 6];
     hi[0] = p::CT_HELLO;
     hi[1] = p::VERSION;
-    hi[2..6].copy_from_slice(&(p::CAP_CONSOLE | p::CAP_ECHO | p::CAP_FILE).to_le_bytes());
+    hi[2..6].copy_from_slice(&host_instance_nonce().to_le_bytes());
     link.send(p::CH_CTRL, p::F_SOM | p::F_EOM, &hi);
     // REATTACH RESYNC: a prior session may have left kernel-buffered A/V/bulk frames ahead of our
     // HELLO_ACK that the box cannot retract. Drain frames until the ACK (or timeout) rather than
@@ -326,7 +343,9 @@ fn mode_mfi(link: &mut Link) {
                 // per-chip provisioning from a shared/cloned one.
                 //   openssl pkcs7 -inform DER -in mfi_cert.der -print_certs | openssl x509 -noout -serial
                 if let Some(path) = std::env::var_os("OCBM_MFI_CERT_OUT") {
-                    match std::fs::write(&path, &out[3..3 + n.min(out.len() - 3)]) {
+                    // Bound by the RECEIVED payload `l`, not the reusable 64 KiB buffer: a reply
+                    // whose declared `n` overran `l` would append stale bytes to the DER.
+                    match std::fs::write(&path, &out[3..3 + n.min(l - 3)]) {
                         Ok(()) => println!("MFI cert written to {}", path.to_string_lossy()),
                         Err(e) => eprintln!("MFI cert write failed: {e}"),
                     }
@@ -1022,8 +1041,16 @@ fn mode_avdec(link: &mut Link, secs: u64, cfg_path: Option<&str>, rtt: bool) {
                 }
                 break;
             }
-            let msg = abuf[4..4 + mlen].to_vec();
+            let mut msg = abuf[4..4 + mlen].to_vec();
             abuf.drain(0..4 + mlen);
+            // Since 2026-09-03 the audio seam is magic-tagged like the video seam:
+            // `[u32 BE len][SEAM_MAGIC "SEAV"][marker]…`. Strip it when present so this tool reads
+            // both wires; a pre-magic box build still sends `[len][marker]`. (This debug receiver does
+            // not implement the full scan-forward resync the macOS host does — it only needs to parse
+            // a healthy stream.)
+            if msg.len() >= 5 && msg[..4] == [0x53, 0x45, 0x41, 0x56] {
+                msg.drain(0..4);
+            }
             match msg[0] {
                 // SEAM_KEY: [0x00][key 32][scid 8]
                 0x00 if msg.len() >= 41 => {
@@ -1600,6 +1627,15 @@ fn main() {
 mod tests {
     use chacha20poly1305::aead::{Aead, KeyInit, Payload};
     use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+
+    /// The nonce must be stable within a process (a reattach is the SAME host) and never 0
+    /// ("not supplied"), or the box's replacement detection reads it wrong in either direction.
+    #[test]
+    fn host_instance_nonce_is_stable_and_nonzero() {
+        let n = super::host_instance_nonce();
+        assert_ne!(n, 0);
+        assert_eq!(n, super::host_instance_nonce());
+    }
     // Encrypt an audio AU exactly as receiver_core's encrypt_audio_aad (packet = [12B hdr][ct‖tag][nonce8],
     // nonce = [0,0,0,0]‖nonce8, aad = hdr[4..12]), then decrypt with the exact logic mode_avdec uses for
     // CH_MEDIA_AUDIO. Proves the host audio-decrypt replica matches the box wire.

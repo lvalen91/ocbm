@@ -70,7 +70,7 @@ it to the clients now fails the check.
 off 0:  magic    u32   = 0x4F43424D  ("OCBM")   ; resync marker
 off 4:  length   u32                             ; payload byte count
 off 8:  channel  u16                             ; logical channel (the "type")
-off 10: flags    u8                              ; bit0 SOM, bit1 EOM (fragment), bit2 REPLAY
+off 10: flags    u8                              ; bit0 SOM, bit1 EOM (fragment), bit2 REPLAY, bit3 NEW_SOURCE
 off 11: hcheck   u8                              ; XOR of header bytes 0..=10 (resync robustness)
 off 12: seq      u32                             ; per-endpoint sequence (debug/telemetry — see below)
 off 16: payload  [length]
@@ -87,6 +87,14 @@ mirror cannot otherwise answer: *is this news, or is this what I already knew?* 
 a flag file that is never cleared otherwise replays as a live event on every reattach. Purely
 advisory, and **no receiver on either end validates flag bits**, so the two sides may adopt it
 independently and in either order. Reasoning: [../ops/06_CORRECTIONS_LEDGER.md](../ops/06_CORRECTIONS_LEDGER.md) `R-02-4`.
+
+**`F_NEW_SOURCE` (bit3, added 2026-09-03):** set by the box on the FIRST frame it forwards from a
+newly accepted A/V seam connection (`:9001`–`:9005`). A re-SETUP reconnects the seam and ocbmd
+replaces the previous producer *without draining it*, so the host's byte-stream reassembly for that
+channel may still hold a partial message from the old producer; this bit says "drop that remainder,
+my bytes start at a message boundary". It is connection-lifecycle knowledge ocbmd already has — the
+seam payload itself is forwarded untouched, so it does not breach *the box forwards, the app
+processes*. Advisory exactly like `F_REPLAY`. See the audio-lane correction below for what it fixes.
 
 **`seq` as implemented:** each endpoint keeps **one global counter across all channels** —
 monotonically increasing (wrapping), stamped on every frame it sends, reset to 0 by ocbmd on a new
@@ -140,16 +148,18 @@ host → box:  MODE_SELECT { mode }        (only when the host wants a non-defau
 | `0x02` | `HELLO_ACK` | box→host | `[ver u8][caps u32 LE][active_mode u8]` |
 | `0x03` | `MODE_SELECT` | host→box | `[mode u8]` |
 | `0x04` | `SRC` | host→box | `[ms u32 LE]` — box floods CH_ECHO for a downlink benchmark. The flood blocks ocbmd's single-threaded poll, so the box **clamps `ms` to `HEARTBEAT_GRACE/2` (5 s)** and refreshes `last_hb` when it ends (`Daemon::handle`, the `CT_SRC` arm). An unclamped bench past the grace used to make `presence_tick` see a stale `last_hb`, declare the host GONE and destroy the live session — a host asking for 30 s gets 5 s, not an error |
-| `0x05` | `SETTIME` | host→box | `[unix_seconds u64 LE]`; box `settimeofday()`s, then acks `[0x05][unix_seconds u64 LE][status u8]` (`0`=applied, `1`=failed) |
+| `0x05` | `SETTIME` | host→box | `[unix_seconds u64 LE]`; box `settimeofday()`s, then acks `[0x05][unix_seconds u64 LE][status u8]` (`0`=applied, `1`=failed) | (2026-09-03: the macOS client now sends it right after every SUBSCRIBE — until then only the Android client did, and a box that booted unsynced logged every line, read-time and write-time stamped alike, as 2020-01-02)
 | `0x06` | `CT_ETH_START` | host→box | `[iface bytes?]` — box bridges that netdev (default `ncm0`) onto CH_ETH |
 | `0x07` | `CT_ETH_STOP` | host→box | *(empty)* — box tears the raw-frame bridge down |
-| `0x14` | `CT_UPLINK` | box→host | `[state u8][rate u32 LE][ch u8]` — mic-uplink gate: `1`=on (iPhone opened a type-100 `input=true` SETUP; app starts capturing at rate/ch), `0`=off (TEARDOWN; app stops) |
-| `0x15` | `CT_PAIRING_CODE` | box→host | `[6 ascii digits \| empty]` — the wireless SSP Numeric-Comparison code to display for the user to match against the iPhone; empty payload = clear/hide |
+| `0x14` | `CT_UPLINK` | box→host | `[state u8][rate u32 LE][ch u8][codec u8]` — mic-uplink gate: `1`=on (iPhone opened a type-100 `input=true` SETUP, or an HFP call opened SCO; app starts capturing at rate/ch), `0`=off (TEARDOWN; app stops). `codec` added 2026-09-04: `0` PCM S16LE (every CarPlay uplink and HFP/CVSD), `4` mSBC — the app returns whole 60 B eSCO packets, not PCM. ON is 8 bytes; **OFF stays the 7-byte all-zero form**, so read `codec` only when `len ≥ 8` and default it to 0 |
+| `0x15` | `CT_PAIRING_CODE` | box→host | `[6 ascii digits \| empty]` — the wireless SSP Numeric-Comparison code to display for the user to match against the iPhone; empty payload = clear/hide | (macOS app, 2026-09-03: rendered one digit per shaded cell in the main-window overlay, grouped n/2 + n/2 with a dash for even lengths ≥ 4, semantic system colours, VoiceOver label; hidden when the payload is empty. The one-line status only carries the instruction.)
+| `0x1C` | `CT_PAIR_CONFIRM` | host→box | `[accept u8]` — the USER'S answer to the `CT_PAIRING_CODE` prompt: `1` = the codes match, pair; `0` = cancel. Any non-zero byte is a yes; a truncated frame reads as **cancel** (an unparseable request must never complete a bond nobody confirmed). SSP Numeric Comparison requires a real yes/no on BOTH devices, so the box no longer auto-accepts: it publishes the code, waits up to **55 s** (inside `pairing_aware_connect`'s 60 s hold), then replies `USER_CONFIRM_REPLY` or `USER_CONFIRM_NEG_REPLY`. ocbmd relays this to carplay-wireless's control port as `{"cmd":"pair_answer","accept":…}` (127.0.0.1:9115). An answer with no prompt outstanding is ignored. (macOS app, 2026-09-03: **Pair** default/Return and **Cancel**/Escape under the code panel, disabled after one answer until the box clears the code.) See docs/wireless/01_BT_AND_RADIO.md |
 | `0x16` | `CT_RADIO` | host→box | `[0 \| 1]` — `0` = radios off now, `1` = clear the inhibit (the pushed cfg still governs). Any other value is logged and ignored; a fresh `CT_SUBSCRIBE` clears the inhibit **unconditionally**, so a config push always overrides a prior `off`. See the note below before trying to change that |
 | `0x17` | `CT_BT_PHASE` | box→host | `[BTP_* u8]` — Bluetooth/iAP2 handshake progress. See below |
 | `0x18` | `CT_PHONE_IDENT` | box→host | `[utf8 JSON \| empty]` — who the connected phone is: `{"name","deviceID","model","osName","osVersion"}`, lifted from the phone's own AirPlay phase-1 SETUP plist. `deviceID` is the BR/EDR MAC, so it joins `MGMT_INFO`'s bonded list. Sent only while subscribed, on **change** only, re-emitted after each `CT_SUBSCRIBE`; empty payload = no identity yet / cleared |
-| `0x19` | `CT_PROJ_MODE` | box→host | `[PM_* u8]` — WHICH projection transport owns the box right now: `0x00` `PM_NONE` (idle), `0x01` `PM_WIRED_CP`, `0x02` `PM_WIRELESS_CP`, `0x03` `PM_WIRED_AA`, `0x04` `PM_WIRELESS_AA` (reserved, unbuilt). Mirrors the box's single-owner arbitration flag `/tmp/projection_owner` (docs/host/02_ANDROID_AUTO.mda). Sent only while subscribed, on **change** only, re-emitted after each `CT_SUBSCRIBE`. Advisory: an unknown value means "some transport owns the box" — never gate on ordering |
+| `0x19` | `CT_PROJ_MODE` | box→host | `[PM_* u8]` — WHICH projection transport owns the box right now: `0x00` `PM_NONE` (idle), `0x01` `PM_WIRED_CP`, `0x02` `PM_WIRELESS_CP`, `0x03` `PM_WIRED_AA`, `0x04` `PM_WIRELESS_AA` (reserved, unbuilt). Mirrors the box's single-owner arbitration flag `/tmp/projection_owner` (docs/androidauto/02_ARBITRATION.md). Sent only while subscribed, on **change** only, re-emitted after each `CT_SUBSCRIBE`. Advisory: an unknown value means "some transport owns the box" — never gate on ordering |
 | `0x1A` | `CT_BOX_HEALTH` | box→host | `[BH_* bitmask u8]` — the box's own readiness. Sent only while subscribed, on **change** only, re-emitted after each `CT_SUBSCRIBE`. See below |
+| `0x1B` | `CT_LOG_CTL` | host→box | `[enabled u8][cap_kb u16 LE]` — arm/disarm the box→host `CH_LOG` stream. `cap_kb` 0 = the built-in default (256). **Default is OFF**, and it resets to off on `CT_STOP` / host-gone like every other per-session state. Enabling streams from **offset 0** of every source — that IS the backfill, there is no separate dump opcode — then follows EOF. Every line that existed on disk at the moment a source is (re)opened for that offset-0 pass carries `LOG_F_BACKFILL` (see §CH_LOG), so a host can tell "already happened" replay from what happens next. A payload shorter than 2 bytes reads as *disable*: an unparseable request must never leave a stream running the host does not know about. See §CH_LOG |
 
 ### `CT_BOX_HEALTH` (`0x1A`) — the box's own readiness (added 2026-08-27)
 
@@ -220,29 +230,36 @@ The session-control opcodes `0x10` `CT_SUBSCRIBE`, `0x11` `CT_STOP`, `0x12` `CT_
 lifecycle section below.
 
 > **`HELLO`'s trailing u32 is the host INSTANCE NONCE, not capabilities.** The box has never read
-> capabilities from `HELLO` — not in the current handler (`ccpa/ocbmd/src/main.rs:2117`) nor in the
+> capabilities from `HELLO` — not in the current handler (the `CT_HELLO` arm of `Daemon::handle` in
+> `ccpa/ocbmd/src/main.rs`) nor in the
 > oldest one in history. It reads those four bytes as an opaque identifier for the host *process*:
 > non-zero, fixed for the lifetime of one host session object, re-sent on every reattach that
 > session makes. `0` = not supplied, which the box treats exactly as it did before the field had a
-> meaning (the `pl.len() >= 6` and `inst != 0` guards in the `CT_HELLO` arm of `Daemon::handle`,
-> `main.rs:2126-2128` — a zero or short nonce falls past both and leaves `host_instance` untouched);
+> meaning (the `pl.len() >= 6` and `inst != 0` guards in the `CT_HELLO` arm of `Daemon::handle`
+> — a zero or short nonce falls past both and leaves `host_instance` untouched);
 > a `HELLO` shorter than 6 bytes is tolerated the same way.
 > A **different** nonce arriving while the box still holds a previously-recorded nonce **and** still
 > believes a host is present means the previous host died without `CT_STOP`: the box sets
 > `host_replaced`, and the next `CT_SUBSCRIBE` turns it into a silent 2 s dip of `/tmp/host_present`
-> (`main.rs:2245,2265,2271` → `Daemon::rearm_presence_silently`, which dips the flag and holds it for
+> (`Daemon::rearm_presence_silently`, which dips the flag and holds it for
 > `REARM_HOLD` = 2 s) so the supervisor respawns airplayd. The host is told
 > `SEV_HOST_PRESENT` only, never `SEV_HOST_GONE` — sending GONE there was measured to tear
-> projection down. The **same** nonce is that host reattaching, so `CT_SUBSCRIBE` falls through to
-> the normal reuse decision: a matching nonce never *causes* a warm reuse, it only declines to veto
-> one, and a changed config re-arms anyway. Only `HELLO_ACK`'s u32 is a capability bitmask.
+> projection down. The **same** nonce is that host reattaching, which sets nothing: `CT_SUBSCRIBE`
+> then takes the ordinary path (a fresh `SEV_HOST_PRESENT`, or the plain `set_present(true)` edge if
+> presence had already dropped). A predecessor that sent `CT_STOP` is never a replacement — it went
+> fully idle, so `present`/`subscribed` are both false when its successor's `HELLO` arrives.
+> Only `HELLO_ACK`'s u32 is a capability bitmask.
 >
-> **Conformance (2026-08-16).** Only the Android host supplies a real nonce
+> **Conformance (2026-08-16, updated 2026-09-01).** The Android host supplies a real nonce
 > (`CarlinkManager.kt:360`, random per manager, never 0, held stable across the clients it builds).
-> `OCBMClient.swift:197` sends zeros — legal, but it forfeits replacement detection on macOS.
-> `host/ocbm-host/src/main.rs:144` still sends the caps-era constant `0x13`, which is worse than 0:
-> two successive `ocbm-host` runs look like one host to the box, so the re-arm never fires. Both are
-> client bugs against this spec, not alternative readings of it.
+> `ocbm-host` now does too: `host_instance_nonce()` in `host/ocbm-host/src/main.rs` derives a
+> per-process value (pid ⊕ wall-clock nanos, forced non-zero) once and re-sends it, so the bench
+> tool exercises replacement detection instead of defeating it. Until 2026-09-01 it sent the
+> caps-era constant `0x13`, which was worse than 0 — two successive runs looked like one host to the
+> box, so the re-arm never fired.
+> `OCBMClient.swift:197` still sends zeros — legal, but it forfeits replacement detection on macOS,
+> and its comment calling the field "caps" is stale. That remains a client bug against this spec,
+> not an alternative reading of it.
 
 
 ### `CT_BT_PHASE` (`0x17`) — Bluetooth/iAP2 handshake progress
@@ -292,7 +309,7 @@ therefore treat "no `CT_BT_PHASE` ever arrives" as normal and keep whatever fall
 
 Specified here because it is the mode `gm_ccpa` actually runs (`OCBM_FWD_ENC=0`), and it was
 previously described only in a source comment. **This is not the seam-v2 framing** — that is the
-`[u32 BE len][marker]` envelope with `SEAM_KEY`/`SEAM_FORMAT`/`SEAM_PKT` documented **below**
+`[u32 BE len][SEAM_MAGIC][marker]` envelope with `SEAM_KEY`/`SEAM_FORMAT`/`SEAM_PKT` documented **below**
 (§"Media transport — committed model"), used when
 forward-encrypt is on. The two are wire-incompatible and there is **no discriminator on the wire**:
 mode is chosen out-of-band by `OCBM_FWD_ENC` and a consumer must know which it is receiving.
@@ -337,7 +354,16 @@ lifecycle: `CT_SUBSCRIBE` (`0x10`, host→box, + ephemeral YAML config), `CT_STO
 `CT_HEARTBEAT` (`0x12`), and `CT_SESSION_EVENT` (`0x13`, box→host, `SEV_HOST_PRESENT` `0x01` |
 `SEV_HOST_GONE` `0x02`). `CT_SESSION_EVENT` also mirrors *phone* presence on the box's phone-facing
 bus — `SEV_PHONE_PRESENT` `0x03` | `SEV_PHONE_ABSENT` `0x04` — so the app can show a truthful
-"waiting for phone" immediately. ocbmd tracks presence, runs a **10 s** heartbeat watchdog
+"waiting for phone" immediately. **`CT_STOP` ends the session immediately and completely** (changed
+2026-09-03): it is a session-end indicator, so ocbmd takes the identical `go_idle` teardown a lost
+heartbeat takes — presence drops to 0 on `/tmp/host_present` in the same instant, the supervisor runs
+its full wireless teardown back to IDLE and the phone disconnects. There is no longer a warm-reuse
+grace; the only thing `CT_STOP` does differently from heartbeat loss is *not* send `SEV_HOST_GONE`
+back (the host has already detached, and that frame would be the first thing the NEXT host reads).
+The `CT_SUBSCRIBE` that follows gets `SEV_HOST_PRESENT` immediately, but the box holds the *flag*
+raise until that GONE edge is `REARM_HOLD` (2 s) old, so a quit→relaunch landing inside one 1 Hz
+supervisor sample cannot hide the teardown from it.
+ocbmd tracks presence, runs a **10 s** heartbeat watchdog
 (`HEARTBEAT_GRACE` — deliberately **widened from 3 s** per audit QC #428: expiry is maximally
 destructive, and a macOS host can miss several ~1/s beats to App Nap or a brief USB stall without
 the session being dead), and mirrors presence to **`/tmp/host_present`** — the cross-process signal
@@ -380,8 +406,9 @@ explicitly requests `CONSOLE`. New modes are pure additions — no rewrite.
 | `0x0024` | ALT_VIDEO | box→host: the ALT / navigation (instrument-cluster) screen stream, decoded host-side on a **dedicated** decoder (box seam `:9005`) | projection |
 | `0x0030` | INPUT | host→box: **binary `INPUT_*` sub-frames** — `INPUT_TOUCH 0x01` (normalized u16 coords) / `INPUT_KEYFRAME 0x02` / `INPUT_MEDIA_BTN 0x03` (Consumer-Control HID uid 2) / `INPUT_COMMAND 0x04` / `INPUT_NAV 0x05` (D-Pad HID uid 3, `NAV_*`) / `INPUT_KEYFRAME_ALT 0x06` (re-IDRs the ALT/cluster stream **specifically**; a bare `INPUT_KEYFRAME` only re-IDRs main) / `INPUT_KNOB 0x07` (Knob HID uid 4) / `INPUT_TELEPHONY 0x08` (Telephony HID). `INPUT_COMMAND`'s payload is the `CMD_*` set — `CMD_REQUEST_UI 0x01`, `CMD_REQUEST_SIRI 0x02` *(deprecated, iOS ignores it)*, `CMD_SIRI_DOWN 0x03` / `CMD_SIRI_UP 0x04`, `CMD_NAV_START 0x05` / `CMD_NAV_STOP 0x06` / `CMD_NAV_CARD 0x07` / `CMD_NAV_APP 0x0A`, `CMD_LIMITED_UI_ON 0x08` / `CMD_LIMITED_UI_OFF 0x09`, `CMD_NAV_APPEARANCE 0x0B`, `CMD_NAV_ZOOM_IN 0x0C` / `CMD_NAV_ZOOM_OUT 0x0D`, `CMD_UI_APPEARANCE 0x0E` / `CMD_MAP_APPEARANCE 0x0F` / `CMD_NIGHT_MODE 0x10`. ocbmd relays every sub-frame opaquely to airplayd; airplayd taps the iPhone HID devices for touch/media/nav/knob/telephony, dispatches `INPUT_COMMAND` as an AirPlay `/command`, and turns `INPUT_KEYFRAME` / `INPUT_KEYFRAME_ALT` into a `forceKeyFrame` on the event channel (main / `VideoStream.Alt1`). Constants are authoritative in `crates/ocbm-proto/src/lib.rs` | all |
 | `0x0031` | MIC | host→box: mic-uplink PCM (S16LE at the CT_UPLINK-negotiated rate/ch); ocbmd relays to airplayd's mic-ingest seam → RTP uplink to the iPhone | projection |
-| `0x0040` | MGMT | box management, request/response (the app's "CCPA" tab): host→box `MGMT_GET_INFO 0x01` / `MGMT_REBOOT 0x02` / `MGMT_FORGET_ALL 0x03` / `MGMT_FORGET_DEVICE 0x04` / `MGMT_RESTART_WIRELESS 0x05`; box→host `MGMT_INFO 0x81` / `MGMT_ACK 0x82` | all |
+| `0x0040` | MGMT | box management, request/response (the app's "CCPA" tab): host→box `MGMT_GET_INFO 0x01` / `MGMT_REBOOT 0x02` / `MGMT_FORGET_ALL 0x03` / `MGMT_FORGET_DEVICE 0x04` / `MGMT_RESTART_WIRELESS 0x05` / `MGMT_ENTER_NCM 0x06` (added 2026-09-03: box arms the persistent `/script/ncm_only` flag, drops any `/script/ocbm_trial` dead-man, ACKs, reboots into NCM maintenance mode; sticky — return over ssh with `rm /script/ncm_only; reboot`. Reachable from the app's CCPA tab (confirmed) and from `open -a <carlink_macOS.app> carlink://box/enter-ncm` while the app holds the USB interface (the `-a` form is required for a bundle in a build directory: LaunchServices does not bind the `carlink` scheme for it, so a bare `open carlink://…` fails with kLSApplicationNotFoundErr)); box→host `MGMT_INFO 0x81` / `MGMT_ACK 0x82` | all |
 | `0x0041` | RTSP | box↔host: the **app-driven SETUP relay** (box seam `:9106`, `receiver::relay`). ocbmd is a dumb byte pipe; the endpoint framing is `[u32 BE "RTSP"][u32 BE len][msg]` (len ≤ 512 KiB, magic-resync) carrying the `RS_*` messages below. Rides **out_hi** with the control plane (timing-critical pair/SETUP/RECORD phase) | projection |
+| `0x0042` | LOG | **box→host only:** the box's own logs, streamed live. Payload = one or more back-to-back entries, `[source u8][flags u8][seq u16 LE][unix_ms u64 LE][len u16 LE][text]`, packed up to a 4096 B payload per frame. Off until the host sends `CT_LOG_CTL`. See below | all |
 | `0x00FF` | ECHO | benchmark echo / CT_SRC flood target | all |
 | `0x0FFF` | DISCARD | box parses + drops silently (uplink benchmark sink) | all |
 | `0xF000–0xFFFF` | reserved: **experimental / vendor** | — | — |
@@ -421,20 +448,58 @@ even for cluster frames it gates away, so **a host that increments a local count
 `SEAM_MAGIC` is these lanes' only resync marker: on a torn message, scan forward for it and re-align on
 `magic − 4`.
 
-**Audio lanes** (seam framing v2). Envelope `[u32 BE len][marker u8]…`, **no magic**, every message
-scid-tagged so concurrent streams sharing the voice sink (telephony + alert) cannot clobber each other:
-- `SEAM_KEY    0x00` — `[key.output 32B][scid u64 LE]`  *(scid TRAILS the key here)*
-- `SEAM_PKT    0x01` — `[scid u64 LE][raw encrypted RTP datagram]`
-- `SEAM_FORMAT 0x02` — `[scid u64 LE][codec u8][rate u32 LE][ch u8][bits u8][audio_type u8]`
-  (codec 0 PCM · 1 AAC-LC · 2 AAC-ELD · 3 OPUS; `bits` 16 for PCM else 0; audio_type 0 media ·
+**Audio lanes** (seam framing v2). Envelope `[u32 BE len][SEAM_MAGIC "SEAV" 4B][marker u8]…` — the
+SAME envelope as the video lanes, `len` counting the magic — with every message scid-tagged so
+concurrent streams sharing the voice sink (telephony + alert) cannot clobber each other:
+- `SEAM_KEY    0x00` — `[len=45]["SEAV"][0x00][key.output 32B][scid u64 LE]`  *(scid TRAILS the key here)*
+- `SEAM_PKT    0x01` — `[len=13+pkt]["SEAV"][0x01][scid u64 LE][raw encrypted RTP datagram]`
+- `SEAM_FORMAT 0x02` — `[len=21]["SEAV"][0x02][scid u64 LE][codec u8][rate u32 LE][ch u8][bits u8][audio_type u8]`
+  (codec 0 PCM · 1 AAC-LC · 2 AAC-ELD · 3 OPUS · 4 mSBC; `bits` 16 for PCM else 0; audio_type 0 media ·
   1 telephony · 2 speechRecognition · 3 alert · 4 default · 5 compatibility — the PCM media
   fallback, split out of 4 so a consumer cannot misroute it by format alone; same values as the
   `:9003` `atype` table above)
+- `SEAM_PKT_PLAIN 0x03` — `[len=13+pcm]["SEAV"][0x03][scid u64 LE][payload]` — an **UNENCRYPTED**
+  access unit: no RTP header, no tag, no nonce, and **no `SEAM_KEY` is ever sent for that scid**.
+  Added 2026-09-03 for the Android Auto **telephony** lane: the call's audio reaches the box over
+  Bluetooth HFP/SCO (CVSD, 8 kHz mono S16LE), where there is no AirPlay stream to encrypt it with, so
+  the box forwards 320 B (= 160 samples = 20 ms) per frame verbatim on `CH_ALT_AUDIO` after a
+  `SEAM_FORMAT` of `codec 0 PCM, rate 8000, ch 1, bits 16, audio_type 1`. The payload is
+  **little-endian** (Android-native), unlike the big-endian PCM inside the CarPlay RTP — a host that
+  byte-swaps it plays full-scale white noise. A `SEAM_PKT_PLAIN` arriving before its `SEAM_FORMAT` is
+  dropped (the rate is unknowable) and counted; the host must not run the RFC 2198 demux over it.
+  Uplink for the same call is the existing mic path: the box's `CT_UPLINK` gate asks for
+  `uplink on 8000 1` and the host answers with S16LE 8 kHz mono on `CH_MIC` in 20 ms (320 B) frames.
+  **Wideband (codec 4 mSBC), added 2026-09-04 behind the box lever `CARPLAY_HFP_WBS` / `/tmp/hfp_wbs`:**
+  when the AG negotiates mSBC the controller stops decoding, and the box forwards each transparent
+  eSCO read VERBATIM as one `SEAM_PKT_PLAIN` — no 320 B aggregation, H2 headers untouched — under a
+  `SEAM_FORMAT` of `codec 4, rate 16000, ch 1, bits 16, audio_type 1`, where `rate`/`bits` describe
+  the DECODED audio and the payload is a bitstream. The host resynchronises on the H2 header
+  (`0x01` then `0x08`/`0x38`/`0xC8`/`0xF8`), never on message length, and must drop the stream rather
+  than play it if it cannot decode mSBC. The gate then reads `uplink on 16000 1 msbc` → `CT_UPLINK`
+  codec 4, and the host returns whole 60 B packets (H2 + 57 B frame + 1 pad) on `CH_MIC`; the box
+  writes them to the SCO socket unmodified and SKIPS a write it has no whole packet for.
+  **Box producer:** `crates/vendor/wireless/src/sco_audio.rs` — it connects to ocbmd's voice seam
+  `:9003` when the phone opens SCO and uses a FIXED scid `0x4846_5053_434F_0001` (ASCII `HFPSCO` +
+  an ordinal), because there is exactly one SCO channel at a time; a scid in a host log therefore
+  names its own origin. The uplink half has no ocbmd change at all: ocbmd's `CH_MIC` relay already
+  connects to `127.0.0.1:9112`, and during an Android Auto session — when airplayd is not running —
+  `carplay-wireless` listens there itself and speaks airplayd's protocol verbatim.
 
 The datagram is the iPhone's packet verbatim: `[12B RTP hdr][ciphertext][16B tag][8B nonce]`. Nonce =
 `[0,0,0,0]‖pkt[len-8..]`, AAD = `pkt[4..12]` (ts‖ssrc), ciphertext‖tag = `pkt[12..len-8]`. **This lane
-has no sequence and no counter** — the nonce rides every packet — and no magic, so a torn audio seam can
-only re-frame by length plausibility.
+has no sequence and no counter** — the nonce rides every packet.
+
+**CORRECTED 2026-09-03 — the audio lanes DO carry `SEAM_MAGIC` now.** Until this date they had no
+magic and a torn seam could only re-frame by length plausibility, which did not survive a re-SETUP:
+ocbmd replaces a seam producer without draining the old one, so the host's reassembly for that channel
+could still hold a partial message when the new producer's `SEAM_KEY` landed mid-message and desynced
+the lane for the rest of the session. Device-proven: 18 bogus `received audio key (scid=…)` lines, an
+`audio format … 1469658167Hz 232ch`, and no media audio on 3 of 4 streams. Fixed by the magic above
+(`receiver::session::seam_audio_key_msg` / `seam_audio_format_msg`, the `SEAM_PKT` write in the audio
+thread) together with `F_NEW_SOURCE` (see the flag catalog above) telling the host to drop the stale
+partial before appending — a host must accept a **pre-magic box build** by falling back to the legacy
+`[u32 BE len][marker]` parse when the magic is absent on the first message of a seam buffer (macOS
+`OCBMAVDecrypt.nextAudioMessage`, Android `AudioSeam.drain`).
 
 Multibyte fields: seam length prefixes are **big-endian**; every other seam field (`seq`, `scid`,
 `rate`, the screen header's `bodySize`) is **little-endian**.
@@ -502,6 +567,102 @@ have since been assigned to **real wire channels** (CH_ALT_AUDIO / CH_MIC / CH_M
 above), so the taxonomy is dropped from this spec to avoid the collision trap. What the host app
 produces internally after decrypt/decode is an app-side concern, not an OCBM wire format.
 
+### LOG channel (`0x0042`) — the box's logs, live
+
+**Why it exists.** Everything the box knows about a failure it writes to a file in `/tmp`, and until
+this channel the only ways to read one were a debug UART, an NCM/SSH route the shipped head-unit link
+does not have, or a `FILE_PULL` after the fact. "What was the box doing when it dropped us" was
+answerable only in a lab.
+
+**`/tmp/box.log` is the box's universal log**, and the one the box OWNS: every daemon and script whose
+output nothing else parses appends to it with `O_APPEND` (the run scripts redirect stdout/stderr there,
+ocbmd's own included), and lines carry their own `[ocbmd]` / `[airplayd]` / `[sup]` prefixes. `/tmp` is
+tmpfs on a 123 MB no-swap box, so it is a bounded **staging area, never storage**: the tailer
+`ftruncate`s it back to 0 at the cap. The file is small by construction, which is why "stream from
+offset 0" IS the backfill — everything since boot, with no separate dump opcode.
+
+**Not everything could be funnelled into it.** `session_supervisor.sh` and `projection_up.sh` PARSE
+the per-daemon logs as IPC — the pair-verify `grep -q`, the `tail -1` stall checks, `bound_logs`' own
+reap list — so those files keep their own identity and lifecycle. The tailer follows them **tail-only**
+and never writes to them; only source 0 is rotated. Sources:
+
+| `source` | Name | Path | Policy |
+|---|---|---|---|
+| `0` | `box` | `/tmp/box.log` | **staged** — streamed, then `ftruncate`d at `cap_kb` |
+| `1` | `airplayd` | `/tmp/airplayd.log` | tail-only |
+| `2` | `airplayd_wl` | `/tmp/airplayd_wl.log` | tail-only |
+| `3` | `iap2d` | `/tmp/iap2d.log` | tail-only |
+| `4` | `aa-bridge` | `/tmp/aa-bridge.log` | tail-only |
+| `5` | `rx-connect` | `/tmp/rx-connect.log` | tail-only |
+| `6` | `bt` | `/tmp/bt.log` | tail-only |
+| `7` | `radio_ap_dhcp` | `/tmp/radio_ap_dhcp.log` | tail-only |
+| `8` | `radio_bt_attach` | `/tmp/radio_bt_attach.log` | tail-only |
+| `9` | `rx-connect_wl` | `/tmp/rx-connect_wl.log` | tail-only |
+| `10` | `wl` | `/tmp/wl.log` | tail-only (carplay-wireless stdout) |
+| `255` | `internal` | — | the tailer itself: rotation / restart notes and drop reports |
+
+An **unknown source id is a display concern, never a reason to drop the entry** — a newer box may
+follow sources a client has never heard of. Ids are fixed by agreement with the host apps; renumbering
+would silently relabel every line a shipped client renders.
+
+**Entry**, back-to-back, packed to at most `LOG_MAX_FRAME` = 4096 B of payload per frame:
+
+```
+off 0:  source  u8         ; the table above
+off 1:  flags   u8         ; bit0 LOG_F_DROPPED, bit1 LOG_F_TRUNCATED, bit2 LOG_F_BACKFILL
+off 2:  seq     u16 LE     ; per-channel entry counter, wraps; advisory ordering only
+off 4:  unix_ms u64 LE     ; wall clock — bogus until CT_SETTIME lands (no RTC battery)
+off 12: len     u16 LE     ; <= LOG_MAX_LINE (1024)
+off 14: text    [len]      ; UTF-8 (lossy-converted box-side), NO trailing newline
+```
+
+- `LOG_F_TRUNCATED` (`0x02`): the source line was longer than 1024 B and `text` is its prefix.
+- `LOG_F_DROPPED` (`0x01`): this entry is a **drop report**, not a line — `len` is exactly 4 and
+  `text` is a `u32 LE` count of lines lost to the box's queue cap since the previous report, for the
+  `source` named in the entry. Reports are **prepended** to the next frame, so a host renders the gap
+  where it happened. A decoder must reject a `LOG_F_DROPPED` entry whose `len` is not 4, a `len` above
+  1024, and a `len` past the end of the payload: entries are self-delimiting, so one tolerated bad
+  length walks the reader off the end of every entry behind it.
+- `LOG_F_BACKFILL` (`0x04`): this line was already on disk when the tailer (re)opened its source at
+  offset 0 — the enable-time backfill, or any restart forced by an in-place truncation or a
+  replaced/reaped file (§ above). Never set on a line the tailer read after that point. **Fixes a
+  device-proven defect:** before this flag, a reconnect re-streamed the same history with a FRESH
+  `unix_ms` each time (the same line looked like 5 different live events across 5 app launches),
+  and a host had no way to tell backfill from live at all. A reader should render `LOG_F_BACKFILL`
+  lines distinctly (dimmed / filterable) rather than as new activity.
+
+**`unix_ms` write-time vs. read-time.** By default `unix_ms` is stamped when the tailer READS the
+line, which collapses an entire burst written between two ticks onto the one millisecond it was
+read at. A writer that knows its own wall-clock time may instead prefix the line itself with
+`@<unix_ms> ` — ASCII decimal digits, then exactly one space, before the rest of the text (e.g.
+`@1758382920123 [iap2] numeric-comparison code = 874736`). The tailer recognizes this convention on
+any source, parses the digits as the entry's `unix_ms`, and strips the prefix from `text` before
+encoding the entry; a line that does not open with it keeps the read-time stamp. Central Rust log
+helpers that funnel a daemon's own log lines (`iap2d`, `bt-common`'s `sdp_server`/`ssp_agent`,
+`carplay-wireless`'s `main`/`bt_driver`/`control`/`sdp_client`/`reconnect`/`arbiter_client`,
+`receiver`'s `iap_tunnel`) emit this prefix on every line; ocbmd's own `eprintln!`s into `box.log`
+and the shell-script writers (`session_supervisor.sh`, `ocbm_boot.sh`, `radio_hal.sh` et al.,
+`aa-bridge`/`rx-connect`'s ad hoc `eprintln!`s) do not, and stay read-time-stamped — deliberately:
+this is a cheap `SystemTime::now()` in a handful of central Rust helpers, not a per-line shell pipe
+in the supervisor, which is CPU-bound.
+
+**Box-side discipline.** The tailer runs on ocbmd's single dispatch thread on the same `Instant`-gated
+tick as the `/tmp/bt_phase` mirror (~250 ms), never blocks (`O_NONBLOCK`), and reads at most **8 KB per
+tick across all sources** — round-robin, so a chatty file cannot starve the rest, with the leftover
+budget handed to whoever still has data so one active source still gets the whole 8 KB. A source that
+**shrinks** (in-place `bound_logs` rewrite) or is **replaced** (reaped and recreated — detected by
+inode, one path `stat` per tick, rotating) restarts at offset 0 with a `source 255` note saying why; an
+absent file is simply polled for. `CH_LOG` drains **below `CH_CONSOLE` and above the bulk queue**: a
+diagnostic must never delay the control plane, A/V, or an interactive rescue console, but it must not
+sit behind a 32 MiB file pull either. The whole log path is capped at 64 KiB of RAM; over it the
+**oldest** pending entries are dropped and counted, because the newest lines are the ones describing
+whatever is going wrong now.
+
+**Cap enforcement runs whether or not a host is streaming** — an idle box with no host is where this
+file spends most of its life growing. Disabled and over cap, the box `ftruncate`s `/tmp/box.log` to 0
+and appends one `[log] rotated <N> bytes (not streamed)` marker with `O_APPEND`. (This is why ocbmd's
+poll no longer blocks indefinitely when fully idle: it wakes at 2 s to run that one `stat`.)
+
 ### FILE channel (`0x0011`) — verified binary deploy
 
 The box rootfs is a tiny jffs2 and the shipped head-unit link is OCBM-only (no NCM/SSH), so
@@ -539,7 +700,7 @@ rcS" gotcha. This is the incremental, always-available cousin of the `FIRMWARE_U
 **There is no `STREAM_OPEN`/`STREAM_CLOSE`, on CTRL or anywhere else.** An earlier draft of this
 document sketched a `STREAM_OPEN { streamId, streamType, codec, params (TLV) }` on CH_CTRL. It was
 never implemented: no such opcode exists in `crates/ocbm-proto/src/lib.rs` (the `CT_*` space,
-`0x01`-`0x1A`, is handshake, session lifecycle and box->host status only), and nothing in the
+`0x01`-`0x1B`, is handshake, session lifecycle, box->host status and the log-stream arm only), and nothing in the
 workspace emits or parses one. The sketch is recorded here as history so it is not re-derived;
 **do not implement against it.**
 
@@ -555,7 +716,7 @@ parameters travel as data - is met today by four real mechanisms:
 
 2. **Audio: `SEAM_FORMAT` is the per-stream descriptor** - `[0x02][scid u64 LE][codec u8]
    [rate u32 LE][ch u8][bits u8][audio_type u8]`, on the media lane itself (see §Media transport for
-   the byte-exact framing). Codec `0 PCM / 1 AAC-LC / 2 AAC-ELD / 3 OPUS`; `audio_type`
+   the byte-exact framing). Codec `0 PCM / 1 AAC-LC / 2 AAC-ELD / 3 OPUS / 4 mSBC`; `audio_type`
    `0 media / 1 telephony / 2 speechRecognition / 3 alert / 4 default / 5 compatibility`. Every
    `SEAM_KEY`/`SEAM_PKT` is scid-tagged too, so **N concurrent audio streams share one channel** and
    a host keeps per-scid key/format/decoder tables. New codecs are new enum values; an unknown value

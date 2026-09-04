@@ -12,7 +12,7 @@ use crate::types::{
 /// Apple iAP2 parameter ids for the metadata-plane messages, decoded from Apple's first-party
 /// `CarPlaySimulator.devicekitplugin` spec. Defined locally (not `use`d from
 /// `carplay_iap2_core::spec`) because `carplay-iap2-core` DEPENDS ON this crate -- importing it back
-/// would create a dependency cycle. See coordinator note in the agent report.
+/// would create a dependency cycle.
 mod pid {
     /// `NowPlayingUpdate` (0x5001) top-level group ids.
     pub mod now_playing_group {

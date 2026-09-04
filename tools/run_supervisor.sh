@@ -13,5 +13,5 @@ sleep 3
 while [ ! -e /dev/usb_accessory ]; do sleep 1; done
 # Already running (ocbm_boot's launch, or a prior respawn)? Watch until it dies, then relaunch.
 while pgrep -f /script/session_supervisor.sh >/dev/null 2>&1; do sleep 3; done
-echo "[respawn] session_supervisor down -> relaunching (init)" >> /tmp/supervisor.log
-exec /script/session_supervisor.sh >> /tmp/supervisor.log 2>&1
+echo "[respawn] session_supervisor down -> relaunching (init)" >> /tmp/box.log
+exec /script/session_supervisor.sh >> /tmp/box.log 2>&1

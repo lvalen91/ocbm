@@ -219,6 +219,15 @@ final class USBTransport: @unchecked Sendable {
 
             if kr != kIOReturnSuccess {
                 if !isRunning.withLock({ $0 }) { break }
+                // 07-L3: the device is definitively gone — no amount of retrying or stall-clearing
+                // will recover it, so exit immediately rather than burning the 5-strike budget in
+                // microseconds. handleDeviceRemoved/the terminated-notification path also fires, but
+                // this stops read errors racing ahead of it.
+                if kr == kIOReturnNoDevice || kr == kIOReturnNotResponding {
+                    Self.logger.error("Read error: device gone (\(UInt32(bitPattern: kr), format: .hex, privacy: .public)) — disconnecting")
+                    delegate?.transportDidDisconnect(self)
+                    break
+                }
                 consecutiveErrors += 1
                 Self.logger.error("Read error: \(UInt32(bitPattern: kr), format: .hex, privacy: .public) (count=\(consecutiveErrors, privacy: .public))")
                 if consecutiveErrors >= maxConsecutiveErrors {
@@ -231,6 +240,9 @@ final class USBTransport: @unchecked Sendable {
                 // data toggle. ClearPipeStall alone only resets the host side,
                 // so a device-side halt would re-fail every retry.
                 _ = iface.pointee.pointee.ClearPipeStallBothEnds(iface, bulkInPipe)
+                // 07-L3: give a transient error room to clear before retrying instead of spinning the
+                // 5-strike budget in microseconds (docs/host/00_MACOS_HOST_APP.md Tier 2 item 10).
+                usleep(20_000)
                 continue
             }
 
@@ -245,6 +257,10 @@ final class USBTransport: @unchecked Sendable {
                 continue
             }
         }
+        // 07-L4: without this, a self-exit (5-strike break or device-gone break above) leaves
+        // isRunning true, so a later startReadLoop() (e.g. a fresh USBTransport is normally created
+        // instead, but this closes the latent trap) would see "already running" and no-op.
+        isRunning.withLock { $0 = false }
     }
 
     // MARK: - Raw bulk write (OCBM: the caller supplies an already-framed OCBM frame, no header added)
@@ -257,11 +273,13 @@ final class USBTransport: @unchecked Sendable {
         writeQueue.sync { [self] in
             guard !isClosed.withLock({ $0 }) else { return false }
             let writeStart = Date()
-            var buf = bytes
-            let n = UInt32(buf.count) // hoist out of withUnsafeMutableBytes (exclusivity)
-            let kr = buf.withUnsafeMutableBytes { ptr in
+            let n = UInt32(bytes.count)
+            // 07-L7: WritePipeTO's `void*` parameter is a COM-signature artifact — it does not mutate
+            // the buffer — so read-only access avoids the copy-on-write duplication of the whole
+            // frame (up to 64 KiB) that `var buf = bytes` + withUnsafeMutableBytes forced on every write.
+            let kr = bytes.withUnsafeBytes { ptr in
                 iface.pointee.pointee.WritePipeTO(
-                    iface, bulkOutPipe, ptr.baseAddress, n,
+                    iface, bulkOutPipe, UnsafeMutableRawPointer(mutating: ptr.baseAddress), n,
                     Self.rawWriteNoDataTimeoutMs, Self.rawWriteCompletionTimeoutMs)
             }
             if kr == kIOReturnSuccess {

@@ -18,13 +18,26 @@ touch /tmp/UDiskPassThroughMode
   L=/tmp/ocbm_boot.log
   export PATH=/usr/sbin:/usr/bin:/sbin:/bin:/tmp/bin:$PATH
   echo "[ocbm-boot] start uptime=$(cut -d. -f1 /proc/uptime)s" > "$L"
+  echo "[ocbm-boot] start uptime=$(cut -d. -f1 /proc/uptime)s" >> /tmp/box.log
+  # A self-reboot (supervisor L3) leaves the previous boot's universal log on jffs2 so the host
+  # app's CH_LOG backfill streams the post-mortem; /tmp did not survive the reboot, this did.
+  if [ -s /script/box_crash.log ]; then
+    echo "[ocbm-boot] ---- previous boot's log (self-reboot post-mortem) ----" >> /tmp/box.log
+    cat /script/box_crash.log >> /tmp/box.log
+    echo "[ocbm-boot] ---- end of previous boot's log ----" >> /tmp/box.log
+    rm -f /script/box_crash.log
+  fi
   # stage + load the gadget modules (copy_to_tmp may not have run yet)
   [ -e /tmp/g_android_accessory.ko ] || { [ -e /script/ko.tar.gz ] && tar -xzf /script/ko.tar.gz -C /tmp 2>/dev/null; }
   grep -q storage_common /proc/modules || insmod /tmp/storage_common.ko 2>/dev/null
   grep -q g_android_accessory /proc/modules || insmod /tmp/g_android_accessory.ko 2>/dev/null
+  # ZLP after a wMaxPacketSize-multiple accessory write. Off by default (accZLP=N, measured
+  # 2026-09-02); without it a 512-multiple frame followed by idle never completes the host's
+  # bulk read and is discarded on its timeout (macOS app and ocbm-host alike).
+  echo Y > /sys/module/g_android_accessory/parameters/accZLP 2>/dev/null
   A=/sys/class/android_usb_accessory/android0
   i=0; while [ ! -e "$A/enable" ] && [ "$i" -lt 50 ]; do i=$((i+1)); sleep 0.1; done
-  [ -e "$A/enable" ] || { echo "[ocbm-boot] gadget sysfs never appeared" >> "$L"; exit 0; }
+  [ -e "$A/enable" ] || { echo "[ocbm-boot] gadget sysfs never appeared" >> "$L"; echo "[ocbm-boot] gadget sysfs never appeared" >> /tmp/box.log; exit 0; }
   echo 0 > "$A/enable"
   # PURE accessory device: class defined at the interface (0xFF), not a composite IAD.
   echo 0 > "$A/bDeviceClass"; echo 0 > "$A/bDeviceSubClass"; echo 0 > "$A/bDeviceProtocol"
@@ -38,12 +51,13 @@ touch /tmp/UDiskPassThroughMode
   echo 2d00 > "$A/idProduct"                # stable OCBM accessory PID (see comment above)
   echo accessory > "$A/functions"; echo 1 > "$A/enable"
   i=0; while [ ! -e /dev/usb_accessory ] && [ "$i" -lt 50 ]; do i=$((i+1)); sleep 0.1; done
-  /usr/sbin/ocbmd >/tmp/ocbmd.log 2>&1 &
+  /usr/sbin/ocbmd >> /tmp/box.log 2>&1 &
   OCBMD=$!
   # Session supervisor: idle-waits on host presence; a host-app SUBSCRIBE drives projection + ARM
   # (docs/carplay/02_SESSION_LIFECYCLE.md). Backgrounded, so it can never block boot. Box stays IDLE (phone unswitched) until a host.
-  [ -x /script/session_supervisor.sh ] && setsid /script/session_supervisor.sh >/tmp/supervisor.log 2>&1 &
+  [ -x /script/session_supervisor.sh ] && setsid /script/session_supervisor.sh >> /tmp/box.log 2>&1 &
   echo "[ocbm-boot] armed functions=$(cat $A/functions) class=$(cat $A/bDeviceClass) pid=$(cat $A/idProduct) state=$(cat $A/state) acc=$([ -e /dev/usb_accessory ] && echo yes) ocbmd=$OCBMD sup=$(pgrep -f session_supervisor)" >> "$L"
+  echo "[ocbm-boot] armed functions=$(cat $A/functions) class=$(cat $A/bDeviceClass) pid=$(cat $A/idProduct) state=$(cat $A/state) acc=$([ -e /dev/usb_accessory ] && echo yes) ocbmd=$OCBMD sup=$(pgrep -f session_supervisor)" >> /tmp/box.log
 
   # ---- FIRST-BOOT DEAD-MAN (armed by ocbm_install.sh finalize: /script/ocbm_trial) --------
   # The installer tells the operator: "if this host does not confirm over the OCBM link within

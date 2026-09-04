@@ -63,7 +63,11 @@ const RX_CONNECT_BIN_DEFAULT: &str = "/usr/sbin/rx-connect";
 const WLAN_IFACE: &str = "wlan0";
 /// The AP gateway hostapd/udhcpd serve on `wlan0` — the address the iPhone reaches airplayd at, and
 /// the A record rx-connect advertises. Matches `start_bluetooth_wifi.sh` (WLANIP default).
-const AP_IP: &str = "192.168.43.1";
+///
+/// ONE definition, hoisted to `box-common` on 2026-09-04: wireless Android Auto ADVERTISES this
+/// address to the phone (`WifiStartRequest.ip_address`, `main.rs::aa_ap_params`) and `aa-bridge`
+/// BINDS its wireless pump to it, so a second literal anywhere is a silent handoff failure.
+pub(crate) const AP_IP: &str = box_common::net::AP_IP;
 
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())

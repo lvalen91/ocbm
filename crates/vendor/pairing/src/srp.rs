@@ -90,11 +90,13 @@ impl SrpServer {
         }
     }
 
-    /// Create with a fresh random server private `b`.
-    pub fn new(username: &[u8], password: &[u8], salt: &[u8]) -> Self {
+    /// Create with a fresh random server private `b`. `None` if the RNG fails — every sibling
+    /// (`setup::m1_to_m2`, `verify`, `mfi::sap`) reports that as an error, and this crate is linked
+    /// into a `panic = "abort"` binary where an `expect` would take the whole daemon down.
+    pub fn new(username: &[u8], password: &[u8], salt: &[u8]) -> Option<Self> {
         let mut b = [0u8; 32];
-        getrandom::getrandom(&mut b).expect("rng");
-        Self::with_secret(username, password, salt, &b)
+        getrandom::getrandom(&mut b).ok()?;
+        Some(Self::with_secret(username, password, salt, &b))
     }
 
     /// The server public value `B`, padded to the modulus length (sent in M2).
@@ -105,12 +107,22 @@ impl SrpServer {
     /// Verify the client's M3 (`A`, `clientProof`). On success returns the server proof `M2` and
     /// stores the session key (HKDF IKM); on mismatch returns `None`.
     pub fn verify(&mut self, a_pub: &[u8], client_proof: &[u8]) -> Option<Vec<u8>> {
+        // A legitimate A is at most the modulus length. TLV8 coalescing lets a peer deliver an
+        // arbitrarily long PublicKey, which would otherwise feed BigUint multiplication and `pad()`
+        // (which hands back oversized bytes UNPADDED, so the hashes would silently change shape).
+        if a_pub.len() > self.n_len {
+            return None;
+        }
         let a = BigUint::from_bytes_be(a_pub);
         if (&a % &self.n).is_zero() {
             return None;
         }
         // u = H(PAD(A) | PAD(B))
         let u = BigUint::from_bytes_be(&sha512(&[&pad(&a, self.n_len), &pad(&self.b_pub, self.n_len)]));
+        // RFC 5054 §2.5.4: abort on u == 0 (2^-512, but the check is one line).
+        if u.is_zero() {
+            return None;
+        }
         // S = (A * v^u)^b mod N
         let s = (&a * self.v.modpow(&u, &self.n) % &self.n).modpow(&self.b, &self.n);
         // K = H(PAD(S))
@@ -198,6 +210,20 @@ mod tests {
         // client checks M2 = H(A | M1 | K)
         let expect_m2 = sha512(&[&a_pub, &m1, &ckey]);
         assert_eq!(m2, expect_m2);
+    }
+
+    /// An oversized `A` must be refused before it reaches `pad()`, which would return it unpadded.
+    #[test]
+    fn oversized_a_rejected() {
+        let mut server = SrpServer::with_secret(b"Pair-Setup", b"3939", &[1u8; 16], &[2u8; 32]);
+        let n_len = server.b_pub().len();
+        assert!(server.verify(&vec![0xAAu8; n_len + 1], &[0u8; 64]).is_none());
+        assert!(server.session_key().is_none());
+    }
+
+    #[test]
+    fn new_returns_a_server() {
+        assert!(SrpServer::new(b"Pair-Setup", b"3939", &[1u8; 16]).is_some());
     }
 
     #[test]

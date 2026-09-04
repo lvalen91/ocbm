@@ -149,8 +149,8 @@ pub struct CarPlayStartSession<'a> {
     pub wired_ip_address: Option<&'a str>,
     /// WirelessAttributes (param 1), if declaring a wireless bearer.
     pub wireless: Option<WirelessAttributes<'a>>,
-    /// Port (param 2).
-    pub port: Option<u32>,
+    /// Port (param 2) — REQUIRED, always emitted (see struct doc / #140).
+    pub port: u32,
     /// DeviceIdentifier (param 3).
     pub device_identifier: Option<&'a str>,
     /// PublicKey (param 4).
@@ -172,10 +172,6 @@ impl CarPlayStartSession<'_> {
     /// ⚠️ Do NOT send this on the wired path (device-verified dead end — see module header).
     pub fn build(&self) -> Vec<u8> {
         use start_session as p;
-        // NOTE (#140): Port (param 2) is REQUIRED per Apple's spec; a real session-start MUST set it.
-        // We don't hard-assert here — `build()` is also used to serialize partial/empty structs in unit
-        // tests, and 0x4301 isn't sent on the live wireless flow (which hands off via 0x5703) — but the
-        // struct doc records the requirement so any future sender includes Port.
         let mut body = Tlv::new();
 
         if let Some(ip) = self.wired_ip_address {
@@ -192,9 +188,7 @@ impl CarPlayStartSession<'_> {
             g.u8v(p::wireless::SECURITY_TYPE, w.security_type); // sub 4 (enum → 1 byte)
             body.bytes(p::WIRELESS_ATTRIBUTES, &g.0); // param 1
         }
-        if let Some(port) = self.port {
-            body.u32v(p::PORT, port); // param 2
-        }
+        body.u32v(p::PORT, self.port); // param 2 — REQUIRED, always emitted
         if let Some(v) = self.device_identifier {
             body.str(p::DEVICE_IDENTIFIER, v); // param 3
         }
@@ -343,7 +337,7 @@ mod tests {
                 ip_address: "fe80::1",
                 security_type: start_session::wireless::SECURITY_TYPE_WPA3_PERSONAL_ONLY,
             }),
-            port: Some(7000),
+            port: 7000,
             device_identifier: Some("dev"),
             supports_mutual_authentication: Some(true),
             ..Default::default()
@@ -378,6 +372,7 @@ mod tests {
     fn start_session_with_wired_and_asset_groups() {
         let msg = CarPlayStartSession {
             wired_ip_address: Some("fe80::2"),
+            port: 7000,
             asset: Some(AssetInformation { asset_identifier: "a", asset_version: -1 }),
             ..Default::default()
         };
@@ -390,6 +385,8 @@ mod tests {
         g0.extend_from_slice(b"fe80::2\0");
         exp.extend_from_slice(&[0x00, (4 + g0.len()) as u8, 0x00, 0x00]);
         exp.extend_from_slice(&g0);
+        // param 2 Port uint32 = 7000 (0x00001B58) — REQUIRED, always emitted (#140/L5).
+        exp.extend_from_slice(&[0x00, 0x08, 0x00, 0x02, 0x00, 0x00, 0x1B, 0x58]);
         // param 7 AssetInformation { AssetIdentifier "a", AssetVersion -1 }.
         let mut g7 = Vec::new();
         g7.extend_from_slice(&[0x00, 0x06, 0x00, 0x00, b'a', 0x00]); // str(0,"a") len 6
@@ -398,11 +395,6 @@ mod tests {
         exp.extend_from_slice(&g7);
 
         assert_eq!(body, exp);
-    }
-
-    #[test]
-    fn empty_start_session_is_empty_body() {
-        assert!(CarPlayStartSession::default().build().is_empty());
     }
 
     #[test]

@@ -36,14 +36,15 @@ final class VideoLane {
 
     func receiveConfig(_ config: Data) {
         let raw = [UInt8](config)
-        // iOS sends the HEVC config as a full ISO hvc1/hev1 VisualSampleEntry; H.264 as a bare avcC.
-        let b = Self.extractHvcC(fromSampleEntry: raw) ?? raw
-        if let (s, p, lenSize) = Self.parseAvcC(b) {
+        // Wired iOS sends H.264 as a bare avcC record; the HEVC config (and, per the box's own parser,
+        // wireless H.264) arrives as a full ISO VisualSampleEntry that has to be unwrapped first.
+        let b = AVCCFastPath.extractConfigRecord(fromSampleEntry: raw) ?? raw
+        if let (s, p, lenSize) = AVCCFastPath.parseAvcC(b) {
             nalLengthSize = lenSize; configValid = true
             log.info("[\(self.label, privacy: .public)] avcC parsed: SPS \(s.count)B, PPS \(p.count)B, nalLen \(lenSize)")
             decoder.configure(codec: .h264, parameterSets: [Data(s), Data(p)])
             onCodec?(.h264)
-        } else if let (v, s, p, lenSize) = Self.parseHvcC(b) {
+        } else if let (v, s, p, lenSize) = AVCCFastPath.parseHvcC(b) {
             nalLengthSize = lenSize; configValid = true
             log.info("[\(self.label, privacy: .public)] hvcC parsed: VPS \(v.count)B, SPS \(s.count)B, PPS \(p.count)B, nalLen \(lenSize)")
             decoder.configure(codec: .hevc, parameterSets: [Data(v), Data(s), Data(p)])
@@ -69,91 +70,10 @@ final class VideoLane {
     }
 
     // MARK: - Codec-config parsers
-
-    /// Unwrap an ISO `hvc1`/`hev1` VisualSampleEntry (what iOS sends as the HEVC session config —
-    /// observed live 2026-07-12) and return the payload of its `hvcC` child box.
-    private static func extractHvcC(fromSampleEntry b: [UInt8]) -> [UInt8]? {
-        // [0..4] box size (== total length), [4..8] fourcc 'hvc1' or 'hev1'
-        guard b.count > 94 else { return nil }
-        let boxSize = (Int(b[0]) << 24) | (Int(b[1]) << 16) | (Int(b[2]) << 8) | Int(b[3])
-        let fourcc = String(bytes: b[4..<8], encoding: .ascii)
-        guard boxSize >= 94, boxSize <= b.count, fourcc == "hvc1" || fourcc == "hev1" else { return nil }
-        var i = 86
-        while i + 8 <= boxSize {
-            let size = (Int(b[i]) << 24) | (Int(b[i + 1]) << 16) | (Int(b[i + 2]) << 8) | Int(b[i + 3])
-            guard size >= 8, i + size <= boxSize else { return nil }
-            if b[i + 4] == 0x68, b[i + 5] == 0x76, b[i + 6] == 0x63, b[i + 7] == 0x43 { // 'hvcC'
-                return Array(b[(i + 8)..<(i + size)])
-            }
-            i += size
-        }
-        return nil
-    }
-
-    /// avcC box: [0]=version(1) [1..3]=profile/compat/level [4]=0xFC|(lenSizeMinusOne)
-    /// [5]=0xE0|numSPS, per SPS [u16 len][bytes], then numPPS, per PPS [u16 len][bytes].
-    /// Returns nil unless the first SPS really is an H.264 SPS (forbidden_zero_bit 0, NAL type 7).
-    private static func parseAvcC(_ b: [UInt8]) -> (sps: [UInt8], pps: [UInt8], lenSize: Int)? {
-        guard b.count >= 7, b[0] == 1 else { return nil }
-        let lenSize = Int(b[4] & 0x03) + 1
-        var i = 5
-        var sps: [UInt8]?
-        var pps: [UInt8]?
-        let numSPS = Int(b[i] & 0x1F); i += 1
-        for _ in 0..<numSPS {
-            guard i + 2 <= b.count else { return nil }
-            let len = (Int(b[i]) << 8) | Int(b[i + 1]); i += 2
-            guard len > 0, i + len <= b.count else { return nil }
-            sps = Array(b[i..<i + len]); i += len
-        }
-        guard i < b.count else { return nil }
-        let numPPS = Int(b[i]); i += 1
-        for _ in 0..<numPPS {
-            guard i + 2 <= b.count else { return nil }
-            let len = (Int(b[i]) << 8) | Int(b[i + 1]); i += 2
-            guard len > 0, i + len <= b.count else { return nil }
-            pps = Array(b[i..<i + len]); i += len
-        }
-        guard let s = sps, let p = pps,
-              s.first.map({ $0 & 0x80 == 0 && $0 & 0x1F == 7 }) == true, // H.264 SPS
-              p.first.map({ $0 & 0x80 == 0 && $0 & 0x1F == 8 }) == true  // H.264 PPS
-        else { return nil }
-        return (s, p, lenSize)
-    }
-
-    /// hvcC box: 22 fixed header bytes ([21] low 2 bits = lenSizeMinusOne), [22]=numOfArrays, then per
-    /// array [0]=completeness|NAL type, [1..2]=numNalus BE, per NALU [u16 len][bytes].
-    /// Returns nil unless VPS(32)+SPS(33)+PPS(34) are all present with matching NAL headers.
-    private static func parseHvcC(_ b: [UInt8]) -> (vps: [UInt8], sps: [UInt8], pps: [UInt8], lenSize: Int)? {
-        guard b.count >= 23, b[0] == 1 else { return nil }
-        let lenSize = Int(b[21] & 0x03) + 1
-        var i = 22
-        let numArrays = Int(b[i]); i += 1
-        var vps: [UInt8]?
-        var sps: [UInt8]?
-        var pps: [UInt8]?
-        for _ in 0..<numArrays {
-            guard i + 3 <= b.count else { return nil }
-            let nalType = b[i] & 0x3F; i += 1
-            let numNalus = (Int(b[i]) << 8) | Int(b[i + 1]); i += 2
-            for _ in 0..<numNalus {
-                guard i + 2 <= b.count else { return nil }
-                let len = (Int(b[i]) << 8) | Int(b[i + 1]); i += 2
-                guard len > 0, i + len <= b.count else { return nil }
-                let nal = Array(b[i..<i + len]); i += len
-                // The NALU's own header type must match the array's declared type.
-                guard let h = nal.first, (h >> 1) & 0x3F == nalType else { return nil }
-                switch nalType {
-                case 32: vps = nal
-                case 33: sps = nal
-                case 34: pps = nal
-                default: break // SEI arrays etc — fine, ignored
-                }
-            }
-        }
-        guard let v = vps, let s = sps, let p = pps else { return nil }
-        return (v, s, p, lenSize)
-    }
+    //
+    // MOVED to `AVCCFastPath` (Video/AVCCFastPath.swift, "Codec-config records") 2026-09-03 — verbatim,
+    // no behaviour change — so the hardware-free harness (tests/main.swift) can exercise them. The
+    // ALT/cluster lane's 63-byte-SPS hvcC had no test; `receiveConfig` above calls straight into them.
 }
 
 /// Bridges decrypted OCBM A/V into the decode/render layers. Two independent video lanes — the main
@@ -189,13 +109,46 @@ final class OCBMAVBridge: OCBMAVDelegate {
     // warmed before the first AU. Wired streams are PCM → this map stays empty on the wired transport.
     private var compressedDecoders: [UInt64: CompressedAudioDecoder] = [:]
 
+    /// Telephony (atype 1) lane bookkeeping — the Android Auto call-audio path (box HFP/SCO →
+    /// SEAM_PKT_PLAIN). All three are touched only from the audio decrypt queue, the same serial
+    /// context `compressedDecoders` above already relies on.
+    private var telephonyArmed: Set<UInt64> = []
+    private var telRxFrames = 0
+    private var telRxBytes = 0
+    private var telLastLog = 0.0
+    /// Per-scid mSBC decode lanes — the HFP WIDEBAND telephony path (SEAM_FORMAT codec 4). Built on
+    /// the format, not the first packet, so the filterbank is warm before audio arrives. Separate
+    /// from `compressedDecoders` because CompressedAudioDecoder is an AudioToolbox wrapper and macOS
+    /// has no SBC codec at all — this one is our own (Audio/MSBCCodec.swift).
+    private var msbcDecoders: [UInt64: MSBCTelephonyDecoder] = [:]
+    /// PLC frames reported in the last telephony log window.
+    private var telPlcAtLastLog = 0
+
     func avDidReceiveAudioFormat(scid: UInt64, format: OCBMAudioStreamFormat) {
-        if format.isPCM {
+        // Telephony: the voice/nav mixer node for this rate is already attached and connected from the
+        // engine pre-warm (AudioPlayer.wiredPCMRates covers 8 kHz, voice=true covers mono), so "armed"
+        // is a statement of fact, not a request — there is nothing to build at the first frame.
+        if format.audioType == 1 && (format.isPCM || format.isMSBC) && telephonyArmed.insert(scid).inserted {
+            let codec = format.isMSBC ? "mSBC" : "PCM"
+            log.info("telephony \(codec, privacy: .public) \(Int(format.sampleRate)) Hz/\(format.channels)ch scid=\(scid) — player armed")
+        }
+        if format.isMSBC {
+            // Wideband: the AUs are eSCO air frames, not PCM. One decoder per scid, reset on every
+            // (re)declared format so a second call on the same scid never inherits the first call's
+            // filterbank state or its H2 sequence expectation.
+            let dec = msbcDecoders[scid] ?? MSBCTelephonyDecoder()
+            dec.reset()
+            msbcDecoders[scid] = dec
             compressedDecoders[scid] = nil
+            log.info("audio scid=\(scid) mSBC \(Int(format.sampleRate))Hz \(format.channels)ch atype=\(format.audioType) — decoder armed")
+        } else if format.isPCM {
+            compressedDecoders[scid] = nil
+            msbcDecoders[scid] = nil   // a lane that was wideband and re-declared narrowband
             log.info("audio scid=\(scid) PCM \(Int(format.sampleRate))Hz \(format.channels)ch atype=\(format.audioType) — pre-warmed node ready")
         } else if let dec = CompressedAudioDecoder(
             codec: format.codec, sampleRate: format.sampleRate, channels: format.channels) {
             compressedDecoders[scid] = dec
+            msbcDecoders[scid] = nil
             log.info("audio scid=\(scid) compressed codec=\(format.codec) — decoder prestaged")
         } else {
             log.error("audio scid=\(scid) codec=\(format.codec) unsupported — AUs will be dropped")
@@ -208,13 +161,64 @@ final class OCBMAVBridge: OCBMAVDelegate {
             audio.feedMediaPCM(au)
             return
         }
+        if fmt.isMSBC {
+            // Wideband telephony: decode the eSCO read(s) to 16 kHz mono PCM. A payload can be a
+            // fragment (no output yet), one frame, or several; `decode` returns exactly what it
+            // recovered, including concealment for what the H2 sequence says was lost.
+            guard let dec = msbcDecoders[scid] else { return } // format not seen — nothing armed
+            let pcm = dec.decode(au)
+            if !pcm.isEmpty {
+                audio.feedPCM(pcm, rate: MSBC.sampleRate, channels: 1, voice: true, bigEndian: false,
+                              preroll: AudioPlayer.telephonyPrerollSeconds)
+            }
+            noteTelephonyFrame(au.count, format: fmt, plc: dec.plcFrames)
+            return
+        }
         if fmt.isPCM {
+            // `plainLE` is set only on SEAM_PKT_PLAIN (AA telephony): that PCM is host-endian HFP audio.
+            // Everything else came out of the CarPlay RTP and is BIG-endian on the wire.
             audio.feedPCM(au, rate: Int(fmt.sampleRate), channels: Int(fmt.channels),
-                          voice: fmt.isVoice, bigEndian: true)
+                          voice: fmt.isVoice, bigEndian: !fmt.plainLE,
+                          preroll: fmt.plainLE ? AudioPlayer.telephonyPrerollSeconds : 0)
+            if fmt.plainLE { noteTelephonyFrame(au.count, format: fmt) }
         } else if let dec = compressedDecoders[scid], let pcm = dec.decode(au) {
             // Decoded output is host-endian at the stream's rate/channels.
             audio.feedPCM(pcm, rate: Int(dec.sampleRate), channels: Int(dec.channels),
                           voice: fmt.isVoice, bigEndian: false)
         }
+    }
+
+    /// One-per-second telephony throughput line. A call that is up but silent and a call whose audio
+    /// never left the box look identical in the AVmon totals; this prints the delivered frame count and
+    /// how much wall-clock audio that is, so a lane running at half rate is visible without a capture.
+    /// Audio decrypt queue (serial) — same confinement as the rest of this section.
+    private func noteTelephonyFrame(_ bytes: Int, format fmt: OCBMAudioStreamFormat, plc: Int = 0) {
+        telRxFrames += 1
+        telRxBytes += bytes
+        let now = ProcessInfo.processInfo.systemUptime
+        if telLastLog == 0 { telLastLog = now; telPlcAtLastLog = plc; return }
+        guard now - telLastLog >= 1.0 else { return }
+        telLastLog = now
+        // mSBC: one AU is one 60-byte air packet carrying 7.5 ms, so the PCM-frame arithmetic below
+        // (which divides payload bytes by the sample size) would report a third of the truth.
+        let ms: Int
+        if fmt.isMSBC {
+            ms = telRxFrames * MSBC.samplesPerFrame * 1000 / MSBC.sampleRate
+        } else {
+            let bytesPerSample = max(1, Int(fmt.bits) / 8)
+            let frameBytes = max(1, Int(fmt.channels) * bytesPerSample)
+            ms = Int(Double(telRxBytes / frameBytes) * 1000.0 / max(1.0, fmt.sampleRate))
+        }
+        let plcDelta = max(0, plc - telPlcAtLastLog)
+        telPlcAtLastLog = plc
+        // A concealed frame is a dropped SCO packet or a corrupt one; silent PLC would make a lossy
+        // link look identical to a clean one in the log.
+        if plcDelta > 0 {
+            log.info("telephony rx=\(self.telRxFrames) frames (\(ms) ms audio) plc=\(plcDelta)")
+        } else {
+            log.info("telephony rx=\(self.telRxFrames) frames (\(ms) ms audio)")
+        }
+        telRxFrames = 0
+        telRxBytes = 0
     }
 }

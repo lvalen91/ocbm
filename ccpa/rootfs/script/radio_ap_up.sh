@@ -189,7 +189,10 @@ ifconfig "$IF" "$WLANIP" netmask 255.255.255.0 mtu 1500 up || {
 
 # ---- bring up ---------------------------------------------------------------------------------
 test -e /tmp/bin/hostapd || cp /usr/sbin/hostapd /tmp/bin/hostapd 2>/dev/null
-ps | grep -v grep | grep -qw hostapd || hostapd /etc/hostapd.conf -B >/tmp/radio_ap_hostapd.log 2>&1
+# Nothing reads /tmp/radio_ap_hostapd.log back (checked: no tail/cat/grep of it anywhere in the
+# scripts), so it folds straight into the universal log with a source prefix.
+echo "[radio] hostapd starting on $IF" >> /tmp/box.log
+ps | grep -v grep | grep -qw hostapd || hostapd /etc/hostapd.conf -B >>/tmp/box.log 2>&1
 
 # The AP's DHCP server, explicitly scoped. The stock script masked this behind a global udhcpd
 # check, so the always-running NCM instance satisfied it and the AP's own server never started -
@@ -202,6 +205,9 @@ ps | grep -v grep | grep -qw hostapd || hostapd /etc/hostapd.conf -B >/tmp/radio
 # invocation of the seam hang long after the script itself has finished, and would break the
 # HAL's convergent-on-return contract for any caller that reads our output.
 if ! ps | grep -v grep | grep -q "udhcpd .*etc/udhcpd.conf"; then
+  # radio_ap_dhcp.log stays a small `>`-truncated status file: this udhcpd is a setsid-backgrounded
+  # daemon (it does not fork/daemonise itself on this build), so piping its own stdout to tee would
+  # change its lifecycle. Only the readback below (on failure) is universal-logged.
   setsid udhcpd /etc/udhcpd.conf </dev/null >/tmp/radio_ap_dhcp.log 2>&1 &
 fi
 
@@ -232,7 +238,7 @@ if ! ap_serving; then
     || echo "$L   $IF does not hold $WLANIP"
   ps | grep -v grep | grep -q "udhcpd .*etc/udhcpd.conf" \
     || { echo "$L   the AP DHCP server is not running - a phone would associate and get no address"
-         tail -3 /tmp/radio_ap_dhcp.log 2>/dev/null | sed "s|^|$L     |"; }
+         tail -3 /tmp/radio_ap_dhcp.log 2>/dev/null | sed "s|^|$L     |" | tee -a /tmp/box.log; }
   exit 1
 fi
 echo "$L AP up: ssid=$NAME ip=$WLANIP ch=$ch if=$IF dhcp=yes"

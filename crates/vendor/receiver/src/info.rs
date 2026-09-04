@@ -388,8 +388,16 @@ fn view_areas(
     let masks = is_main && crate::levers::cornermasks();
 
     let (sx, sy, sw, sh) = safe
+        // `checked_add`, not `+`: the host YAML is the source of these, and an absurd `originX` near
+        // i64::MAX wraps in the release profile (overflow checks off) — admitting a bogus rect through
+        // the very bound that is supposed to reject it.
         .filter(|&(x, y, w, h)| {
-            x >= 0 && y >= 0 && w > 0 && h > 0 && x + w <= width && y + h <= height
+            x >= 0
+                && y >= 0
+                && w > 0
+                && h > 0
+                && x.checked_add(w).is_some_and(|e| e <= width)
+                && y.checked_add(h).is_some_and(|e| e <= height)
         })
         .unwrap_or((0, 0, width, height));
 
@@ -763,15 +771,25 @@ pub fn build_info(cfg: &DeviceConfig) -> Vec<u8> {
     // is appended only when `CARPLAY_DPAD` is set (airplayd arms it from the host YAML
     // `accessoryConfig.enablesDPad`), so the safe two-device set is the default and a third device is
     // opt-in + instantly revertible — the guard against the 2026-07-06 reconnect incident.
+    // The descriptors patch a 2-byte HID **Logical Maximum** (`0x26 FF 7F`), which HID reads as
+    // SIGNED: a configured dimension above 32767 goes negative on the wire and one above 65535
+    // truncates silently under a bare `as u16`. `vehicle_config::apply` bounds these only by `> 0`, so
+    // guard here — an out-of-range dimension falls back to the default resolution rather than
+    // advertising a descriptor whose extent iOS reads as negative.
+    let hid_dim = |v: i64, dflt: u16| u16::try_from(v).ok().filter(|d| *d <= 0x7FFF).unwrap_or(dflt);
+    // Fallbacks are `DeviceConfig::default()`'s 1920x720 (spelled out rather than constructed, since
+    // building a whole `DeviceConfig` here would also re-run its env-sensitive audio-format default).
+    let hid_w = hid_dim(cfg.display_width, 1920);
+    let hid_h = hid_dim(cfg.display_height, 720);
     let mut hids = vec![
         hid_device(
             HID_UID_TOUCHSCREEN,
             "CarLink Touchscreen",
             HID_PRODUCT_TOUCHSCREEN,
             if crate::levers::multi_touch() {
-                touchscreen_multi_descriptor(cfg.display_width as u16, cfg.display_height as u16)
+                touchscreen_multi_descriptor(hid_w, hid_h)
             } else {
-                touchscreen_descriptor(cfg.display_width as u16, cfg.display_height as u16)
+                touchscreen_descriptor(hid_w, hid_h)
             },
         ),
         hid_device(
@@ -1161,5 +1179,34 @@ mod tests {
         assert_eq!(d.len(), 62);
         assert_eq!(u16::from_le_bytes([d[39], d[40]]), 1920); // X logical max
         assert_eq!(u16::from_le_bytes([d[52], d[53]]), 720); // Y logical max
+    }
+
+    /// HID Logical Maximum is signed 16-bit: a dimension past 32767 (or past u16 entirely) must not
+    /// reach the descriptor, or the advertised extent is negative/truncated. Nothing upstream clamps.
+    #[test]
+    fn out_of_range_display_dims_fall_back_instead_of_wrapping() {
+        let cfg = DeviceConfig {
+            display_width: 40_000,  // > i16::MAX, still fits u16 → would go negative on the wire
+            display_height: 70_000, // > u16::MAX → would truncate to 4464
+            ..DeviceConfig::default()
+        };
+        let v = Value::from_reader(Cursor::new(build_info(&cfg))).unwrap();
+        let hids = v.as_dictionary().unwrap()["hidDevices"].as_array().unwrap();
+        let desc = hids[0].as_dictionary().unwrap()["hidDescriptor"].as_data().unwrap();
+        assert_eq!(u16::from_le_bytes([desc[39], desc[40]]), 1920);
+        assert_eq!(u16::from_le_bytes([desc[52], desc[53]]), 720);
+    }
+
+    /// `safeArea` comes from host YAML; an extreme origin used to wrap `origin + extent` in the
+    /// release profile and slip a bogus rect past the very bound meant to reject it.
+    #[test]
+    fn safe_area_rejects_a_rect_whose_extent_overflows() {
+        let bogus = Some((i64::MAX, 0, 100, 100));
+        let v = view_areas(1920, 720, bogus, false, false);
+        let area = v.as_array().unwrap()[0].as_dictionary().unwrap();
+        let safe = area["safeArea"].as_dictionary().unwrap();
+        // Rejected → falls back to the full panel, not to a wrapped rect.
+        assert_eq!(safe["originXPixels"].as_signed_integer().unwrap(), 0);
+        assert_eq!(safe["widthPixels"].as_signed_integer().unwrap(), 1920);
     }
 }

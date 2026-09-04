@@ -744,9 +744,13 @@ correctness failure — it means a stale frame or a stale map position is waitin
   (`CH_CTRL`/`CH_MFI`/`CH_RTSP`); `CH_CONSOLE` has its own `out_console` drained *below* A/V so a console
   flood cannot freeze video; reliable bulk is `out_lo`, whose cap-clear resyncs to the next `F_SOM` so the
   peer never sees a truncated message (#567). The live-UI principle above is unchanged and still governs
-  the **host** renderer, where a stalled consumer is single-slot latest-wins
+  the **host** renderer, where a stalled consumer still DROPS rather than buffers
   (`VideoDecoder.swift` — "drop on backpressure, never buffer"); buffering *there* really would show a
-  stale frame.
+  stale frame. Refined 2026-09-03: the mechanism is no longer a single latest-wins slot but a depth-3
+  bounded FIFO that never blocks its producer and picks the CHEAPEST frame to lose (see
+  [../host/00_MACOS_HOST_APP.md](../host/00_MACOS_HOST_APP.md) "Host decode pipeline"). The principle is
+  unchanged — a two-frame cushion is not "buffering", it is the difference between dropping a stale P
+  and dropping the IDR the next two seconds of video depend on.
 
 > **⚠️ REVERSAL — the principle above supersedes both the earlier "bounded queue with drop-oldest"
 > idea AND this document's own original "drop the whole frame on `EAGAIN`" mechanism (2026-07-09,
@@ -793,12 +797,15 @@ which signals are real:
    resource-critical cases, the keepalive interval can be **relaxed** (a few seconds), not tight.
 
 **Detection as built has exactly two detectors — and neither is the pair originally designed here:** the
-heartbeat watchdog (`HEARTBEAT_GRACE`) and an explicit `CT_STOP` (deferred by `STOP_GRACE`). Sustained
+heartbeat watchdog (`HEARTBEAT_GRACE`) and an explicit `CT_STOP` (immediate, no grace). Sustained
 backpressure does **not** feed a grace clock — `out_video`/`out_alt_video` backpressure their producers and
 `out_lo` clears at `OUT_QUEUE_CAP` with no effect on presence. An accessory-fd error or hangup is not a
-grace path either: ocbmd `exit(1)`s immediately (`main.rs`, the POLLHUP/POLLERR and read-EOF `exit(1)` arms), leaving
-`/tmp/host_present` at its last value until the inittab respawn restarts it and `main()` re-initialises the
-flag to 0 (`main.rs`, the startup `write_flag_atomic(HOST_PRESENT_FLAG, false)`).
+grace path either: ocbmd `exit(1)`s immediately (`main.rs`, the POLLHUP/POLLERR and read-EOF `exit(1)` arms) —
+but **before exiting it now clears the same three files `main()` clears at startup** (`clear_session_state_for_exit`:
+`/tmp/host_present` → 0, the ephemeral `/tmp/carplay_cfg.yaml`, the `/tmp/radio_off` inhibit; corrected
+2026-09-03). It used to leave `/tmp/host_present` at its last value, so a supervisor on a box WITHOUT the
+inittab respawn believed a host was present forever. No `SEV_HOST_GONE` accompanies it: the accessory fd
+that would carry it is exactly what just died.
 
 > **Ruled out:** `/sys/class/udc/*/state` is **not** an app-presence signal. It reflects cable enumeration,
 > not host-app liveness — see [Empirical basis](#empirical-basis).
@@ -848,12 +855,20 @@ flag to 0 (`main.rs`, the startup `write_flag_atomic(HOST_PRESENT_FLAG, false)`)
   (accessory still up, head unit still "present"). NOT a cold disconnect. Host reappears later →
   re-advertise → CarPlay relaunches from the warm accessory state.
 
-The graces are **two distinct constants**, both in `ccpa/ocbmd/src/main.rs`: **`HEARTBEAT_GRACE = 10 s`**
-(`:561`) covers a host that stops beating — crash, wedge, App Nap, USB stall — and **`STOP_GRACE = 5 s`**
-(`:566`) covers a *clean* `CT_STOP`, holding the session warm so a fast app relaunch re-`SUBSCRIBE`s into it
-instead of racing a full teardown. A third, **`REARM_HOLD = 2 s`** (`:579`), is not a grace at all: it is how
-long `/tmp/host_present` must read 0 for the 1 Hz supervisor to see a re-arm edge. Detection granularity for
-all three is the 500 ms bounded poll (`:2568`). The `~5 s` this section originally quoted was a notional
+There is now **one grace**, in `ccpa/ocbmd/src/main.rs`: **`HEARTBEAT_GRACE = 10 s`** covers a host that
+stops beating — crash, wedge, App Nap, USB stall. A *clean* `CT_STOP` gets none (changed 2026-09-03):
+a host that closes is telling the box the session is over, so it tears down at once via the same
+`go_idle` routine. The `STOP_GRACE = 5 s` warm-reuse hold this section used to describe is **gone** —
+it left a projection running with no host and the phone attached to nobody for 5 s after every quit,
+and the relaunch it optimised for still had to re-`SUBSCRIBE` anyway. **`REARM_HOLD = 2 s`** is not a
+grace at all: it is how
+long `/tmp/host_present` must read 0 for the 1 Hz supervisor to see a re-arm edge. It now does double
+duty — `Daemon::raise_presence` holds a `CT_SUBSCRIBE`'s flag raise until the *preceding* GONE edge is
+`REARM_HOLD` old, because the actor samples that flag at 1 Hz and acts on edges: a scripted
+quit→relaunch would otherwise write 0 then 1 between two samples, the actor would read 1 → 1, and the
+teardown `CT_STOP` just performed would be invisible to it (leaving the new host subscribed against
+the dead session's airplayd). Only the flag waits; `present`, `SEV_HOST_PRESENT` and `HELLO_ACK` are
+all immediate. Detection granularity for both is the 500 ms bounded poll. The `~5 s` this section originally quoted was a notional
 design starting value that matched no constant; `HEARTBEAT_GRACE` was itself widened 3 s → 10 s by audit
 QC #428, because expiry is maximally destructive and a 1 Hz host can miss several beats without being dead.
 
@@ -928,15 +943,17 @@ up so the iPhone remains an enumerated accessory with CarPlay not running. GONE 
 BT off (`hciconfig hci0 down`, not just noscan) to drop the iPhone's BT connection to an app-less box;
 the wired iap2d holding pattern is the sanctioned exception, since no radio is involved.
 
-Because ocbmd applies its graces before moving `/tmp/host_present`, a heartbeat blip shorter than
-`HEARTBEAT_GRACE`, or a close/relaunch inside `STOP_GRACE` (5 s), never reaches the actor — no
-teardown/re-ARM cycle occurs. The exception is a *replacement* host whose predecessor died without
+Because ocbmd applies its grace before moving `/tmp/host_present`, a heartbeat blip shorter than
+`HEARTBEAT_GRACE` never reaches the actor — no teardown/re-ARM cycle occurs. A clean `CT_STOP` is the
+opposite case and reaches it immediately: the flag goes to 0 in the same instant, and the actor's 1→0
+edge runs the complete wireless teardown back to IDLE. The exception is a *replacement* host whose predecessor died without
 `CT_STOP`: `rearm_presence_silently()` dips the flag for `REARM_HOLD` (2 s) so the 1 Hz actor loop can
 observe a GONE→PRESENT edge, while the host itself is never sent `SEV_HOST_GONE`.
 
-> **Replacement detection requires `present` AND `subscribed`, not `present` alone.** Testing presence
-> alone reclassifies a normal relaunch inside `STOP_GRACE` as a replacement and turns warm reuse into a
-> session-dropping radio cycle. `host_replaced` is also cleared in `go_idle()`.
+> **Replacement detection requires `present` AND `subscribed`, not `present` alone.** The flag means
+> "the previous host died mid-session without `CT_STOP`", and only a SUBSCRIBEd host has a session to
+> die in. A predecessor that closed cleanly is never a replacement: `CT_STOP` already dropped both
+> flags. `host_replaced` is also cleared in `go_idle()`.
 
 **Possible refinement, not done:** move teardown into airplayd as a graceful RTSP TEARDOWN (a
 presence-watchdog thread shutting the control socket) so airplayd stays a persistent daemon rather
@@ -1055,10 +1072,29 @@ persistent `/etc/ccpa_reboot_count` budget shipped with it.
 |---|---|---|
 | L0 Retry (exists) | re-ARM airplayd, backoff `fails*5` cap 30 s | airplayd death while armed |
 | L1 Phone-facing reset | `phone_reset()` → re-run projection | ≥3 projection fails / ncm0 stuck / iap2d flap |
-| L2 Full daemon restart | restart ocbmd + iap2d + airplayd + rx_connect; force `host_present=0` | presence-flap loop, or L1 ×2 |
-| L3 Reboot | `reboot -f`, **persistent `/etc` budget ≤2/10 min**, then park in IDLE + surface fault | L2 exhausted |
+| L2 Full daemon restart | restart ocbmd + iap2d + airplayd + rx_connect; force `host_present=0` | presence-flap loop, L1 ×2, or **ocbmd wedge** (below) |
+| L3 Reboot | `reboot -f`, **persistent `/etc` budget ≤2/10 min**, then park in IDLE + surface fault | L2 exhausted, or L2 fails to clear an **ocbmd wedge** within 10 s |
 
 The reboot budget **must live in `/etc` (jffs2), not `/tmp` (tmpfs)**, or it evaporates each reboot.
+
+**ocbmd wedge escalation (added after a bench incident: `ocbmd` stuck in an uninterruptible HCI
+ioctl during BT line-discipline teardown never exits, so the inittab respawn, the pid-lock
+singleton, and the failover watchdog's first-120s window all did nothing — USB writes to the
+host stalled until a manual power cycle).** `ocbmd` touches `/tmp/ocbmd_alive` (mtime only) once
+per second from its dispatch loop. `session_supervisor.sh`'s 1 Hz main loop calls this WEDGED
+(independent of, and in addition to, the phone-session ladder above) when **all** of: the mtime
+of `/tmp/ocbmd_alive` is stale, the Mac/host-facing accessory gadget
+(`/sys/class/android_usb_accessory/android0/state`) reads `CONFIGURED`, and `pidof ocbmd` is
+non-empty. An absent `/tmp/ocbmd_alive` is a no-op (older `ocbmd` builds never create it).
+Staleness is checked with `find /tmp/ocbmd_alive -maxdepth 0 -mmin +0`, the same integer-minute
+BusyBox `find` idiom already used by `radio_hal.sh`/`radio_ap_up.sh` for stale-lock detection —
+this box's BusyBox has no `-newermt`/fractional support, so `-mmin +0` (>=1 full minute stale) is
+the finest granularity available, not the 15 s the underlying contract targets. On WEDGED
+(rate-limited to once per 60 s) the supervisor logs to `/tmp/box.log`, runs the same L2
+restart primitive (`restart_ocbmd_daemon()` in `tools/session_supervisor.sh` — extracted from the
+L2 rung above so both callers share one code path), then polls `pidof ocbmd` for up to 10 s: if
+the pid is unchanged (a D-state process ignores `SIGKILL`), it escalates straight to L3
+(`sync; reboot`).
 
 #### 4. Prevent the trigger
 Idle-gate persistent-state mutation: refuse peer-store writes/deletes while `present==1`; route
@@ -1697,6 +1733,29 @@ P2 Rust harness authoring every response — live-oracle diff matched on all exc
 divergences, 0 fallbacks, 8 A/V seams streaming** (`89c457b`). Divergence handling is warn-only by
 default; `CARPLAY_RELAY_STRICT=1` rejects a divergent response and falls back locally.
 
+**Bench levers.** `CARPLAY_PAIRSETUP_DUMP=<path>` (resolved once per process, `server.rs`'s
+`pairsetup_dump_path`, mirroring `CARPLAY_CMD_DUMP`'s length-prefixed `[u32 LE len][body]` append
+format) captures every raw `/pair-setup` request body to `path` before the exchange runs. M1 is the
+first ~6-byte body; decode it as TLV8 `[type][len][value]`: type `0x00` = Method (`00 01 00` plain,
+`00 01 01` MFi), type `0x06` = State.
+
+`CARPLAY_FEATURES_REVERSE=1` (resolved once, `relay.rs`'s `features_reverse`) reverses the
+`enabledFeatures` array the phone actually receives — the list `session.rs` authors in its SETUP
+response. In relay mode the SETUP exchange falls back to the local body while the lever is armed
+(logged as `[relay] CARPLAY_FEATURES_REVERSE=1 armed — LOCAL body for SETUP`), because otherwise the
+host's unreversed answer would reach the phone. Test: baseline session (lever off, note hevc/altScreen
+negotiation), a second session with `CARPLAY_FEATURES_REVERSE=1`, then compare; identical negotiation on
+both means feature order is not significant and `relay.rs`'s ordered oracle comparison could safely
+sort, a difference means order is significant and the ordered comparison must stay.
+
+**`tools/session_supervisor.sh` btmon bench lever (2026-09-03).** If `/tmp/carplay_btmon` exists
+(or `CARPLAY_BTMON=1` is exported into the supervisor's environment) AND `btmon` is on `PATH`,
+`wireless_up()` starts `btmon` for the wireless session, with its output appended to `/tmp/box.log`
+prefixed `[btmon] `; `wireless_down()` kills it (bracketed `pkill -f "[b]tmon"`, matching the
+existing airplayd/rx-connect/carplay-wireless teardown style) in both its COMPLETE-teardown and
+advertiser-only branches. If `btmon` is absent — unknown whether the CCPA rootfs ships it — the
+lever logs one line and is otherwise a no-op; it never blocks bring-up.
+
 **Engaging a config change on wired requires a fresh airplayd connection.** airplayd survives Mac-app
 restarts and reads config per-connection at accept, while the phone's `:5000` connection is
 long-lived. Toggling in the app is therefore not sufficient: `killall airplayd` (the supervisor
@@ -1709,7 +1768,7 @@ RemoteSession` always sends `CLOSE_EOF` (it cannot distinguish eof from hijack o
 `CLOSE_HIJACK` exists only in a unit test).
 
 **Measurement caveats for a re-run.** A >64 KiB relay message spans OCBM frames and was not exercised
-end-to-end. Cap-clears are only visible box-side in `/tmp/ocbmd.log`; the host sees them as a timeout
+end-to-end. Cap-clears are only visible box-side in `/tmp/box.log` (ocbmd's `[ocbmd]`-prefixed lines); the host sees them as a timeout
 or lost count. `avdec --rtt` cadence stretches toward ~300 ms on a silent link, which is why n varies.
 
 ## Reference measurements from the first full session

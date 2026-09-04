@@ -18,3 +18,8 @@ path = "src/main.rs"
 [dependencies]
 libc = "0.2"
 box-common = { path = "../../crates/box-common" }
+# ONE definition of the TCP port the wireless bootstrap advertises to the phone
+# (`WifiStartRequest.port`). `carplay-wireless` reads the same constant when it builds that message,
+# so the endpoint we bind and the endpoint the phone dials cannot drift. Protocol only — this crate
+# links the constant, not the Bluetooth bootstrap.
+aa-wireless = { path = "../aa-wireless" }

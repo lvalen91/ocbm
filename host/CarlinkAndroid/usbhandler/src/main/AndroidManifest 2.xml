@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- ===================================================================================
+         "Handler squat" proof app — package android.car.usb.handler. Full rationale: docs/59.
+
+         Mirrors AOSP packages/services/Car/car-usb-handler (same package, same
+         .UsbHostManagementActivity name that GM's config_UsbDeviceConnectionHandling_component
+         points at) so the framework's fixed-handler path resolves THIS app. Deliberate
+         divergences from the AOSP original:
+           - NO <uses-permission android:name="android.permission.MANAGE_USB"/>: it is
+             signature|privileged; a /data install can never hold it (SELinux neverallow). We do
+             not need it — the framework calls grantDevicePermission(device, ourUid) FOR us; we
+             never grant anything ourselves. Declaring it would only make the manifest lie.
+           - NoDisplay theme instead of the Dialog handler-picker: the point is zero UI.
+
+         USB host feature is required=false: GM AAOS does not advertise android.hardware.usb.host
+         in its Play profile (see :app's manifest for the same note); the UsbManager API works at
+         runtime regardless. This app is sideload-only anyway.
+         =================================================================================== -->
+    <uses-feature
+        android:name="android.hardware.usb.host"
+        android:required="false" />
+
+    <application
+        android:allowBackup="false"
+        android:label="@string/app_name"
+        tools:targetApi="36">
+
+        <!-- The fixed handler. Its FULLY-QUALIFIED name must be exactly
+             android.car.usb.handler.UsbHostManagementActivity — that is the literal string in GM's
+             framework-res config (docs/59). namespace=android.car.usb.handler + ".UsbHostManagementActivity"
+             resolves to it.
+
+             On the target unit the framework LAUNCHES this activity by explicit component from
+             deviceAttachedForFixedHandler AFTER the silent grant, passing the device in
+             UsbManager.EXTRA_DEVICE — so the intent-filter below is not what selects us there; the
+             fixed-handler config is. The intent-filter + catch-all usb_device_filter are kept only
+             to mirror AOSP and to give a working fallback on a NON-broken unit (normal attach
+             resolver). NoDisplay + finish() in onCreate means it never draws. -->
+        <activity
+            android:name="android.car.usb.handler.UsbHostManagementActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:theme="@android:style/Theme.NoDisplay">
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+            </intent-filter>
+            <meta-data
+                android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
+                android:resource="@xml/usb_device_filter" />
+        </activity>
+
+        <!-- Secondary signal only. A manifest-declared receiver for USB_DEVICE_ATTACHED is NOT a
+             reliable delivery path (the platform routes attach to activities), but the
+             fixed-handler code ALSO sendBroadcastAsUser(createDeviceAttachedIntent(device)) before
+             launching the activity, so this may fire and gives a second, independent log line
+             confirming the attach reached user 10. Never rely on it as the sole proof. -->
+        <receiver
+            android:name="android.car.usb.handler.UsbAttachReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+            </intent-filter>
+        </receiver>
+
+    </application>
+
+</manifest>

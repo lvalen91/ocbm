@@ -76,13 +76,26 @@ class SeamTest {
         return be32(4 + body.size) + SeamCrypto.SEAM_MAGIC + body
     }
 
-    /** Wrap an audio seam message as `[u32 BE len][marker][payload]`. */
+    /**
+     * Wrap an audio seam message in the LEGACY (pre-2026-09-03) framing `[u32 BE len][marker][payload]`.
+     * Kept as the default in these tests on purpose: it is the compatibility path, and a box build
+     * older than the magic must keep working.
+     */
     private fun audioMsg(
         marker: Int,
         payload: ByteArray,
     ): ByteArray {
         val body = byteArrayOf(marker.toByte()) + payload
         return be32(body.size) + body
+    }
+
+    /** The CURRENT audio wire: `[u32 BE len][SEAM_MAGIC][marker][payload]`, same as the video seam. */
+    private fun audioMsgV3(
+        marker: Int,
+        payload: ByteArray,
+    ): ByteArray {
+        val body = byteArrayOf(marker.toByte()) + payload
+        return be32(4 + body.size) + SeamCrypto.SEAM_MAGIC + body
     }
 
     private fun videoHeader(
@@ -392,6 +405,49 @@ class SeamTest {
             ((out[3].toInt() and 0x03) shl 11) or ((out[4].toInt() and 0xFF) shl 3) or
                 ((out[5].toInt() shr 5) and 0x07)
         assertEquals(7 + au.size, frameLen)
+        assertArrayEquals(au, out.copyOfRange(7, out.size))
+    }
+
+    /**
+     * The magic-framed audio wire, and the desync it exists to survive.
+     *
+     * ocbmd replaces a seam producer on a re-SETUP WITHOUT draining the old one, so the seam can be
+     * holding a partial message when the new producer's bytes arrive. Here the dead producer left a
+     * `SEAM_PKT` whose length prefix promises far more than arrived; the parser must reject it on the
+     * length-plausibility check, scan forward to the next `SEAM_MAGIC`, and pick the new stream up at
+     * the key. Without the magic the new `SEAM_KEY` is swallowed as that message's tail and the lane
+     * never decrypts again (device-proven 2026-09-02: bogus keys, a 1469658167Hz format, silence).
+     */
+    @Test
+    fun `magic-framed audio resyncs past a dead producer's partial message`() {
+        val mediaPipe = SeamPipe(1 shl 20)
+        val voicePipe = SeamPipe(1 shl 20)
+        val seam = AudioSeam(mediaPipe, voicePipe, log)
+
+        val key = ByteArray(32) { 0x55 }
+        val scid = 42L
+        val au = ByteArray(37) { (it * 3).toByte() }
+
+        // A magic-framed SEAM_KEY latches the framing, then a torn message: valid magic, impossible
+        // length (SEAM_KEY is always 45), followed by the real stream.
+        seam.feedMedia(audioMsgV3(SeamCrypto.MARK_KEY, key + le64(scid)))
+        val torn = be32(100) + SeamCrypto.SEAM_MAGIC + byteArrayOf(SeamCrypto.MARK_KEY.toByte()) + ByteArray(20)
+        seam.feedMedia(
+            torn +
+                audioMsgV3(
+                    SeamCrypto.MARK_FORMAT,
+                    le64(scid) + byteArrayOf(SeamCrypto.CODEC_AAC_LC.toByte()) +
+                        byteArrayOf(0x80.toByte(), 0xBB.toByte(), 0, 0) + // 48000 LE
+                        byteArrayOf(2, 0, SeamCrypto.ATYPE_MEDIA.toByte()),
+                ) +
+                audioMsgV3(SeamCrypto.MARK_PKT, le64(scid) + rtp(key, au, ByteArray(8) { 9 })),
+        )
+
+        assertEquals(1L, seam.decryptOk.get())
+        assertEquals(0L, seam.decryptFail.get())
+        assertEquals(0L, seam.unkeyed.get())
+        val out = ByteArray(7 + au.size)
+        assertTrue(readFully(mediaPipe, out))
         assertArrayEquals(au, out.copyOfRange(7, out.size))
     }
 

@@ -11,25 +11,13 @@ import AVFoundation
 /// The NSView that hosts the alt decoder's display layer, keeping it sized to the window.
 private final class AltVideoView: NSView {
     private var videoLayer: CALayer?
-    // Re-apply the corner mask when iOS's streamed mask arrives/changes after first layout.
-    // nonisolated so the nonisolated deinit can remove it (NotificationCenter removal is thread-safe).
-    private nonisolated(unsafe) var cornerMaskObs: NSObjectProtocol?
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
         layer?.backgroundColor = NSColor.black.cgColor
-        cornerMaskObs = NotificationCenter.default.addObserver(
-            forName: .carPlayCornerMaskUpdated, object: nil, queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.needsLayout = true }
-        }
     }
     required init?(coder: NSCoder) { fatalError() }
-
-    deinit {
-        if let cornerMaskObs { NotificationCenter.default.removeObserver(cornerMaskObs) }
-    }
 
     func setVideoLayer(_ new: CALayer) {
         videoLayer?.removeFromSuperlayer()
@@ -39,10 +27,13 @@ private final class AltVideoView: NSView {
         videoLayer = new
     }
 
+    // NOTE (05-M2/12-L1 fix): iOS never delegates cornerMasks to the alt/cluster display — box-side
+    // info.rs gates `cornerMasks` to `is_main` only, and the mask the main lane streams is scaled for
+    // the MAIN display's width. Applying it here (as this view used to) carved a corner sized for a
+    // different stream. No mask is applied to the alt window; it stays a plain black-backed layer.
     override func layout() {
         super.layout()
         videoLayer?.frame = bounds
-        if let l = layer { CarPlayCornerMask.apply(to: l, bounds: bounds) }
     }
 }
 

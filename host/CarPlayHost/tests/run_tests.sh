@@ -45,6 +45,9 @@ xcrun swiftc \
     carlink_macOS/OCBM/OCBMControlRelay.swift \
     carlink_macOS/OCBM/AirPlaySetupSession.swift \
     carlink_macOS/Video/AVCCFastPath.swift \
+    carlink_macOS/Audio/MSBCCodec.swift \
+    carlink_macOS/Audio/MSBCFramer.swift \
+    carlink_macOS/AA/AACapability.swift \
     carlink_macOS/AA/AAWire.swift \
     tests/main.swift \
     -o "$OUT"

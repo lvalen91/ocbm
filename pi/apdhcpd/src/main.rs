@@ -283,16 +283,45 @@ impl Leases {
             self.map.insert(mac, (ip, Instant::now() + lease));
             return ip;
         }
-        let taken: Vec<Ipv4Addr> = self.map.values().map(|(ip, _)| *ip).collect();
-        for n in 0..self.cfg_len {
-            let cand = Ipv4Addr::from(self.cfg_start + n);
-            if !taken.contains(&cand) {
-                self.map.insert(mac, (cand, Instant::now() + lease));
-                return cand;
-            }
+        // Expire first: the stored deadline was never read, so every MAC ever seen held its address
+        // until restart and a pool of N died after N phones.
+        let now = Instant::now();
+        self.map.retain(|_, (_, exp)| *exp > now);
+        if let Some(ip) = self.free_address() {
+            self.map.insert(mac, (ip, now + lease));
+            return ip;
         }
-        // Pool exhausted — reuse the oldest entry rather than refuse service.
-        Ipv4Addr::from(self.cfg_start)
+        // Still exhausted with every lease live: evict the one closest to expiry and take its
+        // address. Handing out `cfg_start` without inserting (what this used to do) gave a second
+        // phone an address the first one is actively using.
+        let oldest = self.map.iter().min_by_key(|(_, (_, exp))| *exp).map(|(m, (ip, _))| (*m, *ip));
+        let Some((old_mac, ip)) = oldest else {
+            return Ipv4Addr::from(self.cfg_start); // empty pool (cfg_len == 0) — nothing to hand out
+        };
+        self.map.remove(&old_mac);
+        self.map.insert(mac, (ip, now + lease));
+        ip
+    }
+
+    /// The address this MAC would be given, without recording anything. Lets a REQUEST be refused
+    /// without consuming a pool slot on the way to the NAK.
+    fn peek(&self, mac: &[u8; 6]) -> Option<Ipv4Addr> {
+        self.map.get(mac).map(|(ip, _)| *ip).or_else(|| self.free_address())
+    }
+
+    /// Lowest pool address not held by a live lease, or None when the pool is full.
+    fn free_address(&self) -> Option<Ipv4Addr> {
+        let now = Instant::now();
+        let taken: Vec<Ipv4Addr> = self
+            .map
+            .values()
+            .filter(|(_, exp)| *exp > now)
+            .map(|(ip, _)| *ip)
+            .collect();
+        (0..self.cfg_len)
+            // `checked_add`: a pool running past 255.255.255.255 would otherwise panic in debug.
+            .filter_map(|n| self.cfg_start.checked_add(n).map(Ipv4Addr::from))
+            .find(|cand| !taken.contains(cand))
     }
 
     fn release(&mut self, mac: &[u8; 6]) {
@@ -398,6 +427,13 @@ fn main() {
             continue;
         }
 
+        // RFC 2131 §4.3.2: a client that selected another server names it in the server-identifier
+        // option; that message is not ours to answer. Single-server AP today, so this only closes a
+        // latent misbehaviour if a second server ever shares the link.
+        if req.server_id.is_some_and(|s| s != cfg.server_ip) {
+            continue;
+        }
+
         let mac = mac_str(&req.chaddr);
         match req.msg_type {
             DHCPDISCOVER => {
@@ -412,9 +448,12 @@ fn main() {
                 // Honour the address the client asks for when it is ours to give; otherwise NAK so
                 // it restarts discovery instead of silently using a stale address.
                 let want = req.requested_ip.unwrap_or(req.ciaddr);
-                let ours = leases.assign(req.chaddr, lease);
-                let (ty, ip) = if want == Ipv4Addr::UNSPECIFIED || want == ours {
-                    (DHCPACK, ours)
+                // Decide BEFORE recording the lease: assigning first burned a pool slot for a
+                // client that is about to be refused.
+                let grant =
+                    want == Ipv4Addr::UNSPECIFIED || leases.peek(&req.chaddr) == Some(want);
+                let (ty, ip) = if grant {
+                    (DHCPACK, leases.assign(req.chaddr, lease))
                 } else {
                     (DHCPNAK, Ipv4Addr::UNSPECIFIED)
                 };
@@ -524,5 +563,25 @@ mod tests {
         assert_eq!(l.assign([1; 6], Duration::from_secs(60)), a, "stable");
         l.release(&[1; 6]);
         assert_eq!(l.assign([3; 6], Duration::from_secs(60)), a, "released ip reused");
+    }
+
+    /// An expired lease must free its address, and a pool of live leases must never hand the same
+    /// address to two MACs — the old exhaustion path returned `pool_start` without recording it.
+    #[test]
+    fn expiry_frees_an_address_and_exhaustion_never_duplicates_one() {
+        let cfg = Config { pool_len: 2, ..Config::default() };
+        let mut l = Leases::new(&cfg);
+        let a = l.assign([1; 6], Duration::from_millis(0)); // expires immediately
+        let b = l.assign([2; 6], Duration::from_secs(60));
+        assert_eq!(b, a, "an expired lease's address is reclaimed");
+        let c = l.assign([3; 6], Duration::from_secs(60));
+        assert_ne!(c, b, "two live leases are two addresses");
+
+        // Pool full of live leases: the newcomer evicts a holder rather than shadowing one.
+        let d = l.assign([4; 6], Duration::from_secs(60));
+        assert!(d == b || d == c, "must come from the pool");
+        let ips: Vec<_> = l.map.values().map(|(ip, _)| *ip).collect();
+        assert_eq!(ips.len(), 2, "the evicted holder must be dropped, not kept");
+        assert_ne!(ips[0], ips[1], "two MACs must never hold one address");
     }
 }

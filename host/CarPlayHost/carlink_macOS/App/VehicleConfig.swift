@@ -28,6 +28,14 @@ struct VehicleConfig: Codable, Equatable {
     /// vehicle_config `alt_screen()`). The app tracks it as a single Bool (the stream contents are
     /// irrelevant to the feature echo — only presence).
     var altVideoStreamsPresent: Bool = false
+    /// Mirrors the box's `view_areas_enabled()` auto-arm (verify_01 03-M2, `vehicle_config.rs:874`):
+    /// the box negotiates `viewAreas` when EITHER `enablesViewAreas` is set OR the pushed main/alt
+    /// stream defines a real (non-full-coverage) safe-area inset — an inset "just works" without the
+    /// extra toggle. Computed by `VehicleConfigModel.config` from the SAME safe-area edge values the
+    /// YAML emits, using the identical validity rule (`safe_area_inset` in the Rust twin): a rect
+    /// that covers the whole panel is not an inset. Default false, so a config with no inset (0,0,0,0
+    /// edges, the shipped default) stays byte-identical to today's `enabledFeatures()` output.
+    var safeAreaInsetPresent: Bool = false
     /// Whether the pushed YAML actually requested app-driven SETUP. Not part of the feature echo;
     /// the AppDelegate reads it to decide whether to stand up the relay at all (default OFF).
     var appDrivenSetup: Bool = false
@@ -48,7 +56,8 @@ struct VehicleConfig: Codable, Equatable {
     /// `AuthoringConfig::enabled_features` — the gating must stay in lockstep with setup_driver.rs:
     ///   * hevc        <- enablesHEVC
     ///   * altScreen   <- altVideoStreams non-empty
-    ///   * viewAreas   <- enablesViewAreas || enablesCornerMasks
+    ///   * viewAreas   <- enablesViewAreas || enablesCornerMasks || safeAreaInsetPresent (03-M2 fix,
+    ///                     mirrors the box's `view_areas_enabled()` inset auto-arm)
     ///   * cornerMasks <- enablesCornerMasks
     ///   * logTransfer <- enablesLogTransfer
     ///   * mainBuffered<- enablesMainBufferedAudio (docs/carplay/04_CAPABILITIES_AND_CONFIG.md B4, app default OFF)
@@ -56,11 +65,26 @@ struct VehicleConfig: Codable, Equatable {
     /// gated on box-process env vars with no config key. They are NOT divergences: since the
     /// 2026-08-10 wireless flip `AirPlaySetupSession.authorPhase1` PRESERVES any token outside this
     /// vocabulary from the box's local response, which is what keeps the iAP2 tunnel alive on wireless.
+    /// Mirrors `vehicle_config.rs`'s private `safe_area_inset(&SafeRect, panel_w, panel_h)` — the
+    /// validity rule the box applies to decide whether a safe-area edge inset is a REAL inset (arms
+    /// `viewAreas`) or a no-op full-panel rect (does not). `l/t/r/b` are the edge insets the Settings
+    /// UI stores (never negative — `clampInsets` enforces that), `w`/`h` the panel/stream's pixel
+    /// dimensions. Takes the SAME sx/sy/sw/sh derivation the YAML emitter's `va()` uses, so this is
+    /// evaluated against exactly what is pushed on the wire, not an approximation.
+    static func hasRealSafeAreaInset(left l: Int, top t: Int, right r: Int, bottom b: Int,
+                                      width w: Int, height h: Int) -> Bool {
+        let sx = max(0, l), sy = max(0, t)
+        let sw = max(1, w - sx - max(0, r)), sh = max(1, h - sy - max(0, b))
+        if sw <= 0 || sh <= 0 { return false }
+        let coversFull = sx <= 0 && sy <= 0 && (sx + sw) >= w && (sy + sh) >= h
+        return !coversFull
+    }
+
     func enabledFeatures() -> [String] {
         var f: [String] = []
         if enablesHEVC { f.append("hevc") }
         if altVideoStreamsPresent { f.append("altScreen") }
-        if enablesViewAreas || enablesCornerMasks { f.append("viewAreas") }
+        if enablesViewAreas || enablesCornerMasks || safeAreaInsetPresent { f.append("viewAreas") }
         if enablesCornerMasks { f.append("cornerMasks") }
         if enablesLogTransfer { f.append("logTransfer") }
         if enablesMainBufferedAudio { f.append("mainBuffered") }
@@ -115,6 +139,12 @@ enum YamlEmit {
         var cs = CharacterSet()
         cs.insert(charactersIn: Unicode.Scalar(0x00)!...Unicode.Scalar(0x1F)!)
         cs.insert(charactersIn: Unicode.Scalar(0x7F)!...Unicode.Scalar(0x9F)!)
+        // U+FFFE/U+FFFF (verify_06 10-L3): unsafe-libyaml's reader rejects these noncharacters at
+        // the stream level even though they are valid Swift Unicode.Scalars that survive
+        // quotedBody's escaping — a pasted one fails the WHOLE pushed document, same failure class
+        // as the Cc range above.
+        cs.insert(Unicode.Scalar(0xFFFE)!)
+        cs.insert(Unicode.Scalar(0xFFFF)!)
         return cs
     }()
 

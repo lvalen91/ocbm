@@ -20,6 +20,7 @@ object Ocbm {
 
     /** Replay of a frame the box already sent (dedupe hint; receivers may ignore it). */
     const val F_REPLAY: Byte = 0x04
+    const val F_NEW_SOURCE: Byte = 0x08
 
     /** Every frame in the tree is sent SOM|EOM; the reassembler pops one frame per header. */
     const val F_BOTH: Byte = 0x03
@@ -42,6 +43,8 @@ object Ocbm {
 
     /** App-driven SETUP relay. Inert with `appDrivenSetup: false` — the box only relays when asked. */
     const val CH_RTSP: Int = 0x0041 // lib.rs:65
+    /** Box→host universal-log stream (`/tmp/box.log` + per-daemon logs); armed by CT_LOG_CTL. */
+    const val CH_LOG: Int = 0x0042
     const val CH_ECHO: Int = 0x00FF
     const val CH_DISCARD: Int = 0x0FFF
 
@@ -62,6 +65,7 @@ object Ocbm {
             CH_MIC -> "MIC"
             CH_MGMT -> "MGMT"
             CH_RTSP -> "RTSP"
+            CH_LOG -> "LOG"
             CH_ECHO -> "ECHO"
             CH_DISCARD -> "DISCARD"
             else -> "0x%04x".format(ch)
@@ -81,6 +85,13 @@ object Ocbm {
     const val CT_SESSION_EVENT: Byte = 0x13
     const val CT_UPLINK: Byte = 0x14
     const val CT_PAIRING_CODE: Byte = 0x15
+
+    /**
+     * host->box `[CT_PAIR_CONFIRM][accept u8: 1 = pair, 0 = cancel]` — the user's answer to the
+     * CT_PAIRING_CODE prompt. SSP Numeric Comparison needs a real yes/no on BOTH devices, so the box
+     * waits for this instead of auto-accepting, for up to 55 s. Any byte != 0 is a yes.
+     */
+    const val CT_PAIR_CONFIRM: Byte = 0x1C
 
     /** host->box `[CT_RADIO][0 = radios off now | 1 = radios on if the pushed cfg allows]`. lib.rs:117 */
     const val CT_RADIO: Byte = 0x16
@@ -115,6 +126,7 @@ object Ocbm {
     const val BTP_IDENTIFYING: Byte = 0x04
     const val BTP_IDENTIFIED: Byte = 0x05
     const val BTP_WIFI_HANDOFF: Byte = 0x06
+    const val BTP_PAIR_REJECTED: Byte = 0x07
 
     fun btpName(b: Byte): String =
         when (b) {
@@ -125,6 +137,7 @@ object Ocbm {
             BTP_IDENTIFYING -> "IDENTIFYING"
             BTP_IDENTIFIED -> "IDENTIFIED"
             BTP_WIFI_HANDOFF -> "WIFI_HANDOFF"
+            BTP_PAIR_REJECTED -> "PAIR_REJECTED"
             else -> "BTP_0x%02x".format(b)
         }
 
@@ -184,6 +197,32 @@ object Ocbm {
     const val BH_CARPLAY_WIRELESS: Int = 0x10
     const val BH_WLAN_AP: Int = 0x20
     const val BH_ROOTFS_OK: Int = 0x40
+
+    // ---- CT_LOG_CTL (0x1B) — host→box `[CT_LOG_CTL][enabled u8][cap_kb u16 LE]` ----------------
+    // Arms the CH_LOG stream: the box tails its universal log (source 0, truncated at cap_kb once
+    // streamed) and the supervisor's per-daemon logs (tail-only). Entry layout on CH_LOG:
+    // [source u8][flags u8][seq u16 LE][unix_ms u64 LE][len u16 LE][text]. Not consumed by this app
+    // yet; defined so tools/proto_check.py keeps the three implementations in step.
+    const val CT_LOG_CTL: Byte = 0x1B
+    const val LOG_CAP_DEFAULT_KB: Int = 0x100
+    const val LOG_ENTRY_HDR: Int = 0x0E
+    const val LOG_MAX_LINE: Int = 0x400
+    const val LOG_MAX_FRAME: Int = 0x1000
+    const val LOG_F_DROPPED: Int = 0x01
+    const val LOG_F_TRUNCATED: Int = 0x02
+    const val LOG_F_BACKFILL: Int = 0x04
+    const val LOG_SRC_BOX: Int = 0x00
+    const val LOG_SRC_AIRPLAYD: Int = 0x01
+    const val LOG_SRC_AIRPLAYD_WL: Int = 0x02
+    const val LOG_SRC_IAP2D: Int = 0x03
+    const val LOG_SRC_AA_BRIDGE: Int = 0x04
+    const val LOG_SRC_RX_CONNECT: Int = 0x05
+    const val LOG_SRC_BT: Int = 0x06
+    const val LOG_SRC_RADIO_AP_DHCP: Int = 0x07
+    const val LOG_SRC_RADIO_BT_ATTACH: Int = 0x08
+    const val LOG_SRC_RX_CONNECT_WL: Int = 0x09
+    const val LOG_SRC_CARPLAY_WIRELESS: Int = 0x0A
+    const val LOG_SRC_INTERNAL: Int = 0xFF
 
     /** Human-readable bit list for a CT_BOX_HEALTH payload — the log line and the UI detail. */
     fun bhString(f: Int): String {
@@ -257,6 +296,7 @@ object Ocbm {
     const val MGMT_FORGET_ALL: Byte = 0x03
     const val MGMT_FORGET_DEVICE: Byte = 0x04
     const val MGMT_RESTART_WIRELESS: Byte = 0x05
+    const val MGMT_ENTER_NCM: Byte = 0x06
     const val MGMT_INFO: Byte = 0x81.toByte()
     const val MGMT_ACK: Byte = 0x82.toByte()
 
@@ -370,6 +410,19 @@ object Ocbm {
     const val APPEARANCE_STREAM_ALT: Byte = 0x01 // lib.rs:276
     const val APPEARANCE_MODE_LIGHT: Byte = 0x00 // lib.rs:277
     const val APPEARANCE_MODE_DARK: Byte = 0x01 // lib.rs:278
+
+    // ---- Audio seam v2 markers (CH_MEDIA_AUDIO / CH_ALT_AUDIO) ----------------------------------
+    // `[u32 BE len][SEAM_MAGIC "SEAV"][marker]…`; 0x00 SEAM_KEY, 0x01 SEAM_PKT, 0x02 SEAM_FORMAT.
+    /** `[0x03][scid 8 LE][payload]` — UNENCRYPTED access unit (no RTP, no key): the Android Auto
+     *  telephony lane, HFP/SCO S16LE PCM forwarded verbatim after a PCM SEAM_FORMAT. */
+    const val SEAM_PKT_PLAIN: Byte = 0x03
+
+    /** SEAM_FORMAT `codec` 4 — mSBC, the HFP wideband-speech codec (HFP 1.6 §5.7.4). The payload
+     *  under it is NOT PCM: each SEAM_PKT_PLAIN carries one raw transparent-eSCO read (2-byte H2
+     *  header + 57-byte mSBC frame + pad), and `rate`/`bits` describe the DECODED audio (16 kHz
+     *  mono S16LE). A host without an mSBC decoder must drop the stream, not play the bytes.
+     *  Decoded on macOS by carlink_macOS/Audio/MSBCCodec.swift; this client has no decoder yet. */
+    const val SEAM_CODEC_MSBC: Byte = 4
 
     // ---- CH_METADATA seam markers --------------------------------------------------------------
     // Framing is [u32 BE "META"][u32 BE len][marker][payload] where len = 1 + payload.size.

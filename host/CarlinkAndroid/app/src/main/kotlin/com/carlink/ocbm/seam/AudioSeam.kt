@@ -25,10 +25,18 @@ import java.util.concurrent.atomic.AtomicLong
  *
  * ## Wire
  *
- * `[u32 BE len][marker][...]`, with:
- *  - `0x00 SEAM_KEY`    `[key 32][scid 8 LE]`
+ * `[u32 BE len][SEAM_MAGIC "SEAV"][marker][...]` — since 2026-09-03 the same self-synchronizing
+ * envelope [VideoSeam] uses, `len` counting the magic:
+ *  - `0x00 SEAM_KEY`    `[key 32][scid 8 LE]`      (len 45)
  *  - `0x01 SEAM_PKT`    `[scid 8 LE][raw encrypted RTP packet]`
- *  - `0x02 SEAM_FORMAT` `[scid 8 LE][codec][rate u32 LE][ch][bits][atype]`
+ *  - `0x02 SEAM_FORMAT` `[scid 8 LE][codec][rate u32 LE][ch][bits][atype]`  (len 21)
+ *
+ * The magic exists because ocbmd replaces a seam producer on a re-SETUP **without draining the old
+ * one**, so this buffer can be holding half a message when the new producer's first bytes arrive. Before
+ * the magic the new `SEAM_KEY` landed mid-message and the lane desynced for the rest of the session.
+ * `OcbmProto.F_NEW_SOURCE` on the first frame of a new producer is the primary fix; the magic is the
+ * recovery when that flag is absent. A box build older than that date sends no magic at all, so the
+ * legacy `[u32 BE len][marker]` framing is detected once per seam and parsed as before.
  */
 class AudioSeam(
     private val mediaPipe: SeamPipe,
@@ -74,15 +82,40 @@ class AudioSeam(
     private val media = Buf()
     private val voice = Buf()
 
+    /** Which framing a seam speaks; latched from its first message and kept for the connection. */
+    private enum class Framing { UNKNOWN, MAGIC, LEGACY }
+
     private class Buf {
         var b = ByteArray(1 shl 16)
         var end = 0
         var start = 0
+        var framing = Framing.UNKNOWN
     }
+
+    private var loggedLegacy = false
 
     fun feedMedia(payload: ByteArray) = feed(media, payload)
 
     fun feedVoice(payload: ByteArray) = feed(voice, payload)
+
+    /**
+     * `OcbmProto.F_NEW_SOURCE`: the box accepted a new producer on this seam and dropped the previous
+     * one without draining it. Whatever partial message is buffered belongs to a producer that will
+     * never finish it — discard it BEFORE the new bytes are appended, or the new `SEAM_KEY` is parsed
+     * as the tail of a dead message. The latched framing is kept: it is a property of the box build.
+     */
+    @Synchronized
+    fun resetMedia() = reset(media)
+
+    @Synchronized
+    fun resetVoice() = reset(voice)
+
+    private fun reset(s: Buf) {
+        val held = s.end - s.start
+        s.start = 0
+        s.end = 0
+        if (held > 0) log.i("new seam producer — dropped $held B of the previous producer's partial message")
+    }
 
     @Synchronized
     private fun feed(
@@ -141,18 +174,145 @@ class AudioSeam(
         return v
     }
 
-    private fun drain(s: Buf) {
-        while (s.end - s.start >= 4) {
-            val mlen = be32(s.b, s.start)
-            // No magic on this seam, so an implausible length can only be resynced byte-wise.
-            if (mlen <= 0 || mlen > MAX_MESSAGE) {
-                s.start += 1
-                continue
+    private fun magicAt(
+        s: Buf,
+        off: Int,
+    ): Boolean =
+        off + 4 <= s.end &&
+            s.b[off] == SeamCrypto.SEAM_MAGIC[0] &&
+            s.b[off + 1] == SeamCrypto.SEAM_MAGIC[1] &&
+            s.b[off + 2] == SeamCrypto.SEAM_MAGIC[2] &&
+            s.b[off + 3] == SeamCrypto.SEAM_MAGIC[3]
+
+    /**
+     * Magic-framed message: `[len 4][magic 4][marker][…]`. Two of the three shapes are FIXED length, so
+     * "magic verified ⇒ mlen trustworthy" is structural, not probabilistic — after a resync the 4 bytes
+     * in front of the magic are whatever preceded it, and a false magic inside RTP ciphertext would
+     * otherwise declare a length that swallows every message after it. An unknown marker is rejected for
+     * the same reason.
+     */
+    private fun lengthPlausible(
+        s: Buf,
+        mlen: Int,
+    ): Boolean {
+        if (mlen < 5 || mlen > MAX_MESSAGE) return false
+        if (s.end - s.start < 9) return true // marker not buffered yet — can't judge; wait
+        return when (s.b[s.start + 8].toInt() and 0xFF) {
+            SeamCrypto.MARK_KEY -> mlen == 45
+            SeamCrypto.MARK_FORMAT -> mlen == 21
+            SeamCrypto.MARK_PKT -> mlen >= 4 + 1 + 8 + 36 // RTP hdr 12 + tag 16 + nonce 8 floor
+            else -> false
+        }
+    }
+
+    /** Legacy (pre-magic) shapes, used ONLY to decide once that a seam speaks the old framing. */
+    private fun legacyLengthPlausible(
+        s: Buf,
+        mlen: Int,
+    ): Boolean {
+        if (s.end - s.start < 5 || mlen < 1 || mlen > MAX_MESSAGE) return false
+        return when (s.b[s.start + 4].toInt() and 0xFF) {
+            SeamCrypto.MARK_KEY -> mlen == 41
+            SeamCrypto.MARK_FORMAT -> mlen == 17
+            SeamCrypto.MARK_PKT -> mlen >= 1 + 8 + 36
+            else -> false
+        }
+    }
+
+    /** Re-align on the next `SEAM_MAGIC`, leaving the cursor on its 4-byte length prefix. */
+    private fun resyncToMagic(s: Buf): Boolean {
+        var i = s.start + 5 // past the current (bad) position; i − 4 > start guarantees progress
+        while (i + 4 <= s.end) {
+            if (magicAt(s, i)) {
+                s.start = i - 4
+                return true
             }
-            if (s.end - s.start < 4 + mlen) return
-            handle(s.b, s.start + 4, mlen)
-            s.start += 4 + mlen
-            compact(s)
+            i++
+        }
+        if (s.end - s.start > 7) s.start = s.end - 7 // a magic could straddle the next feed
+        return false
+    }
+
+    /**
+     * Decide, once per seam, which framing it speaks. A magic-framed message can never be mistaken for
+     * a legacy one (its byte 4 is `'S'`, not a marker) and vice versa, so junk cannot latch the wrong
+     * framing — it byte-resyncs instead. Leaves `framing` UNKNOWN and `start` unmoved when there are not
+     * yet enough bytes to tell them apart.
+     */
+    private fun latchFraming(
+        s: Buf,
+        mlen: Int,
+    ) {
+        if (magicAt(s, s.start + 4)) {
+            s.framing = Framing.MAGIC
+            return
+        }
+        if (legacyLengthPlausible(s, mlen)) {
+            s.framing = Framing.LEGACY
+            if (!loggedLegacy) {
+                loggedLegacy = true
+                log.w(
+                    "legacy audio framing detected (no SEAM_MAGIC) — this box predates the " +
+                        "self-syncing audio seam; a re-SETUP on it can still desync the lane",
+                )
+            }
+            return
+        }
+        if (s.end - s.start >= 8) s.start += 1 // neither framing fits — byte-resync
+    }
+
+    /** One legacy `[len][marker][…]` message. False = need more bytes. */
+    private fun takeLegacy(
+        s: Buf,
+        mlen: Int,
+    ): Boolean {
+        if (mlen <= 0 || mlen > MAX_MESSAGE) {
+            s.start += 1
+            return true
+        }
+        if (s.end - s.start < 4 + mlen) return false
+        handle(s.b, s.start + 4, mlen)
+        s.start += 4 + mlen
+        compact(s)
+        return true
+    }
+
+    /** One `[len][SEAV][marker][…]` message, resyncing on the magic when the framing is torn. */
+    private fun takeMagic(
+        s: Buf,
+        mlen: Int,
+    ): Boolean {
+        if (s.end - s.start < 8) return false // need [len 4][magic 4]
+        if (!magicAt(s, s.start + 4) || !lengthPlausible(s, mlen)) return resyncToMagic(s)
+        if (s.end - s.start < 4 + mlen) return false // magic verified, so mlen is trustworthy
+        handle(s.b, s.start + 8, 4 + mlen - 8) // strip [len][magic] → [marker][payload]
+        s.start += 4 + mlen
+        compact(s)
+        return true
+    }
+
+    /**
+     * Three-way: `true` = framing known, take a message; `false` = byte-resynced, re-read the length;
+     * `null` = undecidable until more bytes arrive, stop draining.
+     */
+    private fun framingReady(
+        s: Buf,
+        mlen: Int,
+    ): Boolean? {
+        if (s.framing != Framing.UNKNOWN) return true
+        val before = s.start
+        latchFraming(s, mlen)
+        if (s.framing != Framing.UNKNOWN) return true
+        return if (s.start == before) null else false
+    }
+
+    private fun drain(s: Buf) {
+        while (s.end - s.start >= 5) { // [len 4][marker] is the smallest either framing can start with
+            val mlen = be32(s.b, s.start)
+            val ready = framingReady(s, mlen) ?: return
+            if (!ready) continue
+            val progressed = if (s.framing == Framing.LEGACY) takeLegacy(s, mlen) else takeMagic(s, mlen)
+            if (!progressed) return
         }
     }
 

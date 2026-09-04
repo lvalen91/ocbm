@@ -34,8 +34,16 @@ use std::time::{Duration, Instant};
 const BT_PHASE_FILE: &str = "/tmp/bt_phase";
 
 /// Best-effort: reporting must never perturb what it reports.
+///
+/// Temp-then-`rename` (ocbmd's `write_flag_atomic` idiom), not a bare `fs::write`: the file is
+/// polled by another process, and `fs::write` truncates before it writes — a poll landing in that
+/// window reads "" and parses as no phase at all. Rename is atomic, so a reader sees the previous
+/// phase or the new one. The pid keeps two writers off one temp name.
 pub(crate) fn publish_bt_phase(phase: u8) {
-    let _ = std::fs::write(BT_PHASE_FILE, phase.to_string());
+    let tmp = format!("{BT_PHASE_FILE}.tmp.{}", std::process::id());
+    if std::fs::write(&tmp, phase.to_string()).is_ok() && std::fs::rename(&tmp, BT_PHASE_FILE).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
 }
 
 /// Map the iAP2 handshake state onto the wire-visible phase. Deliberately coarse: the host uses it
@@ -50,15 +58,52 @@ fn phase_for(st: State) -> u8 {
     }
 }
 
+/// `@<unix_ms> ` write-time stamp (docs/carplay/01_OCBM_PROTOCOL.md CH_LOG): the box.log tailer
+/// parses this prefix and uses it instead of the millisecond it happened to READ the line at.
 fn log(m: &str) {
-    println!("[bt-driver] {m}");
+    println!("@{} [bt-driver] {m}", now_ms());
 }
 
-/// This Pi's `hci0` BD address. The reference's own comment on the equivalent constant: "lifted
-/// verbatim from the capture... cosmetic — any 6 bytes are accepted by iOS" (see docs/carplay/04_CAPABILITIES_AND_CONFIG.md) — the
-/// *presence* of param 17 is what's load-bearing, not this specific value, but using the real
-/// address costs nothing and avoids an arbitrary placeholder.
-const ACCESSORY_BT_MAC: [u8; 6] = [0xD8, 0x3A, 0xDD, 0x65, 0x6E, 0x03];
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Locally-administered (bit 1 of the first octet), all-zero body — assignable to no real device.
+/// Used only when this unit's own controller address cannot be read, so a box that does not know
+/// its address never claims another device's.
+const PLACEHOLDER_BT_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x00];
+
+/// This box's own controller BD address, read once from sysfs, for param 17 sub-param 3.
+///
+/// Was a compile-time constant holding one development Pi's address, so every unit in the fleet
+/// reported that Pi's address to the phone as its own. The value is cosmetic per
+/// docs/carplay/04_CAPABILITIES_AND_CONFIG.md — only the *presence* of param 17 is load-bearing —
+/// but a foreign device's real address must never go on the wire.
+fn accessory_bt_mac() -> [u8; 6] {
+    static MAC: std::sync::OnceLock<[u8; 6]> = std::sync::OnceLock::new();
+    *MAC.get_or_init(|| {
+        let path = format!("/sys/class/bluetooth/{}/address", crate::HCI_DEV);
+        match std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| crate::control::parse_addr(s.trim()))
+        {
+            // `parse_addr` yields mgmt little-endian; `build_ident_info` wants display order.
+            Some(mut a) => {
+                a.reverse();
+                a
+            }
+            None => {
+                log(&format!(
+                    "WARN {path} unreadable -- param 17 carries a placeholder BD address"
+                ));
+                PLACEHOLDER_BT_MAC
+            }
+        }
+    })
+}
 
 /// Write `data` fully to `w`, checking `should_abort` between attempts -- same discipline as the
 /// wired driver's `write_interruptible`, generic over `Write` for the same reason (unit-testable
@@ -111,7 +156,7 @@ fn session(mut sock: File, name: &str, shutdown: &AtomicBool) {
     // otherwise spin write_interruptible (1 s SO_SNDTIMEO + 50 ms sleep) until preempt. But the budget must
     // apply ONLY pre-Identify — `abort` is ALSO threaded into the post-Identify ACK / WiFi-config writes and
     // (originally) the loop-top check, and once Identify completes the RFCOMM iAP2 link is held open for the
-    // whole CarPlay-over-WiFi session. So gate the budget on `!identified_flag` (set below when Identify is
+    // whole CarPlay-over-WiFi session. So gate the budget on `!identified_flag` (set by `process_one` when Identify is
     // reached); shutdown always aborts. The loop-top check is shutdown-only; the read-side pre-Identify
     // budget stays its own explicit check in the loop.
     let identified_flag = AtomicBool::new(false);
@@ -188,12 +233,8 @@ fn session(mut sock: File, name: &str, shutdown: &AtomicBool) {
             log("shutdown requested -- closing RFCOMM session");
             break;
         }
-        let identified = st >= State::Identified;
-        if identified {
-            // Latch it so `abort` stops applying the handshake budget to the post-Identify writes.
-            identified_flag.store(true, Ordering::Relaxed);
-        }
-        if !identified && start.elapsed() >= budget {
+        // Latched by `process_one`'s Commit arm the moment Identify commits, not here.
+        if !identified_flag.load(Ordering::Relaxed) && start.elapsed() >= budget {
             log("handshake budget expired before Identify");
             break;
         }
@@ -208,7 +249,7 @@ fn session(mut sock: File, name: &str, shutdown: &AtomicBool) {
                 // complete frames and RETAINS the partial tail for the next read (the old code passed a
                 // fresh `&buf[..n]` each read, dropping any split frame + everything behind it).
                 acc.extend_from_slice(&buf[..n]);
-                if process(&mut acc, &mut link, &mut st, &mut sock, name, &abort) {
+                if process(&mut acc, &mut link, &mut st, &mut sock, name, &abort, &identified_flag) {
                     break; // Abort
                 }
             }
@@ -255,11 +296,11 @@ fn parse_transport_identifiers(payload: &[u8]) -> Vec<String> {
         if plen < 4 || i + plen > end {
             break;
         }
-        let s: String = payload[i + 4..i + plen]
-            .iter()
-            .take_while(|&&b| b != 0)
-            .map(|&b| b as char)
-            .collect();
+        // UTF-8, as the doc says: `b as char` decoded Latin-1, so any non-ASCII byte in a device
+        // name logged as a different character than the phone sent.
+        let raw = &payload[i + 4..i + plen];
+        let end_of_str = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+        let s = String::from_utf8_lossy(&raw[..end_of_str]);
         if !s.is_empty() {
             out.push(format!("param{pid}={s}"));
         }
@@ -279,13 +320,14 @@ fn process(
     sock: &mut File,
     name: &str,
     abort: &dyn Fn() -> bool,
+    identified: &AtomicBool,
 ) -> bool {
     let mut off = 0;
     while off < acc.len() {
         match link::packet_len(&acc[off..]) {
             // A complete valid-SOP frame at `off` -- dispatch it and advance past it.
             Some(plen) => {
-                if process_one(&acc[off..off + plen], link, st, sock, name, abort) {
+                if process_one(&acc[off..off + plen], link, st, sock, name, abort, identified) {
                     acc.drain(..off + plen); // drop everything consumed incl. the aborting frame
                     return true; // Abort propagates immediately
                 }
@@ -299,8 +341,15 @@ fn process(
             //      return None on it forever, wedging every real frame behind it (audit Fix #21, per the
             //      accessoryd DETECT trace). Skip one byte to resync to the next candidate SOP.
             None => {
+                // `packet_len` also returns None for a frame whose DECLARED length is below the 9-byte
+                // header minimum -- a corrupt length, not a partial frame. Treating that as (a) retains
+                // it forever: nothing is ACKed, the phone retransmits, and the accumulator only clears
+                // once it crosses MAX_REASSEMBLY, which can eat the 120 s pre-Identify budget. Check the
+                // declared length here so a corrupt head resyncs immediately instead.
                 let head_is_partial_frame = acc[off] == link::SOP1
-                    && (off + 1 >= acc.len() || acc[off + 1] == link::SOP2);
+                    && (off + 1 >= acc.len() || acc[off + 1] == link::SOP2)
+                    && (off + 4 > acc.len()
+                        || u16::from_be_bytes([acc[off + 2], acc[off + 3]]) as usize >= 9);
                 if head_is_partial_frame {
                     break; // (a) retain from `off` and wait for more bytes
                 }
@@ -330,6 +379,7 @@ fn process_one(
     sock: &mut File,
     name: &str,
     abort: &dyn Fn() -> bool,
+    identified: &AtomicBool,
 ) -> bool {
     let Some(rx) = link.parse(data) else {
         return false;
@@ -358,7 +408,16 @@ fn process_one(
     // phone can join wlan0. Intercepted here (not in iap2-core::state) to keep the shared wired state
     // machine untouched. Sent on the control session (1), like identify.
     if msg_id == spec::MSG_REQUEST_ACCESSORY_WI_FI_CONFIGURATION_INFORMATION {
-        let cfg = crate::wifi_handoff::read_hostapd_ap_config();
+        // No readable AP config means we cannot answer truthfully. Say nothing: the phone retries
+        // 0x5702 on its own (three times per handoff, av.rs), which is the path that recovers if
+        // hostapd comes up late. Replying with an invented SSID would send the phone off Bluetooth
+        // to join a network that does not exist, AND publish the handoff phase, spawn the A/V layer
+        // and claim /tmp/carplay_transport for a session that can never arrive — suppressing the
+        // wired supervisor with it.
+        let Some(cfg) = crate::wifi_handoff::read_hostapd_ap_config() else {
+            log("RX 0x5702 RequestAccessoryWiFiConfig -- no AP config readable; not replying");
+            return false;
+        };
         log(&format!(
             "RX 0x5702 RequestAccessoryWiFiConfig -> replying 0x5703 (ssid={:?} ch={:?} sec={:?})",
             cfg.ssid, cfg.channel, cfg.security_type
@@ -449,6 +508,13 @@ fn process_one(
     match execute(action, link, sock, name, abort) {
         ExecResult::Commit => {
             *st = next;
+            // Latch HERE, not at the next loop top, so `abort` stops applying the pre-Identify
+            // budget the instant Identify commits. IdentificationAccepted can arrive coalesced with
+            // a following frame, and the ACK for that following frame is written inside THIS
+            // `process` call -- at ~120 s the budget would still abort it.
+            if *st >= State::Identified {
+                identified.store(true, Ordering::Relaxed);
+            }
             publish_bt_phase(phase_for(*st));
             log(&format!("RX 0x{msg_id:04X} -> {st:?}"));
             false
@@ -467,8 +533,6 @@ enum ExecResult {
     Abort,
 }
 
-/// Execute a state-machine action. Mirrors `driver.rs::execute`, minus the USB-only call-control
-/// integration and metadata-server forwarding (out of scope for Phase A2 -- see docs/carplay/04_CAPABILITIES_AND_CONFIG.md).
 /// Retry a fallible local-MFi I2C op a few times before giving up (#210). The auth chip on `/dev/i2c-1`
 /// occasionally NAKs a transaction on a rapid reconnect (the observed 0xAA00 "action failed, state
 /// held"); an immediate retry succeeds. Retrying in-session keeps the handshake alive instead of
@@ -486,6 +550,8 @@ fn mfi_retry<T>(what: &str, mut op: impl FnMut() -> Option<T>) -> Option<T> {
     None
 }
 
+/// Execute a state-machine action. Mirrors `driver.rs::execute`, minus the USB-only call-control
+/// integration and metadata-server forwarding (out of scope for Phase A2 -- see docs/carplay/04_CAPABILITIES_AND_CONFIG.md).
 fn execute(
     action: Action,
     link: &mut Link,
@@ -530,7 +596,7 @@ fn execute(
             let ib = message::build_ident_info(
                 name,
                 message::TransportComponent::Wireless {
-                    bt_mac: ACCESSORY_BT_MAC,
+                    bt_mac: accessory_bt_mac(),
                 },
                 false,
             );
@@ -557,7 +623,7 @@ fn execute(
             let ib = message::build_ident_info_excluding(
                 name,
                 message::TransportComponent::Wireless {
-                    bt_mac: ACCESSORY_BT_MAC,
+                    bt_mac: accessory_bt_mac(),
                 },
                 false,
                 &excluded,
@@ -625,6 +691,36 @@ mod tests {
             std::io::Error::last_os_error()
         );
         unsafe { (File::from_raw_fd(fds[0]), File::from_raw_fd(fds[1])) }
+    }
+
+    /// A `FF 5A` head whose declared length is below the 9-byte minimum is corrupt, not partial:
+    /// retaining it wedges every later frame behind it until 8 KiB accumulate, which can eat the
+    /// 120 s pre-Identify budget.
+    #[test]
+    fn a_corrupt_length_frame_head_resyncs_instead_of_being_retained() {
+        let (mut sock, _peer) = pair();
+        let mut link = Link::new();
+        let mut st = State::Init;
+        let flag = AtomicBool::new(false);
+        let mut acc: Vec<u8> = vec![link::SOP1, link::SOP2, 0x00, 0x05, 1, 2, 3, 4, 5];
+        assert!(!process(&mut acc, &mut link, &mut st, &mut sock, "test", &|| false, &flag));
+        assert!(acc.is_empty(), "corrupt head retained: {acc:02X?}");
+
+        // A genuinely partial frame (declared length >= 9, bytes still arriving) is still retained.
+        let mut acc: Vec<u8> = vec![link::SOP1, link::SOP2, 0x00, 0x20, 1, 2, 3, 4, 5];
+        assert!(!process(&mut acc, &mut link, &mut st, &mut sock, "test", &|| false, &flag));
+        assert_eq!(acc.len(), 9, "partial frame must be retained");
+    }
+
+    /// param 17 must never carry a real foreign device's address: the fallback is locally
+    /// administered, and the sysfs read (display order) is converted back out of `parse_addr`'s
+    /// mgmt little-endian into the display order `build_ident_info` writes.
+    #[test]
+    fn accessory_bt_mac_is_this_units_own_address_or_a_locally_administered_placeholder() {
+        assert_eq!(PLACEHOLDER_BT_MAC[0] & 0x02, 0x02, "not locally administered");
+        let mut a = crate::control::parse_addr("11:22:33:44:55:66").unwrap();
+        a.reverse();
+        assert_eq!(a, [0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
     }
 
     fn count_syns(stream: &[u8]) -> usize {

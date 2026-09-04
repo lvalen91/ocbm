@@ -313,8 +313,10 @@ for every audio stream** on a modern iOS client — verified live, including typ
 
 **Forward-encrypted is the default and the committed model** (`levers::fwd_enc`, env `OCBM_FWD_ENC`;
 absent ⇒ true, and only an explicit `0`/`false`/`off`/empty selects the legacy on-box path). In this
-mode `spawn_audio` writes three message kinds to the sink, all length-prefixed `[u32 BE len][marker]`
-and all **scid-tagged** so concurrent streams sharing one sink cannot clobber each other:
+mode `spawn_audio` writes three message kinds to the sink, all length-prefixed `[u32 BE len][SEAM_MAGIC
+"SEAV" 4B][marker]` (magic added 2026-09-03, `len` counting it — same envelope shape as the video
+seams; see `../carplay/01_OCBM_PROTOCOL.md` for why) and all **scid-tagged** so concurrent streams
+sharing one sink cannot clobber each other:
 
 - `0x00 SEAM_KEY` — `[key 32][scid 8 LE]`
 - `0x02 SEAM_FORMAT` — `[scid 8 LE][codec][rate u32 LE][ch][bits][atype]`, codec `0 PCM · 1 AAC-LC ·

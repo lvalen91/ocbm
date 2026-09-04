@@ -77,11 +77,6 @@ pub struct VehicleConfig {
     pub audio: AudioConfig,
 }
 
-/// Apple `oemIconConfig` — the vehicle-maker's logo shown on the CarPlay home screen. Delivered in
-/// `/info` (`AirPlayReceiverServer.c` emits `oemIcons`/`oemIconLabel`/`oemIconVisible` inside the
-/// in-session guard). STATIC config — no runtime command exists in R14G17. The PNG rides base64 in the
-/// YAML (mac→box single-doc OCBM delivery has no separate asset channel); an empty `imageBase64` means
-/// no icon, and the whole `/info` block is then omitted (byte-identical for users who set none).
 /// One resolution of the OEM icon — a base64 PNG plus its pixel size.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct OemIconImage {
@@ -93,6 +88,11 @@ pub struct OemIconImage {
     pub height: i64,
 }
 
+/// Apple `oemIconConfig` — the vehicle-maker's logo shown on the CarPlay home screen. Delivered in
+/// `/info` (`AirPlayReceiverServer.c` emits `oemIcons`/`oemIconLabel`/`oemIconVisible` inside the
+/// in-session guard). STATIC config — no runtime command exists in R14G17. The PNG rides base64 in the
+/// YAML (mac→box single-doc OCBM delivery has no separate asset channel); an empty `imageBase64` means
+/// no icon, and the whole `/info` block is then omitted (byte-identical for users who set none).
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct OemIconConfig {
     /// Multi-resolution icon set. Apple's AppStub emits 120/180/256 ("for each required size"); iOS
@@ -116,8 +116,12 @@ pub struct OemIconConfig {
 }
 
 /// Decode standard base64 (RFC 4648, `+/` alphabet, optional `=` padding, whitespace ignored) to bytes.
-/// Dependency-free — the box crates avoid pulling a base64 dep for one small PNG. Returns empty on any
-/// invalid input (the caller then emits no icon, exactly the unconfigured behavior).
+/// Dependency-free — the box crates avoid pulling a base64 dep for one small PNG.
+///
+/// Deliberately LENIENT: it rejects only a byte outside the alphabet (returning empty, after which the
+/// caller emits no icon — exactly the unconfigured behavior). `=` is skipped wherever it appears, an
+/// input length not a multiple of 4 is accepted, and trailing bits are dropped. The app's own fixtures
+/// rely on that (`"iVBORw0KGgp="`), and a corrupt PNG is rejected by iOS rather than by the box.
 pub fn decode_base64(s: &str) -> Vec<u8> {
     fn val(c: u8) -> Option<u8> {
         match c {
@@ -198,7 +202,10 @@ pub struct AudioSubConfig {
 /// omitted/empty = output-only (no mic capture on that stream).
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct AudioFormatEntry {
-    #[serde(rename = "type")]
+    /// `#[serde(default)]` so a `formats[]` entry missing `type` does not fail the WHOLE document —
+    /// which is exactly what this file's per-leaf fallback policy forbids. A defaulted 0 is not in
+    /// `SERVEABLE_STREAM_TYPES`, so `to_spec` rejects that one entry, loudly and on its own.
+    #[serde(default, rename = "type")]
     pub stream_type: i64,
     #[serde(default, rename = "audioType")]
     pub audio_type: Option<String>,
@@ -520,7 +527,7 @@ pub struct AltVideoStream {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct VideoStreamConfig {
-    /// Negotiated max frame rate — iOS caps its encode at this (24/30/60). 0 = keep the box default.
+    /// Negotiated max frame rate — iOS caps its encode at this (30/60). 0 = keep the box default.
     #[serde(default, rename = "maxFPS")]
     pub max_fps: i64,
     #[serde(default, rename = "hidConfig")]
@@ -589,12 +596,12 @@ pub struct SafeRect {
 /// Apple `hidConfig` — which HID controls the accessory supports (mirrors the CarPlaySimulator
 /// VehicleConfig templates). `dPadSupport` gates the D-Pad HID device.
 ///
-/// ⚠️ We parse SEVEN of Apple's TWENTY-ONE `hidConfig` fields and act on THREE. The four added by
+/// ⚠️ We parse EIGHT of Apple's TWENTY-ONE `hidConfig` fields and act on FOUR. The four added by
 /// C-2 (`touchpadSupport`, `steeringWheelSupport`, `mediaButtonsSupport`, `touchScreenMode`) are
 /// PARSE-ONLY until C-7/C-8 derive the display-features word from them
-/// (`dPadSupport`, `knobSupport`, `telephonyButtonsSupport` — each arms its HID device via the
-/// matching `events::set_*_advertised` lever in airplayd's per-connection config apply). Apple's
-/// full set, read
+/// (`dPadSupport`, `knobSupport`, `telephonyButtonsSupport`, `touchScreenSupportsMultiTouch` — each
+/// arms its HID device via the matching `events::set_*_advertised` lever in airplayd's
+/// per-connection config apply). Apple's full set, read
 /// from `CarPlayConfigs.HIDConfig` in the Simulator binary (ivar offsets +0x18..+0x3d), is:
 /// `knobSupport`, `knobSupportsHomeAndBackButton`, `knobSupportsNudge`, `knobSupportsDPadNudgeFudge`,
 /// `knobFocusTransfer{Left,Right,Up,Down}`, `lockPTFocus`, `touchScreenMode`,
@@ -741,10 +748,12 @@ fn safe_area_inset(s: &SafeRect, panel_w: i64, panel_h: i64) -> Option<(i64, i64
     if s.width <= 0 || s.height <= 0 {
         return None;
     }
+    // `saturating_add`, not `+`: `originX: 9223372036854775807` in host YAML overflows — a panic under
+    // debug assertions (tests, dev builds) and a silent wrap in the box's release profile.
     let covers_full = s.origin_x <= 0
         && s.origin_y <= 0
-        && s.origin_x + s.width >= panel_w
-        && s.origin_y + s.height >= panel_h;
+        && s.origin_x.saturating_add(s.width) >= panel_w
+        && s.origin_y.saturating_add(s.height) >= panel_h;
     if covers_full {
         None
     } else {
@@ -772,7 +781,7 @@ impl VehicleConfig {
             base.display_width = d.width;
             base.display_height = d.height;
         }
-        // maxFPS (24/30/60) — iOS caps encode at this. 0 / out-of-range keeps the box default.
+        // maxFPS (30/60) — iOS caps encode at this. 0 / out-of-range keeps the box default.
         let fps = self.video_streams_config.main_video_stream.max_fps;
         // 30 | 60 only. 24 REMOVED 2026-07-30: `CarPlayConfigs.FramesPerSecond` (Simulator
         // @0x10026a9ac) has exactly two cases — rawValue "30" and "60" — and R14G17
@@ -819,7 +828,7 @@ impl VehicleConfig {
             base.audio_formats = specs;
         }
         // Alt-stream maxFPS — previously parsed and dropped (the alt display inherited the MAIN
-        // stream's FPS regardless of what the YAML asked for). Same 24/30/60 validation as the main
+        // stream's FPS regardless of what the YAML asked for). Same 30/60 validation as the main
         // stream; anything else leaves 0 = inherit.
         if let Some(a) = self.video_streams_config.alt_video_streams.first() {
             if [30, 60].contains(&a.max_fps) {
@@ -923,6 +932,7 @@ impl VehicleConfig {
     ///   * our own SYN advertises `MaxRcvPacketLength = 0x1000` -> body <= 4080, and with the name in
     ///     all four TLV positions the Identify grows 4 B per character, so the MTU alone allows ~901.
     ///   * the DNS-SD instance label maxes at 63 bytes (`rx-connect` publishes the name as one).
+    ///
     /// 63 is therefore the BINDING constraint and is comfortably inside every iAP2 ceiling — the
     /// field comment above, which reads as though 63 fails to cover the iAP2 params, understates it.
     ///
@@ -937,13 +947,16 @@ impl VehicleConfig {
     /// char-based cap would be wrong for non-ASCII and a naive byte cut would emit invalid UTF-8.
     pub fn accessory_name_bounded(&self) -> Option<String> {
         const MAX_NAME_BYTES: usize = 63;
-        let raw = self.accessory_name.as_deref()?.trim();
+        let raw = self.accessory_name.as_deref()?;
         // Cc controls would be rejected at the YAML stream level, but this is the box's own defence:
         // the app's stripping is courtesy, and a config can reach here from somewhere else.
+        // Strip controls BEFORE trimming, not after: `"\x01 Name"` trims to itself (a control is not
+        // whitespace), and filtering then left the leading space behind.
         let cleaned: String = raw.chars().filter(|c| !c.is_control()).collect();
+        let cleaned = cleaned.trim();
         let out = match cleaned.char_indices().find(|(i, c)| i + c.len_utf8() > MAX_NAME_BYTES) {
             Some((cut, _)) => cleaned[..cut].to_string(),
-            None => cleaned,
+            None => cleaned.to_string(),
         };
         (!out.is_empty()).then_some(out)
     }
@@ -987,8 +1000,6 @@ impl VehicleConfig {
             .dpad_support
     }
 
-    /// Whether the host YAML asks for the rotary Knob HID device (Apple `hidConfig.knobSupport`).
-    /// Drives the `CARPLAY_KNOB` lever (the uid-4 device — the Simulator's real navigation device).
     /// `hidConfig.touchScreenSupportsMultiTouch` — advertise Apple's two-finger touchscreen.
     pub fn multi_touch_support(&self) -> bool {
         self.video_streams_config
@@ -997,6 +1008,8 @@ impl VehicleConfig {
             .touch_screen_supports_multi_touch
     }
 
+    /// Whether the host YAML asks for the rotary Knob HID device (Apple `hidConfig.knobSupport`).
+    /// Drives the `CARPLAY_KNOB` lever (the uid-4 device — the Simulator's real navigation device).
     pub fn knob_support(&self) -> bool {
         self.video_streams_config
             .main_video_stream
@@ -1442,13 +1455,10 @@ displayPanelsConfig:
     /// The app's real emitted document, generated by `tools/regen_app_yaml_fixture.py`.
     /// Shared by the drift guard and the key-inventory guard below.
     const APP_EMITTED_DOCUMENT: &str = r#"name: "CarLink Widescreen"
-version: 1
 wireless: true
 hot_handover: false
 pairing: just_works
 android_auto: true
-rightHandDrive: false
-nightMode: false
 displayPanelsConfig:
   mainDisplayPanel:
     displayPanelID: DisplayPanel.Main
@@ -1492,6 +1502,7 @@ videoStreamsConfig:
       touchpadButtonsSupport: false
       touchScreenMode: High Fidelty
       touchScreenSupportsCancel: true
+      touchScreenSupportsMultiTouch: false
       steeringWheelSupport: true
     primaryInput: Touchpad
   altVideoStreams:
@@ -1803,6 +1814,25 @@ metadata:
         let got = name(&format!("accessoryName: \"{emoji}\"\n")).unwrap();
         assert_eq!(got.chars().count(), 15, "the straddling 4-byte char is dropped entirely");
         assert_eq!(got.len(), 60);
+
+        // Controls are stripped BEFORE the trim: a control is not whitespace, so trimming first left
+        // the space it was hiding behind in the result.
+        assert_eq!(name("accessoryName: \"\\u0001 CarLink \"\n").as_deref(), Some("CarLink"));
+        assert_eq!(name("accessoryName: \"\\u0001\\u0002\"\n"), None, "controls-only is not a name");
+    }
+
+    /// A bad leaf must never fail the whole document — the policy this file states for resolution,
+    /// HEVC, `appDrivenSetup` and the metadata tier. A `formats[]` entry missing `type` used to be a
+    /// serde "missing field" error, i.e. a whole-document failure that reverted EVERY key.
+    #[test]
+    fn a_formats_entry_missing_type_loses_only_that_entry() {
+        let y = "audio:\n  formats:\n\
+                 \x20 - {audioType: media, out: aac_lc_48k_stereo}\n\
+                 \x20 - {type: 102, audioType: media, out: aac_lc_48k_stereo}\n";
+        let cfg = VehicleConfig::from_yaml(y.as_bytes()).expect("document still parses");
+        let dev = cfg.apply(base());
+        let types: Vec<i64> = dev.audio_formats.iter().map(|f| f.stream_type).collect();
+        assert_eq!(types, vec![102], "the typeless entry is rejected on its own, by SERVEABLE_STREAM_TYPES");
     }
 
     /// EVERY key the app emits must be a CONSCIOUS decision — parsed by someone, or knowingly
@@ -1822,6 +1852,7 @@ metadata:
     /// new name in. Decide which list it belongs in and say why:
     ///   * parse it — add a field to the relevant struct here, or in `iap2-core::config`;
     ///   * or add it to `EMITTED_BUT_UNREAD` with a comment naming what will read it and when.
+    ///
     /// The config document has THREE independent consumers — this crate, `iap2-core` (metadata +
     /// iapConfig), and `tools/session_supervisor.sh` via `cfg_value` — and no single place knows
     /// the union, which is precisely why the gaps went unseen.
@@ -1855,11 +1886,10 @@ metadata:
             "videoStreamID",
             // Documented as unparsed: the cluster URL rides showUI at runtime instead (docs/carplay/03_SDK_GROUND_TRUTH.md §5).
             "initialURL",
-            // These two READ LIKE REAL SETTINGS and are worth a decision rather than an entry here:
-            // `nightMode` is driven at runtime by /command setNightMode, so the YAML key is
-            // plausibly vestigial — but nothing says so. `rightHandDrive` has no consumer at all.
-            "nightMode",
-            "rightHandDrive",
+            // `nightMode` (driven at runtime by /command setNightMode instead) and `rightHandDrive`
+            // (no consumer at all) were DROPPED from the app's emitted document 2026-09-02
+            // (verify_06 10, owner decision (c)) — no longer emitted, so no longer listed here.
+            // `version` (schema version marker, never read) was dropped the same way.
         ];
 
         /// Emitted for a consumer OUTSIDE this crate. Not a gap.
@@ -1867,7 +1897,6 @@ metadata:
             "android_auto", // tools/session_supervisor.sh — aa_enabled(): gates arming the AA bridge
             "hot_handover", // tools/session_supervisor.sh — gates the wired/wireless preempt
             "pairing",      // tools/session_supervisor.sh — SSP association model
-            "version",      // schema version marker
         ];
 
         /// The COMPLETE inventory of keys the app emits. Asserting the exact set (not a
@@ -1925,7 +1954,6 @@ metadata:
             "metadata",
             "musicLists",
             "name",
-            "nightMode",
             "nonMusicLists",
             "oemIconConfig",
             "originX",
@@ -1935,7 +1963,6 @@ metadata:
             "pairing",
             "pixelDimensions",
             "primaryInput",
-            "rightHandDrive",
             "safeArea",
             "skip",
             "softKeyboard",
@@ -1946,10 +1973,10 @@ metadata:
             "tier",
             "touchScreenMode",
             "touchScreenSupportsCancel",
+            "touchScreenSupportsMultiTouch",
             "touchpadButtonsSupport",
             "touchpadSupport",
             "type",
-            "version",
             "videoStreamID",
             "videoStreamsConfig",
             "viewArea",

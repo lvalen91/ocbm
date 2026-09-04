@@ -47,14 +47,62 @@ use std::sync::{Arc, Mutex};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
+/// `@<unix_ms> ` write-time stamp (docs/carplay/01_OCBM_PROTOCOL.md CH_LOG): the box.log tailer
+/// parses this prefix and uses it instead of the millisecond it happened to READ the line at.
 fn log(m: &str) {
-    println!("[iap-tunnel] {m}");
+    println!("@{} [iap-tunnel] {m}", now_ms());
 }
 
-/// Same physical BT MAC `bt_driver.rs::ACCESSORY_BT_MAC` uses — kept identical for identity
-/// continuity across the BT-time and tunnel Identifies (the value itself is cosmetic per docs/carplay/04_CAPABILITIES_AND_CONFIG.md;
-/// only its presence in param 17 is load-bearing).
-const ACCESSORY_BT_MAC: [u8; 6] = [0xD8, 0x3A, 0xDD, 0x65, 0x6E, 0x03];
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Locally-administered (bit 1 of the first octet), all-zero body — assignable to no real device.
+/// Used only when this unit's own controller address cannot be read, so a box that does not know
+/// its address never claims another device's.
+const PLACEHOLDER_BT_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x00];
+
+/// This box's own controller BD address for param 17 sub-param 3, read once from sysfs — the same
+/// source and fallback `wireless::bt_driver::accessory_bt_mac` uses, duplicated because the two
+/// crates share no dependency that could hold one copy.
+///
+/// Was a compile-time constant holding one development Pi's address, so every unit reported that
+/// Pi's address to the phone as its own. The value is cosmetic per
+/// docs/carplay/04_CAPABILITIES_AND_CONFIG.md — only the *presence* of param 17 is load-bearing —
+/// but a foreign device's real address must never go on the wire.
+fn accessory_bt_mac() -> [u8; 6] {
+    static MAC: std::sync::OnceLock<[u8; 6]> = std::sync::OnceLock::new();
+    *MAC.get_or_init(|| {
+        const PATH: &str = "/sys/class/bluetooth/hci0/address";
+        std::fs::read_to_string(PATH)
+            .ok()
+            .and_then(|s| parse_bd_addr(s.trim()))
+            .unwrap_or_else(|| {
+                log(&format!(
+                    "WARN {PATH} unreadable -- param 17 carries a placeholder BD address"
+                ));
+                PLACEHOLDER_BT_MAC
+            })
+    })
+}
+
+/// `XX:XX:XX:XX:XX:XX` (sysfs display order) -> the six bytes in that same order, which is the
+/// order `build_ident_info` writes them in. Accepts `:` or `-`, any case.
+fn parse_bd_addr(s: &str) -> Option<[u8; 6]> {
+    let mut out = [0u8; 6];
+    let mut n = 0usize;
+    for p in s.split(['-', ':']) {
+        if n == 6 {
+            return None;
+        }
+        out[n] = u8::from_str_radix(p, 16).ok()?;
+        n += 1;
+    }
+    (n == 6).then_some(out)
+}
 
 /// Pre-Identify handshake budget. `bt_driver.rs` (120 s) and `iap2d` both bound their handshakes; this
 /// module originally had no timer at all. Past this budget, a pre-Identify session in ANY state is
@@ -744,7 +792,7 @@ fn execute(action: Action, link: &mut Link) -> ExecOutcome {
             let ib = message::build_ident_info(
                 "CarLink",
                 message::TransportComponent::AirPlayTunnel {
-                    bt_mac: ACCESSORY_BT_MAC,
+                    bt_mac: accessory_bt_mac(),
                 },
                 false,
             );
@@ -767,7 +815,7 @@ fn execute(action: Action, link: &mut Link) -> ExecOutcome {
             let ib = message::build_ident_info_excluding(
                 "CarLink",
                 message::TransportComponent::AirPlayTunnel {
-                    bt_mac: ACCESSORY_BT_MAC,
+                    bt_mac: accessory_bt_mac(),
                 },
                 false,
                 &excluded,
@@ -806,6 +854,23 @@ fn execute(action: Action, link: &mut Link) -> ExecOutcome {
         // Identified `handle_inbound` returns `false` before ever calling `execute` — kept exhaustive
         // for the match, not because this path fires.
         Action::NowPlaying(_) | Action::RouteGuidance(_) | Action::Maneuver(_) => ExecOutcome::Commit,
+    }
+}
+
+#[cfg(test)]
+mod bt_mac_tests {
+    use super::*;
+
+    /// param 17 must never carry a real foreign device's address: sysfs display order is preserved
+    /// byte-for-byte, and an unreadable controller yields a locally-administered placeholder.
+    #[test]
+    fn bd_addr_parses_in_display_order_and_falls_back_locally_administered() {
+        assert_eq!(parse_bd_addr("11:22:33:44:55:66"), Some([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]));
+        assert_eq!(parse_bd_addr("aa-bb-cc-dd-ee-ff"), Some([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]));
+        assert_eq!(parse_bd_addr("11:22:33:44:55"), None);
+        assert_eq!(parse_bd_addr("11:22:33:44:55:66:77"), None);
+        assert_eq!(parse_bd_addr(""), None);
+        assert_eq!(PLACEHOLDER_BT_MAC[0] & 0x02, 0x02, "not locally administered");
     }
 }
 

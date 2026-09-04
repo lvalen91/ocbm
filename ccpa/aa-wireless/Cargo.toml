@@ -1,0 +1,25 @@
+[package]
+name = "aa-wireless"
+version = "0.1.0"
+edition = "2021"
+description = "Wireless Android Auto: the Bluetooth bootstrap that hands the phone an AP and a TCP endpoint, after which the ordinary AA session runs over it. A library linked into carplay-wireless. See docs/androidauto/03_WIRELESS.md."
+
+# A LIBRARY, not a daemon — see src/lib.rs for why it cannot be one (L2CAP PSM 0x0001 is exclusive,
+# and the stock box serves both projection protocols from a single Bluetooth identity, telling them
+# apart by RFCOMM channel). Consumed by `carplay-wireless`, which owns the radio.
+#
+# Unrelated to `aa-bridge`, which stays its own binary: wired AOAP is a genuinely independent path
+# and it ships.
+
+[lib]
+name = "aa_wireless"
+path = "src/lib.rs"
+
+[dependencies]
+# The projection-owner flag, so wireless AA folds into the same first-come-wins model as every other
+# transport rather than becoming a parallel one.
+box-common = { path = "../../crates/box-common" }
+
+# NOTE: deliberately no bt-common dependency. This crate owns no sockets, no radio and no lifecycle
+# — the Bluetooth half lives in carplay-wireless, which already depends on bt-common. Keeping that
+# edge out means the bootstrap stays transport-free and host-testable.

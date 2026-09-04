@@ -42,6 +42,7 @@ pub fn touch_report_normalized(buttons: u8, nx: f64, ny: f64, width: u16, height
 /// Both contacts ride ONE report because the descriptor declares two `Finger` collections in a
 /// single input report. A caller therefore cannot emit fingers independently: it must hold the state
 /// of both and re-send the pair whenever either changes.
+#[allow(clippy::too_many_arguments)]
 pub fn touch_report_multi(
     transducer1: u8,
     buttons1: u8,

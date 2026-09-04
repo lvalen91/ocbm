@@ -52,7 +52,9 @@ serde_yaml = "0.9"
 # isn't available there)". That is no longer true. The Raspberry Pi / AAOS port builds airplayd WITH
 # this feature against a cross-built libfdk-aac (pi/tools/build_fdk_aac_arm64.sh), because without
 # it iOS negotiates the AAC-ELD mic uplink and receives silence — Siri hears nothing and calls are
-# one-way. Still absent on the armv7-musl CCPA build, which is what the gate is for.
+# one-way. CORRECTED 2026-09-01: the armv7-musl CCPA build carries it too — `ccpa/airplayd` has it
+# default-on and `build.sh` cross-builds armv7 with FDK_AAC_PREFIX defaulted; the gate is for builds
+# with no fdk-aac prefix available at all (build.sh's "skip airplayd" branch).
 default = ["mic-uplink", "local-mfi"]
 mic-uplink = []
 # Direct MFi chip access over /dev/i2c-1. ON for box targets, OFF for the Android app. Consumers that

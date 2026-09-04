@@ -6,9 +6,10 @@
 //! crate's simplified proof is wire-incompatible); the LTPK exchange + key derivation reuse
 //! [`crate::crypto`].
 //!
-//! ⚠ SRP wire-compatibility with the iPhone's client is the single thing **not** provable offline
-//! (we have no captured pair-setup). It is confirmed at the live cutover; this module's tests prove
-//! internal consistency (srp-client ↔ srp-server + the LTPK exchange round-trip).
+//! SRP wire-compatibility with the iPhone's client was the one thing not provable offline; it has
+//! since been validated against a real iPhone (see the `H(g)` note in [`crate::srp`]). This module's
+//! tests still prove only internal consistency (srp-client ↔ srp-server + the LTPK exchange
+//! round-trip) — the live evidence is not reproducible from the tree.
 //!
 //! Flow: in `M1{State=1,Method}` → out `M2{State=2,Salt,PublicKey=B}`; in
 //! `M3{State=3,PublicKey=A,Proof=M1}` → out `M4{State=4,Proof=M2}`; in
@@ -126,7 +127,7 @@ impl<'a> PairSetupServer<'a> {
         }
         let mut salt = [0u8; 16];
         getrandom::getrandom(&mut salt).map_err(|_| SetupError::Srp)?;
-        let server = SrpServer::new(USERNAME, &self.setup_code, &salt);
+        let server = SrpServer::new(USERNAME, &self.setup_code, &salt).ok_or(SetupError::Srp)?;
         let b_pub = server.b_pub();
         self.srp = Some(server);
         self.state = 2;

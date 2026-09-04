@@ -9,5 +9,5 @@ export PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH
 sleep 2
 while [ ! -e /dev/usb_accessory ]; do sleep 1; done
 while pgrep -f /usr/sbin/ocbmd >/dev/null 2>&1; do sleep 3; done
-echo "[respawn] ocbmd down -> relaunching (init)" >> /tmp/ocbmd.log
-exec /usr/sbin/ocbmd >> /tmp/ocbmd.log 2>&1
+echo "[respawn] ocbmd down -> relaunching (init)" >> /tmp/box.log
+exec /usr/sbin/ocbmd >> /tmp/box.log 2>&1

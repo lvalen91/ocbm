@@ -6,6 +6,22 @@
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin:/tmp/bin:$PATH
 KO=/lib/firmware/nxp/iw416_ko.tar.gz
 
+# S11: take the SAME lock radio_hal.sh uses for this subsystem (/tmp/.radio_lock_wlan), mirroring
+# its mkdir test-and-set + PID-liveness reclaim idiom (radio_hal.sh:84-99), so this path and
+# radio_hal.sh wifi_ap_on never both invoke the vendor start_bluetooth_wifi.sh at once.
+_wl_lk=/tmp/.radio_lock_wlan
+while ! mkdir "$_wl_lk" 2>/dev/null; do
+	_wl_holder=$(cat "$_wl_lk/pid" 2>/dev/null)
+	if [ -n "$_wl_holder" ] && [ ! -d "/proc/$_wl_holder" ]; then
+		rm -rf "$_wl_lk"; continue
+	fi
+	echo "[wlan_on] radio lock held by pid=${_wl_holder:-unknown} - refusing to stack AP bring-up" >> /tmp/box.log
+	exit 1
+done
+echo $$ > "$_wl_lk/pid" 2>/dev/null
+trap 'rm -rf "$_wl_lk" 2>/dev/null' EXIT
+trap 'rm -rf "$_wl_lk" 2>/dev/null; trap - EXIT; exit 143' INT TERM HUP
+
 # device-unique name: last 2 octets of WiFi MAC (fallback: last 4 hex of serial)
 ID=$(set_wifi_mac 2>/dev/null | grep -oE '([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}' | head -1)
 SUF=$(echo "$ID" | sed 's/.*\(..\):\(..\)$/\1\2/' | tr 'A-F' 'a-f')

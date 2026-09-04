@@ -3,39 +3,6 @@ import AVFAudio
 import os
 import Synchronization
 
-// MARK: - Audio Decode Types
-//
-// Relocated from the deleted Protocol/MessageTypes.swift: AudioPlayer is the only live user
-// (it pre-warms one player node per rate×channel combo from `allCases`).
-enum AudioDecodeType: UInt32, Sendable, CaseIterable {
-    case media48kAlt = 1   // 48000Hz stereo (alternate media)
-    case mediaCtrl   = 2   // 48000Hz stereo (stop/cleanup signals — carries commands, not PCM)
-    case voice8k     = 3   // 8000Hz mono (AA phone calls, WebRTC AECM compatible)
-    case media48k    = 4   // 48000Hz stereo (primary CarPlay media output)
-    case voice16k    = 5   // 16000Hz mono (Siri/voice assistant)
-    case voice24k    = 6   // 24000Hz mono (enhanced voice/alerts)
-    case voice16kStereo = 7 // 16000Hz stereo
-
-    var sampleRate: Double {
-        switch self {
-        case .media48kAlt: return 48000
-        case .mediaCtrl:   return 48000
-        case .voice8k:     return 8000
-        case .media48k:    return 48000
-        case .voice16k:    return 16000
-        case .voice24k:    return 24000
-        case .voice16kStereo: return 16000
-        }
-    }
-
-    var channels: UInt32 {
-        switch self {
-        case .media48kAlt, .mediaCtrl, .media48k, .voice16kStereo: return 2
-        case .voice8k, .voice16k, .voice24k:                       return 1
-        }
-    }
-}
-
 /// Dual-stream audio player (media + navigation) with volume ducking.
 /// Uses AVAudioEngine with two AVAudioPlayerNode instances.
 ///
@@ -99,6 +66,12 @@ final class AudioPlayer: @unchecked Sendable {
         /// quiet-period deadline and whether the restore watcher is alive.
         var isVoiceDucking = false
         var voiceDeadlineNs: UInt64 = 0
+        /// L1: was a bare unsynchronized `var`, written from the main actor (AppDelegate at session
+        /// setup) and read from `engineQueue` (`feedPCM`, `scheduleBounded`). Moved into the Mutex
+        /// alongside the rest of the bookkeeping state instead of an injected `let`, so the existing
+        /// `audio.anomalyLog = ...` call site in AppDelegate.swift (outside this file's ownership)
+        /// keeps compiling unchanged.
+        var anomalyLog: AVAnomalyLog?
     }
 
     /// Nav/voice ducking level: media plays at this gain while voice audio is AUDIBLE. The SDK's
@@ -128,7 +101,12 @@ final class AudioPlayer: @unchecked Sendable {
     ///     = 1000 ms; structures sized to ~4 s). Forcing it through the old uniform 150 ms cap starved the
     ///     node ~200 ms every ~750 ms — the media-audio stutter (Siri/telephony were clean; only Apple
     ///     Music chopped; 1062 underruns / 10 min on hardware).
-    private static let voiceMaxQueuedSeconds = 0.150
+    /// 2026-09-04: 150 → 250 ms. Android Auto guidance/Assistant at 48 kHz arrives as 4096 B packets
+    /// of 42.7 ms (128 ms at the old 16 kHz declaration), and the phone opens each prompt with a
+    /// burst of three; at 150 ms that burst dropped the two newest packets on every AUDIO START
+    /// (measured: "backlog over 150ms — dropped 2 packet(s)" at each prompt). CarPlay Siri and
+    /// telephony never queue past ~100 ms, so they keep their arrival-paced behaviour.
+    private static let voiceMaxQueuedSeconds = 0.250
     private static let mediaMaxQueuedSeconds = 1.0
     /// MEDIA pre-roll. A deep cap ALONE does nothing: an AVAudioPlayerNode drains as fast as it fills, so
     /// under net-realtime delivery the queue settles at ~0 and starves every burst-pause regardless of the
@@ -139,6 +117,12 @@ final class AudioPlayer: @unchecked Sendable {
     /// ≤250 ms burst deficit with margin and is imperceptible for music (no lip-sync to the real-time UI
     /// video, which stays immediate-drop). Voice is NEVER pre-rolled.
     private static let mediaPrerollSeconds = 0.4
+    /// TELEPHONY pre-roll (AA HFP calls over the plain seam, 2026-09-04): the box forwards each 20 ms SCO
+    /// frame as it lands, so arrival-paced scheduling ran the 8 kHz voice node dry once every ~3 s
+    /// (measured: one-packet "playback underrun" at that cadence on the first live call). Three frames
+    /// of cushion absorbs the SCO/USB jitter and is still well under the HFP round-trip budget. Voice
+    /// audio from CarPlay keeps its zero-cushion, arrival-paced delivery (that class was clean).
+    static let telephonyPrerollSeconds = 0.06
     private struct BacklogState {
         /// Seconds of scheduled-but-not-yet-consumed audio, per player node.
         var queuedSeconds: [ObjectIdentifier: Double] = [:]
@@ -159,6 +143,11 @@ final class AudioPlayer: @unchecked Sendable {
         /// inserts it on crossing. The staging buffers themselves live in engineQueue-only plain properties
         /// (`mediaStaging`/`mediaStagedSeconds`) so the non-Sendable AVAudioPCMBuffers never cross this mutex.
         var mediaPrimed: Set<ObjectIdentifier> = []
+        /// L2: bumped by `stop()`/`handleConfigurationChange()`. A `.dataConsumed` handler captures the
+        /// generation at schedule time; if it differs when the handler fires, every buffer flushed by
+        /// that stop/restart is stale and must not re-arm `emptySinceNs` — otherwise a start() + first
+        /// packet within 300 ms logs a false "playback underrun" against a node that never actually ran.
+        var generation: UInt64 = 0
     }
     private let backlog = Mutex(BacklogState())
 
@@ -176,36 +165,25 @@ final class AudioPlayer: @unchecked Sendable {
     /// eventually dropped unplayed; the age-out bounds the hold and flushes a slow trickle instead of
     /// stranding it. engineQueue-only, like the staging maps.
     private var mediaStageStartNs: [ObjectIdentifier: UInt64] = [:]
+    /// L3: age-out timer per media node, armed when its priming batch starts, so a batch that never
+    /// reaches `mediaPrerollSeconds` of staged audio (packets slow down or stop mid-prime) still
+    /// releases at the wall-clock age-out instead of waiting for the next packet arrival to check it.
+    /// engineQueue-only, like the staging maps.
+    private var mediaAgeOutTimers: [ObjectIdentifier: DispatchSourceTimer] = [:]
 
     /// A3: (rate, channels) combos outside the pre-warm matrix we have already complained about —
     /// the 48k/2ch fallback still plays (graceful degradation) but pitch-shifted, so say so once.
     private let offCatalogLogged = Mutex(Set<PCMKey>())
-
-    /// One immutable AVAudioFormat per decode type — feedAudio runs per
-    /// packet, and allocating a format (plus ObjC isEqual compares) per
-    /// packet was measurable churn. AVAudioFormat is immutable after init.
-    private static let formatCache: [UInt32: AVAudioFormat] = {
-        var cache: [UInt32: AVAudioFormat] = [:]
-        for decodeType in AudioDecodeType.allCases {
-            cache[decodeType.rawValue] = AVAudioFormat(
-                commonFormat: .pcmFormatInt16,
-                sampleRate: decodeType.sampleRate,
-                channels: AVAudioChannelCount(decodeType.channels),
-                interleaved: true
-            )!
-        }
-        return cache
-    }()
-    private static let fallbackFormat = AVAudioFormat(
-        commonFormat: .pcmFormatInt16, sampleRate: 48000, channels: 2, interleaved: true
-    )!
 
     private var configChangeObserver: NSObjectProtocol?
 
     /// Stream-performance monitor's shared anomaly log (set by AppDelegate at session setup, before any
     /// audio flows). AudioPlayer only computes the per-buffer numbers + underrun signal and hands them to
     /// this IOKit-free sink; all silence/click/clip decisions + debounce live there. nil = no monitor.
-    var anomalyLog: AVAnomalyLog?
+    var anomalyLog: AVAnomalyLog? {
+        get { state.withLock { $0.anomalyLog } }
+        set { state.withLock { $0.anomalyLog = newValue } }
+    }
 
     init() {
         engineQueue.sync { setupEngine() }
@@ -242,8 +220,10 @@ final class AudioPlayer: @unchecked Sendable {
                 $0.queuedSeconds.removeAll()
                 $0.emptySinceNs.removeAll()
                 $0.mediaPrimed.removeAll()
+                $0.generation &+= 1   // L2: invalidate in-flight .dataConsumed handlers from before this restart
             }
             mediaStaging.removeAll(); mediaStagedSeconds.removeAll(); mediaStageStartNs.removeAll()  // engineQueue-only
+            for t in mediaAgeOutTimers.values { t.cancel() }; mediaAgeOutTimers.removeAll()  // L3
             // audit A3: a stop/restart landing mid-duck must not leave media at voiceDuckLevel until the
             // 1.5 s watcher expires — reset the duck state + mixer here so a fresh session starts at unity.
             state.withLock { $0.isVoiceDucking = false; $0.voiceDeadlineNs = 0 }
@@ -252,9 +232,24 @@ final class AudioPlayer: @unchecked Sendable {
                 try engine.start()
                 try mediaPlayer.playAudio()
                 try navPlayer.playAudio()
-                playPrewarmed()
+                playPrewarmed(force: true)
             } catch {
                 Self.logger.error("Engine restart after configuration change failed: \(error.localizedDescription, privacy: .public)")
+                // L4: leave the door open for recovery instead of a terminal state — one bounded retry
+                // after 500 ms (transient output-device absence). A further failure just logs again on
+                // the next configuration-change notification, same as today.
+                self.engineQueue.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                    guard let self, self.state.withLock({ $0.isStarted }) else { return }
+                    do {
+                        try self.engine.start()
+                        try self.mediaPlayer.playAudio()
+                        try self.navPlayer.playAudio()
+                        self.playPrewarmed(force: true)
+                        Self.logger.info("Engine restart retry succeeded")
+                    } catch {
+                        Self.logger.error("Engine restart retry failed: \(error.localizedDescription, privacy: .public)")
+                    }
+                }
             }
         }
     }
@@ -269,8 +264,11 @@ final class AudioPlayer: @unchecked Sendable {
         engine.attach(navMixer)
 
         // Default formats — will reconnect on first audio if different
-        let defaultMedia = Self.formatCache[AudioDecodeType.media48k.rawValue] ?? Self.fallbackFormat
-        let defaultNav = Self.formatCache[AudioDecodeType.voice16k.rawValue] ?? Self.fallbackFormat
+        // L6: defaults come straight from pcmFormatCache (48k/2ch media, 16k/1ch voice) — both keys are
+        // guaranteed present (rates/channels drawn from the same catalog that builds the cache below),
+        // so the dead separate formatCache/fallbackFormat pair is gone.
+        let defaultMedia = Self.pcmFormatCache[PCMKey(rate: 48000, channels: 2, voice: false)]!
+        let defaultNav = Self.pcmFormatCache[PCMKey(rate: 16000, channels: 1, voice: true)]!
 
         do {
             try engine.connectNode(mediaPlayer, to: mediaMixer, format: defaultMedia)
@@ -314,9 +312,45 @@ final class AudioPlayer: @unchecked Sendable {
     }
 
     /// Start every pre-warmed node (engine must be running). On engineQueue.
-    private func playPrewarmed() {
-        for node in prewarmed.values where !node.isPlaying {
-            try? node.playAudio()
+    private func playPrewarmed(force: Bool = false) {
+        // `force` (engine restart after a configuration change, 2026-09-04): a player node keeps
+        // reporting isPlaying == true across an AVAudioEngineConfigurationChange although it no
+        // longer renders, so the `!isPlaying` filter skipped every pre-warmed node and the AA media
+        // and guidance lanes went silent — each packet then hit the backlog cap and was dropped
+        // for the rest of the session. Stop and re-play unconditionally, and log a play failure
+        // instead of swallowing it.
+        for (key, node) in prewarmed where force || !node.isPlaying {
+            if force { node.stop() }
+            do { try node.playAudio() } catch {
+                Self.logger.error("pre-warmed node \(key.rate)Hz/\(key.channels)ch voice=\(key.voice) play failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    /// Watchdog (2026-09-04): a node whose queue sits at its cap while nothing is consumed is dead —
+    /// its `.dataConsumed` handlers will never run, so every later packet is dropped. Called from
+    /// `scheduleBounded` on each drop; after `stalledDropsBeforeRestart` consecutive drops on the
+    /// same node with no decrement in between, stop and re-play that node and clear its counter.
+    private static let stalledDropsBeforeRestart = 48   // ~2 s of media packets at 24/s
+    private var stalledDrops: [ObjectIdentifier: Int] = [:]
+    private func noteDropForWatchdog(node: AVAudioPlayerNode, id: ObjectIdentifier) {
+        let n = (stalledDrops[id] ?? 0) + 1
+        stalledDrops[id] = n
+        guard n >= Self.stalledDropsBeforeRestart else { return }
+        stalledDrops[id] = 0
+        backlog.withLock {
+            $0.queuedSeconds[id] = 0
+            $0.emptySinceNs.removeValue(forKey: id)
+            $0.mediaPrimed.remove(id)
+            $0.generation &+= 1
+        }
+        node.stop()
+        do {
+            if !engine.isRunning { try engine.start() }
+            try node.playAudio()
+            Self.logger.warning("audio node stalled at its backlog cap with nothing consumed — restarted the node")
+        } catch {
+            Self.logger.error("audio node stall recovery failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -357,8 +391,10 @@ final class AudioPlayer: @unchecked Sendable {
                 $0.queuedSeconds.removeAll()
                 $0.emptySinceNs.removeAll()
                 $0.mediaPrimed.removeAll()
+                $0.generation &+= 1   // L2: invalidate in-flight .dataConsumed handlers from before stop()
             }
             mediaStaging.removeAll(); mediaStagedSeconds.removeAll(); mediaStageStartNs.removeAll()  // engineQueue-only
+            for t in mediaAgeOutTimers.values { t.cancel() }; mediaAgeOutTimers.removeAll()  // L3
             // audit A3: a stop/restart landing mid-duck must not leave media at voiceDuckLevel until the
             // 1.5 s watcher expires — reset the duck state + mixer here so a fresh session starts at unity.
             state.withLock { $0.isVoiceDucking = false; $0.voiceDeadlineNs = 0 }
@@ -380,7 +416,8 @@ final class AudioPlayer: @unchecked Sendable {
     /// decoded wireless output is host-endian, so `bigEndian: false` skips the swap. A combo outside
     /// the pre-warm matrix (shouldn't happen — it spans the SDK's full wired catalog) falls back to
     /// the dynamic media/nav player with a one-time reconnect.
-    func feedPCM(_ samples: Data, rate: Int, channels: Int, voice: Bool, bigEndian: Bool) {
+    func feedPCM(_ samples: Data, rate: Int, channels: Int, voice: Bool, bigEndian: Bool,
+                 preroll: Double = 0) {
         guard !samples.isEmpty else { return }
         engineQueue.async { [self] in
             guard state.withLock({ $0.isStarted }), engine.isRunning else { return }
@@ -471,7 +508,7 @@ final class AudioPlayer: @unchecked Sendable {
                         maxAbsDelta: Float(maxDelta) / fs,
                         voice: voice)
                     log.recordAudioBuffer(voice ? .voiceAudio : .mediaAudio, dsp,
-                                          active: true, tMonoMs: AVAnomalyLog.monoMs(),
+                                          tMonoMs: AVAnomalyLog.monoMs(),
                                           tWall: Date().timeIntervalSince1970)
                 }
             }
@@ -481,15 +518,15 @@ final class AudioPlayer: @unchecked Sendable {
             let streamKind: StreamKind = voice ? .voiceAudio : .mediaAudio
             if let node = prewarmed[key] {
                 if !node.isPlaying { try? node.playAudio() }
-                enqueue(buffer, on: node, kind: streamKind)
+                enqueue(buffer, on: node, kind: streamKind, preroll: preroll)
             } else if voice {
                 guard ensureFormat(format, for: navPlayer, mixer: navMixer,
                                    stored: \.currentNavFormat, label: "Voice") else { return }
-                enqueue(buffer, on: navPlayer, kind: streamKind)
+                enqueue(buffer, on: navPlayer, kind: streamKind, preroll: preroll)
             } else {
                 guard ensureFormat(format, for: mediaPlayer, mixer: mediaMixer,
                                    stored: \.currentMediaFormat, label: "Media") else { return }
-                enqueue(buffer, on: mediaPlayer, kind: streamKind)
+                enqueue(buffer, on: mediaPlayer, kind: streamKind, preroll: preroll)
             }
         }
     }
@@ -500,8 +537,12 @@ final class AudioPlayer: @unchecked Sendable {
     /// deep buffer is primed before the first packet plays (mirrors Apple's prime-before-pull; without it a
     /// deep cap still starves — the node drains as fast as it fills). Once a media node is primed, buffers
     /// schedule straight through until it drains (which re-primes). On engineQueue (feedPCM).
-    private func enqueue(_ buffer: AVAudioPCMBuffer, on node: AVAudioPlayerNode, kind: StreamKind) {
-        guard kind == .mediaAudio else { scheduleBounded(buffer, on: node, kind: kind); return }
+    /// `preroll` is the caller-requested cushion for a VOICE-class stream (0 = arrival-paced; the
+    /// telephony lane passes `telephonyPrerollSeconds`); media always uses `mediaPrerollSeconds`.
+    private func enqueue(_ buffer: AVAudioPCMBuffer, on node: AVAudioPlayerNode, kind: StreamKind,
+                         preroll: Double = 0) {
+        let preroll = kind == .mediaAudio ? Self.mediaPrerollSeconds : preroll
+        guard preroll > 0 else { scheduleBounded(buffer, on: node, kind: kind); return }
         let id = ObjectIdentifier(node)
         if backlog.withLock({ $0.mediaPrimed.contains(id) }) {     // steady state → schedule directly
             scheduleBounded(buffer, on: node, kind: kind)
@@ -511,7 +552,10 @@ final class AudioPlayer: @unchecked Sendable {
         // AGE, whichever first (audit A3), then release in order.
         let now = DispatchTime.now().uptimeNanoseconds
         let seconds = Double(buffer.frameLength) / buffer.format.sampleRate
-        if mediaStaging[id]?.isEmpty ?? true { mediaStageStartNs[id] = now } // first buffer of this batch
+        if mediaStaging[id]?.isEmpty ?? true {
+            mediaStageStartNs[id] = now // first buffer of this batch
+            armAgeOutTimer(id: id, node: node, kind: kind, preroll: preroll)
+        }
         mediaStaging[id, default: []].append(buffer)
         let stagedSec = (mediaStagedSeconds[id] ?? 0) + seconds
         mediaStagedSeconds[id] = stagedSec
@@ -519,15 +563,39 @@ final class AudioPlayer: @unchecked Sendable {
         // pre-roll wall-clock (age-out): the latter flushes a slow trickle or a sub-pre-roll tail instead of
         // stranding it in silence until the next stop()/config-change clear. The inherent one-time cushion-
         // rebuild after a genuine drain still costs up to a pre-roll of latency — a deep buffer cannot be
-        // primed without it — but a partial/slow batch no longer hangs. Follow-up: flush on META_CMD pause.
+        // primed without it — but a partial/slow batch no longer hangs. L3: the timer armed above covers
+        // the case where packets stop arriving mid-batch (this arrival-time check alone never fires then).
         let heldNs = now &- (mediaStageStartNs[id] ?? now)
-        let ageOut = heldNs >= UInt64(Self.mediaPrerollSeconds * 1_000_000_000)
-        guard stagedSec >= Self.mediaPrerollSeconds || ageOut else { return } // still priming → held
+        let ageOut = heldNs >= UInt64(preroll * 1_000_000_000)
+        guard stagedSec >= preroll || ageOut else { return } // still priming → held
+        releaseMediaBatch(id: id, node: node, kind: kind)
+    }
+
+    /// Release a media node's staged priming batch (this buffer included, arrival order) and mark it
+    /// primed. Shared by the packet-arrival path and the age-out timer (L3). engineQueue-only.
+    private func releaseMediaBatch(id: ObjectIdentifier, node: AVAudioPlayerNode, kind: StreamKind) {
+        mediaAgeOutTimers.removeValue(forKey: id)?.cancel()
         backlog.withLock { _ = $0.mediaPrimed.insert(id) }
-        let batch = mediaStaging.removeValue(forKey: id) ?? []     // this buffer included, in arrival order
+        let batch = mediaStaging.removeValue(forKey: id) ?? []
         mediaStagedSeconds[id] = nil
         mediaStageStartNs[id] = nil
         for buf in batch { scheduleBounded(buf, on: node, kind: kind) }
+    }
+
+    /// Arm (replacing any prior timer for this node) a one-shot age-out on `engineQueue` for a fresh
+    /// priming batch. Fires only if the batch is still pending when it goes off — a normal depth-based
+    /// release, `stop()`, or a config-change restart cancels/clears it first.
+    private func armAgeOutTimer(id: ObjectIdentifier, node: AVAudioPlayerNode, kind: StreamKind,
+                                preroll: Double) {
+        mediaAgeOutTimers.removeValue(forKey: id)?.cancel()
+        let timer = DispatchSource.makeTimerSource(queue: engineQueue)
+        timer.schedule(deadline: .now() + preroll)
+        timer.setEventHandler { [weak self] in
+            guard let self, self.mediaStaging[id]?.isEmpty == false else { return }
+            self.releaseMediaBatch(id: id, node: node, kind: kind)
+        }
+        mediaAgeOutTimers[id] = timer
+        timer.resume()
     }
 
     /// Schedule `buffer` on `node` only if the node's queued-but-unplayed audio is under its per-class cap
@@ -545,7 +613,9 @@ final class AudioPlayer: @unchecked Sendable {
         var dropsToLog: Int?
         var underrunsToLog: Int?
         var underrunDryMs: Double?   // set when THIS packet arrived to a node that had run dry (underrun)
+        var scheduleGeneration: UInt64 = 0
         let admitted = backlog.withLock { b -> Bool in
+            scheduleGeneration = b.generation
             if (b.queuedSeconds[id] ?? 0) >= cap {
                 b.dropCount += 1
                 let now = DispatchTime.now().uptimeNanoseconds
@@ -578,6 +648,7 @@ final class AudioPlayer: @unchecked Sendable {
         if let n = dropsToLog { // logged OUTSIDE the lock
             Self.logger.warning("playback backlog over \(Int(cap * 1000))ms — dropped \(n) packet(s)")
         }
+        if admitted { stalledDrops[id] = 0 } else { noteDropForWatchdog(node: node, id: id) }
         if let n = underrunsToLog { // logged OUTSIDE the lock
             Self.logger.warning("playback underrun — node ran dry between packets \(n) time(s)")
         }
@@ -586,8 +657,13 @@ final class AudioPlayer: @unchecked Sendable {
                                tMonoMs: AVAnomalyLog.monoMs(), tWall: Date().timeIntervalSince1970)
         }
         guard admitted else { return }
-        node.scheduleBuffer(buffer, completionCallbackType: .dataConsumed) { [weak self] _ in
+        node.scheduleBuffer(buffer, completionCallbackType: .dataConsumed) { [weak self, scheduleGeneration] _ in
             self?.backlog.withLock { b in
+                // L2: a stop()/config-change bumped `generation` after this buffer was scheduled but
+                // before its completion fired — it was flushed, not actually consumed, so its decrement
+                // and (especially) its emptySinceNs re-arm would be against a node that never ran; the
+                // counters were already cleared wholesale by that stop/restart. Drop it.
+                guard b.generation == scheduleGeneration else { return }
                 let remaining = max(0, (b.queuedSeconds[id] ?? 0) - seconds)
                 b.queuedSeconds[id] = remaining
                 // < 1 ms ≈ drained (FP add/sub of the same values can leave a tiny residue).
@@ -778,7 +854,9 @@ final class CompressedAudioDecoder {
         guard let outBuf = AVAudioPCMBuffer(pcmFormat: outFormat, frameCapacity: max(capacity, 4096)) else {
             return nil
         }
-        var fed = false
+        // L7: converter callback is synchronous — safe to capture mutable state (mirrors
+        // MicCapture.processInput's identical pattern).
+        nonisolated(unsafe) var fed = false
         var err: NSError?
         let status = converter.convert(to: outBuf, error: &err) { _, outStatus in
             if fed {

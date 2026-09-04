@@ -18,8 +18,17 @@ pub enum ClaimResult {
     Denied,
 }
 
+/// `@<unix_ms> ` write-time stamp (docs/carplay/01_OCBM_PROTOCOL.md CH_LOG): the box.log tailer
+/// parses this prefix and uses it instead of the millisecond it happened to READ the line at.
 fn log(m: &str) {
-    println!("[arbiter-client] {m}");
+    println!("@{} [arbiter-client] {m}", now_ms());
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Connect to the arbiter and attempt to claim `wireless`.

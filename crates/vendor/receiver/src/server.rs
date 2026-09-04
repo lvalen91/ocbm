@@ -21,13 +21,41 @@ use rtsp::route::Route;
 pub trait Pairings: PeerStore + PeerSaver {}
 impl<T: PeerStore + PeerSaver> Pairings for T {}
 
+/// Pull the pair-setup/pair-verify `State` TLV (type 0x06) out of a request body for logging —
+/// neither `pairing::setup::SetupError` nor `pairing::verify::PairError` exposes which M-state it
+/// failed at, so we re-derive it from the wire the same way `exchange()` itself does.
+fn request_tlv_state(body: &[u8]) -> String {
+    pairing::tlv::decode(body)
+        .ok()
+        .and_then(|items| {
+            items
+                .into_iter()
+                .find(|(t, _)| *t == pairing::crypto::tlv_type::STATE)
+                .and_then(|(_, v)| v.first().copied())
+        })
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "?".to_string())
+}
+
+/// Why a control connection was torn down.
+///
+/// Each variant carries its cause: `net.rs` logs this `{e:?}` as the only record of WHY a session
+/// ended, and collapsing five unrelated failures into `Protocol`/`Decrypt` made that line useless --
+/// an oversized frame even reported itself as a decrypt failure.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ServerError {
     /// A genuinely malformed request. (A well-formed-but-incomplete request — split across frames —
     /// is buffered and awaited, NOT reported as this.)
-    Protocol,
-    /// An inbound encrypted frame failed authentication.
-    Decrypt,
+    Protocol(rtsp::message::ParseError),
+    /// The accumulator crossed `MAX_PLAINTEXT_ACCUM` without ever completing a request.
+    Runaway,
+    /// An inbound encrypted frame failed authentication, or declared an oversized length.
+    Frame(rtsp::control::FrameError),
+    /// A pair-setup or pair-verify exchange failed. Carries the underlying `pairing::` error's
+    /// Display text so `net.rs`'s `{e:?}` teardown log names the real cause instead of "Pairing".
+    Pairing(String),
+    /// The MFi-SAP (`/auth-setup`) exchange failed.
+    AuthSetup,
 }
 
 const OCTET: &str = "application/octet-stream";
@@ -183,7 +211,7 @@ impl<'a, P: Pairings, S: MfiSigner> ControlServer<'a, P, S> {
             loop {
                 let frame = channel
                     .decrypt_frame(&self.rx)
-                    .map_err(|_| ServerError::Decrypt)?;
+                    .map_err(ServerError::Frame)?;
                 match frame {
                     Some((plaintext, used)) => {
                         self.ptx.extend_from_slice(&plaintext);
@@ -193,9 +221,9 @@ impl<'a, P: Pairings, S: MfiSigner> ControlServer<'a, P, S> {
                 }
             }
             if self.ptx.len() > MAX_PLAINTEXT_ACCUM {
-                return Err(ServerError::Protocol); // runaway: frames without a complete request
+                return Err(ServerError::Runaway); // frames without a complete request
             }
-            match Request::parse(&self.ptx).map_err(|_| ServerError::Protocol)? {
+            match Request::parse(&self.ptx).map_err(ServerError::Protocol)? {
                 Some((req, consumed)) => {
                     self.ptx.drain(..consumed);
                     Ok(Some((req, true)))
@@ -214,9 +242,9 @@ impl<'a, P: Pairings, S: MfiSigner> ControlServer<'a, P, S> {
             // defensible (real pair-setup/verify/info messages are a few KB at most) but is a
             // behavioral change, so it is left as a separate decision.
             if self.rx.len() > MAX_PLAINTEXT_ACCUM {
-                return Err(ServerError::Protocol);
+                return Err(ServerError::Runaway);
             }
-            match Request::parse(&self.rx).map_err(|_| ServerError::Protocol)? {
+            match Request::parse(&self.rx).map_err(ServerError::Protocol)? {
                 Some((req, consumed)) => {
                     self.rx.drain(..consumed);
                     Ok(Some((req, false)))
@@ -266,27 +294,55 @@ impl<'a, P: Pairings, S: MfiSigner> ControlServer<'a, P, S> {
         }
         match route {
             Route::PairSetup => {
+                if let Some(p) = pairsetup_dump_path() {
+                    use std::io::Write as _;
+                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p)
+                    {
+                        let _ = f.write_all(&(req.body.len() as u32).to_le_bytes());
+                        let _ = f.write_all(&req.body);
+                    }
+                }
                 if self.setup.is_none() {
                     self.setup =
                         Some(PairSetupServer::new(self.identity, self.setup_code.clone()));
                 }
                 let setup = self.setup.as_mut().unwrap();
-                let (body, _done) =
-                    setup.exchange(&req.body, &mut self.peers).map_err(|_| ServerError::Protocol)?;
-                Ok(Response::ok(req, Some(OCTET), body))
+                let m_in = request_tlv_state(&req.body);
+                match setup.exchange(&req.body, &mut self.peers) {
+                    Ok((body, _done)) => {
+                        if self.verbose {
+                            eprintln!("[receiver] pair-setup M{m_in} ok");
+                        }
+                        Ok(Response::ok(req, Some(OCTET), body))
+                    }
+                    Err(e) => {
+                        eprintln!("[receiver] pair-setup M{m_in} FAIL: {e}");
+                        Err(ServerError::Pairing(e.to_string()))
+                    }
+                }
             }
             Route::PairVerify => {
                 if self.verify.is_none() {
                     self.verify = Some(PairVerifyServer::new(self.identity));
                 }
                 let verify = self.verify.as_mut().unwrap();
-                let (body, done) =
-                    verify.exchange(&req.body, &self.peers).map_err(|_| ServerError::Protocol)?;
-                if done {
-                    // Some only if verification actually succeeded; None ⇒ stays plaintext.
-                    self.activate = verify.shared_secret();
+                let m_in = request_tlv_state(&req.body);
+                match verify.exchange(&req.body, &self.peers) {
+                    Ok((body, done)) => {
+                        if done {
+                            // Some only if verification actually succeeded; None ⇒ stays plaintext.
+                            self.activate = verify.shared_secret();
+                        }
+                        if self.verbose {
+                            eprintln!("[receiver] pair-verify M{m_in} ok");
+                        }
+                        Ok(Response::ok(req, Some(OCTET), body))
+                    }
+                    Err(e) => {
+                        eprintln!("[receiver] pair-verify M{m_in} FAIL: {e}");
+                        Err(ServerError::Pairing(e.to_string()))
+                    }
                 }
-                Ok(Response::ok(req, Some(OCTET), body))
             }
             Route::AuthSetup => match self.sap.exchange(&req.body, &mut self.signer) {
                 Ok(body) => {
@@ -299,7 +355,7 @@ impl<'a, P: Pairings, S: MfiSigner> ControlServer<'a, P, S> {
                     if self.verbose {
                         eprintln!("[receiver] auth-setup FAILED: {e:?}");
                     }
-                    Err(ServerError::Protocol)
+                    Err(ServerError::AuthSetup)
                 }
             },
             Route::Options => {
@@ -328,8 +384,14 @@ impl<'a, P: Pairings, S: MfiSigner> ControlServer<'a, P, S> {
                 // Forward iOS's exact per-resolution corner mask to the host (docs/carplay/06_AV_PIPELINE.md Phase-3b): the
                 // SETUP dict carries `topLeftCornerMask`. Gated on the cornerMasks lever inside.
                 forward_corner_mask(self.display_width, &req.body);
-                let resp = self.session.setup(&req.body);
-                Ok(Response::ok(req, Some(BPLIST), resp))
+                match self.session.setup(&req.body) {
+                    Ok(resp) => Ok(Response::ok(req, Some(BPLIST), resp)),
+                    // Mirrors `_ControlSetup`'s `require_noerr(err, exit)` (R14G17
+                    // `AirPlayReceiverSession.c:900-914`): a genuine bind/setup failure answers 500,
+                    // not 200 with an empty body. Keeps the connection open, same as the 401 gate
+                    // above — the phone tears the session down on its own.
+                    Err(crate::session::SetupError) => Ok(Response::status(req, 500, "Internal Server Error")),
+                }
             }
             Route::Record => {
                 let resp = self.session.record();
@@ -464,6 +526,15 @@ fn capture_corner_mask(route: &str, body: &[u8]) {
     }
 }
 
+/// Bench lever: `CARPLAY_PAIRSETUP_DUMP=<path>` appends every raw `/pair-setup` request body to
+/// `path`, length-prefixed (`[u32 LE len][body]`) — same format as `session.rs`'s `CARPLAY_CMD_DUMP`.
+/// Resolved once per process (house pattern, `session.rs::au_dump_path`), so editing the env var
+/// mid-run does nothing until restart.
+fn pairsetup_dump_path() -> Option<&'static str> {
+    static V: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    V.get_or_init(|| std::env::var("CARPLAY_PAIRSETUP_DUMP").ok()).as_deref()
+}
+
 #[cfg(test)]
 mod tests {
     //! Control-frame reassembly (spec §1): a control request iOS splits across ChaCha frames must be
@@ -572,6 +643,63 @@ mod tests {
             "plaintext SETUP must be denied 401, got status line: {:?}",
             text.lines().next()
         );
+    }
+
+    /// `_ControlSetup` on failure answers 500, not a 200 with an empty body (R14G17
+    /// `AirPlayReceiverSession.c:900-914`). A `SessionDelegate::setup` that fails a bind/setup must
+    /// surface as HTTP 500, not a `200 OK` with a zero-length bplist.
+    struct FailingSetupSession;
+    impl crate::session::SessionDelegate for FailingSetupSession {
+        fn setup(&mut self, _request_plist: &[u8]) -> Result<Vec<u8>, crate::session::SetupError> {
+            Err(crate::session::SetupError)
+        }
+    }
+
+    #[test]
+    fn failed_setup_answers_500_not_200_empty() {
+        let secret = [6u8; 32];
+        let identity = Identity::new(b"testdev".to_vec(), [5u8; 32]);
+        let mut srv = server_with_channel(&identity, &secret).session(Box::new(FailingSetupSession));
+        let sk = derive_control_keys(&secret);
+        let mut client = ControlChannel::new(ControlKeys { read: sk.write, write: sk.read });
+        let frames =
+            client.encrypt_frame(b"SETUP rtsp://x RTSP/1.0\r\nCSeq: 1\r\nContent-Length: 0\r\n\r\n");
+        let out = srv.feed(&frames).expect("no server error");
+        let (plain, _used) = client.decrypt_frame(&out).expect("decrypt").expect("one frame");
+        let text = String::from_utf8_lossy(&plain);
+        assert!(
+            text.starts_with("RTSP/1.0 500"),
+            "a failed SETUP must answer 500, not a 200-with-empty-body, got status line: {:?}",
+            text.lines().next()
+        );
+    }
+
+    /// `ServerError::Pairing` must carry the underlying `pairing::` error's Display text — a bare
+    /// `map_err(|_| ServerError::Pairing)` collapsed every pair-setup failure into one
+    /// undifferentiated variant, which is what this test guards against regressing.
+    #[test]
+    fn pairing_error_preserves_underlying_message() {
+        let identity = Identity::new(b"testdev".to_vec(), [8u8; 32]);
+        let mut srv =
+            ControlServer::new(&identity, b"3939".to_vec(), DummyPeers, DummySigner, Vec::new());
+        // A pair-verify M1 on a fresh server is fine, but pair-setup with an out-of-sequence State
+        // (9 — not 1/3/5) drives `SetupError::BadState` deterministically without needing a real SRP
+        // exchange first.
+        let body = pairing::tlv::encode(&[(pairing::crypto::tlv_type::STATE, &[9])]);
+        let req = format!(
+            "POST /pair-setup RTSP/1.0\r\nCSeq: 1\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        let mut raw = req.into_bytes();
+        raw.extend_from_slice(&body);
+        let err = srv.feed(&raw).expect_err("bad pair-setup state must error");
+        match err {
+            ServerError::Pairing(msg) => assert_eq!(
+                msg, "unexpected pair-setup state",
+                "must preserve SetupError::BadState's Display text, got {msg:?}"
+            ),
+            other => panic!("expected ServerError::Pairing, got {other:?}"),
+        }
     }
 
     #[test]

@@ -26,6 +26,9 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 const IAP2_DEV: &str = "/dev/android_iap2";
+/// Consecutive non-progress `iap.read()` results (persistent error or unexpected `Ok(0)`) before the
+/// main loop gives up and exits (M2/L1) — see the `read_errs` comment in `main()`.
+const READ_ERR_EXIT_THRESHOLD: u32 = 25;
 
 // ---- Direct MFi chip access over I2C (/dev/i2c-1 @0x11). No NCM bridge, no NCM.
 // The chip is LOCAL to the box, so iap2d drives it directly — unlike carplayd's
@@ -192,6 +195,9 @@ fn mfi_sign(chal: &[u8]) -> Option<Vec<u8>> {
     for _ in 0..200 {
         let mut st = [0u8; 1];
         if i2c_rd(0x10, &mut st) && (st[0] & 0x10) != 0 {
+            if st[0] != 0x10 {
+                eprintln!("mfi: sign status 0x{:02x} (expected 0x10)", st[0]);
+            }
             done = true;
             break;
         }
@@ -228,9 +234,20 @@ fn mfi_sign(chal: &[u8]) -> Option<Vec<u8>> {
 /// ANDed inside the YAML emitter, not merely a disabled control. So `status_caps` stays `None`,
 /// param 21 is never built, and only param 20's CONTENT changes here.
 fn vehicle_identity() -> &'static carplay_iap2_core::config::VehicleIdentity {
+    vehicle_identity_from(&carplay_iap2_core::config::Iap2Config::load())
+}
+
+/// Same OnceLock as [`vehicle_identity`], but takes an already-loaded config so `SendIdentify` can
+/// share ONE `Iap2Config::load()` between the metadata-policy arm and the identity snapshot (L2):
+/// two independent loads left a microscopic window where `ocbmd`'s SUBSCRIBE-triggered rewrite of
+/// `/tmp/carplay_cfg.yaml` could land between them, even though the comment above argues for one
+/// snapshot. First-call-wins regardless of which loaded config is passed in.
+fn vehicle_identity_from(
+    cfg: &carplay_iap2_core::config::Iap2Config,
+) -> &'static carplay_iap2_core::config::VehicleIdentity {
     static ID: OnceLock<carplay_iap2_core::config::VehicleIdentity> = OnceLock::new();
     ID.get_or_init(|| {
-        let id = carplay_iap2_core::config::Iap2Config::load().vehicle_identity();
+        let id = cfg.vehicle_identity();
         log(&format!(
             "vehicle identity armed: {}",
             if id.is_baseline() {
@@ -243,8 +260,18 @@ fn vehicle_identity() -> &'static carplay_iap2_core::config::VehicleIdentity {
     })
 }
 
+/// `@<unix_ms> ` write-time stamp (docs/carplay/01_OCBM_PROTOCOL.md CH_LOG): the box.log tailer
+/// parses this prefix and uses it instead of the millisecond it happened to READ the line at, so
+/// a burst of lines written in the same tick doesn't collapse onto one timestamp.
 fn log(m: &str) {
-    println!("[iap2] {m}");
+    println!("@{} [iap2] {m}", now_ms());
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Host-gone detection: the phone-facing gadget drops out of CONFIGURED when the iPhone leaves.
@@ -333,7 +360,9 @@ fn execute(action: Action, link: &mut Link, iap: &mut File) -> ExecResult {
             // Second (and last) chance to arm the pushed tier: the app may have SUBSCRIBEd during
             // our link/auth seconds. No-op when main() already armed it (first-arm-wins), so the
             // declaration below and the subscribes after Identified always share one snapshot.
-            carplay_iap2_core::config::Iap2Config::load().arm_metadata_policy();
+            // ONE load shared with the identity snapshot below (L2) — see `vehicle_identity_from`.
+            let cfg = carplay_iap2_core::config::Iap2Config::load();
+            cfg.arm_metadata_policy();
             // cp_iface:1 = the NCM data interface (#1) that carries CarPlay A/V (not this iAP2 iface #0).
             // Per-device name (e.g. "CarLink-b0df") so multiple boxes are distinct on the wired iAP2
             // identify too — same suffix as the Wi-Fi SSID + the wireless BT name (message::accessory_name).
@@ -341,7 +370,7 @@ fn execute(action: Action, link: &mut Link, iap: &mut File) -> ExecResult {
                 &message::accessory_name("CarLink"),
                 message::TransportComponent::Usb { cp_iface: 1 },
                 false, // declare_wired=false: CarPlay A/V rides AirPlay-over-NCM, not wired iAP2
-                vehicle_identity(),
+                vehicle_identity_from(&cfg),
             );
             if !tx(
                 iap,
@@ -407,12 +436,14 @@ fn process(
     st: &mut State,
     iap: &mut File,
     art: &mut metadata::Artwork,
+    link_up: &mut bool,
 ) -> bool {
     let Some(rx) = link.parse(data) else {
         return false;
     };
     if rx.is_syn_ack() {
         log("SYN-ACK — link up");
+        *link_up = true;
         return !tx(iap, &link.build_ack());
     }
     if rx.payload.is_empty() {
@@ -456,6 +487,19 @@ fn process(
     if matches!(msg_id, 0x5001 | 0x5201 | 0x5202) {
         log(&format!("RX 0x{msg_id:04X} (metadata → seam)"));
         return false;
+    }
+    // Mirror the wireless arm's 0x1D03 diagnostic (bt_driver.rs): raw payload + per-message-id
+    // decoded reason, so a wired reject is as debuggable as a wireless one (docs/wireless/00_WIRELESS_CARPLAY.md Phase 5.2).
+    if msg_id == spec::MSG_IDENTIFICATION_REJECTED {
+        log(&format!(
+            "RX 0x1D03 IdentificationRejected raw payload ({} B): {:02x?}",
+            rx.payload.len(),
+            rx.payload
+        ));
+        log(&format!(
+            "RX 0x1D03 decoded: {}",
+            message::describe_reject(&rx.payload[6..])
+        ));
     }
     let (next, action) = state::on_message(*st, msg_id, &rx.payload);
     match execute(action, link, iap) {
@@ -518,7 +562,18 @@ fn run_selftest() {
     let _ = std::fs::remove_file(path);
 }
 
+/// `panic = "abort"` (workspace-wide) means the default hook's stderr line is the only trace of a
+/// crash the supervisor sees — prefix it so it's greppable in the merged host log stream.
+fn install_panic_hook(name: &'static str) {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        eprintln!("[{name}] PANIC: {info}");
+        default_hook(info);
+    }));
+}
+
 fn main() {
+    install_panic_hook("iap2d");
     if std::env::var_os("IAP2D_SELFTEST").is_some() {
         run_selftest();
         return;
@@ -557,14 +612,21 @@ fn main() {
     }
     G_I2C.store(i2c, Ordering::Relaxed);
     // Advisory only: a NAK here must not kill the daemon — the real reads retry per-transaction.
+    // But it is still a chip transaction, so it takes the same cross-process lock as cert/sign: the
+    // one thing worse than a failed warm-up is one that lands inside another chip user's
+    // write→trigger→poll→read window (airplayd's sign path) and corrupts THAT transaction.
     let mut v = [0u8; 1];
-    if i2c_rd(0x00, &mut v) {
+    let warm = match MfiLock::acquire() {
+        Some(_lock) => i2c_rd(0x00, &mut v),
+        None => false,
+    };
+    if warm {
         log(&format!(
             "MFi chip open (local i2c), DeviceVersion=0x{:02x}",
             v[0]
         ));
     } else {
-        log("MFi chip open (local i2c), DeviceVersion read failed (transient NAK?)");
+        log("MFi chip open (local i2c), DeviceVersion read failed (transient NAK or chip lock busy)");
     }
 
     let mut link = Link::new();
@@ -582,6 +644,7 @@ fn main() {
     let mut st = State::Init;
     let start = Instant::now();
     let mut last_syn = Instant::now();
+    let mut link_up = false;
     let mut buf = [0u8; 8192];
     let mut seen_configured = false;
     // Throttle the host-gone check (opt #4): host_configured() opens+reads a sysfs file and allocs a
@@ -590,6 +653,10 @@ fn main() {
     let mut last_host_check = Instant::now();
     let mut art = metadata::Artwork::default();
     let mut subscribed = false;
+    // M2/L1: bound consecutive non-progress reads (persistent errors or unexpected Ok(0)) so a
+    // host-gone daemon exits instead of spinning forever behind the 1 Hz sysfs poll. 25 * 200 ms = 5 s,
+    // comparable to `tx()`'s 6 s bound.
+    let mut read_errs = 0u32;
 
     loop {
         let identified = st >= State::Identified;
@@ -643,8 +710,20 @@ fn main() {
             }
         }
         match iap.read(&mut buf) {
-            Ok(0) => sleep(Duration::from_millis(50)),
+            Ok(0) => {
+                // Char-device convention here is EAGAIN for "no data"; a 0-byte read is unusual and,
+                // on other fds, usually means EOF/hangup (L1). Fold it into the same persistent-error
+                // counter as a real read error so a host-gone Ok(0) storm still exits (M2) rather than
+                // sleeping forever behind the 1 Hz sysfs poll.
+                read_errs += 1;
+                if read_errs >= READ_ERR_EXIT_THRESHOLD {
+                    log("read returning Ok(0) persistently — exiting");
+                    break;
+                }
+                sleep(Duration::from_millis(50));
+            }
             Ok(n) => {
+                read_errs = 0;
                 // COALESCED READS: the char device hands us several link packets per read.
                 //
                 // During auth/identify we deliberately process only the FIRST packet — that is the
@@ -670,6 +749,7 @@ fn main() {
                         &mut st,
                         &mut iap,
                         &mut art,
+                        &mut link_up,
                     ) {
                         aborted = true;
                         break;
@@ -686,13 +766,25 @@ fn main() {
                 }
             }
             Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                if st == State::Init && last_syn.elapsed() >= Duration::from_secs(1) {
+                read_errs = 0;
+                if !link_up && last_syn.elapsed() >= Duration::from_secs(1) {
                     let _ = tx(&mut iap, &syn);
                     last_syn = Instant::now();
                 }
                 sleep(Duration::from_millis(50));
             }
-            Err(_) => sleep(Duration::from_millis(200)),
+            Err(e) => {
+                // The `last_host_check` comment above claims the read-error path is a fast host-gone
+                // signal; nothing enforced that until now (M2). `tools/session_supervisor.sh` uses
+                // `pgrep iap2d` as its wired-CarPlay liveness evidence, so a daemon spinning on a
+                // persistent read error must exit rather than sleep forever.
+                read_errs += 1;
+                if read_errs >= READ_ERR_EXIT_THRESHOLD {
+                    log(&format!("read failing persistently ({e}) — exiting"));
+                    break;
+                }
+                sleep(Duration::from_millis(200));
+            }
         }
     }
     log(&format!("exit state={st:?}"));

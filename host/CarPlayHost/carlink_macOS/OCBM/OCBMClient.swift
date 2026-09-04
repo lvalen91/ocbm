@@ -42,8 +42,9 @@ protocol OCBMClientDelegate: AnyObject {
     func ocbmPhonePresence(present: Bool)
 }
 
-// Thread-safety: control-plane state (seq, subscribed, heartbeat) is confined to `queue`; the read
-// path (reasm, av) runs on the transport's read queue; they don't share mutable state. Asserted here.
+// Thread-safety: `subscribed`/heartbeat/helloLoop state is confined to `queue`; `seq` is guarded by
+// `sendLock` (send() is callable from both `queue` and `aaWriteQueue`, see its doc comment); the read
+// path (reasm, av) runs on the transport's read queue and shares no mutable state with the above.
 final class OCBMClient: @unchecked Sendable {
     private let transport: RawBulkTransport
     private let reasm = OCBMReassembler()
@@ -87,14 +88,31 @@ final class OCBMClient: @unchecked Sendable {
 
     /// CH_IP stream-mux inbound (used by the Android Auto transport, which rides CH_IP to reach the
     /// box's aa-bridge). Called per IP_DATA sub-frame with (conn id, bytes); an empty payload signals
-    /// IP_CLOSE for that id. Confined to the transport read queue like the other on* callbacks.
-    var onIpData: ((UInt16, [UInt8]) -> Void)?
+    /// IP_CLOSE for that id. INVOKED on the transport read queue — but unlike the other `on*`
+    /// callbacks (set once before `connect()`), this one and `onIpWriteFailed` are (re)ASSIGNED
+    /// mid-session by `AAOCBMTransport.init` (`AASession.swift`), reached off the transport read queue
+    /// via `onProjectionMode → Task { @MainActor … } → startAAOverOCBM` with no synchronization against
+    /// a concurrent read-queue call — a genuine data race on the stored closure (func ptr + context
+    /// word), caught the same way `projMode` was. Lock-guarded like `projMode` for the same reason.
+    var onIpData: ((UInt16, [UInt8]) -> Void)? {
+        get { ipCallbackLock.lock(); defer { ipCallbackLock.unlock() }; return _onIpData }
+        set { ipCallbackLock.lock(); _onIpData = newValue; ipCallbackLock.unlock() }
+    }
+    private var _onIpData: ((UInt16, [UInt8]) -> Void)?
+    private let ipCallbackLock = NSLock()
 
     /// Mic-uplink gate (CH_CTRL `ctUplink`): the box raises this when the iPhone opens a type-100
-    /// `input=true` MainAudio SETUP (Siri/telephony) and lowers it on TEARDOWN. `(on, sampleRate,
-    /// channels)`. The app captures the mic ONLY while on, at the box-negotiated format, and ships the
-    /// PCM back over `sendMicPCM`. Invoked on the transport read queue.
-    var onUplinkGate: ((Bool, UInt32, UInt8) -> Void)?
+    /// `input=true` MainAudio SETUP (Siri/telephony) — or an HFP call opens SCO — and lowers it on
+    /// TEARDOWN. `(on, sampleRate, channels, codec)`. The app captures the mic ONLY while on, at the
+    /// box-negotiated format, and ships the result back over `sendMicPCM`. `codec` is 0 for S16LE PCM
+    /// (every CarPlay uplink and HFP narrowband/CVSD) or `OCBM.seamCodecMsbc` for HFP WIDEBAND, where
+    /// the box wants whole 60-byte mSBC eSCO packets rather than PCM. Invoked on the transport read queue.
+    var onUplinkGate: ((Bool, UInt32, UInt8, UInt8) -> Void)?
+
+    /// CH_MIC frames shipped since launch (one per `sendMicPCM` call — MicCapture emits exact 20 ms
+    /// frames). Read at 1 Hz by StreamMetricsMonitor for the AVmon `mictx=` rate; an Atomic so the
+    /// sampler never contends with the audio IO thread that produces them.
+    static let micTxFrames = Atomic<UInt64>(0)
 
     /// Wireless SSP Numeric-Comparison pairing code (CH_CTRL `ctPairingCode`): a non-nil 6-digit string
     /// is the code to DISPLAY for the user to match against the iPhone; `nil` clears it (pairing done or
@@ -127,6 +145,30 @@ final class OCBMClient: @unchecked Sendable {
     /// `onBoxAck` delivers an action result `(verb, status)` (status 0 = ok). Both on the read queue.
     var onBoxInfo: ((CCPAInfo?) -> Void)?
     var onBoxAck: ((UInt8, UInt8) -> Void)?
+
+    /// Box readiness bitmask (CH_CTRL `ctBoxHealth`, `OCBM.bh*` bits). Sent only while subscribed, on
+    /// change only, re-emitted after each fresh SUBSCRIBE — a reconnect always refreshes this rather
+    /// than the app caching a stale value across sessions. Invoked on the transport read queue.
+    var onBoxHealth: ((UInt8) -> Void)?
+    /// Bluetooth/iAP2 handshake progress (CH_CTRL `ctBtPhase`, one of `OCBM.btp*`). Advisory — never
+    /// gate on ordering. Same emission discipline as `onBoxHealth`. Invoked on the transport read queue.
+    var onBtPhase: ((UInt8) -> Void)?
+    /// Identity of the connected phone (CH_CTRL `ctPhoneIdent`); `nil` = no identity yet / cleared.
+    /// Same emission discipline as `onBoxHealth`. Invoked on the transport read queue.
+    var onPhoneIdent: ((PhoneIdent?) -> Void)?
+
+    /// Decoded CH_LOG entries — the box's universal log stream (docs/carplay/01_OCBM_PROTOCOL.md
+    /// CH_LOG). Invoked on the transport read queue, in wire order; `BoxLogStore` is the consumer. A
+    /// `seq` jump is synthesized as an extra `source: logSourceTailer` marker entry ahead of the entry
+    /// that revealed the gap.
+    var onBoxLog: (([LogEntry]) -> Void)?
+
+    /// Whether to auto-arm CH_LOG (`sendLogCtl`) right after each successful SUBSCRIBE — the box resets
+    /// this to disabled on STOP/host-gone, so it must be re-sent every time (see `subscribe()`). Set
+    /// from `BoxLogSettings` before `connect()`; a live toggle re-sends immediately via `sendLogCtl`.
+    var logStreamEnabled: Bool = true
+    /// KB cap for the box's log ring; 0 = box default (256 KB). Same source as `logStreamEnabled`.
+    var logStreamCapKB: UInt16 = 256
 
     /// Truthful SUBSCRIBE state (C2): fires `true` when a SUBSCRIBE write lands (box now streaming-capable)
     /// and `false` the moment the box declares the host GONE, BEFORE the re-subscribe attempt. The UI gates
@@ -209,6 +251,9 @@ final class OCBMClient: @unchecked Sendable {
         queue.async { [weak self] in
             if let self, self.subscribed {
                 self.subscribed = false
+                // Best-effort — the box also resets CH_LOG to disabled on its own STOP/host-gone path,
+                // but sending it explicitly here means an app-initiated STOP never races that.
+                self.send(channel: OCBM.chCtrl, payload: OCBM.logCtl(enabled: false, capKB: 0))
                 let ok = self.send(channel: OCBM.chCtrl, payload: [OCBM.ctStop])
                 stopSent.withLock { $0 = ok }
             }
@@ -230,10 +275,20 @@ final class OCBMClient: @unchecked Sendable {
         transport.stop()
     }
 
+    /// Per-process, non-zero instance nonce sent in HELLO bytes 2..6 — mirrors `ocbm-host`'s
+    /// `host_instance_nonce()` (`host/ocbm-host/src/main.rs:146-156`). Fixed for the process lifetime so
+    /// `ocbmd`'s `CT_HELLO` arm (`ccpa/ocbmd/src/main.rs:2446-2473`, `if inst != 0`) can detect a host
+    /// RELAUNCH (new nonce) vs. a retransmitted HELLO from the same host instance (same nonce). A
+    /// permanent zero — the previous behavior — was a no-op for that replacement detection.
+    /// `.random(in: 1...UInt32.max)` already excludes 0, so no extra floor is needed.
+    private static let instanceNonce: UInt32 = .random(in: 1...UInt32.max)
+
     private func sendHello() {
-        // [CT_HELLO][version][caps u32 LE] — caps left 0 (advisory for the host); the box replies
-        // HELLO_ACK (drained by the read handler).
-        let p: [UInt8] = [OCBM.ctHello, OCBM.version, 0, 0, 0, 0]
+        // [CT_HELLO][version][instance nonce u32 LE] — the box replies HELLO_ACK (drained by the read
+        // handler).
+        let n = Self.instanceNonce
+        let p: [UInt8] = [OCBM.ctHello, OCBM.version,
+                           UInt8(n & 0xff), UInt8((n >> 8) & 0xff), UInt8((n >> 16) & 0xff), UInt8(n >> 24)]
         send(channel: OCBM.chCtrl, payload: p)
     }
 
@@ -243,7 +298,7 @@ final class OCBMClient: @unchecked Sendable {
     /// `sessionConfig` was assigned once at connect and never again, so every lever the box reads out
     /// of the pushed YAML was inert for the life of a session. `android_auto` made that visible —
     /// turning Android Auto off did nothing until the app was relaunched, no matter what the box did
-    /// with the key (docs/host/02_ANDROID_AUTO.md F3).
+    /// with the key (docs/androidauto/02_ARBITRATION.md F3).
     ///
     /// REFUSED while a CarPlay transport owns the box. ocbmd's re-SUBSCRIBE deliberately dips
     /// `/tmp/host_present` for 2 s (`rearm_presence_silently`) so the shell supervisor sees a
@@ -287,8 +342,39 @@ final class OCBMClient: @unchecked Sendable {
             // decode-failure fallback still backstops any race.
             requestKeyframe()
             requestAltKeyframe()
+            // Clock sync FIRST (device-proven 2026-09-03: the box booted with its clock at 2020-01-02 and
+            // every box log line — ocbmd's read-time stamps and the daemons' write-time stamps — carried
+            // that date; the Android client has always sent CT_SETTIME here, the macOS client never did).
+            sendSetTime()
+            // Re-arm CH_LOG every fresh SUBSCRIBE — the box drops it to disabled on STOP/host-gone
+            // (docs/carplay/01_OCBM_PROTOCOL.md CH_LOG), so caching "already sent" here would leave the
+            // stream dark after any re-subscribe (SEV_HOST_GONE, Settings ▸ Save, etc).
+            if logStreamEnabled {
+                send(channel: OCBM.chCtrl, payload: OCBM.logCtl(enabled: true, capKB: logStreamCapKB))
+            }
         } else {
             log.error("SUBSCRIBE write FAILED (\(self.sessionConfig.count) B config) — box was NOT commanded to project; heartbeat will retry")
+        }
+    }
+
+    /// CT_SETTIME: hand the box the host's wall clock (unix seconds, u64 LE). Sent on the caller's queue
+    /// right after SUBSCRIBE; the box acks `[0x05][secs][status]` (see docs/carplay/01_OCBM_PROTOCOL.md).
+    private func sendSetTime() {
+        let secs = UInt64(Date().timeIntervalSince1970)
+        var p: [UInt8] = [OCBM.ctSetTime]
+        for i in 0..<8 { p.append(UInt8((secs >> (8 * UInt64(i))) & 0xff)) }
+        _ = send(channel: OCBM.chCtrl, payload: p)
+        log.info("CT_SETTIME sent (\(secs, privacy: .public))")
+    }
+
+    /// Arm/disarm the box's CH_LOG stream mid-session (e.g. a live Settings toggle). Also sent
+    /// automatically after every successful SUBSCRIBE when `logStreamEnabled` is true — see
+    /// `subscribe()`. No-op when not subscribed (the box has no session to arm).
+    func sendLogCtl(enabled: Bool, capKB: UInt16) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            guard self.subscribed else { return }
+            self.send(channel: OCBM.chCtrl, payload: OCBM.logCtl(enabled: enabled, capKB: capKB))
         }
     }
 
@@ -303,7 +389,31 @@ final class OCBMClient: @unchecked Sendable {
         send(channel: OCBM.chCtrl, payload: [OCBM.ctRadio, on ? 1 : 0])
     }
 
+    /// The user's answer to the wireless SSP Numeric-Comparison prompt (CH_CTRL `ctPairConfirm`).
+    /// `true` = the codes match, pair; `false` = cancel, which also makes the box raise its
+    /// pair-rejected flag so the reconnect driver backs off instead of retrying into the same prompt.
+    ///
+    /// Off the calling thread (`send` does a BLOCKING bulk write) so a click cannot stall the UI, and
+    /// unguarded by `subscribed` on purpose — the box only publishes a code to a subscribed host, so
+    /// the guard could only ever refuse an answer the user really gave. The box waits ~55 s and then
+    /// answers NO itself, so a dropped send costs the pairing attempt, never a hang.
+    func sendPairConfirm(accept: Bool) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            let ok = self.send(channel: OCBM.chCtrl, payload: [OCBM.ctPairConfirm, accept ? 1 : 0])
+            if ok {
+                self.log.info("pair confirm sent: \(accept ? "PAIR" : "CANCEL", privacy: .public)")
+            } else {
+                self.log.error("pair confirm \(accept ? "PAIR" : "CANCEL", privacy: .public) FAILED to write — the box will time the prompt out")
+            }
+        }
+    }
+
     private func startHeartbeat() {
+        // Defensive: cancel any existing timer first so two callers of connect() without an
+        // intervening disconnect() can't leave two live 1 Hz timers running (releasing an active
+        // resumed dispatch source without cancel() is legal but leaks a second ticker).
+        stopHeartbeat()
         let t = DispatchSource.makeTimerSource(queue: queue)
         t.schedule(deadline: .now() + 1.0, repeating: 1.0)
         t.setEventHandler { [weak self] in
@@ -545,13 +655,17 @@ final class OCBMClient: @unchecked Sendable {
 
     // MARK: - Mic uplink
 
-    /// Ship one captured mic PCM chunk (S16LE, little-endian, at the gate's negotiated rate/channels) to
-    /// the box over CH_MIC. ocbmd relays it to airplayd, which RTP-uplinks it to the iPhone on the active
+    /// Ship one captured mic chunk to the box over CH_MIC — S16LE PCM at the gate's negotiated
+    /// rate/channels, or, when the gate asked for `OCBM.seamCodecMsbc`, one whole 60-byte mSBC eSCO
+    /// packet (H2 header + 57-byte frame + pad) that the box writes to the SCO socket verbatim. ocbmd relays it to airplayd, which RTP-uplinks it to the iPhone on the active
     /// type-100 `input` SETUP. Confined to `queue` for `seq` safety, like the HID uplink; only sent while
     /// subscribed (no session ⇒ the box has no uplink armed and drops it). The capture is itself gated by
     /// `onUplinkGate`, so this is a no-op stream between Siri/call turns.
     func sendMicPCM(_ pcm: Data) {
         guard !pcm.isEmpty else { return }
+        // Counted HERE, not in MicCapture: this is the CH_MIC lane specifically. An AA session drives a
+        // SECOND MicCapture whose frames go to the phone over AA channel 9 and must not be folded in.
+        Self.micTxFrames.wrappingAdd(1, ordering: .relaxed)
         let bytes = [UInt8](pcm)
         queue.async { [weak self] in
             guard let self else { return }
@@ -668,14 +782,19 @@ final class OCBMClient: @unchecked Sendable {
         reasm.push(chunk)
         while let frame = reasm.next() {
             switch frame.channel {
+            // fNewSource: the box accepted a NEW producer on that seam and dropped the previous one
+            // without draining it, so the decrypt layer's reassembly buffer for this channel may hold a
+            // partial message that will never be completed. Surface the bit so it resets the buffer
+            // BEFORE appending; otherwise the new producer's SEAM_KEY lands mid-message and the lane
+            // desyncs for the rest of the session (2026-09-02, media audio on a re-SETUP).
             case OCBM.chVideo:
-                av.feedVideo(frame.payload)
+                av.feedVideo(frame.payload, newSource: frame.flags & OCBM.fNewSource != 0)
             case OCBM.chAltVideo:
-                av.feedAltVideo(frame.payload)
+                av.feedAltVideo(frame.payload, newSource: frame.flags & OCBM.fNewSource != 0)
             case OCBM.chMediaAudio:
-                av.feedAudio(frame.payload)
+                av.feedAudio(frame.payload, newSource: frame.flags & OCBM.fNewSource != 0)
             case OCBM.chAltAudio:
-                av.feedVoice(frame.payload)
+                av.feedVoice(frame.payload, newSource: frame.flags & OCBM.fNewSource != 0)
             case OCBM.chMetadata:
                 onMetadata?(frame.payload)
             case OCBM.chRtsp:
@@ -686,6 +805,8 @@ final class OCBMClient: @unchecked Sendable {
                 handleCtrl(frame.payload)
             case OCBM.chMgmt:
                 handleMgmt(frame.payload)
+            case OCBM.chLog:
+                handleLog(frame.payload)
             default:
                 // ECHO/CONSOLE/etc — not used by the A/V receiver, but say so (throttled).
                 logUnhandled(channel: frame.channel, frame.payload)
@@ -720,8 +841,13 @@ final class OCBMClient: @unchecked Sendable {
     /// hole in the record sequence that nothing can repair, so the peer's decrypt fails and it tears
     /// the session down with no protocol teardown — a freeze with no diagnosis. USBTransport
     /// deliberately does not retry a timed-out write (a retry could duplicate partially-sent bytes),
-    /// so the only sound response is to fail the stream FAST and let it be rebuilt.
-    var onIpWriteFailed: ((UInt16) -> Void)?
+    /// so the only sound response is to fail the stream FAST and let it be rebuilt. Lock-guarded like
+    /// `onIpData` above — same mid-session (re)assignment hazard.
+    var onIpWriteFailed: ((UInt16) -> Void)? {
+        get { ipCallbackLock.lock(); defer { ipCallbackLock.unlock() }; return _onIpWriteFailed }
+        set { ipCallbackLock.lock(); _onIpWriteFailed = newValue; ipCallbackLock.unlock() }
+    }
+    private var _onIpWriteFailed: ((UInt16) -> Void)?
 
     /// Write stream bytes to conn `id`. Split into ≤maxPayload IP_DATA sub-frames (header = 3 B).
     func ipWrite(id: UInt16, _ bytes: [UInt8]) {
@@ -765,20 +891,6 @@ final class OCBMClient: @unchecked Sendable {
         }
     }
 
-    /// Wait, up to `timeout`, for the CH_IP writes queued so far to reach the wire.
-    ///
-    /// `ipWrite`/`ipClose` are fire-and-forget onto `aaWriteQueue`, so a teardown that shuts the AA
-    /// session down and then immediately stops the USB transport can abort the pipe with the AA
-    /// BYEBYE still queued — leaving the phone holding a stale session, which breaks its NEXT attach
-    /// (docs/host/02_ANDROID_AUTO.md Phase 1). Draining first fixes that.
-    ///
-    /// It is TIME-BOUNDED, not a plain `aaWriteQueue.sync {}` barrier, because the caller is the main
-    /// actor and the queue's work is blocking USB I/O: each queued write can sit in `WritePipeTO` for
-    /// up to ~1.5 s, and a failed write is dropped without closing the pipe, so the NEXT one waits the
-    /// same again. Exactly when this runs — the box hung or the cable pulled mid-AA — there can be a
-    /// backlog of them, which as an unbounded barrier froze the UI (and beat `applicationWillTerminate`'s
-    /// own ~2 s bound) for as long as the pipe took to give up. A missed BYEBYE costs one stale phone
-    /// session; a frozen main thread costs the whole app.
     /// High-water backlog since the last report, logged by the heartbeat tick.
     private let aaBacklogPeak = Mutex<Int>(0)
     /// Backlog at which we declare the pipe stalled. ~2 s of AA ACK traffic (50+/s): well past any
@@ -787,6 +899,20 @@ final class OCBMClient: @unchecked Sendable {
     /// Wall clock of the last heartbeat tick (confined to `queue`), for the starvation detector.
     private var lastHeartbeatTick = Date()
 
+    /// Wait, up to `timeout`, for the CH_IP writes queued so far to reach the wire.
+    ///
+    /// `ipWrite`/`ipClose` are fire-and-forget onto `aaWriteQueue`, so a teardown that shuts the AA
+    /// session down and then immediately stops the USB transport can abort the pipe with the AA
+    /// BYEBYE still queued — leaving the phone holding a stale session, which breaks its NEXT attach
+    /// (docs/androidauto/02_ARBITRATION.md Phase 1). Draining first fixes that.
+    ///
+    /// It is TIME-BOUNDED, not a plain `aaWriteQueue.sync {}` barrier, because the caller is the main
+    /// actor and the queue's work is blocking USB I/O: each queued write can sit in `WritePipeTO` for
+    /// up to ~1.5 s, and a failed write is dropped without closing the pipe, so the NEXT one waits the
+    /// same again. Exactly when this runs — the box hung or the cable pulled mid-AA — there can be a
+    /// backlog of them, which as an unbounded barrier froze the UI (and beat `applicationWillTerminate`'s
+    /// own ~2 s bound) for as long as the pipe took to give up. A missed BYEBYE costs one stale phone
+    /// session; a frozen main thread costs the whole app.
     func drainIpWrites(timeout: TimeInterval = 0.5) {
         let drained = DispatchSemaphore(value: 0)
         aaWriteQueue.async { drained.signal() }
@@ -816,13 +942,19 @@ final class OCBMClient: @unchecked Sendable {
             // in-flight helloLoop tick (≤500 ms away) observes it and proceeds to SUBSCRIBE.
             queue.async { [weak self] in self?.helloAcked = true }
         case OCBM.ctUplink where payload.count >= 7:
-            // [ctUplink][state u8][rate u32 LE][ch u8] — the box's mic-uplink gate.
+            // [ctUplink][state u8][rate u32 LE][ch u8]([codec u8]) — the box's mic-uplink gate.
+            // The codec byte was appended 2026-09-04 for HFP wideband and is OPTIONAL: a 7-byte
+            // payload is the pre-existing PCM form and must keep meaning exactly that, which is also
+            // why the box still sends OFF as the 7-byte all-zero shape. Never index payload[7]
+            // without the count check — a truncated frame would otherwise crash the read queue.
             let on = payload[1] != 0
             let rate = UInt32(payload[2]) | (UInt32(payload[3]) << 8)
                 | (UInt32(payload[4]) << 16) | (UInt32(payload[5]) << 24)
             let ch = payload[6]
-            log.info("mic uplink gate: \(on ? "ON" : "OFF", privacy: .public) \(rate, privacy: .public)Hz \(ch, privacy: .public)ch")
-            onUplinkGate?(on, on ? rate : 0, on ? ch : 0)
+            let codec: UInt8 = payload.count >= 8 ? payload[7] : 0
+            let codecName = codec == OCBM.seamCodecMsbc ? "mSBC" : (codec == 0 ? "PCM" : "codec \(codec)")
+            log.info("mic uplink gate: \(on ? "ON" : "OFF", privacy: .public) \(rate, privacy: .public)Hz \(ch, privacy: .public)ch \(codecName, privacy: .public)")
+            onUplinkGate?(on, on ? rate : 0, on ? ch : 0, on ? codec : 0)
         case OCBM.ctPairingCode:
             // [ctPairingCode][6 ascii digits | empty] — the wireless SSP Numeric-Comparison code.
             let digits = String(bytes: payload.dropFirst(), encoding: .ascii)?
@@ -830,19 +962,44 @@ final class OCBMClient: @unchecked Sendable {
             log.info("pairing code: \(digits.isEmpty ? "cleared" : digits, privacy: .public)")
             onPairingCode?(digits.isEmpty ? nil : digits)
         case OCBM.ctProjMode where payload.count >= 2:
-            // [ctProjMode][pm*] — the box telling us which transport owns it (docs/host/02_ANDROID_AUTO.mde).
+            // [ctProjMode][pm*] — the box telling us which transport owns it (docs/androidauto/02_ARBITRATION.md).
             let mode = payload[1]
             log.info("projection mode: \(OCBM.projModeName(mode), privacy: .public)")
             projMode = mode
             projModeSeq &+= 1
             onProjectionMode?(mode, projModeSeq)
+        case OCBM.ctBtPhase where payload.count >= 2:
+            // [ctBtPhase][BTP_*] — Bluetooth/iAP2 handshake progress; advisory (never gate on
+            // ordering — docs/carplay/01_OCBM_PROTOCOL.md).
+            let phase = payload[1]
+            log.info("[box] bt phase: \(OCBM.btPhaseName(phase), privacy: .public)")
+            onBtPhase?(phase)
+        case OCBM.ctPhoneIdent:
+            // [ctPhoneIdent][utf8 JSON | empty] — who the connected phone is; empty payload = cleared.
+            let body = Array(payload.dropFirst())
+            if body.isEmpty {
+                log.info("[box] phone: cleared")
+                onPhoneIdent?(nil)
+            } else if let ident = try? JSONDecoder().decode(PhoneIdent.self, from: Data(body)) {
+                log.info("[box] phone: \(ident.model, privacy: .public) \(ident.osName, privacy: .public) \(ident.osVersion, privacy: .public)")
+                onPhoneIdent?(ident)
+            } else {
+                // Malformed JSON — never trap; throttled visibility like every other unhandled case.
+                logUnhandled(channel: OCBM.chCtrl, payload)
+            }
+        case OCBM.ctBoxHealth where payload.count >= 2:
+            // [ctBoxHealth][BH_* bitmask] — the box's own readiness; re-emitted on change / after a
+            // fresh SUBSCRIBE, so the app never needs to cache this across a reconnect.
+            let bits = payload[1]
+            log.info("[box] health: \(OCBM.boxHealthNames(bits), privacy: .public)")
+            onBoxHealth?(bits)
         case OCBM.ctSessionEvent where payload.count >= 2:
             switch payload[1] {
             case OCBM.sevPhonePresent, OCBM.sevPhoneAbsent:
                 let phone = payload[1] == OCBM.sevPhonePresent
                 log.info("box session event: phone \(phone ? "PRESENT" : "ABSENT", privacy: .public)")
                 delegate?.ocbmPhonePresence(present: phone)
-            default:
+            case OCBM.sevHostPresent, OCBM.sevHostGone:
                 let present = payload[1] == OCBM.sevHostPresent
                 log.info("box session event: \(present ? "PRESENT" : "GONE", privacy: .public)")
                 delegate?.ocbmSessionEvent(present: present)
@@ -866,6 +1023,12 @@ final class OCBMClient: @unchecked Sendable {
                         self.subscribe()
                     }
                 }
+            default:
+                // Undefined SEV_* byte (payload has no checksum beyond the frame's `hcheck`) — log and
+                // ignore rather than falling into "not present"/HOST GONE. Previously the `default:` arm
+                // computed `present = (payload[1] == sevHostPresent)`, so this and a real SEV_HOST_GONE
+                // were indistinguishable and both dropped `subscribed` + re-SUBSCRIBEd.
+                logUnhandled(channel: OCBM.chCtrl, payload)
             }
         default:
             // Unknown op, or a KNOWN op whose payload was too short for its `where` guard (a
@@ -874,11 +1037,50 @@ final class OCBMClient: @unchecked Sendable {
         }
     }
 
+    // MARK: - CH_LOG (the box's universal log stream)
+
+    // Confined to the transport read queue (onRead runs there); the box's own per-channel u16 counter,
+    // not shared with `seq` above.
+    private var lastLogSeq: UInt16?
+    private var lastLogParseWarnNs: UInt64 = 0
+
+    /// Decode one CH_LOG frame and hand it to `onBoxLog`. `parseLogEntries` is pure/bounds-checked
+    /// (OCBMFraming.swift); a malformed remainder is logged here (throttled) rather than in the
+    /// decoder, and never traps. A `seq` gap is loss — synthesize a `logSourceTailer` marker entry
+    /// immediately ahead of the entry that revealed it, so the combined log shows exactly where.
+    private func handleLog(_ payload: [UInt8]) {
+        let entries = parseLogEntries(payload)
+        let consumed = entries.reduce(0) { $0 + 14 + $1.rawLen }
+        if consumed < payload.count {
+            let now = DispatchTime.now().uptimeNanoseconds
+            if now &- lastLogParseWarnNs >= 1_000_000_000 {
+                lastLogParseWarnNs = now
+                log.warning("CH_LOG malformed remainder (\(payload.count - consumed, privacy: .public) B) dropped")
+            }
+        }
+        guard !entries.isEmpty else { return }
+        var out: [LogEntry] = []
+        out.reserveCapacity(entries.count)
+        for e in entries {
+            if let last = lastLogSeq, e.seq != last &+ 1 {
+                let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
+                // Stamped with `e.source` (NOT logSourceTailer) — the gap is per-source, and the box
+                // line that revealed it tells us which per-daemon log lost the range.
+                out.append(LogEntry(source: e.source, flags: 0, seq: e.seq, unixMs: nowMs,
+                                     text: "seq gap \(last) -> \(e.seq)", droppedCount: nil, rawLen: 0,
+                                     isGapMarker: true))
+            }
+            lastLogSeq = e.seq
+            out.append(e)
+        }
+        onBoxLog?(out)
+    }
+
     // MARK: - CH_MGMT (the "CCPA" tab)
 
-    // NB: these hop to `queue` before `send` (which mutates the `queue`-confined `seq`), exactly like
-    // sendTouch/sendCommand/etc. Calling `send` directly from the @MainActor CCPA bridge would race the
-    // heartbeat's seq increment.
+    // NB: these hop to `queue` before `send` (whose `seq` mutation is actually guarded by `sendLock`,
+    // not `queue`), exactly like sendTouch/sendCommand/etc — the hop is for ordering with the rest of
+    // the control plane on `queue`, not for `seq` safety.
     /// Ask the box for a fresh info/health snapshot (reply arrives on `onBoxInfo`).
     func requestBoxInfo() { mgmtSend([OCBM.mgmtGetInfo]) }
     /// Reboot the adapter (box ACKs, then reboots). Reply on `onBoxAck`.
@@ -889,6 +1091,10 @@ final class OCBMClient: @unchecked Sendable {
     func boxForgetDevice(_ mac: String) { mgmtSend([OCBM.mgmtForgetDevice] + Array(mac.utf8)) }
     /// Restart the wireless stack (re-advertise CarLink) without a full reboot. Reply on `onBoxAck`.
     func boxRestartWireless() { mgmtSend([OCBM.mgmtRestartWireless]) }
+    /// Put the adapter into NCM maintenance mode: the box arms `/script/ncm_only` and reboots. Sticky —
+    /// the operator returns it over ssh (`rm /script/ncm_only; reboot`). Reply on `onBoxAck`, then the
+    /// OCBM link drops.
+    func boxEnterNCM() { mgmtSend([OCBM.mgmtEnterNCM]) }
 
     private func mgmtSend(_ payload: [UInt8]) {
         queue.async { [weak self] in self?.send(channel: OCBM.chMgmt, payload: payload) }
@@ -910,6 +1116,16 @@ final class OCBMClient: @unchecked Sendable {
             logUnhandled(channel: OCBM.chMgmt, payload)
         }
     }
+}
+
+/// Identity of the connected phone (CH_CTRL `CT_PHONE_IDENT`, `{name,deviceID,model,osName,osVersion}`
+/// lifted from its own AirPlay phase-1 SETUP plist). Property names match the box's JSON keys exactly.
+struct PhoneIdent: Codable, Equatable {
+    let name: String
+    let deviceID: String
+    let model: String
+    let osName: String
+    let osVersion: String
 }
 
 /// A snapshot of CCPA adapter identity + health + bonded devices (the box's `MGMT_INFO` JSON). Property

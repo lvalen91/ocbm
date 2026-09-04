@@ -33,7 +33,7 @@ use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use crate::session::{AvSession, SessionDelegate};
+use crate::session::{AvSession, SessionDelegate, SetupError};
 
 /// Seam framing magic, "RTSP" big-endian — see the module doc for why a magic (out_hi cap-clear has
 /// no resync policy of its own).
@@ -148,6 +148,15 @@ fn strict() -> bool {
     *S.get_or_init(|| std::env::var("CARPLAY_RELAY_STRICT").is_ok_and(|v| v == "1"))
 }
 
+/// Bench lever: `CARPLAY_FEATURES_REVERSE=1` reverses the `enabledFeatures` order the phone actually
+/// receives (authored in `session.rs`'s SETUP response). In relay mode the SETUP exchange falls back
+/// to the local body while armed, otherwise the host's (unreversed) answer would reach the phone and
+/// the lever would only perturb the oracle comparison. Resolved once, like `strict`/`relay_timeout`.
+pub(crate) fn features_reverse() -> bool {
+    static R: OnceLock<bool> = OnceLock::new();
+    *R.get_or_init(|| std::env::var("CARPLAY_FEATURES_REVERSE").is_ok_and(|v| v == "1"))
+}
+
 // ---- seam frame codec ----
 
 /// Frame one message for the seam: `[u32 BE "RTSP"][u32 BE len][msg]`.
@@ -160,9 +169,13 @@ pub fn frame_msg(msg: &[u8]) -> Vec<u8> {
 }
 
 /// Streaming seam-frame decoder: `push()` raw bytes, `next()` pops complete messages. Resyncs by
-/// scanning for the magic (a truncated frame — an out_hi cap-clear on the OCBM leg — costs exactly
-/// the truncated message; the next complete frame parses). An implausible declared length
-/// (> [`RELAY_SEAM_MAX`]) is treated as garbage: skip one byte and rescan.
+/// scanning for the magic. An implausible declared length (> [`RELAY_SEAM_MAX`]) is treated as
+/// garbage: skip one byte and rescan.
+///
+/// A truncated frame — an out_hi cap-clear on the OCBM leg — costs the truncated message PLUS up to
+/// `len` bytes of the good frames behind it, which are delivered as one spliced garbage message
+/// before the scan realigns (pinned by the truncation test). Bounded by [`RELAY_SEAM_MAX`] and
+/// recovered by the rpc timeout, never by wedging.
 #[derive(Default)]
 pub struct FrameBuf {
     buf: Vec<u8>,
@@ -324,6 +337,15 @@ fn dispatch_inbound(msg: &[u8]) {
             body: rest[2..].to_vec(),
         },
         RS_ERR => RelayAnswer::Err(rest.first().copied().unwrap_or(0)),
+        // A truncated RS_RESP misses the guard above and used to be reported as an "unexpected op",
+        // which points the reader at the wrong problem entirely.
+        RS_RESP => {
+            eprintln!(
+                "[relay] short RS_RESP ({} B, needs a 2-byte status) (conn {conn} cseq {cseq}) — dropped",
+                rest.len()
+            );
+            return;
+        }
         _ => {
             eprintln!("[relay] unexpected inbound op {op:#04x} (conn {conn} cseq {cseq}) — dropped");
             return;
@@ -357,7 +379,13 @@ pub fn start_listener() {
         for conn in listener.incoming() {
             let s = match conn {
                 Ok(s) => s,
-                Err(_) => continue,
+                // Back off before retrying: a PERSISTENT accept error (EMFILE etc.) would otherwise
+                // spin this thread at 100% CPU for as long as the condition lasts.
+                Err(e) => {
+                    eprintln!("[relay] accept failed: {e}");
+                    std::thread::sleep(Duration::from_millis(100));
+                    continue;
+                }
             };
             let _ = s.set_nodelay(true); // rpc frames are small and latency-critical
             let _ = s.set_write_timeout(Some(Duration::from_secs(2)));
@@ -407,19 +435,26 @@ fn read_seam(mut s: TcpStream, gen: u32) {
     // Check + clear under the SEAM_TX lock, pairing with the accept loop's locked mint+install:
     // without the lock this was check-then-act, and a reconnect racing the check could get its
     // fresh socket cleared by the dying reader (see the accept-side comment).
-    {
+    let current = {
         let mut g = crate::plock(&SEAM_TX);
-        if SEAM_GEN.load(Ordering::Relaxed) == gen {
+        let current = SEAM_GEN.load(Ordering::Relaxed) == gen;
+        if current {
             SEAM_UP.store(false, Ordering::Release);
             *g = None;
             eprintln!("[relay] seam reader EOF (gen {gen}) — host relay down, local fallback armed");
         } else {
             eprintln!("[relay] superseded seam reader (gen {gen}) exited");
         }
+        current
+    };
+    // Fail the in-flight rpcs — but ONLY if we were still the live generation. `PENDING` is
+    // process-global, not per-connection: a SUPERSEDED reader observing its EOF after ocbmd has
+    // already reconnected would otherwise `HostGone` an rpc issued on the FRESH connection, sending
+    // that phone connection sticky-local for nothing. For the superseded case the rpc's own timeout
+    // is the backstop.
+    if current {
+        drain_pending(RelayAnswer::HostGone);
     }
-    // Pending answers were registered against THIS connection's writes either way — the replacement
-    // connection will never answer them. Fail them fast regardless of generation.
-    drain_pending(RelayAnswer::HostGone);
 }
 
 // ---- the rpc itself ----
@@ -465,6 +500,10 @@ fn rpc(conn: u32, cseq: u32, route: u8, req: &[u8], local: &[u8]) -> RpcResult {
                 body.len()
             );
             if route == ROUTE_SETUP {
+                if features_reverse() {
+                    eprintln!("[relay] CARPLAY_FEATURES_REVERSE=1 armed — LOCAL body for SETUP so the phone receives the reversed enabledFeatures");
+                    return RpcResult::FallLocal { sticky: false };
+                }
                 if let Some(diff) = diff_setup(local, &body) {
                     if strict() {
                         eprintln!("[relay] STRICT: host SETUP response diverges from local oracle ({diff}) — LOCAL fallback for this exchange");
@@ -699,20 +738,19 @@ impl SessionDelegate for RemoteSession {
         );
     }
 
-    fn setup(&mut self, request_plist: &[u8]) -> Vec<u8> {
+    fn set_resolution(&mut self, w: i64, h: i64, fps: i64) {
+        self.inner.set_resolution(w, h, fps);
+    }
+
+    fn setup(&mut self, request_plist: &[u8]) -> Result<Vec<u8>, SetupError> {
         // Pre-bind + oracle: the box session runs FIRST (binds, spawns, side effects) and its answer
         // is what we relay AND what we fall back to. Phase 1 vs phase 2 needs no distinguishing here
         // — the host splits on the `streams` key, same as the box.
-        let local = self.inner.setup(request_plist);
-        if local.is_empty() {
-            // Bind failure (AvSession answers an empty body its caller maps to an error). Nothing to
-            // author host-side and nothing worth a USB RTT — return it as-is, don't relay.
-            return local;
-        }
+        let local = self.inner.setup(request_plist)?;
         if !self.relaying() {
-            return local;
+            return Ok(local);
         }
-        self.exchange(ROUTE_SETUP, request_plist, local)
+        Ok(self.exchange(ROUTE_SETUP, request_plist, local))
     }
 
     fn record(&mut self) -> Vec<u8> {
@@ -919,6 +957,22 @@ mod tests {
             plist::Value::Array(vec!["hevc".into(), "viewAreas".into()]),
         );
         assert!(diff_setup(&plist_bytes(&base), &plist_bytes(&diverged)).is_some());
+
+        // `CARPLAY_FEATURES_REVERSE`'s pure part: same content, reversed order must itself be flagged
+        // as a divergence (order-sensitive comparison) — the property the lever deliberately exploits
+        // to produce its expected WARN. Exercised directly on `setup_surface`'s plist parse, not via
+        // the env-gated (process-wide, OnceLock-cached) `features_reverse()`.
+        let mut multi = base.clone();
+        multi.insert(
+            "enabledFeatures".into(),
+            plist::Value::Array(vec!["hevc".into(), "viewAreas".into()]),
+        );
+        let mut reversed = base.clone();
+        reversed.insert(
+            "enabledFeatures".into(),
+            plist::Value::Array(vec!["viewAreas".into(), "hevc".into()]),
+        );
+        assert!(diff_setup(&plist_bytes(&multi), &plist_bytes(&reversed)).is_some());
 
         // Phase 2: an omitted stream type must be flagged.
         let mut stream = plist::Dictionary::new();

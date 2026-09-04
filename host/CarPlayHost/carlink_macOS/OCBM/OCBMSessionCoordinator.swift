@@ -74,7 +74,11 @@ final class OCBMSessionCoordinator: OCBMClientDelegate, USBTransportDelegate, @u
         guard !present else { return }
         log.info("box SESSION_EVENT: host GONE — box tore down; awaiting re-projection")
         hop {
-            self.streaming = false; self.announcedWaiting = false; self.lastTotal = 0; self.idleTicks = 0
+            // lastTotal is NOT reset here: it's a monotonic decrypt tally (never decreases across the
+            // process), and ocbmDidUpdateStats compares delta-since-last-tick (`total > lastTotal`).
+            // Zeroing it made the very next stats tick after a legit HOST_GONE read `total > 0` and
+            // flip back to "CarPlay streaming" one tick after declaring the session torn down.
+            self.streaming = false; self.announcedWaiting = false; self.idleTicks = 0
             self.onStreaming?(false); self.onStatus?("Waiting for phone…")
         }
     }

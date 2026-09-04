@@ -234,7 +234,12 @@ pub fn build_accessory_wifi_configuration_information(cfg: &AccessoryWiFiConfig)
 /// `start_bluetooth_wifi.sh` raises the AP from) into the `AccessoryWiFiConfig` reported over 0x5703,
 /// so the credentials handed to the iPhone are exactly what hostapd is broadcasting. Missing fields
 /// fall back to sane defaults. `wpa=`/`wpa_key_mgmt=` present + a passphrase ⇒ WPA2/WPA3-Personal.
-pub fn read_hostapd_ap_config() -> AccessoryWiFiConfig {
+///
+/// `None` when the file names no SSID. There is no safe default here: an invented SSID describes an
+/// AP that is not running, so the phone leaves Bluetooth to join a network that does not exist and
+/// never arrives — and the caller would have stood the A/V layer up and claimed the transport for
+/// it. Callers must refuse rather than substitute.
+pub fn read_hostapd_ap_config() -> Option<AccessoryWiFiConfig> {
     // Path override for hosts whose AP config does not live at the box's `/etc/hostapd.conf`. The
     // Raspberry Pi port runs hostapd standalone (outside Android's Wi-Fi framework) with its conf
     // under /data. Unset keeps the CCPA behaviour exactly as before.
@@ -271,7 +276,8 @@ pub fn read_hostapd_ap_config() -> AccessoryWiFiConfig {
         }
     }
     if ssid.is_empty() {
-        ssid = "ccpa".to_string();
+        eprintln!("[wifi_handoff] {path} names no SSID — refusing to describe an AP that is not running");
+        return None;
     }
     let (security_type, passphrase) = if has_wpa {
         // Secured AP: advertise WPA2/WPA3 and hand over the passphrase if we have one. A secured AP without
@@ -283,12 +289,12 @@ pub fn read_hostapd_ap_config() -> AccessoryWiFiConfig {
     } else {
         (Some(AccessoryWiFiSecurityType::None), None)
     };
-    AccessoryWiFiConfig {
+    Some(AccessoryWiFiConfig {
         ssid,
         passphrase,
         security_type,
         channel,
-    }
+    })
 }
 
 // ---- shared TLV helpers ----------------------------------------------------------------------

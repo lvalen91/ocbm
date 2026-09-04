@@ -6,8 +6,16 @@ version = 4
 name = "aa-bridge"
 version = "0.1.0"
 dependencies = [
+ "aa-wireless",
  "box-common",
  "libc",
+]
+
+[[package]]
+name = "aa-wireless"
+version = "0.1.0"
+dependencies = [
+ "box-common",
 ]
 
 [[package]]
@@ -100,6 +108,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "bt-common"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "bytes"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -135,6 +150,9 @@ dependencies = [
 name = "carplay-wireless"
 version = "0.1.0"
 dependencies = [
+ "aa-wireless",
+ "box-common",
+ "bt-common",
  "carplay-iap2-core",
  "libc",
  "mfi-wire",

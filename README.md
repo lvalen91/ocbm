@@ -31,11 +31,13 @@ Everything above the kernel is rewritten open-source.
 > full-featured HEVC CarPlay, and keeps it current: new features land app-side. No phone
 > modification, no custom PCB, no soldered MFi chip.
 
-> **Android Auto:** the same split also carries **wired Android Auto** — the box does the AOAP USB
-> switch and pumps raw bytes; the host runs the AA protocol engine and decodes, over the same OCBM
-> link as CarPlay. Video, all three audio sinks, the mic uplink, touch, hardware buttons and the
-> night/driving sensors are device-proven against a Pixel 10, driven from the app's own vehicle
-> profile rather than hardcoded. Wired only; wireless AA is unbuilt. See Status and `docs/host/02_ANDROID_AUTO.md`.
+> **Android Auto:** the same split also carries **Android Auto, wired and wireless** — wired: the box
+> does the AOAP USB switch and pumps raw bytes; wireless: the box pairs as a Bluetooth headset (HFP),
+> the phone dials the box's own AA record, then the phone joins the box's AP and streams over TCP. The
+> host runs the AA protocol engine and decodes either way, over OCBM. Video, all three audio sinks, the
+> mic uplink, touch, hardware buttons, the night/driving sensors and HFP call audio are device-proven
+> against a Pixel 10, driven from the app's own vehicle profile rather than hardcoded. See Status and
+> `docs/androidauto/00_ARCHITECTURE.md`.
 
 ---
 
@@ -80,12 +82,29 @@ Wireless rides BT pair -> WiFi handoff -> AirPlay/RTSP -> OCBM; the inbound iAP2
 RemoteControlSession DataStream, stream type 130. App-driven SETUP is the default on **both**
 transports, with box-driven SETUP as the selectable sticky fallback.
 
-**Android Auto — wired, device-proven against a Pixel 10.** The box does the AOAP switch and pumps
-raw bytes (`ccpa/aa-bridge`); the host runs the AA protocol engine over OCBM `CH_IP`. Video, all
-three audio sinks, mic, touch, hardware buttons and the night/driving sensors work, driven from the
-same app-pushed vehicle profile CarPlay uses. The box selects AA on its own, and CarPlay/AA
-arbitration is first-come-wins with neither able to interrupt the other. **Wireless AA is unbuilt**,
-and HOME/BACK keys are declared but have no effect.
+**Android Auto — wired and wireless, both device-proven against a Pixel 10.** Wired: the box does
+the AOAP switch and pumps raw bytes (`ccpa/aa-bridge`). Wireless: the box pages the bonded phone,
+completes an HFP hands-free link (the gate gearhead waits on), the phone dials the box's own AA
+record over RFCOMM and joins the box AP, and `aa-bridge --wireless` pumps the session over TCP. Both
+arms feed the same host AA protocol engine over OCBM `CH_IP`. Video, all three audio sinks, mic,
+touch, hardware buttons, the night/driving sensors and HFP call audio (both directions) work, driven
+from the same app-pushed vehicle profile CarPlay uses. The box selects AA on its own, and CarPlay/AA
+arbitration is first-come-wins with neither able to interrupt the other. Beyond the base A/V,
+all device-proven on a Pixel 10 (gearhead 17.5, 2026-09-04): the metadata services (now-playing,
+turn-by-turn navigation with the phone's own maneuver glyph, and phone/call state) feed the same
+Metadata window CarPlay uses; drive side, all nine video codec tiers (H.265 above 1080p, 60 fps to
+4K), non-tier panel sizes via codec margins (e.g. 2400×960 with the UI cropped and scaled to fit),
+and display density are declared from the vehicle profile; guidance and Assistant audio run at
+48 kHz; and calls negotiate HFP wideband (mSBC, 16 kHz) with a graceful CVSD fallback.
+
+**Recent OCBM/app work.** Audio-lane resync (`F_NEW_SOURCE` + `SEAM_MAGIC` on a torn frame), a
+box→host log pipeline with write-time backfill tagging (`LOG_F_BACKFILL`), SSP numeric-comparison
+pairing (box auto-confirms in production; an interactive Pair/Cancel lever with a pairing-code panel
+in the app), `MGMT_ENTER_NCM` (app button and a `carlink://box/enter-ncm` URL to drop the box into
+NCM maintenance mode), a bounded video `FrameFIFO` with off-main render hand-off, AA rows in the
+app's CCPA metrics panel, and `host/CallSim` — a self-managed-`ConnectionService` Android call
+simulator for exercising AA telephony without a SIM. See `docs/carplay/01_OCBM_PROTOCOL.md` and
+`docs/host/00_MACOS_HOST_APP.md`.
 
 **Two hosts.** `host/CarPlayHost/` is the shipping macOS app. `host/CarlinkAndroid/` is an AAOS
 head-unit app (GM `gminfo3.7`, AAOS 12L / API 32) that claims the adapter over OCBM and runs full
@@ -164,7 +183,7 @@ phone modification, no soldered chip). See [`docs/ops/01_RECOVERY.md`](docs/ops/
 
 | Path | Contents |
 |---|---|
-| `docs/carplay/`, `docs/wireless/`, `docs/host/`, `docs/ops/` | The whole corpus: 21 documents in four categories, capped at 10 each by `tools/docs_check.py`. Start at [`docs/README.md`](docs/README.md) |
+| `docs/carplay/`, `docs/androidauto/`, `docs/wireless/`, `docs/host/`, `docs/ops/` | The whole corpus: 24 documents in five categories, capped at 10 each by `tools/docs_check.py`. Start at [`docs/README.md`](docs/README.md) |
 | `crates/ocbm-proto/` | OCBM wire codec (envelope, channels, Reassembler, CRC-32) — shared by box + host |
 | `crates/vendor/` | Ten crates vendored in on 2026-07-13 to make the tree self-contained. Provenance is mixed: `receiver`, `pairing`, `rtsp`, `mfi`, `eld-codec` and `rx-connect` came from the archived `ncm_carplayd` tree; `iap2-core`, `metadata` and `wireless` came from the `carplayd` tree; `mfi-i2c-local` was written here (a port of `wireless/src/mfi_local.rs`, split out because `receiver`/`mfi` are `#![forbid(unsafe_code)]`). Eight are path-dependencies only (`Cargo.toml` `exclude`); `wireless` and `rx-connect` are workspace members producing the shipped `carplay-wireless` (BT/WiFi wireless-CarPlay stack) and `rx-connect` (mDNS `_airplay._tcp` advertiser) box binaries |
 | `ccpa/ocbmd/` | Box OCBM daemon (armv7-musl), over `/dev/usb_accessory`: CTRL `0x00` (incl. session-control SUBSCRIBE/heartbeat/presence → `/tmp/host_present`) / MFI `0x01` / CONSOLE `0x02` (root PTY) / IP `0x10` / FILE `0x11` / ETH `0x12` / VIDEO `0x20` / MEDIA_AUDIO `0x21` / ALT_AUDIO `0x22` (voice sink, seam `:9003`) / METADATA `0x23` (seam `:9004`) / ALT_VIDEO `0x24` (cluster screen, seam `:9005`) / INPUT `0x30` (HID uplink) / MIC `0x31` (mic uplink) / MGMT `0x40` (the app's "CCPA" tab) / RTSP `0x41` (app-driven SETUP relay, seam `:9106`) / ECHO `0xFF` / DISCARD `0x0FFF`. Authoritative list: `crates/ocbm-proto/src/lib.rs` |
@@ -180,6 +199,7 @@ phone modification, no soldered chip). See [`docs/ops/01_RECOVERY.md`](docs/ops/
 | `pizero/` | Raspberry Pi Zero 2 W bring-up. Measurement only — no OCBM port yet, and the board facts differ from the CCPA |
 | `host/aa-headunit/` | Rust Android Auto head-unit reference client (TCP / `adb forward`) — the de-risking path the macOS engine was built against |
 | `host/CarPlayHost/` | The shipping macOS host app (Xcode project `carlink_macOS`) — VideoToolbox decode, audio, touch/media-key uplink, Settings/YAML, OCBM client |
+| `host/CallSim/` | Android app: self-managed Telecom `ConnectionService` that fakes real phone calls (ringing, answer/hang-up, HFP/SCO audio routing) for testing AA telephony without a SIM |
 
 ---
 

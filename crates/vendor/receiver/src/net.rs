@@ -40,6 +40,10 @@ where
                         continue; // A/V still flowing → session alive
                     }
                 }
+                eprintln!(
+                    "[receiver] idle backstop tearing down session (screen_focused={})",
+                    crate::events::screen_focused()
+                );
                 return Ok(());
             }
             // TCP-keepalive exhaustion surfaces as ETIMEDOUT → `TimedOut`, DISTINCT from the SO_RCVTIMEO

@@ -123,7 +123,9 @@ box() {
   if [ "$VIA" = ssh ]; then "${SSHP[@]}" ssh -n "${SSH_OPTS[@]}" "root@$BOX" "$1"
   else python3 "$BOXSH" --host "$BOX" --timeout "${BOX_TIMEOUT:-45}" run "$1"; fi
 }
-boxq() { box "$1" >/dev/null 2>&1; }
+# Quiet probe: must NOT die when the box is unreachable — `phase_revert` and `wait_ncm` use it
+# precisely to find out whether NCM is up, and `die` inside `box` would exit the script instead.
+boxq() { detect_transport >/dev/null 2>&1 || return 1; box "$1" >/dev/null 2>&1; }
 
 ask() {  # $1 = prompt; returns 0 for yes
   [ "$ASSUME_YES" = 1 ] && return 0
@@ -162,7 +164,7 @@ manifest() {
     echo "$ARM/airplayd|/usr/sbin/airplayd|755"
     echo "$ARM/rx-connect|/usr/sbin/rx-connect|755"
     echo "$ARM/carplay-wireless|/usr/sbin/carplay-wireless|755"
-    echo "$ARM/aa-bridge|/usr/sbin/aa-bridge|755"  # Android Auto USB bridge (AOAP); launched gated by session_supervisor's arm_aa
+    echo "$ARM/aa-bridge|/usr/sbin/aa-bridge|755"  # Android Auto byte pump: AOAP over USB (arm_aa) AND, with --wireless, the SoftAP TCP endpoint the BT bootstrap advertises (arm_aa_wireless)
     # WIRED CARPLAY CANNOT START WITHOUT THIS. projection_up.sh calls `iap_role_switch` by bare
     # name (PATH), and docs/ops/01_RECOVERY.md puts it in /usr/bin. Absent, the 0x51 host-role switch never runs, so
     # the iPhone stays a USB device, the phone-facing iAP2 gadget never binds to a host, and iap2d
@@ -337,21 +339,26 @@ A=/sys/class/android_usb_accessory/android0
   fi
   # Respawn ocbmd the way OCBM mode does via inittab: it exits deliberately when the USB
   # transport drops, and without a respawner one transient ends the trial.
-  ( n=0; while [ $n -lt 100 ]; do /usr/sbin/ocbmd >>/tmp/ocbmd.log 2>&1; n=$((n+1)); sleep 1; done ) &
+  ( n=0; while [ $n -lt 100 ]; do /usr/sbin/ocbmd >>/tmp/box.log 2>&1; n=$((n+1)); sleep 1; done ) &
+  LOOP=$!
   sleep 3
   pidof ocbmd >/dev/null 2>&1 && echo "  ocbmd running pid=$(pidof ocbmd)" \
-    || { echo "FATAL: ocbmd will not stay up:"; tail -10 /tmp/ocbmd.log; sync; reboot; exit 0; }
+    || { echo "FATAL: ocbmd will not stay up:"; tail -10 /tmp/box.log; sync; reboot; exit 0; }
   i=0
   while [ $i -lt "$TTL" ]; do
-    [ -e /tmp/ocbm_keep ] && { echo "  HELD open by /tmp/ocbm_keep at ${i}s"; exit 0; }
+    # S8: HELD branch exits without the reboot below, which otherwise reaps this whole subshell
+    # tree; the respawn loop must be killed explicitly here or it survives as an orphan (NOT
+    # `pkill -x ocbmd` — the held trial needs ocbmd itself to keep running).
+    [ -e /tmp/ocbm_keep ] && { echo "  HELD open by /tmp/ocbm_keep at ${i}s"; kill "$LOOP" 2>/dev/null; exit 0; }
     sleep 5; i=$((i+5))
   done
   echo "  TTL expired with no /tmp/ocbm_keep — rebooting back to NCM"
+  kill "$LOOP" 2>/dev/null   # symmetric with the HELD branch; harmless here since reboot follows
   sync; reboot
 } >> "$L" 2>&1
 EOS
   push_file "$payload" /tmp/ocbm_try.sh 755
-  box 'rm -f /script/ocbm_try.log /tmp/ocbmd.log /tmp/ocbm_keep; sh -n /tmp/ocbm_try.sh && echo SYNTAX_OK' | grep -q SYNTAX_OK \
+  box 'rm -f /script/ocbm_try.log /tmp/ocbm_keep; sh -n /tmp/ocbm_try.sh && echo SYNTAX_OK' | grep -q SYNTAX_OK \
     || die "trial payload did not parse on the box"
 
   say "launching the trial — the NCM link will drop in ~3s"
@@ -508,8 +515,10 @@ phase_revert() {
     boxq 'sync; (sleep 1; reboot) >/dev/null 2>&1 &' || true
   else
     say "no NCM shell; trying the OCBM console"
-    ( printf 'touch /script/ncm_only; rm -f /script/ocbm_trial; sync; reboot\r'; sleep 3 ) \
-      | "$OCBM_HOST" console 2>&1 | tail -5
+    # Send the command only after the bridge has attached: bytes written before "CONSOLE attached"
+    # are dropped, and the box then stays on OCBM while this script waits for an NCM that never comes.
+    ( sleep 5; printf 'touch /script/ncm_only; rm -f /script/ocbm_trial; sync; echo REVERTED; sleep 1; reboot\r'; sleep 6 ) \
+      | "$OCBM_HOST" console 2>&1 | tail -6
   fi
   sleep 12
   wait_ncm 260 && say "back on NCM" || die "did not come back on NCM"

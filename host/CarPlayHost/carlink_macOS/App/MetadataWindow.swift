@@ -6,7 +6,8 @@
 // SDK parameter symbols read directly from the Xcode-local CarPlaySimulator plugin
 // (iAP2MessageKit.framework exports `_iAP2NowPlayingUpdate_MediaItemAttributes_*`,
 // `_iAP2RouteGuidanceUpdate_*`, `_iAP2CallStateUpdate_*`, `_iAP2ListUpdate_RecentsList_*`,
-// `_iAP2CommunicationsUpdate_*`; the AirPlay `/command` family from CarPlaySDK). See docs/20.
+// `_iAP2CommunicationsUpdate_*`; the AirPlay `/command` family from CarPlaySDK). See
+// docs/carplay/05_METADATA_AND_CONTROLS.md.
 //
 // THREE FEEDS, all over OCBM CH_METADATA:
 //   • META_JSON    — iAP2 metadata parsed box-side by iap2d (media / nav / call / comms / recents)
@@ -68,7 +69,8 @@ enum MetaCategory: String, CaseIterable, Identifiable {
         }
     }
 
-    /// Why a category may be empty — shown inline so a blank pane is never ambiguous (docs/20).
+    /// Why a category may be empty — shown inline so a blank pane is never ambiguous
+    /// (docs/carplay/05_METADATA_AND_CONTROLS.md).
     var absenceNote: String {
         switch self {
         case .media:
@@ -78,7 +80,7 @@ enum MetaCategory: String, CaseIterable, Identifiable {
         case .phone:
             return "No active call. Call state arrives as iAP2 CallStateUpdate (0x4155), subscribed at Identify."
         case .callHistory:
-            return "No calls yet. iPhone Recents ride iAP2 ListUpdate (0x4171), which is not in the stock accessory's declared set and is likely gated on Bluetooth pairing/consent (docs/20 §1.4). We subscribe best-effort; calls observed live are recorded here regardless."
+            return "No calls yet. iPhone Recents ride iAP2 ListUpdate (0x4171), which is not in the stock accessory's declared set and is likely gated on Bluetooth pairing/consent (docs/carplay/05_METADATA_AND_CONTROLS.md §5.6). We subscribe best-effort; calls observed live are recorded here regardless."
         case .telephony:
             return "No telephony status yet. iAP2 CommunicationsUpdate (0x4158) carries carrier, signal, call count and voicemail."
         case .favorites:
@@ -90,7 +92,7 @@ enum MetaCategory: String, CaseIterable, Identifiable {
         case .device:
             return "Nothing yet. The 0x4E0x updates carry device name, language, time, UUID and the connected Bluetooth profiles."
         case .accessibility:
-            return "Nothing yet. VoiceOver and AssistiveTouch declare accessory capabilities and are off unless CARPLAY_METADATA=all."
+            return "Nothing yet. VoiceOver and AssistiveTouch declare accessory capabilities and are off unless the pushed metadata tier (Settings ▸ Configuration ▸ Advanced Capabilities ▸ Metadata declaration) is raised above the default."
         case .siriSpeech:
             return "Not expected. setEnhancedSiriParams only arrives if the accessory declares enhancedSiri, which this project does not (out of scope)."
         case .vehicle:
@@ -143,7 +145,8 @@ struct MediaSnapshot {
     var awaitingTrackInfo: Bool { title == nil && (elapsedMs != nil || playbackStatus != nil) }
     var stateText: String? {
         guard let s = playbackStatus else { return nil }
-        return ["Stopped", "Playing", "Paused"][max(0, min(s, 2))]  // clamp both ends (audit: negative traps)
+        // 0 stop 1 play 2 pause 3 seekFwd 4 seekBack — a 3-entry table clamped 3/4 into "Paused".
+        return ["Stopped", "Playing", "Paused", "Seeking forward", "Seeking backward"][max(0, min(s, 4))]
     }
     var progress: Double? {
         guard let e = elapsedMs, let d = durationMs, d > 0 else { return nil }
@@ -210,6 +213,15 @@ struct NavSnapshot {
     /// The whole maneuver list, keyed by Apple's maneuver index, plus which one is current.
     var maneuvers: [Int: Maneuver] = [:]
     var currentManeuverIndex: Int?
+    /// Android Auto only: the phone renders the upcoming-maneuver glyph itself and ships it as an
+    /// image (`NavigationNextTurnEvent.image`, sized by the options we declared). CarPlay sends a
+    /// maneuver TYPE, not a picture, so this stays nil on iAP2.
+    var maneuverImage: NSImage?
+    /// Android Auto (NavigationState scheme): the phone sends a maneuver TYPE, so the head unit
+    /// draws the glyph — an SF Symbol name chosen by `AAMetadata.maneuverSymbol`.
+    var maneuverSymbol: String?
+    /// Android Auto: the phone's own arrival-time string ("8:24 AM").
+    var etaText: String?
 
     /// The live turn: the maneuver 0x5201 names as current (falls back to the lowest index seen).
     var currentManeuver: Maneuver? {
@@ -247,6 +259,10 @@ struct NavSnapshot {
 @MainActor
 final class MetadataStore: ObservableObject {
     static let shared = MetadataStore()
+    /// Shared trim bound for `callHistory` (was 100 for live-call ends, 200 for Recents — two caps
+    /// trimming opposite ends of the same array). `HistoryPane` sorts by `started` descending, so a
+    /// single cap is enough; it no longer matters which end insert/append land on.
+    static let callHistoryCap = 200
 
     @Published private(set) var media = MediaSnapshot()
     @Published private(set) var nav = NavSnapshot()
@@ -275,6 +291,173 @@ final class MetadataStore: ObservableObject {
     /// Seam reassembly runs off the OCBM read queue; only complete messages hop to the main actor.
     nonisolated private let seamLock = NSLock()
     nonisolated(unsafe) private var seam: [UInt8] = []
+
+    // MARK: Android Auto source
+    //
+    // The AA engine decodes gal MediaPlaybackStatus / NavigationStatus / PhoneStatus messages on
+    // the session thread and hands plain values here; the panes are shared with the iAP2 source.
+    // Delta semantics match `nowPlaying`: a nil leaves the field alone, so a status-only frame
+    // never blanks the title. Everything is main-actor because the panes observe these.
+
+    struct AAMediaUpdate {
+        var title: String?, artist: String?, album: String?, appName: String?
+        var durationMs: Int?, elapsedMs: Int?
+        /// Store convention (iAP2 PlaybackStatus): 0 stopped, 1 playing, 2 paused.
+        var playbackStatus: Int?
+        var shuffleMode: Int?, repeatMode: Int?
+        var artwork: NSImage?
+    }
+
+    struct AANavUpdate {
+        /// nil = leave; `.some(nil)` = the phone said navigation stopped.
+        var active: Bool?
+        var maneuverDescription: String?
+        var nextRoad: String?
+        var distanceText: String?
+        var distanceMeters: Int?
+        var timeToTurnSec: Int?
+        var image: NSImage?
+        var symbol: String?
+        var exitInfo: String?
+        var lanes: [(shapes: [Int], highlighted: Bool)]?
+        var destinationName: String?
+        var currentRoad: String?
+        var destDistanceText: String?
+        var destMeters: Int?
+        var secondsToArrival: Int?
+        var etaText: String?
+    }
+
+    @MainActor
+    func applyAAMedia(_ u: AAMediaUpdate) {
+        if let v = u.title { media.title = v }
+        if let v = u.artist { media.artist = v }
+        if let v = u.album { media.album = v }
+        if let v = u.appName { media.appName = v }
+        if let v = u.durationMs { media.durationMs = v }
+        if let v = u.elapsedMs { media.elapsedMs = v }
+        if let v = u.playbackStatus { media.playbackStatus = v }
+        if let v = u.shuffleMode { media.shuffleMode = v }
+        if let v = u.repeatMode { media.repeatMode = v }
+        if let v = u.artwork { media.artwork = v; media.artworkId = nil }
+        if media.isStopped { media = MediaSnapshot() }   // CLEAR ON MEDIA END, as iAP2 does
+    }
+
+    @MainActor
+    func applyAANav(_ u: AANavUpdate) {
+        if u.active == false { nav = NavSnapshot(); return }
+        if u.active == true, nav.routeGuidanceState == nil { nav.routeGuidanceState = 1 }
+        if let v = u.destinationName { nav.destinationName = v }
+        var m = nav.maneuvers[0] ?? Maneuver()
+        if let v = u.maneuverDescription { m.description = v }
+        if let v = u.nextRoad { m.afterRoadName = v }
+        if let v = u.distanceText { m.distanceText = v; nav.distanceToManeuverText = v; nav.distanceToManeuverUnits = nil }
+        else if let mtr = u.distanceMeters { let t = mtr >= 1000 ? String(format: "%.1f km", Double(mtr) / 1000) : "\(mtr) m"
+            m.distanceText = t; nav.distanceToManeuverText = t; nav.distanceToManeuverUnits = nil }
+        if let v = u.timeToTurnSec, u.secondsToArrival == nil, nav.timeRemainingSec == nil { nav.timeRemainingSec = v }
+        if let v = u.image { nav.maneuverImage = v }
+        if let v = u.symbol { nav.maneuverSymbol = v }
+        if let v = u.exitInfo { m.exitInfo = v }
+        if let ls = u.lanes {
+            nav.lanes = Dictionary(uniqueKeysWithValues: ls.enumerated().map { i, l in
+                (i + 1, Lane(status: l.highlighted ? "preferred" : "ok", angle: nil, highlightAngle: nil))
+            })
+            nav.lanesGuidanceIndex = 0
+        }
+        if let v = u.currentRoad { nav.currentRoadName = v }
+        if let v = u.destDistanceText { nav.distanceRemainingText = v; nav.distanceRemainingUnits = nil }
+        if let v = u.destMeters { nav.distanceRemainingM = v }
+        if let v = u.secondsToArrival { nav.timeRemainingSec = v }
+        if let v = u.etaText { nav.etaText = v }
+        nav.maneuvers[0] = m
+        nav.currentManeuverIndex = 0
+    }
+
+    /// Adapter from the AA engine's decoded events to the store's own update shapes.
+    @MainActor
+    func applyAndroidAuto(_ ev: AAMetadata.Event) {
+        switch ev {
+        case .mediaMetadata(let m):
+            applyAAMedia(AAMediaUpdate(title: m.song, artist: m.artist, album: m.album,
+                                       durationMs: m.durationSeconds.map { $0 * 1000 },
+                                       artwork: m.albumArt.flatMap { NSImage(data: $0) }))
+        case .mediaStatus(let st):
+            // gal State 1 STOPPED / 2 PLAYING / 3 PAUSED -> store (iAP2) 0 / 1 / 2.
+            let status: Int? = st.state.map { $0 == 2 ? 1 : ($0 == 3 ? 2 : 0) }
+            let rep: Int? = (st.repeatOne == true) ? 1 : (st.repeatAll == true ? 2 : (st.repeatAll == false ? 0 : nil))
+            applyAAMedia(AAMediaUpdate(appName: st.source,
+                                       elapsedMs: st.playbackSeconds.map { $0 * 1000 },
+                                       playbackStatus: status,
+                                       shuffleMode: st.shuffle.map { $0 ? 1 : 0 }, repeatMode: rep))
+        case .navStatus(let v):
+            applyAANav(AANavUpdate(active: v == 1 || v == 3))
+        case .navTurn(let t):
+            applyAANav(AANavUpdate(maneuverDescription: t.description, nextRoad: t.road,
+                                   image: t.image.flatMap { NSImage(data: $0) }))
+        case .navDistance(let d):
+            applyAANav(AANavUpdate(distanceText: d.displayText, distanceMeters: d.meters,
+                                   timeToTurnSec: d.secondsToTurn))
+        case .navState(let st):
+            let t = st.maneuverType ?? 0
+            var desc = AAMetadata.maneuverName(t)
+            if let n = st.roundaboutExitNumber, n > 0 { desc += ", exit \(n)" }
+            applyAANav(AANavUpdate(active: true, maneuverDescription: desc, nextRoad: st.road,
+                                   symbol: AAMetadata.maneuverSymbol(t), exitInfo: st.cue.first,
+                                   lanes: st.lanes.map { (shapes: $0.shapes, highlighted: $0.highlighted) },
+                                   destinationName: st.destinations.first))
+        case .navPosition(let p):
+            applyAANav(AANavUpdate(distanceText: p.stepText, distanceMeters: p.stepMeters,
+                                   timeToTurnSec: p.secondsToStep, currentRoad: p.currentRoad,
+                                   destDistanceText: p.destText, destMeters: p.destMeters,
+                                   secondsToArrival: p.secondsToArrival, etaText: p.eta))
+        case .phone(let calls, _):
+            applyAAPhone(calls)
+        case .raw:
+            break
+        }
+    }
+
+    /// PhoneStatus: the first call that is not INACTIVE becomes the active call; none clears it.
+    @MainActor
+    func applyAAPhone(_ calls: [AAMetadata.PhoneCall]) {
+        let live = calls.first { ($0.state ?? 3) != 3 && ($0.state ?? 0) != 0 }
+        guard let c = live else {
+            if let a = activeCall {
+                var ended = a; ended.ended = Date(); ended.status = "ended"
+                callHistory.insert(ended, at: 0)
+                if callHistory.count > Self.callHistoryCap { callHistory.removeLast(callHistory.count - Self.callHistoryCap) }
+                activeCall = nil
+            }
+            return
+        }
+        let status: String
+        switch c.state {
+        case 4: status = "incoming"
+        case 2: status = "on hold"
+        case 5: status = "conference"
+        case 6: status = "muted"
+        default: status = "active"
+        }
+        if var a = activeCall {
+            a.status = status; a.wasAnswered = a.wasAnswered || c.state == 1
+            if let n = c.number, !n.isEmpty { a.remoteId = n }
+            if let id = c.callerId, !id.isEmpty { a.displayName = id }
+            activeCall = a
+        } else {
+            activeCall = CallRecord(started: Date().addingTimeInterval(-Double(c.durationSeconds ?? 0)),
+                                    ended: nil, displayName: c.callerId ?? c.number ?? "Unknown",
+                                    remoteId: c.number ?? "", direction: c.state == 4 ? "incoming" : "outgoing",
+                                    status: status, wasAnswered: c.state == 1)
+        }
+    }
+
+    /// The AA session ended: drop what it had shown so the panes do not keep a dead route/track.
+    @MainActor
+    func clearAndroidAuto() {
+        media = MediaSnapshot()
+        nav = NavSnapshot()
+        activeCall = nil
+    }
 
     func count(for cat: MetaCategory) -> Int {
         switch cat {
@@ -324,15 +507,21 @@ final class MetadataStore: ObservableObject {
         }
         seamLock.unlock()
         guard !msgs.isEmpty else { return }
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            for (marker, payload) in msgs {
-                switch marker {
-                case 0x01: self.handleCommandPlist(Data(payload))
-                case 0x02: self.handleJSON(Data(payload))
-                case 0x03: self.handleArtwork(payload)
-                case 0x04: self.handleCornerMask(payload)
-                default: break
+        // FIFO-preserving main-actor hop (mirrors OCBMClient.deliver): an unstructured `Task {
+        // @MainActor }` here has no cross-task ordering guarantee, so two frames from consecutive
+        // `ingest` calls (e.g. callState status 4 then 0) could apply reversed. The main queue IS the
+        // MainActor executor, so `assumeIsolated` is sound and keeps consecutive deltas ordered.
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                for (marker, payload) in msgs {
+                    switch marker {
+                    case 0x01: self.handleCommandPlist(Data(payload))
+                    case 0x02: self.handleJSON(Data(payload))
+                    case 0x03: self.handleArtwork(payload)
+                    case 0x04: self.handleCornerMask(payload)
+                    default: break
+                    }
                 }
             }
         }
@@ -393,7 +582,8 @@ final class MetadataStore: ObservableObject {
 
         switch kind {
         case "nowPlaying":
-            // DELTA merge — an elapsed-only frame must not blank the title (docs/20 §1.2, prereq 4).
+            // DELTA merge — an elapsed-only frame must not blank the title
+            // (docs/carplay/05_METADATA_AND_CONTROLS.md).
             if let v = str("title") { media.title = v }
             if let v = str("artist") { media.artist = v }
             if let v = str("album") { media.album = v }
@@ -453,7 +643,9 @@ final class MetadataStore: ObservableObject {
                 if var c = activeCall {                       // CLEAR ON CALL END → history
                     c.ended = Date(); c.status = "Ended"
                     callHistory.insert(c, at: 0)
-                    if callHistory.count > 100 { callHistory.removeLast() }
+                    // Same cap as `recentCall` below (was 100 vs 200, trimming opposite ends —
+                    // `HistoryPane` sorts by `started` descending, so keep one shared bound here).
+                    if callHistory.count > Self.callHistoryCap { callHistory.removeLast() }
                     activeCall = nil
                 }
             } else {
@@ -525,8 +717,10 @@ final class MetadataStore: ObservableObject {
                 break
             }
             callHistory.append(CallRecord(
-                started: Date(timeIntervalSince1970: TimeInterval(int("unixTimestamp") ?? 0)),
-                ended: nil,
+                started: incomingStart,
+                // durationSec (metadata.rs list_update id 8) was ignored, so Recents always showed
+                // "—" in the Duration column even though the box sends it.
+                ended: int("durationSec").map { incomingStart.addingTimeInterval(TimeInterval($0)) },
                 displayName: str("displayName") ?? str("remoteId") ?? "Unknown",
                 remoteId: str("remoteId") ?? "",
                 // Apple's 0x4171 `Type` enum is 0 Unknown, 1 Incoming, 2 Outgoing, 3 Missed, and the
@@ -535,7 +729,7 @@ final class MetadataStore: ObservableObject {
                 direction: ["Unknown", "Incoming", "Outgoing", "Missed"][max(0, min(int("callType") ?? 0, 3))],
                 status: "From iPhone Recents",
                 wasAnswered: (int("callType") ?? 0) != 3))
-            if callHistory.count > 200 { callHistory.removeFirst(callHistory.count - 200) }
+            if callHistory.count > Self.callHistoryCap { callHistory.removeFirst(callHistory.count - Self.callHistoryCap) }
 
         // ---- Extended metadata (docs/carplay/05_METADATA_AND_CONTROLS.md). Flat key/value panes; the raw record also lands in the
         // category's event list so nothing is lost if a field is not mapped here.
@@ -788,7 +982,7 @@ private struct MediaPane: View {
 
                 if m.artworkId == nil && !m.awaitingTrackInfo {
                     Card(title: "Album Art") {
-                        Text("iOS is not offering artwork for this track. Album art requires the accessory to declare a supported-artwork-format list in the iAP2 identify — the one unresolved gate (docs/20). The File-Transfer receiver is implemented and will display art the moment iOS offers it.")
+                        Text("iOS is not offering artwork for this track. Album art requires the accessory to declare a supported-artwork-format list in the iAP2 identify — the one unresolved gate (docs/carplay/05_METADATA_AND_CONTROLS.md). The File-Transfer receiver is implemented and will display art the moment iOS offers it.")
                             .font(.callout).foregroundStyle(.secondary)
                     }
                 }
@@ -825,7 +1019,19 @@ private struct NavPane: View {
                 Card(title: "Next Maneuver") {
                     VStack(alignment: .leading, spacing: 6) {
                         let m = n.currentManeuver
-                        Text(m?.description ?? "—").font(.title2).fontWeight(.semibold)
+                        HStack(alignment: .center, spacing: 12) {
+                            if let img = n.maneuverImage {
+                                Image(nsImage: img).resizable().aspectRatio(contentMode: .fit)
+                                    .frame(width: 56, height: 56)
+                                    .accessibilityLabel(m?.description ?? "Maneuver")
+                            }
+                            else if let sym = n.maneuverSymbol {
+                                Image(systemName: sym).font(.system(size: 40, weight: .semibold))
+                                    .frame(width: 56, height: 56)
+                                    .accessibilityLabel(m?.description ?? "Maneuver")
+                            }
+                            Text(m?.description ?? "—").font(.title2).fontWeight(.semibold)
+                        }
                         if let d = n.distanceToTurn {
                             Text("in \(d)").font(.title3).foregroundStyle(.secondary)
                         }
@@ -872,7 +1078,9 @@ private struct NavPane: View {
                         Row(label: "Current road", value: n.currentRoadName)
                         Row(label: "Distance left", value: n.distanceLeft)
                         if let t = n.timeRemainingSec { Row(label: "Time left", value: hms(t)) }
-                        if let e = n.eta {
+                        if let t = n.etaText {
+                            Row(label: "Arrival", value: t)
+                        } else if let e = n.eta {
                             Row(label: "Arrival", value: e.formatted(date: .omitted, time: .shortened))
                         }
                         if let i = n.currentManeuverIndex {
@@ -917,7 +1125,9 @@ private struct CallPane: View {
 private struct HistoryPane: View {
     let calls: [CallRecord]
     var body: some View {
-        Table(calls) {
+        // Live-call ends are inserted newest-first; Recents are appended in phone order — sort here
+        // so the table is always in time order regardless of which feed a row came from (L4).
+        Table(calls.sorted { $0.started > $1.started }) {
             TableColumn("When") { c in
                 Text(c.started.formatted(date: .abbreviated, time: .shortened))
             }
