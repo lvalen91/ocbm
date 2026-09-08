@@ -15,7 +15,11 @@
 #      ~/.cache (build artifacts must not live under iCloud-synced ~/Documents — see CLAUDE.md), and
 #      `rsync -a` copies the LINK, absolute target and all. On GitHub, or on any other machine, it
 #      resolves to nothing. Caught by a --dry-run 2026-09-08, which is also why the excludes below are
-#      SLASHLESS: `apk/` matches a directory only and would have missed it.
+#      SLASHLESS: `apk/` matches a directory only and would have missed it. They are also PATH-
+#      ANCHORED to host/gm_ccpa: a bare `evidence` exclude is global and silently stopped syncing
+#      pi/evidence and pizero/evidence, which ARE deliberately published and cited by docs. rsync
+#      protects excluded paths from --delete, so that strands them published-but-frozen rather than
+#      failing loudly.
 #
 #   2. Gitignored build output rides along. None of it is ever COMMITTED (the .gitignore travels with
 #      the tree), but it accumulated 815 MB of Xcode DerivedData, cargo targets, .gradle caches and a
@@ -39,7 +43,7 @@ rsync -a --delete \
   --exclude='* [0-9].*' \
   --exclude='* [0-9]' \
   --exclude='target' --exclude='build/' \
-  --exclude='apk' --exclude='evidence' --exclude='logs' \
+  --exclude='/host/gm_ccpa/apk' --exclude='/host/gm_ccpa/evidence' --exclude='/host/gm_ccpa/logs' \
   --exclude='.gradle/' --exclude='local.properties' \
   --exclude='xcuserdata/' \
   --exclude='.serena/' \
@@ -65,9 +69,9 @@ if [ -z "$(git status --porcelain)" ]; then
 fi
 
 # Fail loudly rather than publish something tracked that should not be.
-if git status --porcelain | awk '{print $NF}' | grep -qE '(^|/)(target|build|scratchpad|reference|apk|evidence|logs)(/|$)|\.DS_Store$'; then
+if git status --porcelain | awk '{print $NF}' | grep -qE '(^|/)(target|build|scratchpad|reference)(/|$)|^host/gm_ccpa/(apk|evidence|logs)(/|$)|\.DS_Store$'; then
     echo "FATAL: build output or temp is staged for publication" >&2
-    git status --porcelain | grep -E '(^|/)(target|build|scratchpad|apk|evidence|logs)(/|$)|\.DS_Store$' >&2
+    git status --porcelain | grep -E '(^|/)(target|build|scratchpad)(/|$)|^host/gm_ccpa/(apk|evidence|logs)(/|$)|\.DS_Store$' >&2
     exit 1
 fi
 
