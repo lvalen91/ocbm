@@ -213,10 +213,15 @@ final class AASession: @unchecked Sendable {
         log("-> sensor night=\(on)")
     }
 
-    /// Push a driving-restriction change to the phone NOW. AA gives this ONE bit where CarPlay has
-    /// the whole limitedUI catalogue, so this is the nearest equivalent of that toggle.
+    /// Push a driving-restriction change to the phone NOW. The mask is the PROFILE's: before
+    /// 2026-09-04 this sent the hardcoded `drivingDefault` and the vehicle profile's restriction set
+    /// never reached the sensor (DESIGN.md §10) — `cap.drivingMask` is that set, mapped once by
+    /// `FeatureMatrix.androidAutoDrivingStatus` in the profile bridge (`drivingDefault` when the
+    /// profile declares none, so the previous behaviour is the default). The Controls window's
+    /// toggle still supplies only on/off: the bit pattern is a capability declaration authored in
+    /// Settings, the toggle is the "car is moving" signal the box does not source yet.
     func setDrivingRestricted(_ restricted: Bool) {
-        let mask: AACapability.DrivingRestrictions = restricted ? .drivingDefault : .none
+        let mask: AACapability.DrivingRestrictions = restricted ? cap.drivingMask : .none
         sensorLock.lock(); liveDriving = restricted; sensorLock.unlock()
         guard sendEnc(AAWire.chSensor, AAWire.sensorBatch, control: false,
                       AAWire.sensorBatchDriving(mask)) else { return }
@@ -502,19 +507,26 @@ final class AASession: @unchecked Sendable {
         }
         var declared: [UInt8] = [AAWire.chSensor, AAWire.chVideo, AAWire.chMediaAudio,
                                  AAWire.chGuidanceAudio, AAWire.chSystemAudio]
-        if AACapability.telephonySinkExperiment { declared.append(AACapability.telephonySinkChannel) }
+        if cap.telephonySink { declared.append(AACapability.telephonySinkChannel) }
         declared.append(contentsOf: [AAWire.chInput, AAWire.chMicrophone])
-        if AACapability.metadataServices {
-            declared.append(contentsOf: [AAWire.chMediaPlayback, AAWire.chNavigationStatus, AAWire.chPhoneStatus])
-        }
+        // Each metadata feed is gated by the profile individually (W2, 2026-09-04); AA_METADATA=0
+        // still withholds all three (resolved in AACapability, where it is also recorded as a note).
+        if cap.metadata.mediaPlayback { declared.append(AAWire.chMediaPlayback) }
+        if cap.metadata.navigationStatus { declared.append(AAWire.chNavigationStatus) }
+        if cap.metadata.phoneStatus { declared.append(AAWire.chPhoneStatus) }
         log("<- SERVICE_DISCOVERY_REQUEST; -> SERVICE_DISCOVERY_RESPONSE: "
             + declared.map { "\($0)(\(AAWire.channelName($0)))" }.joined(separator: " "))
-        if AACapability.telephonySinkExperiment {
-            log("telephony sink DECLARED (experiment AA_TELEPHONY_SINK)")
+        if cap.telephonySink {
+            log("telephony sink DECLARED (experiment: profile telephonyOverProjection or AA_TELEPHONY_SINK)")
         }
         log("declaring \(videoW)x\(videoH)@\(cap.frameRate == .fps60 ? 60 : 30), density \(cap.density), "
-            + "night=\(cap.nightMode), drivingRestricted=\(cap.drivingRestricted) as \"\(cap.name)\"")
-        log("declaring driver_position=\(cap.driverPosition) (rightHandDrive=\(cap.rightHandDrive))")
+            + "night=\(cap.nightMode), drivingRestricted=\(cap.drivingRestricted) "
+            + "(driving mask 0x\(String(cap.drivingMask.rawValue, radix: 16))) as \"\(cap.name)\"")
+        log("declaring driver_position=\(cap.driverPosition) (seat \(cap.driverSeat))")
+        if !cap.declaresTouchscreen { log("declaring NO touchscreen (controller-only head unit)") }
+        // What the renderer approximated on the way from the profile (defect 4). Already warned at
+        // construction on the main actor; repeated here so the session log is self-contained.
+        for n in cap.negotiationNotes { log("negotiation: \(n)") }
         if cap.hasMargins {
             log("declaring margins \(cap.margins.w)x\(cap.margins.h) — visible \(cap.touchSize.w)x\(cap.touchSize.h) inside \(cap.resolution.size.w)x\(cap.resolution.size.h); touch in visible space")
         }
@@ -522,11 +534,19 @@ final class AASession: @unchecked Sendable {
                                                      density: cap.density,
                                                      widthMargin: cap.margins.w, heightMargin: cap.margins.h,
                                                      tsW: videoW, tsH: videoH,
-                                                     name: cap.name, driverPosition: cap.driverPosition,
-                                                     metadataServices: AACapability.metadataServices,
-                                                     hevc: cap.videoCodecHEVC)
-        if cap.videoCodecHEVC { log("declaring video codec H.265 (tier \(cap.resolution.rawValue)\(ProcessInfo.processInfo.environment["AA_HEVC"] == "1" ? ", AA_HEVC forced" : ""))") }
-        if AACapability.metadataServices { log("metadata services DECLARED (AA_METADATA): media_playback ch=10, navigation_status ch=11 (IMAGE 128x128), phone_status ch=12") }
+                                                     name: cap.name,
+                                                     sinks: cap.audioSinks,
+                                                     driverPosition: cap.driverPosition,
+                                                     metadata: cap.metadata,
+                                                     hevc: cap.videoCodecHEVC,
+                                                     touchscreen: cap.declaresTouchscreen)
+        if cap.videoCodecHEVC { log("declaring video codec H.265 (tier \(cap.resolution.rawValue)\(ProcessInfo.processInfo.environment["AA_HEVC"] == "1" ? ", AA_HEVC forced" : "")\(cap.hevcAllowed ? "" : ", profile disallows HEVC"))") }
+        if cap.metadata.any {
+            log("metadata services DECLARED: "
+                + [cap.metadata.mediaPlayback ? "media_playback ch=10" : nil,
+                   cap.metadata.navigationStatus ? "navigation_status ch=11 (IMAGE 128x128)" : nil,
+                   cap.metadata.phoneStatus ? "phone_status ch=12" : nil].compactMap { $0 }.joined(separator: ", "))
+        }
         guard sendEnc(AAWire.chControl, AAWire.msgServiceDiscoveryResponse, control: false, sd) else { return }
 
         // 5. Event loop.
@@ -575,8 +595,8 @@ final class AASession: @unchecked Sendable {
             }
             // Channel-open on any advertised channel.
             if id == AAWire.msgChannelOpenRequest {
-                if ch == AACapability.telephonySinkChannel, AACapability.telephonySinkExperiment,
-                   let sink = AACapability.audioSink(forChannel: ch) {
+                if ch == AACapability.telephonySinkChannel, cap.telephonySink,
+                   let sink = cap.audioSink(forChannel: ch) {
                     // The whole point of the experiment. Nobody has seen gearhead do this; if it ever
                     // happens, say so loudly and print what we declared for the channel — the setup
                     // request that follows carries the config the phone actually picked.
@@ -598,7 +618,7 @@ final class AASession: @unchecked Sendable {
                     _ = sendEnc(AAWire.chVideo, AAWire.mediaVideoFocusNotification, control: false,
                                 AAWire.videoFocus(AAWire.videoFocusModeProjected, unsolicited: true))
                     log("-> VIDEO_FOCUS (unsolicited) PROJECTED")
-                } else if let sink = AACapability.audioSink(forChannel: ch) {
+                } else if let sink = cap.audioSink(forChannel: ch) {
                     log("-> AUDIO CONFIG ready ch=\(ch) (\(sink.label)) \(sink.rate)Hz \(sink.channels)ch")
                 }
                 continue
@@ -656,7 +676,7 @@ final class AASession: @unchecked Sendable {
             // Membership in the DECLARED sink table, not three hardcoded ids — the AA_TELEPHONY_SINK
             // experiment adds a fourth, and a sink we declared but never routed would be acked into
             // silence. With the lever off the table is exactly 4/5/6, so this is unchanged.
-            if AACapability.audioSink(forChannel: ch) != nil {
+            if cap.audioSink(forChannel: ch) != nil {
                 switch id {
                 case AAWire.mediaStart:
                     let sid = Int64(bitPattern: AAWire.getFieldVarint(body, 1) ?? 0)
@@ -681,14 +701,14 @@ final class AASession: @unchecked Sendable {
                     let pcm: Data = (id == AAWire.mediaData)
                         ? (body.count > 8 ? body.dropFirst(8) : Data())
                         : body
-                    if let sink = AACapability.audioSink(forChannel: ch), !pcm.isEmpty {
+                    if let sink = cap.audioSink(forChannel: ch), !pcm.isEmpty {
                         audio?.feedPCM(Data(pcm), rate: sink.rate, channels: sink.channels,
                                        voice: sink.voice, bigEndian: AACapability.pcmIsBigEndian)
                     }
                     let n = (audioFrames[ch] ?? 0) + 1
                     audioFrames[ch] = n
                     if n == 1 || n % 200 == 0 {
-                        let label = AACapability.audioSink(forChannel: ch)?.label ?? "?"
+                        let label = cap.audioSink(forChannel: ch)?.label ?? "?"
                         log("audio ch=\(ch) (\(label)) frames=\(n) \(pcm.count)B/frame")
                     }
                 case AAWire.mediaStop:
@@ -710,7 +730,7 @@ final class AASession: @unchecked Sendable {
                 sensorLock.unlock()
                 if stype == AAWire.sensorTypeDrivingStatus {
                     _ = sendEnc(AAWire.chSensor, AAWire.sensorBatch, control: false,
-                                AAWire.sensorBatchDriving(driving ? .drivingDefault : .none))
+                                AAWire.sensorBatchDriving(driving ? cap.drivingMask : .none))
                 } else if stype == AAWire.sensorTypeNightMode {
                     _ = sendEnc(AAWire.chSensor, AAWire.sensorBatch, control: false,
                                 AAWire.sensorBatchNight(night))

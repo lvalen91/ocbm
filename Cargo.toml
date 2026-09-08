@@ -19,6 +19,13 @@ exclude = [
     "crates/vendor/mfi", "crates/vendor/mfi-i2c-local", "crates/vendor/pairing", "crates/vendor/receiver",
     "crates/vendor/rtsp", "crates/vendor/eld-codec",
     "crates/vendor/iap2-core", "crates/vendor/metadata",
+    # host/gm_ccpa is a self-contained Android project, not a member of this workspace. EXCLUDED
+    # rather than added: `carplay-jni` is a cdylib cross-compiled for x86_64-linux-android with its
+    # own size-first release profile, and `ocbm-probe` is a macOS bench binary — neither belongs in a
+    # host-native `--workspace` build. Without these entries cargo refuses to build them at all
+    # ("current package believes it's in a workspace when it's not"), because it walks up from their
+    # directories and finds this file.
+    "host/gm_ccpa/native/carplay-jni", "host/gm_ccpa/tools/ocbm-probe",
 ]
 
 # Size-first profile for the box binary (armv7, ~12.5MB rootfs).

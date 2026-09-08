@@ -460,8 +460,10 @@ OptionalMsgNotValidWithoutRequiredMsgs · NotValidWithoutRequiredTransport · No
 NotValidWithoutAssociatedData · InvalidData · FeatureNotSupportedByClass
 ```
 
-Capture with `idevicesyslog -u <udid> -p accessoryd -o <file>` during the session, then
-`grep -E "iapreject|Identification info rejected"`. Both transports also log a decoded line next to the
+Capture with `idevicesyslog -u <udid> -p accessoryd -o <file>` during the session — **wireless only**:
+in a wired session the phone's USB port is on the box, so the live capture is impossible; run wired,
+re-plug the phone on the Mac and pull the archive retroactively (docs/ops/02_TESTING.md §"The trace persists",
+2026-09-05) — then `grep -E "iapreject|Identification info rejected"`. Both transports also log a decoded line next to the
 raw payload: `RX 0x1D03 decoded: param 7 unsupported: 0x4171 ListUpdate`.
 
 Three sessions were spent guessing at a reject the phone was willing to explain in one.
@@ -868,6 +870,10 @@ Deployed and verified: `airplayd c1db72bea1c8aa0756d9a44d7f33a612`.
 - The trace persists on-device and can be pulled retroactively with `idevicesyslog archive` and
   `/usr/bin/log show --archive`. There is no need to start a capture before the session. Use
   `/usr/bin/log` explicitly; a shell function shadows `log` and swallows arguments.
+  **For a WIRED session this is the only way** (2026-09-05): the phone's single port is plugged into
+  the box, so `idevicesyslog` cannot run live — unplug, re-plug on the Mac, pull the archive. A live
+  phone-side capture exists only on wireless CarPlay. Procedure and caveats: docs/ops/02_TESTING.md
+  §"The trace persists — pull it retroactively".
 - Do not judge trace availability from an idle sample: `accessoryd` is silent with no accessory attached.
   Plug in an MFi accessory for ten seconds and grep for `LOG;`.
 - `grep " accessoryd"` without a word boundary also matches `audioaccessoryd` (AirPods proximity
@@ -1024,7 +1030,9 @@ schemas below are **[E]** where the adjacent key strings sit next to the command
 
 | type | direction | payload fields (evidenced keys) | meaning |
 |---|---|---|---|
-| `modesChanged` | iOS→acc | mode state: `screen`, `mainAudio`, `speech`, `phone`, `turns`, each with `entity`{controller/accessory/none} + `permanent*`; `speechMode`{none/speaking/recognizing} | who owns each resource now. Log fmt: `Modes changed: screen %s (permScreen %s), mainAudio %s …` [E] |
+| `modesChanged` | iOS→acc | mode state: `screen`, `mainAudio`, `speech`, `phone`, `turns`, each with `entity`{controller/accessory/none} + `permanent*`; `speechMode`{none/speaking/recognizing} | who owns each resource now. Log fmt: `Modes changed: screen %s (permScreen %s), mainAudio %s …` [E]. Measured 345× in one wired session, 2026-09-05 |
+| `requestUI` | iOS→acc | payload not decoded on this project | the phone asking the accessory to bring the CarPlay UI forward. R14G17 Integration Guide line 106: "requestUI: interface to handle accessory UI requests from the controller" (delegate callback); the same verb is also our OUTBOUND `AirPlayReceiverSessionRequestUI` (IG line 112, `AirPlayCommon.h:679`). Measured inbound 17× in one wired session, 2026-09-05. **Logging-only by design — see below** [E] |
+| `suggestUI` | iOS→acc | payload not decoded on this project | the softer variant (`altScreenSuggestUIURLs`, docs/carplay/06_AV_PIPELINE.md). Absent from R14G17 (post-2017 verb; docs/carplay/03_SDK_GROUND_TRUTH.md §9 lists it from CarPlaySDK strings). Measured inbound 20× in the same session. **Logging-only by design — see below** [E — measured; semantics [I]] |
 | `duckAudio` | iOS→acc | `durationMs` (f64), target gain | lower accessory audio. Log: `Delegating ducking of audio to %f within %f seconds` [E] |
 | `unduckAudio` | iOS→acc | `durationMs` | restore. `Delegating unducking of audio within %f seconds` [E] |
 | `setNightMode` | iOS→acc | night-mode bool/enum (`nightMode`) | day/night UI switch [E — `setNightMode` string] |
@@ -1056,6 +1064,23 @@ a one-shot iAP2-tunnel link nudge (docs/wireless/00_WIRELESS_CARPLAY.md #2.8, do
 `session::command()`, because `events.rs` records that inbound `modesChanged` actually arrives on the
 CONTROL channel. `disableBluetooth` is recognised and logged but deliberately not acted on; everything
 else is display-only. [E — cited symbols]
+
+**Inbound `requestUI` / `suggestUI` are logging-only BY DESIGN (owner decision 2026-09-05) — do not
+"fix" this.** Measured in a wired, iPhone-only session on 2026-09-05: the phone sent `POST /command`
+`type='requestUI'` 17×, `type='suggestUI'` 20× and `type='modesChanged'` 345×. `airplayd` logs each via
+the `[command] ← iPhone POST /command type=…` line above and forwards the raw plist over the `:9004`
+seam; `suggestUI` appears nowhere in the box's Rust source (`rg suggestUI crates ccpa` → nothing), and
+neither reaches the app as a structured event — the app's metadata stream that session carried only
+nowPlaying / callState / routeGuidance / maneuver / appList / power and friends. That is the intended
+state. The mechanism exists for a head unit that must BACKGROUND its projection UI behind an OS-level
+screen of its own (native navigation, reverse camera, vehicle settings) and later restore it when the
+phone asks: `requestUI` is the phone's "bring me back" (the accessory-initiated mirror is the outbound
+`requestUI` — R14G17 IG line 671, "Requests UI to be shown on the other side"), `suggestUI` the soft
+version. This app has no OS-level UI to yield to — the projection IS
+the whole surface — so there is no function to act on. **Log and leave.** A future reader who finds an
+unhandled inbound `requestUI` / `suggestUI` is looking at a decision, not a gap; the outbound
+`requestUI` (`events::send_request_ui`, the Home-button history in §2.2/§Q2) is a separate, unrelated
+path. [E — measured counts; the rationale is the owner's stated design, not something in R14G17]
 
 ### 1.2 (b) NowPlaying / media metadata → **iAP2**, not AirPlay [E, wire-verified]
 **Answer: wired CarPlay delivers artist/title/album/artwork/playback-state to the accessory over an iAP2

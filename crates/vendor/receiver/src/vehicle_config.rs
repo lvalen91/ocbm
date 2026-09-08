@@ -25,7 +25,7 @@
 
 use serde::Deserialize;
 
-use crate::info::{audio_format_bit, audio_preset, AudioFormatSpec, DeviceConfig};
+use crate::info::{audio_format_bit, audio_preset, AudioFormatSpec, DeviceConfig, ViewArea2};
 
 /// Root of the authoring YAML. Only the fields the box consumes (or is about to) are declared; any
 /// other Apple `VehicleConfig` key present in the YAML is ignored by serde.
@@ -35,6 +35,16 @@ pub struct VehicleConfig {
     /// advertised display name — so it is deliberately not mapped onto `DeviceConfig.name`.
     #[serde(default)]
     pub name: String,
+    /// `rightHandDrive` — the steering side, forwarded to `/info` as Apple's Info Message key
+    /// `kAirPlayKey_RightHandDrive` (R14G17 `AirPlayCommon.h`: "[Boolean] Whether or not to use
+    /// right-hand drive mode"; the Integration Guide lists it beside `oemIconVisible`/`OSInfo`).
+    ///
+    /// RE-ADDED 2026-09-05. The app emitted this key here until 2026-09-02, when it was dropped
+    /// because nothing consumed it. That was true but the inference was not: it has no consumer in
+    /// the *VehicleConfig* schema because it is an `/info` key, and `info.rs` had simply never
+    /// emitted one. Parsing it here is what lets the host set it; `info.rs` does the emitting.
+    #[serde(default, rename = "rightHandDrive")]
+    pub right_hand_drive: bool,
     /// `accessoryName` — the name the OWNER gives this box, which the iPhone displays (docs/carplay/04_CAPABILITIES_AND_CONFIG.md C7).
     /// OUR extension, not a stock Apple `VehicleConfig` key, and deliberately distinct from [`name`]
     /// above: that one names the TEMPLATE, this one names the ACCESSORY. Conflating them is the
@@ -61,8 +71,11 @@ pub struct VehicleConfig {
     pub accessory_config: AccessoryConfig,
     /// Apple `limitedUIConfig` — WHICH elements iOS restricts in limited-UI mode. Top-level, a
     /// sibling of `accessoryConfig`, matching Apple's own `Config.init(… accessoryConfig:,
-    /// oemIconConfig:, limitedUIConfig:, …)`. Absent/all-false = emit nothing and let iOS use its
-    /// default set. See [`LimitedUiConfig`]; the runtime on/off is a separate `/command`, not here.
+    /// oemIconConfig:, limitedUIConfig:, …)`. Absent/all-false = emit nothing — and then the runtime
+    /// toggle is a SILENT NO-OP, because the emitted array IS the restriction set (see
+    /// [`LimitedUiConfig`]). Note this differs from Apple: their `LimitedUIConfig(nil…)` defaults five
+    /// elements TRUE, so the Simulator never serves an empty list; our `Default` derive is all-false.
+    /// The runtime on/off is a separate `/command`, not here.
     #[serde(default, rename = "limitedUIConfig")]
     pub limited_ui_config: LimitedUiConfig,
     /// Apple `oemIconConfig` — the vehicle-maker's logo on the CarPlay home screen (see [`OemIconConfig`]).
@@ -421,10 +434,12 @@ pub struct AccessoryConfig {
 ///     on the event channel (Apple `kAirPlayCommand_SetLimitedUI`). No reconnect, no `/info` change,
 ///     no SETUP negotiation. Already implemented — `events::send_set_limited_ui`, driven from the
 ///     host app's Controls window over OCBM `CMD_LIMITED_UI_ON`/`_OFF`.
-///   * **`limitedUIElements` is a STATIC `/info` capability** — the list of elements that restriction
-///     applies to. Absent, iOS applies its own default set, which is why the runtime toggle already
-///     "works" without this struct. Declaring it is what makes the element *selection* match the
-///     Simulator's LimitedUIConfig checkboxes.
+///   * **`limitedUIElements` is a STATIC `/info` capability, and it GATES the runtime toggle** — it is
+///     the set restriction applies to, parsed by iOS into a bitmask. Absent ⇒ mask 0 ⇒ the toggle
+///     restricts nothing and is a silent no-op (acked 2xx). It is NOT true that iOS substitutes a
+///     default set; that claim was inferred from "no stock template sets limitedUIConfig" and is
+///     refuted — Apple's own initialiser defaults five elements TRUE, so the Simulator always serves
+///     a populated list.
 ///
 /// Wire form is an **array of element-name strings** (R14G17 `AirPlayCommon.h:1007-1013`,
 /// "[Array] List of UI elements that are affected in limited UI mode"). The names pass through
@@ -483,10 +498,14 @@ impl LimitedUiConfig {
     ///      Simulator-side behaviour, not `limitedUIElements`. They are parsed here so a
     ///      Simulator-shaped YAML round-trips, and deliberately not emitted.
     ///
-    /// Empty ⇒ emit nothing, so iOS keeps its own default restriction set and `/info` stays
-    /// byte-identical to a build without this feature. That is also why the runtime toggle already
-    /// works today without any of this: `limitedUIElements` selects WHICH elements restrict, it does
-    /// not enable the feature.
+    /// Empty ⇒ emit nothing, which keeps `/info` byte-identical to a build without this feature — but
+    /// ALSO makes the runtime toggle a silent no-op, because iOS builds its restriction bitmask from
+    /// this array and an absent array is mask 0. Device-proven 2026-09-08.
+    ///
+    /// Worth knowing when choosing a default: Apple's `LimitedUIConfig(nil…)` defaults the first nine
+    /// fields TRUE and `longAlerts` FALSE, so every stock Simulator template serves
+    /// `["softKeyboard","softPhoneKeypad","musicLists","nonMusicLists","japanMaps"]`. Rust's `Default`
+    /// derive is all-false, so ours emits nothing unless configured — the opposite posture.
     pub fn elements(&self) -> Vec<&'static str> {
         [
             (self.soft_keyboard, "softKeyboard"),
@@ -555,6 +574,14 @@ pub struct ViewAreaEntry {
     /// `SettingsWindow.swift:355`, which emits it at the same indent as `safeArea:`.
     #[serde(default, rename = "drawUIOutsideSafeArea")]
     pub draw_ui_outside_safe_area: bool,
+    /// OUR extension key (not in Apple's `ViewAreaConfig.CodingKeys`, like `appDrivenSetup`):
+    /// `initial: true` on `viewAreas[1]` makes the session START in that area (display-level
+    /// `initialViewArea: 1`, the lever's `:initial`). Apple keeps that choice at the display level,
+    /// so no Apple template carries it; serde-default `false` means every existing document parses
+    /// exactly as before and the app's emitter does not have to write it. Read only from the MAIN
+    /// stream's second entry (`VehicleConfig::second_main_view_area`).
+    #[serde(default)]
+    pub initial: bool,
 }
 
 impl ViewAreaEntry {
@@ -808,6 +835,15 @@ impl VehicleConfig {
                 base.main_draw_outside_safe = e.draw_outside();
             }
         }
+        // Second MAIN view area (the Dock resize button) — `viewAreas[1].viewArea`, app-driven since
+        // 2026-09-05. ADDITIVE: this list has always been parsed as a Vec and only `.first()` was
+        // consumed, so a second entry parsed and was silently ignored — existing configs cannot
+        // change. Positive-only here (an absent/zeroed rect is "no second area", not a fault);
+        // containment against the panel is `info.rs::view_area_2`'s job, with the same `***` refusal
+        // the bench lever gets. MAIN stream only — see `DeviceConfig::main_view_area_2`.
+        if let Some(a) = self.second_main_view_area() {
+            base.main_view_area_2 = Some(a);
+        }
         if let Some(stream) = self.video_streams_config.alt_video_streams.first() {
             let (aw, ah) = (
                 stream.pixel_dimensions.width,
@@ -863,6 +899,9 @@ impl VehicleConfig {
             base.oem_icon_label = oic.label.clone();
             base.oem_icon_visible = oic.visible;
         }
+        // Steering side -> the `/info` boolean. Unconditional: unlike the OEM icon block above there
+        // is no "absent means omit" case for a plain bool — false IS left-hand drive.
+        base.right_hand_drive = self.right_hand_drive;
         base
     }
 
@@ -915,7 +954,34 @@ impl VehicleConfig {
                     .is_some()
             })
             .unwrap_or(false);
-        main_inset || alt_inset
+        // A second main view area is meaningless without the feature (iOS's SETUP
+        // feature-intersection gate drops the Dock button and the area with it — 2026-09-05, the
+        // cornerMasks A/B: "clearing cornerMasks alone drops the feature and tests nothing"). Arm it
+        // the way a real inset does, and only for an area `info.rs::view_area_2` will actually
+        // declare (positive AND contained in the same effective panel dims), so the negotiated
+        // feature and the advertised geometry agree. The Swift twin is
+        // `VehicleConfig.enabledFeatures()` (`viewArea2Present`).
+        let second_area = self
+            .second_main_view_area()
+            .is_some_and(|a| a.contained_in(mw, mh));
+        main_inset || alt_inset || second_area
+    }
+
+    /// The MAIN stream's `viewAreas[1].viewArea` as a [`ViewArea2`], POSITIVE-ONLY (`is_positive`);
+    /// `None` when there is no second entry or its rect is absent/zeroed/negative. The alt stream's
+    /// list is never consulted — a cluster cannot carry a second area (type-110 gating, see
+    /// `DeviceConfig::main_view_area_2`).
+    pub fn second_main_view_area(&self) -> Option<ViewArea2> {
+        let e = self.video_streams_config.main_video_stream.view_areas.get(1)?;
+        let r = &e.view_area;
+        let a = ViewArea2 {
+            x: r.origin_x,
+            y: r.origin_y,
+            w: r.width,
+            h: r.height,
+            initial: e.initial,
+        };
+        a.is_positive().then_some(a)
     }
 
     /// Whether to advertise `cornerMasks` (docs/carplay/06_AV_PIPELINE.md) — the host's `accessoryConfig.enablesCornerMasks`.
@@ -1457,6 +1523,7 @@ displayPanelsConfig:
     const APP_EMITTED_DOCUMENT: &str = r#"name: "CarLink Widescreen"
 wireless: true
 hot_handover: false
+rightHandDrive: false
 pairing: just_works
 android_auto: true
 displayPanelsConfig:
@@ -1979,6 +2046,12 @@ metadata:
             "type",
             "videoStreamID",
             "videoStreamsConfig",
+            // Parsed (VehicleConfig::right_hand_drive) and forwarded to DeviceConfig, so it is NOT
+            // on EMITTED_BUT_UNREAD: info.rs emits it as the Apple Info Message key
+            // `kAirPlayKey_RightHandDrive` (R14G17 AirPlayCommon.h). Re-added 2026-09-05 after being
+            // dropped on 2026-09-02 — it had been in the VehicleConfig schema, where it has no
+            // meaning, rather than in `/info`, which is its actual home.
+            "rightHandDrive",
             "viewArea",
             "viewAreas",
             "visible",
@@ -2079,6 +2152,98 @@ accessoryConfig:
         let dev = vc.apply(base());
         assert_eq!(dev.main_safe_area, Some((100, 0, 1720, 720)));
         assert!(!dev.main_draw_outside_safe);
+    }
+
+    // ---- second MAIN view area from the pushed YAML (app-driven since 2026-09-05) --------------
+
+    /// The shape the app emits: `viewAreas[0]` full-frame, `viewAreas[1]` the resize target
+    /// (the device-proven portrait rect on a 1080x1920 panel), plus our `initial` extension key.
+    const TWO_AREAS: &str = r#"
+displayPanelsConfig:
+  mainDisplayPanel:
+    pixelDimensions: { width: 1080, height: 1920 }
+videoStreamsConfig:
+  mainVideoStream:
+    viewAreas:
+    - viewArea: { originX: 0, originY: 0, width: 1080, height: 1920 }
+      safeArea: { originX: 0, originY: 0, width: 1080, height: 1920 }
+      drawUIOutsideSafeArea: false
+    - viewArea: { originX: 240, originY: 760, width: 600, height: 400 }
+      safeArea: { originX: 240, originY: 760, width: 600, height: 400 }
+      drawUIOutsideSafeArea: false
+      initial: true
+"#;
+
+    #[test]
+    fn second_main_view_area_is_carried_from_view_areas_1() {
+        let vc = VehicleConfig::from_yaml(TWO_AREAS.as_bytes()).expect("parse");
+        let dev = vc.apply(base());
+        assert_eq!(
+            dev.main_view_area_2,
+            Some(ViewArea2 { x: 240, y: 760, w: 600, h: 400, initial: true })
+        );
+        // The first entry is still the (full-bleed → None) safe-area source, untouched.
+        assert_eq!(dev.main_safe_area, None);
+        assert_eq!((dev.display_width, dev.display_height), (1080, 1920));
+    }
+
+    #[test]
+    fn single_entry_and_absent_configs_carry_no_second_area() {
+        // Apple's own Widescreen template (one entry) and a document with no viewAreas at all.
+        for y in [WIDESCREEN, "name: Minimum\n"] {
+            let dev = VehicleConfig::from_yaml(y.as_bytes()).unwrap().apply(base());
+            assert_eq!(dev.main_view_area_2, None, "{y:?}");
+        }
+        // `initial` defaults false, so a second entry WITHOUT the key is the from-index-0 shape.
+        let y = TWO_AREAS.replace("      initial: true\n", "");
+        let dev = VehicleConfig::from_yaml(y.as_bytes()).unwrap().apply(base());
+        assert_eq!(dev.main_view_area_2.map(|a| a.initial), Some(false));
+    }
+
+    #[test]
+    fn zeroed_second_entry_is_absent_not_a_fault() {
+        // A second entry with only a safeArea (viewArea defaults to 0x0@0,0): no area, no arm.
+        let y = "videoStreamsConfig:\n  mainVideoStream:\n    viewAreas:\n    - safeArea: { width: 0, height: 0 }\n    - safeArea: { width: 0, height: 0 }\n";
+        let vc = VehicleConfig::from_yaml(y.as_bytes()).unwrap();
+        assert_eq!(vc.second_main_view_area(), None);
+        assert!(!vc.view_areas_enabled());
+    }
+
+    #[test]
+    fn alt_stream_never_gains_a_second_area() {
+        // Two entries on the ALT stream, one on main: the cluster's second entry must be ignored
+        // (type-110 gating) and must not leak into the main slot.
+        let y = r#"
+videoStreamsConfig:
+  mainVideoStream:
+    viewAreas:
+    - viewArea: { originX: 0, originY: 0, width: 1920, height: 720 }
+  altVideoStreams:
+  - videoStreamID: VideoStream.Alt1
+    pixelDimensions: { width: 800, height: 480 }
+    viewAreas:
+    - viewArea: { originX: 0, originY: 0, width: 800, height: 480 }
+    - viewArea: { originX: 0, originY: 0, width: 400, height: 480 }
+"#;
+        let vc = VehicleConfig::from_yaml(y.as_bytes()).unwrap();
+        assert_eq!(vc.second_main_view_area(), None);
+        assert_eq!(vc.apply(base()).main_view_area_2, None);
+        assert!(!vc.view_areas_enabled());
+    }
+
+    #[test]
+    fn second_main_view_area_auto_arms_view_areas_only_when_declarable() {
+        // No `enablesViewAreas`, no inset: the second area alone arms the feature — a second area
+        // without `viewAreas` in SETUP is a Dock button that never appears.
+        let vc = VehicleConfig::from_yaml(TWO_AREAS.as_bytes()).unwrap();
+        assert!(!vc.accessory_config.enables_view_areas);
+        assert!(vc.view_areas_enabled());
+        // The same rect spilling past the panel (info.rs will REFUSE it) must NOT arm the feature,
+        // so the negotiated feature never disagrees with the declared geometry.
+        let spill = TWO_AREAS.replace("originX: 240, originY: 760, width: 600", "originX: 481, originY: 760, width: 600");
+        let vc = VehicleConfig::from_yaml(spill.as_bytes()).unwrap();
+        assert_eq!(vc.second_main_view_area().map(|a| a.x), Some(481), "still carried — refusal is info.rs's job");
+        assert!(!vc.view_areas_enabled(), "481 + 600 > 1080: not declarable, so not armed");
     }
 
     #[test]

@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import CoreImage
 import CoreMedia
 import VideoToolbox
 import Synchronization
@@ -54,6 +55,12 @@ final class VideoDecoder: @unchecked Sendable {
     /// Lane label for logs ("main" / "alt"), set by the owner. Lets the nav-freeze instrumentation
     /// below distinguish the cluster lane from the main screen.
     var label = "video"
+
+    /// Bench frame tap (2026-09-07): when set, every sample buffer the renderer ACCEPTS is also handed
+    /// to `FrameTap`, whose shadow VTDecompressionSession keeps the newest decoded picture for the
+    /// ControlServer's `shot` verb. Read on renderQueue only; assign before frames flow. Nil (the
+    /// default, and every build without `CARLINK_CTRL_PORT`) costs nothing on the frame path.
+    var frameTap: FrameTap?
     /// Edge-trigger for the renderer-wedged log. renderQueue-confined (drainEnqueue only) — it was
     /// main-thread-confined until V6 moved the hand-off off main; the confinement discipline is the same
     /// one, re-homed on the queue that now owns the receiver.
@@ -818,7 +825,11 @@ final class VideoDecoder: @unchecked Sendable {
         switch self.receiver.enqueueImmediately(ready) {
         case .enqueued:
             rendererWedgedLogged = false   // clean frame — re-arm the wedged edge log
+            // Tap AFTER acceptance, and only accepted frames: a buffer the renderer refused never
+            // reaches the screen, and a `shot` that showed it would contradict the picture.
+            frameTap?.submit(pending.sb, keyframe: pending.keyframe)
         case .enqueuedWithDecodeFailures(let errors):
+            frameTap?.submit(pending.sb, keyframe: pending.keyframe)
             // Accepted but decoded WITH ERRORS — typically a P-frame that landed on a freshly restarted
             // decompression session (after a format-description swap) with no reference IDR yet. VT does
             // NOT return .cancelledDueToFlushRequiredToResume for this, so the recovery branch below is
@@ -911,7 +922,155 @@ final class VideoDecoder: @unchecked Sendable {
             self.renderQueue.async {
                 self.pendingEnqueue.withLock { $0.removeAll() } // drop decoded-but-unenqueued frames
                 self.receiver.flush()
+                self.frameTap?.flush()   // same rule as the renderer: no P-frame on a stale reference
             }
         }
+    }
+}
+
+// MARK: - Bench frame tap (ControlServer `shot`)
+
+/// Keeps the NEWEST decoded picture of the main CarPlay lane, so a bench caller can dump the exact
+/// pixels the renderer is showing — the only verdict that exists for an iOS lockout, which iOS renders
+/// INTO the video ("CarPlay does not support this display resolution") and reports in no log the
+/// accessory side can read (docs/ops/04_OPEN_ITEMS.md, HANDOFF 2026-09-05).
+///
+/// WHY A SHADOW DECODER. The app's render path is `AVSampleBufferDisplayLayer` fed through a
+/// `Receiver`: decoding happens INSIDE the renderer, which exposes no pixel buffer and no per-frame
+/// completion (the same limitation `handoffLatencyMs` documents). `copyDisplayedPixelBuffer()` exists
+/// on the renderer but is specified to return NULL while the synchronizer rate is non-zero, and ours
+/// runs at 1.0 for the whole session — pausing it to read would perturb the layer under test. So this
+/// tap takes the SAME `CMSampleBuffer` the renderer accepted (`VideoDecoder.drainEnqueue`, after
+/// `.enqueued`) and decodes it a second time through an explicit `VTDecompressionSession`, keeping only
+/// the latest output. Identical bytes, identical format description, no screen-recording permission,
+/// nothing on the render path changed. A second hardware decode is the cost, which is why the tap is
+/// installed only when the ControlServer is (`CARLINK_CTRL_PORT`).
+///
+/// Threading: `submit`/`flush` are renderQueue-confined (one serial caller — the VideoDecoder), so the
+/// session state needs no lock; `latest` is written by VideoToolbox's output thread and read by the
+/// ControlServer's socket thread, so it lives under `lock`. The tap never blocks the caller: decode is
+/// asynchronous and a failure only bumps a counter.
+final class FrameTap: @unchecked Sendable {
+    static let shared = FrameTap()
+    private static let logger = Logger(subsystem: "com.carlink.video", category: "frametap")
+
+    /// One decoded picture plus the facts a caller needs to trust it.
+    struct Snapshot {
+        let pixelBuffer: CVPixelBuffer
+        /// Milliseconds since this picture was decoded — a stale number means the stream stopped.
+        let ageMs: Int
+        let width: Int
+        let height: Int
+        /// Running count of pictures decoded by the tap; two shots with the same value saw the same frame.
+        let sequence: UInt64
+    }
+
+    // renderQueue-confined.
+    private var session: VTDecompressionSession?
+    private var sessionFormat: CMFormatDescription?
+    private var awaitingKeyframe = true
+
+    // Cross-thread, under `lock`.
+    private let lock = NSLock()
+    private var latest: CVPixelBuffer?
+    private var latestUptimeNs: UInt64 = 0
+    private var sequence: UInt64 = 0
+    /// Decode failures since launch, for the `shot` reply — a non-zero delta between shots is corruption
+    /// in the shadow lane, worth knowing when a shot looks wrong.
+    let decodeFailures = Atomic<UInt64>(0)
+
+    /// Hand the tap a sample buffer the renderer accepted. renderQueue.
+    func submit(_ sb: CMSampleBuffer, keyframe: Bool) {
+        guard let fmt = CMSampleBufferGetFormatDescription(sb) else { return }
+        if session == nil || sessionFormat !== fmt {
+            // A new format description object: reuse the session only if VT says it can take it
+            // (same codec, compatible parameter sets); otherwise rebuild and wait for an IDR.
+            if let s = session, let cur = sessionFormat, cur !== fmt,
+               VTDecompressionSessionCanAcceptFormatDescription(s, formatDescription: fmt) {
+                sessionFormat = fmt
+            } else {
+                rebuildSession(for: fmt)
+            }
+        }
+        guard let session else { return }
+        if awaitingKeyframe {
+            guard keyframe else { return }
+            awaitingKeyframe = false
+        }
+        let status = VTDecompressionSessionDecodeFrame(
+            session, sampleBuffer: sb,
+            flags: [._EnableAsynchronousDecompression], infoFlagsOut: nil
+        ) { [weak self] status, _, imageBuffer, _, _ in
+            guard let self else { return }
+            guard status == noErr, let pb = imageBuffer else {
+                self.decodeFailures.wrappingAdd(1, ordering: .relaxed)
+                return
+            }
+            let now = DispatchTime.now().uptimeNanoseconds
+            self.lock.withLock {
+                self.latest = pb
+                self.latestUptimeNs = now
+                self.sequence &+= 1
+            }
+        }
+        if status != noErr {
+            decodeFailures.wrappingAdd(1, ordering: .relaxed)
+            if status == kVTInvalidSessionErr { rebuildSession(for: fmt) }
+        }
+    }
+
+    /// The renderer was flushed: the next frame must be an IDR here too. renderQueue.
+    func flush() { awaitingKeyframe = true }
+
+    private func rebuildSession(for fmt: CMFormatDescription) {
+        if let s = session { VTDecompressionSessionInvalidate(s) }
+        session = nil
+        sessionFormat = nil
+        awaitingKeyframe = true
+        // BGRA, IOSurface-backed: what CIImage consumes directly, so the PNG path is one conversion.
+        let attrs: [CFString: Any] = [
+            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
+        ]
+        var s: VTDecompressionSession?
+        let status = VTDecompressionSessionCreate(
+            allocator: kCFAllocatorDefault, formatDescription: fmt, decoderSpecification: nil,
+            imageBufferAttributes: attrs as CFDictionary, outputCallback: nil, decompressionSessionOut: &s
+        )
+        guard status == noErr, let s else {
+            Self.logger.error("shadow VTDecompressionSession create failed: \(status, privacy: .public)")
+            return
+        }
+        session = s
+        sessionFormat = fmt
+        let dims = CMVideoFormatDescriptionGetDimensions(fmt)
+        Self.logger.info("shadow decoder armed \(dims.width)x\(dims.height) — awaiting IDR")
+    }
+
+    /// The newest picture, or nil before the first decode. Retains the buffer for the caller; VT hands
+    /// out a fresh one from its pool for the next frame, so holding this one never blocks the tap.
+    func snapshot() -> Snapshot? {
+        let now = DispatchTime.now().uptimeNanoseconds
+        return lock.withLock {
+            guard let pb = latest else { return nil }
+            return Snapshot(pixelBuffer: pb,
+                            ageMs: Int((now &- latestUptimeNs) / 1_000_000),
+                            width: CVPixelBufferGetWidth(pb),
+                            height: CVPixelBufferGetHeight(pb),
+                            sequence: sequence)
+        }
+    }
+
+    /// Exact pixels to PNG. sRGB, RGBA8 — a lossless dump, so a lockout banner or a black area is
+    /// what it was on screen. Any thread; the buffer is read-only per VideoToolbox's contract.
+    static func writePNG(_ pb: CVPixelBuffer, to url: URL) throws {
+        let image = CIImage(cvPixelBuffer: pb)
+        let ctx = CIContext(options: [.cacheIntermediates: false])
+        guard let srgb = CGColorSpace(name: CGColorSpace.sRGB) else {
+            throw NSError(domain: "FrameTap", code: 1, userInfo: [NSLocalizedDescriptionKey: "no sRGB colour space"])
+        }
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
+        try ctx.writePNGRepresentation(of: image, to: url, format: .RGBA8, colorSpace: srgb, options: [:])
     }
 }

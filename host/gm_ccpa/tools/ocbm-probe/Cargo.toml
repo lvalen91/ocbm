@@ -1,0 +1,12 @@
+[package]
+name = "ocbm-probe"
+version = "0.1.0"
+edition = "2021"
+
+# Bench instrument, macOS host side. NOT shipped and NOT part of the APK — it exists so the CH_LOG
+# decoder that goes into the Kotlin client can be written against real box frames instead of the
+# spec alone. Same path-dep caveat as native/carplay-jni: this compiles whatever ocbm-proto is on
+# disk, which is the point (it must track the box).
+[dependencies]
+rusb = "0.9"
+ocbm-proto = { path = "../../../../crates/ocbm-proto" }

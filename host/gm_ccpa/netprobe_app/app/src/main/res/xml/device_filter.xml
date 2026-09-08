@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- OCBM accessory gadget. In a wireless-only design the app is the ignition — the box's radios
+         are off at boot and wake on our CT_SUBSCRIBE — so plugging the adapter in IS the trigger.
+         vendor-id/product-id are DECIMAL here: 0x1314 = 4884, 0x2d00 = 11520. -->
+    <usb-device vendor-id="4884" product-id="11520" />
+    <!-- Stock Carlinkit PIDs, matched only so the app can say "wrong mode" instead of staying silent.
+         0x1520 = 5408, 0x1521 = 5409. -->
+    <usb-device vendor-id="4884" product-id="5408" />
+    <usb-device vendor-id="4884" product-id="5409" />
+</resources>

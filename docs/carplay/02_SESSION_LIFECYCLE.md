@@ -1440,12 +1440,20 @@ same tool). It streams the filtered set live, then pulls a full
 `.logarchive` via `idevicesyslog archive`, which is queryable offline with
 `log show --archive … --predicate 'process == "airplayd"' --info --debug`.
 
-**Known limitation:** ~34% of lines carry `<private>` redaction under the default configuration. Apple
-publishes per-subsystem **logging profiles** (developer.apple.com/bug-reporting/profiles) that raise the
-log level and unredact the relevant subsystems; installing the CarPlay profile on the test device is the
-single highest-value improvement available to this workstream and is very likely the reason earlier
-sessions found iOS logs uninformative. Installing it requires physical device interaction and has not
-been done.
+**Known limitation:** ~34% of lines carry `<private>` redaction under the default configuration.
+
+**CORRECTED 2026-09-05.** This paragraph used to call installing Apple's CarPlay logging profile "the
+single highest-value improvement available to this workstream". That was never measured, and when it
+finally was, it did not hold — see `../ops/02_TESTING.md` pre-flight gate 4 for the full result. In
+short: on iOS 27 a `com.apple.system.logging` payload is rejected unless Apple-signed, **no Apple
+profile unredacts any `com.apple.car*` subsystem at all** (deliberate, not an oversight), and a 76 s
+capture with NO profiles that caught a connect beat a 22-minute fully-profiled capture that did not —
+202 unique `carkitd` shapes against 159. The variable is whether a session connects.
+
+What actually helps: capture with zero profiles (`carkitd`/`accessoryd` emit DEBUG by default), keep
+the **Bluetooth** profile for `com.apple.bluetooth` unredaction, and for a redacted `%@` read the
+schema out of the `carkitd` binary rather than chasing a profile. The `mask.hash` set (the BLE pairing
+path) is unrecoverable by any means.
 
 ---
 
@@ -1756,10 +1764,16 @@ existing airplayd/rx-connect/carplay-wireless teardown style) in both its COMPLE
 advertiser-only branches. If `btmon` is absent — unknown whether the CCPA rootfs ships it — the
 lever logs one line and is otherwise a no-op; it never blocks bring-up.
 
-**Engaging a config change on wired requires a fresh airplayd connection.** airplayd survives Mac-app
-restarts and reads config per-connection at accept, while the phone's `:5000` connection is
-long-lived. Toggling in the app is therefore not sufficient: `killall airplayd` (the supervisor
-respawns, the phone re-pair-verifies), a phone unplug/replug, or an adapter restart is what applies it.
+**Engaging a config change on wired requires a fresh airplayd connection — and a Mac-app restart is
+one (CORRECTED 2026-09-07, device-proven).** airplayd reads config per-connection at accept, while
+the phone's `:5000` connection is long-lived, so a toggle inside a running app does not apply. The
+claim that airplayd *survives* a Mac-app restart, and that `killall airplayd` or a replug is
+therefore required, is REFUTED: the app going away is a host-GONE edge, the supervisor's
+`kill_session` reaps airplayd, and the next SUBSCRIBE brings up a fresh one that reads the new
+config. Measured over six consecutive app restarts on 2026-09-07 (wired, 4K panel), each arming a
+different second view area: every restart produced a new `view areas: 2 declared — [1] <new rect>`
+line carrying that run's rect, with no `killall` and no replug. `killall airplayd` and a replug
+still work; they are not the only paths.
 
 **Failure modes, none of which wedge the phone.** Host absent → plain `AvSession` at selection. Host
 crash mid-SETUP → heartbeat loss → socket drop → HostGone → sticky `local_only`. Cap-clear or garbage

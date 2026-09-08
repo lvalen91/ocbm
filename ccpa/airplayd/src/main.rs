@@ -589,6 +589,26 @@ fn carplay_cfg_file() -> &'static str {
     })
 }
 
+/// The host-facing accessory gadget's enumeration state, as the shell supervisor reads it
+/// (`tools/session_supervisor.sh`, `ACC_STATE`): `CONFIGURED` means a host (the Mac app) is attached
+/// and enumerated on the OCBM control plane RIGHT NOW. This is the gadget ocbmd owns, NOT the
+/// phone-facing `android_usb` — the phone's presence says nothing about whether anyone pushed a config.
+const ACC_GADGET_STATE: &str = "/sys/class/android_usb_accessory/android0/state";
+
+/// True when a host is attached to the accessory gadget. One stat-sized read; absent sysfs (bench
+/// host, no gadget driver) reads as "no host", which keeps every bench/harness run exactly as quiet
+/// as it was.
+///
+/// Deliberately NOT `/tmp/host_present`: that flag is ocbmd's OPINION of presence, and it is reset to
+/// `0` by every fresh ocbmd at startup — on 2026-09-05 the restarted ocbmd had already written `0`
+/// while the app was still attached, heartbeating, and about to be served compiled defaults. The
+/// gadget's `state` is the kernel's fact and survives an ocbmd restart.
+fn accessory_host_attached() -> bool {
+    std::fs::read_to_string(ACC_GADGET_STATE)
+        .map(|s| s.trim() == "CONFIGURED")
+        .unwrap_or(false)
+}
+
 /// The effective advertised display resolution, shared with the HID-input ingest so touch scales to the
 /// SAME geometry `/info` advertised (task #20 ↔ #5). Updated by `load_device_config` per connection.
 static DISPLAY_WH: Mutex<(u16, u16)> = Mutex::new((1920, 720));
@@ -870,8 +890,31 @@ fn load_device_config() -> (DeviceConfig, u32) {
             clear_levers();
             base
         }
-        // No host config landed (idle / not yet subscribed) — the interim built-in default (H.264).
+        // No host config landed. Absence is the NORMAL idle state (box booted, nobody subscribed) and
+        // stays quiet then — but it is also the ONE branch of this match that used to say nothing,
+        // and it is the branch that fired on 2026-09-05: the supervisor's L2 watchdog restarted
+        // ocbmd, the fresh ocbmd unlinked the config at startup (`clear_cfg_file`), THIS daemon was
+        // left running, the phone reconnected to it, and every control connection from then on
+        // landed here — `clear_levers()` + compiled defaults, silently. The app thought 2400×960/HEVC
+        // was in force; the box served 1920×720/H.264 and scaled touch against the wrong panel for
+        // hours. The app-side guard that should have caught it ("BOX IS ON BUILT-IN DEFAULTS",
+        // keyed on `cfg_crc == 0` in RS_OPEN) never ran, because `clear_levers()` also cleared
+        // `appsetup`, so SETUP went box-driven and no RS_OPEN was ever relayed: the detector was
+        // disarmed by the very failure it targets.
+        //
+        // So: quiet only when there is genuinely nobody to have pushed a config. With a host attached
+        // to the accessory gadget, an absent config is a pushed config that is NOT IN FORCE, and it
+        // gets the same `***` treatment as the other fallback arms. The house-style loudness is the
+        // fix — the geometry it names is the compiled fallback the phone is about to be served.
         Err(_) => {
+            if accessory_host_attached() {
+                eprintln!(
+                    "[airplayd] *** NO PUSHED CONFIG at {cfg_path} but a host IS attached ({} \
+                     CONFIGURED) — serving compiled defaults {}×{}, HEVC off, box-driven SETUP; \
+                     the host's config is NOT IN FORCE (ocbmd restarted? host must re-SUBSCRIBE) ***",
+                    ACC_GADGET_STATE, base.display_width, base.display_height
+                );
+            }
             clear_levers();
             base
         }
@@ -1258,6 +1301,22 @@ fn handle_input_frame(pl: &[u8]) {
                 }
                 let on = pl[2] != 0;
                 ("setNightMode", events::send_set_night_mode(on))
+            }
+            // View-area switch (2026-09-07): the host commands a MAIN-display transition
+            // deterministically — the ControlServer's `viewarea request <index>` — instead of tapping
+            // the Dock resize button and hoping. Payload `[cmd][index]`. Same refuse-undeclared policy
+            // as the inbound `requestViewArea` answer (`events::switch_view_area`): the app is the
+            // authority either way, iOS's own request being advisory (device-proven 2026-09-05).
+            ocbm_proto::CMD_VIEW_AREA => {
+                if pl.len() < 3 {
+                    eprintln!("[input] viewArea frame too short ({} bytes) — dropped", pl.len());
+                    return;
+                }
+                let idx = pl[2] as i64;
+                (
+                    "updateViewArea",
+                    events::switch_view_area(receiver::info::DISPLAY_UUID, idx, "host viewArea"),
+                )
             }
             // limitedUI (Drive/Park) — restrict / release the CarPlay UI at runtime.
             ocbm_proto::CMD_LIMITED_UI_ON => ("setLimitedUI(true)", events::send_set_limited_ui(true)),

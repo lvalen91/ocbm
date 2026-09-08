@@ -37,7 +37,8 @@ enum AAWire {
     static let chInput: UInt8 = 8
     static let chMicrophone: UInt8 = 9
     /// Metadata services (2026-09-04). Ids are the head unit's to choose; these are the first free
-    /// ones above the A/V, input and mic set. Declared only when `AACapability.metadataServices`.
+    /// ones above the A/V, input and mic set. Each is declared per feed from `cap.metadata`
+    /// (`MetadataServices`, the profile's three feeds); `AA_METADATA=0` withholds all three.
     static let chMediaPlayback: UInt8 = 10
     static let chNavigationStatus: UInt8 = 11
     static let chPhoneStatus: UInt8 = 12
@@ -423,8 +424,9 @@ enum AAWire {
                                              name: String = "Carlink",
                                              sinks sinkTable: [AACapability.AudioSink] = AACapability.audioSinks,
                                              driverPosition: UInt64 = AACapability.driverPositionLeft,
-                                             metadataServices: Bool = false,
-                                             hevc: Bool = false) -> Data {
+                                             metadata: AACapability.MetadataServices = .none,
+                                             hevc: Bool = false,
+                                             touchscreen: Bool = true) -> Data {
         // video sink id=3
         var vc = Data()
         putVarintField(&vc, 1, UInt64(resolution)); putVarintField(&vc, 2, UInt64(fps))
@@ -443,13 +445,15 @@ enum AAWire {
         // the phone has no reason to accept a key event we later send — see AACapability.Key.
         var iss = Data()
         for kc in AACapability.supportedKeycodes { putVarintField(&iss, 1, UInt64(kc)) }
-        // AA_NO_TOUCH=1 declares NO touchscreen, making this a controller-only head unit — DHU's
-        // `rotary.ini` shape (`touch=false, controller=true`). An experiment, not a shipping mode:
-        // with a touchscreen declared, gearhead treats D-Pad focus as secondary and the focus ring
-        // behaves inconsistently (device-observed: focus moves, then vanishes). InputChannel has no
-        // explicit controller flag, so "controller head unit" is expressed by declaring keycodes and
-        // NOT declaring a touchscreen.
-        if ProcessInfo.processInfo.environment["AA_NO_TOUCH"] == nil {
+        // `touchscreen == false` declares NO touchscreen, making this a controller-only head unit —
+        // DHU's `rotary.ini` shape (`touch=false, controller=true`). Since 2026-09-04 (W2) it comes
+        // from the profile (`InputDevices.touchscreen == nil`) via `AACapability.declaresTouchscreen`;
+        // `AA_NO_TOUCH=1` is the bench lever, resolved THERE rather than here so every environment
+        // override is recorded in `negotiationNotes`. With a touchscreen declared, gearhead treats
+        // D-Pad focus as secondary and the focus ring behaves inconsistently (device-observed: focus
+        // moves, then vanishes). InputChannel has no explicit controller flag, so "controller head
+        // unit" is expressed by declaring keycodes and NOT declaring a touchscreen.
+        if touchscreen {
             var ts = Data(); putVarintField(&ts, 1, UInt64(tsW)); putVarintField(&ts, 2, UInt64(tsH))
             putLenField(&iss, 2, ts)
         }
@@ -487,19 +491,27 @@ enum AAWire {
         putLenField(&out, 1, scSensor)
         for sc in sinks { putLenField(&out, 1, sc) }
         putLenField(&out, 1, scMic)
-        if metadataServices {
-            // ChannelDescriptor field numbers per aasdk Service.proto: navigation_status_service = 8,
-            // media_playback_service = 9, phone_status_service = 10. Media and phone configs are
-            // empty messages; navigation carries {1 minimum_interval_ms, 2 type (1 = IMAGE),
-            // 3 ImageOptions {1 height, 2 width, 3 colour_depth_bits}} — the phone renders the
-            // maneuver glyph at this size and ships it in NavigationNextTurnEvent.image.
+        // Metadata descriptors, each individually gated by the profile's `MetadataFeeds` since
+        // 2026-09-04 (W2; it was one AA_METADATA switch for all three). Emitted in the order the
+        // all-three set was DEVICE-ACCEPTED on 2026-09-04 (media, navigation, phone); a subset has
+        // not been tried on a phone yet — the service set is accepted or rejected whole.
+        // ChannelDescriptor field numbers per aasdk Service.proto: navigation_status_service = 8,
+        // media_playback_service = 9, phone_status_service = 10. Media and phone configs are
+        // empty messages; navigation carries {1 minimum_interval_ms, 2 type (1 = IMAGE),
+        // 3 ImageOptions {1 height, 2 width, 3 colour_depth_bits}} — the phone renders the
+        // maneuver glyph at this size and ships it in NavigationNextTurnEvent.image.
+        if metadata.mediaPlayback {
             var scMedia = Data(); putVarintField(&scMedia, 1, UInt64(chMediaPlayback)); putLenField(&scMedia, 9, Data())
+            putLenField(&out, 1, scMedia)
+        }
+        if metadata.navigationStatus {
             var img = Data(); putVarintField(&img, 1, 128); putVarintField(&img, 2, 128); putVarintField(&img, 3, 32)
             var navCfg = Data(); putVarintField(&navCfg, 1, 1000); putVarintField(&navCfg, 2, 1); putLenField(&navCfg, 3, img)
             var scNav = Data(); putVarintField(&scNav, 1, UInt64(chNavigationStatus)); putLenField(&scNav, 8, navCfg)
-            var scPhone = Data(); putVarintField(&scPhone, 1, UInt64(chPhoneStatus)); putLenField(&scPhone, 10, Data())
-            putLenField(&out, 1, scMedia)
             putLenField(&out, 1, scNav)
+        }
+        if metadata.phoneStatus {
+            var scPhone = Data(); putVarintField(&scPhone, 1, UInt64(chPhoneStatus)); putLenField(&scPhone, 10, Data())
             putLenField(&out, 1, scPhone)
         }
         putVarintField(&out, 6, driverPosition) // driver_position (gal DriverPosition; see AACapability.driverPosition)

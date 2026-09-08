@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Declares this app to AAOS as a MEDIA app.
+
+  Referenced from AndroidManifest.xml via the `com.android.automotive` meta-data. AAOS reads it to
+  decide which category the app belongs to; without `media` the MediaBrowserService can be present and
+  correct and the app still will not appear in the media source switcher alongside FM.
+
+  `video` is deliberately absent: it gates AAOS's video-app handling (parked-only playback policies),
+  which is not what CarPlay projection is — the driving-eligibility story here is the
+  distractionOptimized activity, not this file.
+-->
+<automotiveApp>
+    <uses name="media"/>
+</automotiveApp>

@@ -58,6 +58,15 @@ pub struct DeviceConfig {
     pub main_safe_area: Option<(i64, i64, i64, i64)>,
     /// `drawUIOutsideSafeArea` for the main stream (true = UI may draw in the viewArea↔safeArea gap).
     pub main_draw_outside_safe: bool,
+    /// A SECOND main view area (the CarPlay Dock "resize" button), in panel pixels, from the host
+    /// YAML `mainVideoStream.viewAreas[1].viewArea` (+ our `initial` extension key). MAIN stream
+    /// only — `view_areas` gates the second-area block on the type-110 display and Apple's
+    /// `_AirPlayScreenDictSetViewAreas` gates the per-area flags on `type == 110`, so the alt/cluster
+    /// stream never carries one. `None` = the shipped single-area declaration (or the app-less
+    /// `CARPLAY_VIEWAREA2` bench lever, which [`view_area_2`] consults only when this is `None`).
+    /// Carried here POSITIVE-ONLY (`ViewArea2::is_positive`); containment against the panel is
+    /// checked — and refused loudly — in [`view_area_2`], the same gate the lever goes through.
+    pub main_view_area_2: Option<ViewArea2>,
     /// Alt/cluster-stream safe area + draw-outside flag (same semantics, applied to the type-111 display).
     pub alt_safe_area: Option<(i64, i64, i64, i64)>,
     pub alt_draw_outside_safe: bool,
@@ -88,6 +97,19 @@ pub struct DeviceConfig {
     pub oem_icons: Vec<(Vec<u8>, i64, i64)>,
     pub oem_icon_label: String,
     pub oem_icon_visible: bool,
+    /// `rightHandDrive` — the steering side, as an `/info` BOOLEAN.
+    ///
+    /// This is an **Info Message key**, not a `VehicleConfig` key, which is the whole reason it was
+    /// missing: the app used to emit `rightHandDrive` inside the pushed VehicleConfig YAML, nothing
+    /// here parsed it, and on 2026-09-02 it was dropped as dead weight — the premise ("no consumer")
+    /// was right and the conclusion ("CarPlay has no key for it") was wrong. Apple's licensed
+    /// R14G17 source is explicit (`AppleCarPlay/Sources/AirPlayCommon.h`):
+    ///     `// [Boolean] Whether or not to use right-hand drive mode.`
+    ///     `#define kAirPlayKey_RightHandDrive "rightHandDrive"`
+    /// and the Integration Guide lists it among the Info Message keys beside `oemIconVisible` and
+    /// `OSInfo`. Default `false` (left-hand drive), and emitted UNCONDITIONALLY like Apple's own
+    /// stack — it is a plain boolean, so there is no absent-means-default subtlety to preserve.
+    pub right_hand_drive: bool,
 }
 
 impl Default for DeviceConfig {
@@ -116,6 +138,7 @@ impl Default for DeviceConfig {
             max_fps: 60,
             main_safe_area: None,
             main_draw_outside_safe: false,
+            main_view_area_2: None,
             alt_safe_area: None,
             alt_draw_outside_safe: false,
             alt_max_fps: 0, // 0 = inherit max_fps
@@ -129,6 +152,7 @@ impl Default for DeviceConfig {
             oem_icons: Vec::new(),
             oem_icon_label: String::new(),
             oem_icon_visible: false,
+            right_hand_drive: false,
         }
     }
 }
@@ -344,7 +368,252 @@ fn hid_device(uid: u32, name: &str, product_id: i64, descriptor: Vec<u8>) -> Val
     Value::Dictionary(d)
 }
 
-/// One-entry `viewAreas` array for a display: a full-panel `viewArea` (the whole coded frame is
+
+/// A second MAIN view area, as resolved from the pushed config or the bench lever AFTER validation
+/// against the panel.
+///
+/// APP-DRIVEN SINCE 2026-09-05 (docs/carplay/04_CAPABILITIES_AND_CONFIG.md doctrine): the pushed
+/// YAML's `videoStreamsConfig.mainVideoStream.viewAreas[1].viewArea` is the SOURCE
+/// ([`DeviceConfig::main_view_area_2`], filled by `vehicle_config::VehicleConfig::apply`). The bench
+/// lever below is the APP-LESS fallback and is consulted only when the config carries no second
+/// area — a config-sourced area gets the SAME containment check ([`view_area_2`]), and a REFUSED
+/// config area declares one area rather than falling through to stale on-box lever state.
+///
+/// BENCH LEVER (2026-09-05): a SECOND main view area, so the CarPlay Dock's resize button can be
+/// exercised on real hardware on an app-less box.
+///
+/// `CARPLAY_VIEWAREA2=WxH@X,Y` (env, or the on-box file `/tmp/carplay_viewarea2`) declares a second
+/// area at that rect and sets `viewAreaTransitionControl: true` on BOTH areas, which is what makes
+/// iOS offer the button (`CARScreenViewArea.displaysTransitionControl`; WWDC 2019-252: "CarPlay can
+/// provide an Always Available button for the user to trigger a resize request from within the
+/// CarPlay UI"). A trailing `:initial` makes it the STARTING area (`initialViewArea: 1`), so the
+/// session begins collapsed and the first press enlarges to the full panel.
+///
+/// UNSET IS THE DEFAULT AND EMITS EXACTLY WHAT IT DID BEFORE — one area, `transitionControl: false`,
+/// `initialViewArea: 0`, `adjacentViewAreas: []`. That matters: the single-area `/info` is byte-pinned
+/// by a fixture test and by a live session that works. A lever that fails validation ALSO emits the
+/// default (and says so) — never a half-armed shape.
+///
+/// DEVICE-PROVEN GOOD (2026-09-05, `box-20260905-033634.log`, 2400x960 panel, wireless):
+/// `1600x960@800,0` — two areas, `initialViewArea: 0`, `adjacentViewAreas: [1]`, cornerMasks on.
+/// iOS negotiated `viewAreas`, showed the Dock button, sent `requestViewArea` per press, and the
+/// answer (`events::request_view_area`) moved the picture — 255 rect updates, coded size constant.
+///
+/// DEVICE-PROVEN BAD, SAME NIGHT (`box-20260905-034729.log` wireless, `-035236.log` wired):
+/// `1416x842@492,59:initial`. Both arms: iOS TEARDOWN in the same millisecond as RECORD's
+/// session-focus handshake, BEFORE iOS sent its own screen SETUP (wired sent nothing after RECORD at
+/// all; wireless got only the DataStream-130 SETUP out). The `RTSP/1.0 400` logged by `events` is
+/// one of the two handshake commands (`requestUI`/`changeModes`) being answered by an endpoint that
+/// was already tearing down — the same two commands succeeded in the good run — so the 400 is a
+/// SYMPTOM of the declaration being refused, not a command problem. The wired run's config CRC was
+/// identical to the good run's (`cfg_crc=0xc10656bd`), so the lever spec is the only variable.
+///
+/// Three things were wrong with what that spec declared, and this type now makes each impossible:
+///  1. On the wireless arm the panel was 1416x842, so the area extended to 1908x901 — OUTSIDE the
+///     panel. The old parser checked only `w>0 && h>0 && x>=0 && y>=0`. Containment is now
+///     enforced against the panel ([`view_area_2`]) and a refusal is logged.
+///  2. `adjacentViewAreas` was the constant `[1]` regardless of which area was initial, so with
+///     `:initial` the starting area was declared adjacent to ITSELF and nothing else — no area to
+///     go to. CarKit models this as a single `CARScreenInfo.adjacentViewArea` next to
+///     `currentViewArea` (`reference/ios27_extract/headers/CarKit/CarKit/CARScreenInfo.h:39-40`);
+///     current == adjacent is degenerate. Adjacency is now DERIVED from the initial area
+///     ([`ViewArea2::adjacent_from_initial`]) and can never contain it.
+///  3. ~~1416x842 is below a CarPlay minimum area size.~~ **SOLVED 2026-09-05: it was the ODD
+///     ORIGIN Y (59).** All four values — x, y, width, height — must be EVEN, or iOS returns
+///     `-16720 kFigEndpointError_InvalidParameter` from `carEndpoint_copyScreenInfo:7001` and tears
+///     the session down (HEVC 4:2:0 cannot express an odd extent). One-pixel proof: `356x400@240,760`
+///     renders, `357x400@240,760` tears down; `600x400@240,761` (odd Y only) tears down.
+///     The `385 * 0.65 * scale` floor this item used to cite is REFUTED as the gate — it
+///     mispredicts `480x400`, `400x400` and `384x400`, all of which render. A real but much smaller
+///     floor exists (measured 350x304 on 1080x1920) and produces a `viewAreaTooSmall` LOCKOUT, NOT a
+///     teardown — a different failure class. The SHIPPING minimum is the owner's product floor,
+///     800x480 landscape / 480x800 portrait (`ViewArea2Rule` in the macOS app).
+///
+/// DEVICE-PROVEN, PORTRAIT + cornerMasks OFF (2026-09-05, `box-20260905-051923.log`, 1080x1920
+/// wireless): `1080x1600@0,160` — declared, projected, button pressed, picture resized. This is the
+/// first hardware run of the `masks == false` branch below, where BOTH areas carry their own nested
+/// panel-coordinate `safeArea`; iOS accepts it. So cornerMasks is orthogonal to view-area
+/// acceptance. The area touches no panel edge, which also refutes the "must touch a vertical edge"
+/// rule that had been inferred from three landscape points.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ViewArea2 {
+    pub x: i64,
+    pub y: i64,
+    pub w: i64,
+    pub h: i64,
+    /// `:initial` (lever) / `initial: true` (YAML entry) — the session STARTS in this area (index 1)
+    /// rather than the full panel (index 0).
+    pub initial: bool,
+}
+
+impl ViewArea2 {
+    /// Is the rect declarable at all? `w > 0 && h > 0 && x >= 0 && y >= 0`. A zero dimension trips
+    /// iOS's `Pixel display view dimension(s) set to 0` validator — a teardown, not a warning. The
+    /// lever parser applies this before constructing; `vehicle_config::apply` applies it to decide
+    /// whether a YAML entry carries an area at all (an all-zero `viewArea` is "absent", not a fault).
+    pub fn is_positive(&self) -> bool {
+        self.w > 0 && self.h > 0 && self.x >= 0 && self.y >= 0
+    }
+}
+
+impl ViewArea2 {
+    /// Display-level `initialViewArea`: 1 only with `:initial`, else 0.
+    pub fn initial_index(&self) -> i64 {
+        if self.initial { 1 } else { 0 }
+    }
+
+    /// Display-level `adjacentViewAreas`: the ONE other area, reachable from the initial one. Derived,
+    /// never hardcoded — the failing declaration listed the starting area as adjacent to itself
+    /// (see the type doc, item 2). With two areas this is simply "the other index", the same rule
+    /// `events::request_view_area` applies when it answers a switch.
+    pub fn adjacent_from_initial(&self) -> Vec<i64> {
+        vec![1 - self.initial_index()]
+    }
+}
+
+/// Parse a lever spec `WxH@X,Y[:initial]`. Pure — no env, no panel — so it is unit-testable; the
+/// panel-containment check lives in [`ViewArea2::contained_in`], applied by [`view_area_2`].
+/// Returns `None` for anything malformed or with a zero/negative dimension (the `Pixel display view
+/// dimension(s) set to 0` validator failure is a teardown, not a warning).
+fn parse_view_area_2(spec: &str) -> Option<ViewArea2> {
+    let spec = spec.trim();
+    let (spec, initial) = match spec.strip_suffix(":initial") {
+        Some(s) => (s.trim(), true),
+        None => (spec, false),
+    };
+    let (size, origin) = spec.split_once('@')?;
+    let (w, h) = size.split_once('x')?;
+    let (x, y) = origin.split_once(',')?;
+    let (w, h, x, y) = (
+        w.trim().parse::<i64>().ok()?,
+        h.trim().parse::<i64>().ok()?,
+        x.trim().parse::<i64>().ok()?,
+        y.trim().parse::<i64>().ok()?,
+    );
+    (w > 0 && h > 0 && x >= 0 && y >= 0).then_some(ViewArea2 { x, y, w, h, initial })
+}
+
+impl ViewArea2 {
+    /// Does the area sit entirely inside a `panel_w` x `panel_h` panel? `checked_add`, not `+`, for
+    /// the same reason as the safeArea filter in [`view_areas`]: the release profile has overflow
+    /// checks off, and a wrapped extent would pass the very bound meant to reject it.
+    pub fn contained_in(&self, panel_w: i64, panel_h: i64) -> bool {
+        self.x.checked_add(self.w).is_some_and(|e| e <= panel_w)
+            && self.y.checked_add(self.h).is_some_and(|e| e <= panel_h)
+    }
+}
+
+/// The raw lever spec, if armed: env first, then the on-box file. The file form is what makes this
+/// testable without redeploying session_supervisor.sh: write it, reconnect the phone, and airplayd
+/// picks it up on its next control connection. `/tmp` is tmpfs, so a box reboot reverts to the
+/// shipped single-area behaviour on its own — a bench lever that cannot be left on by accident.
+fn view_area_2_spec() -> Option<String> {
+    std::env::var("CARPLAY_VIEWAREA2")
+        .ok()
+        .or_else(|| std::fs::read_to_string("/tmp/carplay_viewarea2").ok())
+}
+
+/// Resolve the second MAIN view area against the MAIN panel: the pushed config's
+/// [`DeviceConfig::main_view_area_2`] first, else the bench lever. `None` = neither source set,
+/// lever malformed, or refused (does not fit the panel) — every one of those emits the
+/// byte-identical single-area default. Resolved ONCE per `/info` build (`build_info`) and threaded
+/// through, so the refusal is logged once and every consumer (`viewAreas`, `initialViewArea`,
+/// `adjacentViewAreas`, the answer policy's declared count) sees the SAME decision — the old shape
+/// re-read the file from three places and the count consulted by the answer path could disagree
+/// with what `/info` declared.
+fn view_area_2(cfg: &DeviceConfig) -> Option<ViewArea2> {
+    resolve_view_area_2(cfg, view_area_2_spec())
+}
+
+/// [`view_area_2`] with the lever spec already read, so the precedence rule is unit-testable
+/// without touching the process environment or `/tmp`:
+///
+/// 1. A config-sourced area WINS, and a refused one declares ONE area — it does NOT fall through to
+///    the lever. App intent must never mix with stale on-box state (the same rule the metadata
+///    `skip` list follows): with an app connected, what the app pushed is what the phone sees.
+/// 2. The lever is consulted only when the config carries no second area (app-less box).
+fn resolve_view_area_2(cfg: &DeviceConfig, lever: Option<String>) -> Option<ViewArea2> {
+    let (panel_w, panel_h) = (cfg.display_width, cfg.display_height);
+    if let Some(a) = cfg.main_view_area_2 {
+        // `apply()` only carries positive rects, but `DeviceConfig` is a plain pub struct — keep the
+        // validator here so a directly constructed config gets the same refusal as the lever.
+        if !a.is_positive() {
+            eprintln!(
+                "[airplayd] *** pushed viewAreas[1] REFUSED — {}x{}@{},{} has a zero/negative \
+                 dimension or a negative origin; declaring ONE view area ***",
+                a.w, a.h, a.x, a.y
+            );
+            return None;
+        }
+        let a = refuse_unless_contained(a, panel_w, panel_h, "pushed viewAreas[1]")?;
+        eprintln!(
+            "[airplayd] second main view area {}x{}@{},{} initial={} from the pushed config \
+             (viewAreas[1]); CARPLAY_VIEWAREA2 bench lever {}",
+            a.w,
+            a.h,
+            a.x,
+            a.y,
+            a.initial,
+            if lever.is_some() { "ignored" } else { "unset" }
+        );
+        return Some(a);
+    }
+    let spec = lever?;
+    let Some(a) = parse_view_area_2(&spec) else {
+        eprintln!(
+            "[airplayd] *** CARPLAY_VIEWAREA2 REFUSED — cannot parse {:?} (want WxH@X,Y[:initial]); \
+             declaring ONE view area ***",
+            spec.trim()
+        );
+        return None;
+    };
+    refuse_unless_contained(a, panel_w, panel_h, "CARPLAY_VIEWAREA2")
+}
+
+/// The containment gate both sources share. `what` names the source in the refusal line — for the
+/// lever it is `CARPLAY_VIEWAREA2`, which keeps that log byte-identical to what the bench matrix
+/// has been grepping for.
+fn refuse_unless_contained(
+    a: ViewArea2,
+    panel_w: i64,
+    panel_h: i64,
+    what: &str,
+) -> Option<ViewArea2> {
+    if !a.contained_in(panel_w, panel_h) {
+        // 2026-09-05: `1416x842@492,59` was accepted against a 1416x842 panel and put a 1908x901
+        // extent on the wire; iOS tore the session down right after RECORD.
+        eprintln!(
+            "[airplayd] *** {what} REFUSED — {}x{}@{},{} extends to {}x{}, outside the \
+             {panel_w}x{panel_h} panel; declaring ONE view area ***",
+            a.w,
+            a.h,
+            a.x,
+            a.y,
+            a.x.saturating_add(a.w),
+            a.y.saturating_add(a.h)
+        );
+        return None;
+    }
+    Some(a)
+}
+
+/// How many MAIN view areas the most recently built `/info` DECLARED (1, or 2 with the bench lever
+/// armed AND accepted). Published by `build_info`, not re-derived from the lever, so the answer
+/// policy cannot disagree with the declaration the phone actually saw (a refused lever declares 1).
+///
+/// The answer policy needs this so it can refuse an index we never declared: iOS CLAMPS an
+/// out-of-range `viewAreaIndex` to 0 rather than rejecting it (CarKit `Resetting to first view area …
+/// out of range`), so passing a bad index through would look like a successful switch to the WRONG
+/// area — the worst shape of failure, since it neither errors nor does what was asked.
+pub fn declared_view_area_count() -> usize {
+    DECLARED_MAIN_VIEW_AREAS.load(std::sync::atomic::Ordering::Acquire)
+}
+
+static DECLARED_MAIN_VIEW_AREAS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(1);
+
+/// `viewAreas` array (one entry; two on the MAIN display with a pushed `viewAreas[1]` or the bench
+/// lever, see [`ViewArea2`]) for a display: a full-panel `viewArea` (the whole coded frame is
 /// visible content — the video always fills the rectangle) with a `safeArea` that MAY be inset —
 /// the rectangle CarPlay keeps its interactive UI inside, for curved/occluded panels.
 ///
@@ -378,6 +647,7 @@ fn view_areas(
     safe: Option<(i64, i64, i64, i64)>,
     draw_outside: bool,
     is_main: bool,
+    second: Option<ViewArea2>,
 ) -> Value {
     // cornerMasks (Phase 1 experiment) is a DISPLAY-level flag (set on the `disp` dict, not here — iOS's
     // validator reads it only from displays[], never from a viewArea entry). Its ONE viewArea consequence:
@@ -437,6 +707,54 @@ fn view_areas(
         area.insert("safeArea".into(), Value::Dictionary(safe_d));
     }
 
+    // Second area (pushed config `viewAreas[1]`, else the bench lever — see `ViewArea2`; resolved by
+    // the caller so this stays pure).
+    // Main/type-110 only: the three per-area flags are gated on `type == 110` in Apple's own SDK
+    // (`_AirPlayScreenDictSetViewAreas`, cmp x8,0x6e), so a cluster never carries them and must not
+    // gain a second area here.
+    if is_main {
+        if let Some(a) = second {
+            let ViewArea2 { x: x2, y: y2, w: w2, h: h2, .. } = a;
+            // Both areas advertise the control: iOS offers the button per area, and an area you can
+            // leave but not return to is a trap.
+            area.insert("viewAreaTransitionControl".into(), Value::Boolean(true));
+
+            let mut a2 = Dictionary::new();
+            a2.insert("originXPixels".into(), Value::Integer(x2.into()));
+            a2.insert("originYPixels".into(), Value::Integer(y2.into()));
+            a2.insert("widthPixels".into(), Value::Integer(w2.into()));
+            a2.insert("heightPixels".into(), Value::Integer(h2.into()));
+            a2.insert("viewAreaTransitionControl".into(), Value::Boolean(true));
+            a2.insert("viewAreaStatusBarEdge".into(), Value::Integer(0.into()));
+            a2.insert(
+                "viewAreaSupportsFocusTransfer".into(),
+                Value::Boolean(crate::levers::focus_transfer()),
+            );
+            if !masks {
+                // The safe area is NESTED INSIDE its own view area and is expressed in PANEL
+                // coordinates, like the area itself (Apple's Widescreen template: area at originX 640
+                // carries a safeArea at originX 640). Full-bleed for the test — a wrong safe rect is
+                // the `safeArea exceeds viewArea` class of fault and would confound the result.
+                let mut sd = Dictionary::new();
+                sd.insert("originXPixels".into(), Value::Integer(x2.into()));
+                sd.insert("originYPixels".into(), Value::Integer(y2.into()));
+                sd.insert("widthPixels".into(), Value::Integer(w2.into()));
+                sd.insert("heightPixels".into(), Value::Integer(h2.into()));
+                sd.insert("drawUIOutsideSafeArea".into(), Value::Boolean(draw_outside));
+                a2.insert("safeArea".into(), Value::Dictionary(sd));
+            }
+            // Log initial + adjacency too: the 2026-09-05 regression logs recorded the rects but not
+            // which area the session started in, and that was the variable under test.
+            eprintln!(
+                "[airplayd] view areas: 2 declared — [0] {width}x{height}@0,0, [1] {w2}x{h2}@{x2},{y2}, \
+                 transitionControl=true, initialViewArea={} adjacentViewAreas={:?}",
+                a.initial_index(),
+                a.adjacent_from_initial()
+            );
+            return Value::Array(vec![Value::Dictionary(area), Value::Dictionary(a2)]);
+        }
+    }
+
     Value::Array(vec![Value::Dictionary(area)])
 }
 
@@ -476,7 +794,22 @@ fn add_appearance_keys(d: &mut Dictionary) {
 }
 
 /// Build the `/info` binary plist bytes from `cfg`.
+///
+/// Resolves the second main view area (pushed config first, then the `CARPLAY_VIEWAREA2` bench
+/// lever) against the MAIN panel exactly once here and publishes how many main view areas the
+/// result declares (see [`declared_view_area_count`]).
 pub fn build_info(cfg: &DeviceConfig) -> Vec<u8> {
+    let second = view_area_2(cfg);
+    DECLARED_MAIN_VIEW_AREAS.store(
+        if second.is_some() { 2 } else { 1 },
+        std::sync::atomic::Ordering::Release,
+    );
+    build_info_with_view_area_2(cfg, second)
+}
+
+/// `build_info` with the second main view area already resolved (`None` = the shipped single-area
+/// declaration). Split out so tests can drive both shapes without touching the environment.
+fn build_info_with_view_area_2(cfg: &DeviceConfig, second: Option<ViewArea2>) -> Vec<u8> {
     let mut d = Dictionary::new();
 
     // audioFormats — the 8 wireless-CarPlay entries (C `_BuildAudioFormatsArray`).
@@ -589,8 +922,30 @@ pub fn build_info(cfg: &DeviceConfig) -> Vec<u8> {
     // invented (facet-08 CORRECTION-1). Match the genuine main = 0/0.
     disp.insert("widthPhysical".into(), Value::Integer(0.into()));
     disp.insert("heightPhysical".into(), Value::Integer(0.into()));
-    disp.insert("initialViewArea".into(), Value::Integer(0.into()));
-    disp.insert("adjacentViewAreas".into(), Value::Array(Vec::new()));
+    // `initialViewArea` / `adjacentViewAreas` are DISPLAY-level siblings of `viewAreas`. Default
+    // (lever unset or refused): `0` / `[]` — the genuine box's shape, byte-pinned below. With the
+    // lever: the initial index comes from `:initial`, and the adjacency is DERIVED from it, never a
+    // constant. Until 2026-09-05 it was the constant `[1]`, so `:initial` declared the starting area
+    // adjacent to itself and nothing else — see `ViewArea2`, item 2.
+    //
+    // Only areas listed in the adjacency may be requested. Empty means "no runtime switching", which
+    // is why the button never appeared before — declaring transitionControl without an adjacency is a
+    // button with nowhere to go.
+    disp.insert(
+        "initialViewArea".into(),
+        Value::Integer(second.map_or(0, |a| a.initial_index()).into()),
+    );
+    disp.insert(
+        "adjacentViewAreas".into(),
+        Value::Array(
+            second
+                .map(|a| a.adjacent_from_initial())
+                .unwrap_or_default()
+                .into_iter()
+                .map(|i| Value::Integer(i.into()))
+                .collect(),
+        ),
+    );
     disp.insert(
         "viewAreas".into(),
         view_areas(
@@ -599,6 +954,7 @@ pub fn build_info(cfg: &DeviceConfig) -> Vec<u8> {
             cfg.main_safe_area,
             cfg.main_draw_outside_safe,
             true, // type-110 main screen
+            second,
         ),
     );
     // cornerMasks at the DISPLAY (screen) level — `CARScreenInfo.wantsCornerMasks` is a screen-level
@@ -634,7 +990,7 @@ pub fn build_info(cfg: &DeviceConfig) -> Vec<u8> {
         alt.insert("adjacentViewAreas".into(), Value::Array(Vec::new()));
         alt.insert(
             "viewAreas".into(),
-            view_areas(aw, ah, cfg.alt_safe_area, cfg.alt_draw_outside_safe, false),
+            view_areas(aw, ah, cfg.alt_safe_area, cfg.alt_draw_outside_safe, false, None),
         );
         add_appearance_keys(&mut alt);
         alt.insert("type".into(), Value::Integer(111.into())); // Cluster / AltScreen
@@ -847,8 +1203,7 @@ pub fn build_info(cfg: &DeviceConfig) -> Vec<u8> {
         );
     }
 
-    // `limitedUI` — the INITIAL limited-UI state, and (hypothesis) the declaration that makes iOS
-    // honour the runtime `setLimitedUI` command at all.
+    // `limitedUI` — the INITIAL limited-UI state. NOT the gate; `limitedUIElements` above is.
     //
     // R14G17 `AirPlayReceiverServer.c:473-480` emits this from `AirPlayCopyServerInfo` right after
     // `limitedUIElements`, and the current SDK still requests it during the InfoRequest phase. We
@@ -857,14 +1212,26 @@ pub fn build_info(cfg: &DeviceConfig) -> Vec<u8> {
     // to `AirPlayReceiverSessionSetLimitedUI` (`AirPlayReceiverSession.c:5311-5316`), it reaches the
     // encrypted event channel (`sent=true` verified on hardware 2026-07-30), and iOS does nothing.
     //
-    // Ruled OUT as the cause: a missing `limitedUIElements`. No stock Apple template and no user
-    // Simulator config sets `limitedUIConfig`, so the Simulator's own `airPlayElements` is empty too —
-    // yet its toggle takes effect immediately. So the element list is not the gate.
+    // RESOLVED 2026-09-08 — the element list WAS the gate, and the paragraph that used to sit here
+    // ruling it out was wrong. `limitedUI` is a BOOLEAN; `limitedUIElements` is the SET it applies to.
+    // iOS 27 CarKit carries both on `CARScreenInfo` (`B _limitedUI`, `Q _limitedUIElements`, a
+    // bitmask) and builds `CARSessionConfiguration._limitableUserInterfaces` from the /info STRING
+    // ARRAY via `+_limitableUserInterfacesFromLimitedUIValues:`. With no array the mask is 0, so
+    // `setLimitedUI(true)` faithfully restricts the empty set — 2xx, no error, no effect.
     //
-    // Emitted unconditionally as `false` (CarPlay starts unrestricted; the runtime command moves it),
-    // matching Apple's own emission whenever the platform supplies a value. This is a WIRE CHANGE on a
-    // proven path and is the candidate fix, NOT a confirmed one — validate on a session, and revert
-    // this single insert if anything regresses.
+    // Device-proven on the AAOS app 2026-09-08 (owner-observed both directions): declare
+    // `["softKeyboard","softPhoneKeypad","musicLists","longUserAlert"]` and the Apple Maps keyboard
+    // icon disappears on shift out of Park and returns in Park, with these same command bytes.
+    //
+    // The old reasoning failed twice over: the 07-30 run served NO element list (the `limitedUIConfig`
+    // feature landed the same day), so the key was never under test; and "Apple's own is empty in a
+    // working session" was never observed — the Simulator logs show /info being REQUESTED and no
+    // toggle exercised. A 2xx ack proves the TRANSPORT, never the SEMANTICS.
+    //
+    // Emitted unconditionally as `false`: CarPlay starts unrestricted and the runtime command moves
+    // it, matching Apple's own emission whenever the platform supplies a value. Whether this key is
+    // independently REQUIRED is still untested — every working and non-working path carried it, so it
+    // was never the differentiator.
     d.insert("limitedUI".into(), Value::Boolean(false));
 
     // `buttonInfo` — an EMPTY BUT PRESENT array, which is literally what Apple's reference accessory
@@ -892,6 +1259,17 @@ pub fn build_info(cfg: &DeviceConfig) -> Vec<u8> {
     );
     d.insert("model".into(), Value::String(cfg.model.clone()));
     d.insert("name".into(), Value::String(cfg.name.clone()));
+    // `rightHandDrive` — Info Message key, Apple R14G17 `AirPlayCommon.h`
+    // (`kAirPlayKey_RightHandDrive`, "[Boolean] Whether or not to use right-hand drive mode") and the
+    // Integration Guide's Info Message list, where it sits beside `oemIconVisible` and `OSInfo`.
+    // ADDED 2026-09-05: the app had been emitting this key inside the pushed VehicleConfig YAML,
+    // where nothing parsed it, so it was dropped on 2026-09-02 as unused. It was in the wrong
+    // document, not unsupported — this is its actual home. Unconditional: a plain boolean whose
+    // false value is meaningful (left-hand drive), so there is no omit-means-default case.
+    d.insert(
+        "rightHandDrive".into(),
+        Value::Boolean(cfg.right_hand_drive),
+    );
     // OEM icon (vehicle-maker logo on the CarPlay home screen). Emitted ONLY when the host YAML sets it
     // — mirrors Apple's guarded block (AirPlayReceiverServer.c:551-607); absent = these keys omitted so
     // `/info` stays byte-identical. `oemIcons` is an ARRAY of one dict per resolution — Apple's AppStub
@@ -1202,11 +1580,175 @@ mod tests {
     #[test]
     fn safe_area_rejects_a_rect_whose_extent_overflows() {
         let bogus = Some((i64::MAX, 0, 100, 100));
-        let v = view_areas(1920, 720, bogus, false, false);
+        let v = view_areas(1920, 720, bogus, false, false, None);
         let area = v.as_array().unwrap()[0].as_dictionary().unwrap();
         let safe = area["safeArea"].as_dictionary().unwrap();
         // Rejected → falls back to the full panel, not to a wrapped rect.
         assert_eq!(safe["originXPixels"].as_signed_integer().unwrap(), 0);
         assert_eq!(safe["widthPixels"].as_signed_integer().unwrap(), 1920);
+    }
+
+    // ---- CARPLAY_VIEWAREA2 bench lever (2026-09-05 regression) -------------------------------
+    // The device-proven-good spec and the device-proven-bad spec from the same night, so the tests
+    // pin the exact shapes that were on the wire, not invented ones.
+    const GOOD: &str = "1600x960@800,0";
+    const BAD: &str = "1416x842@492,59:initial";
+
+    #[test]
+    fn view_area_2_spec_parses_both_forms() {
+        assert_eq!(
+            parse_view_area_2(GOOD),
+            Some(ViewArea2 { x: 800, y: 0, w: 1600, h: 960, initial: false })
+        );
+        assert_eq!(
+            parse_view_area_2(BAD),
+            Some(ViewArea2 { x: 492, y: 59, w: 1416, h: 842, initial: true })
+        );
+        // The on-box file form arrives with a trailing newline and may carry spaces.
+        assert_eq!(parse_view_area_2(" 1600x960 @ 800 , 0 :initial\n").map(|a| a.initial), Some(true));
+        for bad in ["", "1600x960", "1600x960@800", "0x960@0,0", "1600x0@0,0", "1600x960@-1,0", "wxh@x,y"] {
+            assert_eq!(parse_view_area_2(bad), None, "{bad:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn view_area_2_must_fit_the_panel() {
+        let good = parse_view_area_2(GOOD).unwrap();
+        let bad = parse_view_area_2(BAD).unwrap();
+        // Known-good: 800+1600 == 2400 exactly — the boundary is inclusive.
+        assert!(good.contained_in(2400, 960));
+        // The wireless failing run: a 1416x842 area at 492,59 on a 1416x842 PANEL extends to
+        // 1908x901. The old parser let this through.
+        assert!(!bad.contained_in(1416, 842));
+        // The wired failing run: the same rect DOES fit a 2400x960 panel (1908 <= 2400, 901 <= 960),
+        // so containment alone does not explain that arm — see `ViewArea2` item 3.
+        assert!(bad.contained_in(2400, 960));
+        // Overflow must not wrap into a pass (release profile: overflow checks off).
+        let wrap = ViewArea2 { x: i64::MAX, y: 0, w: 100, h: 100, initial: false };
+        assert!(!wrap.contained_in(2400, 960));
+    }
+
+    #[test]
+    fn view_area_2_adjacency_is_derived_from_the_initial_area() {
+        let from0 = parse_view_area_2(GOOD).unwrap();
+        let from1 = parse_view_area_2(BAD).unwrap();
+        assert_eq!((from0.initial_index(), from0.adjacent_from_initial()), (0, vec![1]));
+        assert_eq!((from1.initial_index(), from1.adjacent_from_initial()), (1, vec![0]));
+        // The failing declaration was initial=1 with adjacency [1]: the start area adjacent to
+        // itself and nowhere to go. Derived adjacency can never contain the initial index.
+        for a in [from0, from1] {
+            assert!(!a.adjacent_from_initial().contains(&a.initial_index()));
+        }
+    }
+
+    fn main_display(info: &[u8]) -> Dictionary {
+        let d: Value = plist::from_bytes(info).unwrap();
+        d.as_dictionary().unwrap()["displays"].as_array().unwrap()[0]
+            .as_dictionary()
+            .unwrap()
+            .clone()
+    }
+
+    #[test]
+    fn info_with_lever_declares_two_areas_and_a_consistent_initial_adjacency_pair() {
+        let cfg = DeviceConfig { display_width: 2400, display_height: 960, ..DeviceConfig::default() };
+        for (spec, initial, adjacent) in [(GOOD, 0, 1), (BAD, 1, 0)] {
+            let a = parse_view_area_2(spec).unwrap();
+            assert!(a.contained_in(cfg.display_width, cfg.display_height));
+            let disp = main_display(&build_info_with_view_area_2(&cfg, Some(a)));
+            assert_eq!(disp["initialViewArea"].as_signed_integer().unwrap(), initial, "{spec}");
+            let adj = disp["adjacentViewAreas"].as_array().unwrap();
+            assert_eq!(adj.len(), 1, "{spec}");
+            assert_eq!(adj[0].as_signed_integer().unwrap(), adjacent, "{spec}");
+            let areas = disp["viewAreas"].as_array().unwrap();
+            assert_eq!(areas.len(), 2, "{spec}");
+            for v in areas {
+                let v = v.as_dictionary().unwrap();
+                assert_eq!(v["viewAreaTransitionControl"].as_boolean(), Some(true), "{spec}");
+            }
+            let a1 = areas[1].as_dictionary().unwrap();
+            assert_eq!(a1["originXPixels"].as_signed_integer().unwrap(), a.x);
+            assert_eq!(a1["originYPixels"].as_signed_integer().unwrap(), a.y);
+            assert_eq!(a1["widthPixels"].as_signed_integer().unwrap(), a.w);
+            assert_eq!(a1["heightPixels"].as_signed_integer().unwrap(), a.h);
+        }
+    }
+
+    #[test]
+    fn info_without_lever_is_the_single_area_default() {
+        // `None` is what a refused lever resolves to, so this is also the "refusal emits the
+        // byte-identical default" guarantee — the same shape the /info fixture test pins.
+        let cfg = DeviceConfig::default();
+        let disp = main_display(&build_info_with_view_area_2(&cfg, None));
+        assert_eq!(disp["initialViewArea"].as_signed_integer().unwrap(), 0);
+        assert!(disp["adjacentViewAreas"].as_array().unwrap().is_empty());
+        let areas = disp["viewAreas"].as_array().unwrap();
+        assert_eq!(areas.len(), 1);
+        assert_eq!(
+            areas[0].as_dictionary().unwrap()["viewAreaTransitionControl"].as_boolean(),
+            Some(false)
+        );
+    }
+
+    // ---- pushed config vs bench lever precedence (app-driven since 2026-09-05) ----------------
+    // Driven through `resolve_view_area_2` with the lever spec passed in, so no test here touches
+    // the process environment or `/tmp` — the other tests in this module call `build_info`, which
+    // reads both, and a `set_var` from a parallel test thread would race them.
+
+    const PANEL: (i64, i64) = (2400, 960);
+    const CONFIG_AREA: ViewArea2 = ViewArea2 { x: 0, y: 0, w: 1200, h: 960, initial: true };
+
+    fn cfg_with(second: Option<ViewArea2>) -> DeviceConfig {
+        DeviceConfig {
+            display_width: PANEL.0,
+            display_height: PANEL.1,
+            main_view_area_2: second,
+            ..DeviceConfig::default()
+        }
+    }
+
+    #[test]
+    fn pushed_config_area_wins_over_the_bench_lever() {
+        // Both sources armed with DIFFERENT rects (GOOD is 1600x960@800,0): the config's must be the
+        // one declared, initial flag included.
+        let got = resolve_view_area_2(&cfg_with(Some(CONFIG_AREA)), Some(GOOD.into()));
+        assert_eq!(got, Some(CONFIG_AREA));
+        assert_ne!(got, parse_view_area_2(GOOD), "the lever rect must not leak through");
+    }
+
+    #[test]
+    fn bench_lever_is_the_fallback_only_when_the_config_carries_no_area() {
+        let got = resolve_view_area_2(&cfg_with(None), Some(GOOD.into()));
+        assert_eq!(got, parse_view_area_2(GOOD));
+        assert_eq!(resolve_view_area_2(&cfg_with(None), None), None);
+    }
+
+    #[test]
+    fn refused_config_area_declares_one_area_and_does_not_fall_back_to_the_lever() {
+        // Extends to 2401 on a 2400-wide panel — the device-proven teardown class.
+        let spill = ViewArea2 { x: 801, y: 0, w: 1600, h: 960, initial: false };
+        assert!(!spill.contained_in(PANEL.0, PANEL.1));
+        assert_eq!(resolve_view_area_2(&cfg_with(Some(spill)), Some(GOOD.into())), None);
+        // A non-positive config rect is refused the same way, lever or no lever.
+        let flat = ViewArea2 { x: 0, y: 0, w: 1600, h: 0, initial: false };
+        assert_eq!(resolve_view_area_2(&cfg_with(Some(flat)), Some(GOOD.into())), None);
+        assert_eq!(resolve_view_area_2(&cfg_with(Some(flat)), None), None);
+    }
+
+    #[test]
+    fn pushed_config_area_reaches_the_wire_with_the_same_shape_as_the_lever() {
+        // The config path feeds the SAME `view_areas` builder as the lever, so the wire shape is
+        // one shape: two entries, both with transitionControl, initial/adjacency from the flag.
+        let cfg = cfg_with(Some(CONFIG_AREA));
+        let second = resolve_view_area_2(&cfg, None).expect("contained + positive");
+        let disp = main_display(&build_info_with_view_area_2(&cfg, Some(second)));
+        assert_eq!(disp["initialViewArea"].as_signed_integer().unwrap(), 1);
+        assert_eq!(disp["adjacentViewAreas"].as_array().unwrap()[0].as_signed_integer().unwrap(), 0);
+        let areas = disp["viewAreas"].as_array().unwrap();
+        assert_eq!(areas.len(), 2);
+        let a1 = areas[1].as_dictionary().unwrap();
+        assert_eq!(a1["widthPixels"].as_signed_integer().unwrap(), 1200);
+        assert_eq!(a1["heightPixels"].as_signed_integer().unwrap(), 960);
+        assert_eq!(a1["viewAreaTransitionControl"].as_boolean(), Some(true));
     }
 }

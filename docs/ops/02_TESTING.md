@@ -119,10 +119,42 @@ direction requires the RCS channel.
 4. **Phone trace liveness — without spending a session.** Plug any MFi wired accessory (EarPods,
    USB-C→3.5 mm adapter, car cable) in for ~10 s while running
    `idevicesyslog -u <UDID> -p accessoryd --no-colors -o pre.txt`, then `grep -c "LOG;" pre.txt`.
-   `> 0` ⇒ `PrintIapPackets` is live, proceed. `0` with accessoryd lines present ⇒ the pref is off;
-   reinstall the CarPlay/iapd profile, **reboot**, retest.
+   `> 0` ⇒ `PrintIapPackets` is live, proceed.
    **Do not trust `capture_iphone_carplay.v2.sh`'s PRECHECK** — accessoryd is silent when idle, so it
    warns unconditionally. Measured: 55,001 system-wide `<Debug>` lines with zero from accessoryd.
+
+   **CORRECTED 2026-09-05 — do NOT chase logging profiles.** This gate used to end "`0` with
+   accessoryd lines present ⇒ the pref is off; reinstall the CarPlay/iapd profile, **reboot**,
+   retest." That instruction cost a session's worth of hope tonight and is at best unverified on the
+   current test phone. What was actually measured (separate session, same day, iPhone18,4 / iOS 27.0
+   24A5430a):
+   - **iOS 27 rejects any profile carrying a `com.apple.system.logging` payload unless Apple-signed**
+     — "invalid signature", even with no `Enable-Private-Data` key. The payload TYPE is gated, not the
+     private-data key; self-signing does not help.
+   - **Capture with ZERO profiles.** `carkitd` and `accessoryd` already emit DEBUG by default. A 76 s
+     no-profile capture that caught a connect produced 202 unique `carkitd` message shapes; a
+     22-minute FULLY-PROFILED capture with no connect produced 159. **The variable is whether a
+     session connect happens, not whether a profile is installed.**
+   - Profiles meaningfully add only `bluetoothd`/`wifid` volume and `com.apple.bluetooth`
+     unredaction — so the **Bluetooth profile is the one worth keeping**. No Apple profile unredacts
+     any `com.apple.car*` subsystem, and that is deliberate, not an oversight (AccountsAuthKit grants
+     private data to 12 subsystems at once).
+   - **OPEN QUESTION, worth one check:** whether the *network* profile surfaces CarPlay Wi-Fi
+     information. Untested. Record the result here when someone tries it.
+   - For a redacted `%@`, recover the schema **statically from the `carkitd` binary** instead of
+     chasing unredaction (mount the IPSW root fs, read strings). The `mask.hash` set — 52 decorators,
+     the BLE pairing path — renders as `<mask.hash: 'base64'>` no matter what and is not recoverable.
+
+   Note the `LOG;` / `PrintIapPackets` trace is a *preference* historically set by Apple's own CarPlay
+   debug profile, which is NOT the same mechanism as the hand-rolled logging payloads above — so the
+   measurements do not strictly refute this gate, they refute the instinct to reach for a profile.
+   Treat a zero `LOG;` count as "this trace is unavailable on this phone", not as "install something".
+
+   **The test phone runs DEVELOPER BETA iOS builds, not public production releases.** Weigh every
+   phone-side observation accordingly: a behaviour seen here may be beta-only, may change before
+   release, and may differ from what a customer's device does. When a phone-side result matters,
+   record the exact build (e.g. iOS 27.0 24A5430a) alongside it — a bare "iOS 27" is not enough to
+   reproduce or to trust later.
 5. **Arm the log-truncation guard.** `session_supervisor.sh::bound_logs` tail-truncates
    `/tmp/airplayd_wl.log` to 64 KB once it passes 256 KB — destroying exactly the handshake window.
    Snapshot at ~T+30 s: `cp /tmp/airplayd_wl.log /tmp/hs30.log`.
@@ -130,8 +162,27 @@ direction requires the RCS channel.
 
 ### The trace persists — pull it retroactively
 
-The `LOG;` trace lives in the on-device log store; 226 lines were recovered from a two-hour-old window.
-This removes the start-the-capture-first fragility entirely.
+**Why this procedure exists — wired CarPlay owns the phone's USB port (owner-stated 2026-09-05).** In a
+wired session the iPhone's only port is plugged into the BOX, and `idevicesyslog` needs the phone
+attached to the Mac, so there is NO live phone-side capture during a wired session. Two ways to get
+iOS's own view of a wired session:
+
+- **(a) retroactive-wired** — run the session wired, unplug the phone from the box, plug it into the
+  Mac, and pull the archive (below). The `LOG;` trace lives in the on-device log store; 226 lines were
+  recovered from a two-hour-old window, so nothing has to be started before the session.
+- **(b) live-wireless** — test on WIRELESS CarPlay, where projection rides Wi-Fi and the phone's USB
+  port is free for a live `idevicesyslog -u <UDID> -p accessoryd -o <file>`.
+
+**What this gates:** every check that needs an iOS-side observation — the `iapreject` /
+`Identification info rejected` reason after an `RX 0x1D03` (decision tree below, docs/carplay/05_METADATA_AND_CONTROLS.md §6.5),
+Identify acceptance, the `AirPlay  Acc  0x40  ACK` row — is **retroactive-wired or live-wireless, never
+live-wired**. A wired-arm Identify-shape change (docs/carplay/04_CAPABILITIES_AND_CONFIG.md B3 says "`idevicesyslog -p accessoryd`
+on every Identify-shape change") therefore means: run, unplug, re-plug on the Mac, pull. Pre-flight gate 4
+(trace liveness) is unaffected — it is done with the phone on the Mac before the session.
+
+Practical caveats: the archive is ~290 MB; `--age-limit` is seconds and must comfortably span the
+whole session PLUS the time spent moving the phone (1800 covers a short session, raise it for a long
+one — the two-hour recovery above used a wider window); `/usr/bin/log` must be spelled out (see below).
 
 ```sh
 idevicesyslog -u "$UDID" archive post.tar --age-limit 1800 && tar -xf post.tar -C post.logarchive
@@ -145,6 +196,43 @@ The row to look for: `AirPlay  Acc  0x40  ACK` — the phone confirming, in its 
 arrived. Cross-check the summary: `AirPlay iPod SYN-ACK` must be **1**, not 31.
 
 Note `/usr/bin/log` explicitly — a shell function shadows `log` in this environment and swallows args.
+
+### Wired view-area resize matrix — Mac-side verdicts only (2026-09-07)
+
+`tools/va_wired_sweep.sh` is the wired counterpart of `tools/va_limit_sweep.sh`. Because the phone's
+port is on the box (above), it judges each case from the control socket (`get session`,
+`get viewarea`, `viewarea arm|off|request`, `shot` — verbs and reply shapes owned by
+docs/host/00_MACOS_HOST_APP.md "Bench control surface"), the app log (`view areas: 2 declared`,
+`full TEARDOWN`, `REFUSED`) and the PIXELS of the armed rect — a LOCKOUT is a black rect with the
+session alive, scored by mean luminance, not OCR. Run it from a plain Terminal:
+
+```sh
+TAP="<x> <y>" tools/va_wired_sweep.sh              # whole matrix; --only L-1280x720 ; --case PW PH AW AH
+tools/winshot.sh shot <pid> out.png                  # app window by CGWindowID — occlusion-proof
+```
+
+Two bench facts the scripts encode, so they are not rediscovered:
+
+- **The app dies seconds after a launch from a sandboxed shell** (`sandbox_extension_issue_file_to_process
+  failed ... Operation not permitted`). The launch line is unchanged — the caller's sandbox is the
+  difference. Launch from a plain Terminal; the sweep aborts if the app is gone 8 s after launch.
+- **Never score a screen REGION.** `screencapture -R` returns whatever window is on top; a Terminal
+  over the CarPlay picture poisons every verdict silently. `screencapture -o -l<CGWindowID>` (what
+  `winshot.sh` does) renders the window's own content — verified on macOS 27.0 with a partly covered
+  window. It fails for a window that is not on screen (hidden, minimised, other Space).
+
+**The Dock `TAP` is pinned but should not be needed.** The button is the pill at the TOP of the Dock
+rail (two arrows pointing inward, above the clock); from area 0 it is `tap 133 179` in the app's
+0..10000 space. It **moves with the area**, so the return press is elsewhere and no single constant
+works — which is why `viewarea request <index>` is the trigger and `TRIGGER_MODE=tap` is only for a
+box whose airplayd predates `CMD_VIEW_AREA 0x11`.
+
+**The LOCKOUT thresholds (`BLACK_MEAN=12`, `BLACK_DARK=0.85`) are KNOWN WRONG — do not trust an
+ACCEPTED verdict near a floor without looking at the PNG.** A real lockout frame (2026-09-07,
+`480x800` in 2160x3840) scored ACCEPTED: the lockout card is sized to FILL the view area, so the
+armed rect reads mean luma 40.0 / darkFrac 0.01 — content, not black — while the panel around it is
+95% dark. No luminance threshold separates that from a real render; the discriminator is chroma
+(coloured app icons vs a flat grey card). Tracked as Known-open 7 in ../ops/04_OPEN_ITEMS.md.
 
 ### Negative checks — all must be zero
 
@@ -188,7 +276,9 @@ down — each is a candidate for the next stream-130-class discovery), `stale co
 - **Identified but no metadata** → check whether every subscribe logged `→ sent` (8 under `extended`, 3 under `proven`). Have Apple Music
   **playing before** the session so an idle phone cannot cause this.
 - **`RX 0x1D03`** → do NOT bisect. Capture the phone's reason:
-  `idevicesyslog -u <udid> -p accessoryd -o /tmp/rej.txt`, then
+  `idevicesyslog -u <udid> -p accessoryd -o /tmp/rej.txt` (live — WIRELESS sessions only; on a WIRED
+  session the phone's port is on the box, so pull the archive afterwards per "The trace persists"
+  above and grep `accd.txt` instead), then
   `grep -E "iapreject|Identification info rejected" /tmp/rej.txt`. It names the param, the message id
   and a reason from Apple's enum (docs/carplay/05_METADATA_AND_CONTROLS.md §6.5). Recovery is `echo proven > /tmp/carplay_metadata`.
 - **Identified but only NowPlaying/RouteGuidance** → check `/tmp/carplay_metadata` says `extended`;

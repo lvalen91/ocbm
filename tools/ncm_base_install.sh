@@ -108,7 +108,11 @@
 #                    DHCP lease from the adapter's udhcpd)
 #   --pass PW        root password; implies ssh. Omit for the shipped blank-password unit —
 #                    `install` prompts for an IP/password only if the default endpoint is dead
-#   --via telnet|ssh transport (default telnet)
+#   --via ssh|telnet transport (default ssh, changed 2026-09-05). TELNET IS THE RESCUE PATH:
+#                    it exists so a unit whose dropbear/authorized_keys is broken can be repaired,
+#                    and it moves files as 2 KB base64 chunks through a line-oriented shell. Do not
+#                    route a deploy through it because it happens to be the older default —
+#                    measured 2026-09-05, `scp -O` does 1.8 MB over USB-NCM in ~0.6 s.
 #   --host-if enX    your USB-NCM interface; forced to a static 192.168.50.1 while waiting
 #                    for a cold boot, for when macOS will not re-DHCP the new interface
 #   --run-dir DIR    where backups/reports land (default scratchpad/ncmbase_<stamp>)
@@ -128,7 +132,7 @@ BOXSH="$REPO/tools/boxsh.py"
 
 BOX="192.168.50.2"
 BOX_PW=""
-VIA="telnet"
+VIA="ssh"
 HOST_IF=""
 HOST_IP="192.168.50.1"
 RUN_DIR=""
@@ -176,7 +180,14 @@ gate() {
 # --------------------------------------------------------------------------------------
 # Transport. box/push/pull dispatch on --via so every phase below is written once.
 # --------------------------------------------------------------------------------------
-SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR
+# `id_ccpa_ncm` is the dedicated per-Mac key for the NCM maintenance link (see ~/.ssh/config's
+# `ccpa-ncm` host). Offered only when it exists, so a machine without it falls back to whatever the
+# agent/default identities provide. NOTE: never add `-o PubkeyAuthentication=no` here — dropbear on
+# this unit has NO root password set, so forcing password auth turns a working box into a confusing
+# "Permission denied (publickey,password)".
+[ -f "$HOME/.ssh/id_ccpa_ncm" ] && SSH_KEY_OPTS=(-o IdentityFile="$HOME/.ssh/id_ccpa_ncm") || SSH_KEY_OPTS=()
+SSH_OPTS=("${SSH_KEY_OPTS[@]}"
+          -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR
           -o ConnectTimeout=8 -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa
           -o KexAlgorithms=+diffie-hellman-group14-sha1 -o Ciphers=+aes128-ctr)
 
@@ -192,7 +203,19 @@ push() {  # $1 local  $2 remote  [$3 mode]
   if [ "$VIA" = telnet ]; then python3 "$BOXSH" --host "$BOX" --mode "${3:-755}" put "$1" "$2" >/dev/null
   else scp "${SSH_OPTS[@]}" -O "$1" "root@$BOX:$2" >/dev/null && ssh "${SSH_OPTS[@]}" "root@$BOX" "chmod ${3:-755} $2"; fi
 }
-pull() {  # $1 remote  $2 local — big files go over nc, which is ~100x faster than base64
+pull() {  # $1 remote  $2 local
+  # Under ssh just use scp: it is faster than the nc trick AND reliable. The nc path below stays for
+  # TELNET mode only, where the alternative is 2 KB base64 chunks. Do not promote it back to the
+  # default — measured 2026-09-05 on this USB-NCM link, a single-shot `busybox nc` truncated a
+  # 1.8 MB binary at 380 KB and again at 432 KB (different points, so it is the tool and its
+  # backgrounded listener dying with the shell session, not the link); `scp -O` moved the same file
+  # in ~0.6 s, md5-identical. The md5 check below is what caught that, which is why it stays.
+  if [ "$VIA" != telnet ]; then
+    scp "${SSH_OPTS[@]}" -O "root@$BOX:$1" "$2" >/dev/null && [ -s "$2" ] && return 0
+    warn "scp pull of $1 failed; falling back to base64"
+    python3 "$BOXSH" --host "$BOX" --timeout 180 get "$1" "$2" >/dev/null
+    return
+  fi
   local size; size=$(box "wc -c < $1" | tr -d ' \r\n')
   if [ "${size:-0}" -gt 262144 ] && command -v nc >/dev/null 2>&1; then
     boxq "pkill -f 'nc -l -p 9899'; :" || true

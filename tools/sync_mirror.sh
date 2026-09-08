@@ -7,6 +7,16 @@
 #   1. Deletions get missed. The corpus consolidation deleted 66 documents; without --delete the
 #      mirror keeps serving the stale ones, which is the exact failure the consolidation existed to
 #      end.
+#   2b. `.claude/` carries local tool-permission state, including PATHS INTO CLAUDE SESSION
+#      TRANSCRIPTS (project dir + session UUID). It is gitignored so it never reached GitHub, but
+#      rsync was still copying it into the publication directory. Excluded and removed.
+#
+#   2a. SYMLINKED build output publishes as a DANGLING LINK. `host/gm_ccpa/apk` is a symlink into
+#      ~/.cache (build artifacts must not live under iCloud-synced ~/Documents — see CLAUDE.md), and
+#      `rsync -a` copies the LINK, absolute target and all. On GitHub, or on any other machine, it
+#      resolves to nothing. Caught by a --dry-run 2026-09-08, which is also why the excludes below are
+#      SLASHLESS: `apk/` matches a directory only and would have missed it.
+#
 #   2. Gitignored build output rides along. None of it is ever COMMITTED (the .gitignore travels with
 #      the tree), but it accumulated 815 MB of Xcode DerivedData, cargo targets, .gradle caches and a
 #      stale certs/ copy in a directory that syncs to GitHub. Excluded here, once, rather than
@@ -24,10 +34,12 @@ SUBJECT="${1:-sync: mirror ccpa_custom @ $(git -C "$SRC" branch --show-current)}
 
 rsync -a --delete \
   --exclude='.git/' \
+  --exclude='.claude/' \
   --exclude='.DS_Store' \
   --exclude='* [0-9].*' \
   --exclude='* [0-9]' \
   --exclude='target' --exclude='build/' \
+  --exclude='apk' --exclude='evidence' --exclude='logs' \
   --exclude='.gradle/' --exclude='local.properties' \
   --exclude='xcuserdata/' \
   --exclude='.serena/' \
@@ -39,7 +51,8 @@ rsync -a --delete \
 # rsync protects excluded paths from --delete, so anything that predates an exclusion survives.
 # Remove those explicitly. All of it is gitignored, so nothing tracked can be lost here.
 ( cd "$DST" && find . -name '.DS_Store' -not -path './.git/*' -delete )
-( cd "$DST" && rm -rf build scratchpad reference old .serena target \
+( cd "$DST" && rm -rf build scratchpad reference old .serena target .claude \
+    host/gm_ccpa/apk host/gm_ccpa/evidence host/gm_ccpa/logs \
     host/CarPlayHost/build host/CarlinkAndroid/.gradle host/CarlinkAndroid/local.properties \
     host/aa-headunit/certs \
     host/CarPlayHost/carlink_macOS.xcodeproj/xcuserdata \
@@ -52,9 +65,9 @@ if [ -z "$(git status --porcelain)" ]; then
 fi
 
 # Fail loudly rather than publish something tracked that should not be.
-if git status --porcelain | awk '{print $NF}' | grep -qE '(^|/)(target|build|scratchpad|reference)/|\.DS_Store$'; then
+if git status --porcelain | awk '{print $NF}' | grep -qE '(^|/)(target|build|scratchpad|reference|apk|evidence|logs)(/|$)|\.DS_Store$'; then
     echo "FATAL: build output or temp is staged for publication" >&2
-    git status --porcelain | grep -E '(^|/)(target|build|scratchpad)/|\.DS_Store$' >&2
+    git status --porcelain | grep -E '(^|/)(target|build|scratchpad|apk|evidence|logs)(/|$)|\.DS_Store$' >&2
     exit 1
 fi
 

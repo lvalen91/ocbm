@@ -40,6 +40,8 @@ xcrun swiftc \
     carlink_macOS/App/VehicleConfig.swift \
     carlink_macOS/OCBM/OCBMFraming.swift \
     carlink_macOS/OCBM/OCBMAVDecrypt.swift \
+    carlink_macOS/OCBM/ConfigIntegrity.swift \
+    carlink_macOS/OCBM/SessionFailureTracker.swift \
     carlink_macOS/OCBM/StreamMetrics.swift \
     carlink_macOS/OCBM/OCBMClient.swift \
     carlink_macOS/OCBM/OCBMControlRelay.swift \
@@ -49,6 +51,11 @@ xcrun swiftc \
     carlink_macOS/Audio/MSBCFramer.swift \
     carlink_macOS/AA/AACapability.swift \
     carlink_macOS/AA/AAWire.swift \
+    carlink_macOS/App/Settings/VehicleProfile.swift \
+    carlink_macOS/App/Settings/FeatureMatrix.swift \
+    carlink_macOS/AA/AACapability+Profile.swift \
+    carlink_macOS/App/Settings/ProfileDocumentIO.swift \
+    tests/SettingsTests.swift \
     tests/main.swift \
     -o "$OUT"
 

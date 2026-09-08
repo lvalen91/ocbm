@@ -76,6 +76,11 @@ final class OCBMClient: @unchecked Sendable {
 
     /// The ephemeral session config (YAML) pushed on SUBSCRIBE. Sent verbatim; the box stores it.
     var sessionConfig: Data = Data()
+    /// The structured twin of `sessionConfig` — the same `VehicleConfig` the YAML was rendered from.
+    /// Handed to `ConfigIntegrity` when a SUBSCRIBE actually lands (2026-09-05), so "what we pushed"
+    /// is what the box was last TOLD, not what the settings form currently shows. Kept next to the
+    /// bytes so the two cannot drift: every path that assigns one assigns the other.
+    var sessionConfigStructured: VehicleConfig?
 
     /// Raw CH_METADATA payload chunks (box-forwarded inbound /command plists) — the Metadata window's
     /// feed. Invoked on the transport read queue; the consumer (MetadataStore) is thread-safe.
@@ -309,11 +314,12 @@ final class OCBMClient: @unchecked Sendable {
     /// Runs on `queue` (where every other `subscribe()` caller already runs) and never blocks the
     /// caller: this is invoked from the main thread on a Settings Save, and a `queue.sync` here would
     /// freeze the UI behind an in-flight USB write.
-    func repushConfig(_ data: Data) {
+    func repushConfig(_ data: Data, structured: VehicleConfig? = nil) {
         let mode = projMode
         queue.async { [weak self] in
             guard let self else { return }
             self.sessionConfig = data
+            self.sessionConfigStructured = structured
             guard self.subscribed else { return }  // not connected — applies at the next connect
             if mode == OCBM.pmWiredCp || mode == OCBM.pmWirelessCp {
                 self.log.info("config change held back — \(OCBM.projModeName(mode), privacy: .public) owns the box; applies on the next connection")
@@ -335,6 +341,10 @@ final class OCBMClient: @unchecked Sendable {
         onSubscriptionState?(ok)
         if ok {
             log.info("SUBSCRIBE sent (\(self.sessionConfig.count) B config) — commanding box projection")
+            // The config-in-force check's "pushed" side (2026-09-05): set ONLY when the write landed —
+            // a failed SUBSCRIBE pushed nothing, and the check must compare against what the box
+            // actually received, including a re-SUBSCRIBE after SEV_HOST_GONE.
+            ConfigIntegrity.shared.notePushed(sessionConfigStructured)
             // R2 (quick-relaunch grace): a within-grace session REUSE keeps the box's host_present flag
             // at 1, so airplayd's 0→1 keyframe edge never fires for this fresh decoder — it would sit on
             // undecodable P-frames. Proactively request an IDR on both lanes. Harmless on a cold launch
@@ -567,6 +577,25 @@ final class OCBMClient: @unchecked Sendable {
             self.log.info("nightMode \(on, privacy: .public)")
             let ok = self.send(channel: OCBM.chInput,
                                payload: [OCBM.inputCommand, OCBM.cmdNightMode, on ? 1 : 0])
+            Self.deliver(completion, ok ? .sent : .writeFailed)
+        }
+    }
+
+    /// Command a MAIN-display view-area transition (2026-09-07): `[inputCommand][cmdViewArea][index]`.
+    /// The box answers `updateViewArea` itself (it owns the encrypted event channel) and refuses an
+    /// index `/info` never declared — with one area declared, every index but 0 is refused box-side
+    /// and logged there, not here. `.sent` means the box received the command, not that iOS moved.
+    func sendViewArea(_ index: UInt8, completion: (@MainActor @Sendable (SendOutcome) -> Void)? = nil) {
+        queue.async { [weak self] in
+            guard let self else { Self.deliver(completion, .droppedNotSubscribed); return }
+            guard self.subscribed else {
+                self.noteInputDrop("viewArea")
+                Self.deliver(completion, .droppedNotSubscribed)
+                return
+            }
+            self.log.info("viewArea index=\(index, privacy: .public)")
+            let ok = self.send(channel: OCBM.chInput,
+                               payload: [OCBM.inputCommand, OCBM.cmdViewArea, index])
             Self.deliver(completion, ok ? .sent : .writeFailed)
         }
     }

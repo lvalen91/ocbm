@@ -193,6 +193,143 @@ semantics as iAP2. Navigation shows the phone's maneuver type as a glyph (the AA
 no image), the exit cue, step distance and the phone's own ETA string. State is cleared when the AA
 session ends. Wire details: `docs/androidauto/01_SESSION_AND_AV.md` §"Metadata services".
 
+### Settings window — projection-aware, vehicle-centric (reorganised 2026-09-04)
+
+Design contract, API reference, rendering rules and test contract:
+`host/CarPlayHost/carlink_macOS/App/Settings/DESIGN.md`. This section states the contract; the tab
+files under `App/Settings/` are the implementation. It replaces the T1 plan in
+`docs/ops/08_FUTURE_TASKS.md`.
+
+**Source of truth is a neutral profile, not either vendor's schema.** `VehicleProfile` +
+`AdapterSettings` (`App/Settings/VehicleProfile.swift`, Foundation-only) describe the car and the box
+in words that belong to neither vendor: panel geometry, insets, theme, driver position (left / right /
+center), an 8-member driving-restriction set, powertrain, input devices, audio and metadata feeds,
+plus quarantined `carPlay` / `androidAuto` extension blocks for what only one phone consumes. Two
+renderers consume it:
+
+- **CarPlay** — `VehicleConfigModel.yaml`, the Apple-schema document pushed to the box at SUBSCRIBE.
+  The emitter's TEXT is unchanged and stays in `App/SettingsWindow.swift` under the string anchors
+  `tools/regen_app_yaml_fixture.py` extracts; the fixture drift guard in `tests/run_tests.sh` still
+  governs, and no existing configuration emits different bytes (the only new emission is
+  `wifi_ap: false`, and only when the access point is switched off — absent still means enabled).
+- **Android Auto** — `AACapability(profile:adapter:warn:)` (`AA/AACapability+Profile.swift`), in-process,
+  into the protobuf `gal.ServiceDiscoveryResponse`. **Correction (2026-09-04):** until this change the
+  AA engine took a six-value snapshot of the CarPlay model (`AACapability.init(config:)`: main
+  width/height, max fps, name, `nightMode`, `rightHandDrive`); density, driving restrictions, voice
+  rate and the metadata services were constants or `AA_*` environment levers. It now renders from the
+  neutral profile: `display.panel` → resolution tier (+ margins when `androidAuto.fitPanelWithMargins`),
+  `panel.dpi` → density, `appearance.theme` → the `night_mode` sensor (`auto` = this Mac's appearance,
+  resolved at the AppDelegate call site), `driverPosition` → wire 2 / 1 / 3, `restrictions` → the
+  `driving_status` mask, `video.hevcAllowed` / `androidAuto.preferHEVC` → codec. Approximations the
+  renderer had to make are recorded as `negotiationNotes` and shown in the Vehicle tab. Bench `AA_*`
+  variables still override; they are test fixtures, not vehicle facts.
+
+**Tabs** (460×620): **Vehicle** (the neutral profile; sections Identity & branding, Display,
+Appearance, Driving, Vehicle, Input, Audio, Data feeds), **Adapter** (wireless radios, hot hand-over,
+pairing, Wi-Fi access point, Android Auto projection, app-driven SETUP, then the live box state that was
+the CCPA tab), **Diagnostics** (the Box Log stream toggle + cap — the Adapter tab does NOT duplicate
+it; DESIGN.md §1 claimed both until the 2026-09-05 correction). Each feature renders as: neutral
+control → one badge per projection (supported / limited / unsupported) → per-protocol explanation rows
+→ badged sub-groups for protocol-exclusive keys → a value note when the current value has one. Protocol
+names appear only in those rows; the save bar and the reboot / NCM alerts are worded neutrally.
+
+**Phase 3 — presentation — is designed but NOT implemented (2026-09-05).** The landed layout above is
+dense: the Vehicle tab rests at ~95–105 form rows because every honesty mechanism (badge row, two
+explanation rows, provenance glyph, value note) costs permanent vertical space. The contract for the
+re-layout is `App/Settings/DESIGN.md` §11: each section becomes collapsible (all collapsed at open),
+protocol-exclusive sub-groups become gate-and-reveal, the three separate explanation surfaces merge
+into one `FieldPopover` opened from either the (i) or a badge. The window stays NON-resizable and
+sizes itself to the current pane, with minimize/maximize dimmed, the title reflecting the visible
+pane and the last pane restored on reopen — Apple's Settings guidance, adopted after an intermediate
+draft proposed a resizable window and the owner reversed it (DESIGN.md §11.8). The pane switcher
+becomes a **window toolbar** using the macOS 27 tabs role (`NSToolbarItemGroup.role = .tabs` /
+SwiftUI `.pickerStyle(.tabs)`, both 27.0-only) — `TabView` and `.tabItem` leave the window. The
+pinned bottom bars carrying a primary action are retired, since current guidance reserves a bottom
+bar for small status information only; **where the Save control lands instead is the one decision
+still open** (DESIGN.md §11.9) — the toolbar is occupied by the pane switcher, so it is not
+automatically the answer. It is
+strictly cosmetic — no binding, no emitted byte, no `FeatureMatrix`/`FieldInfo` string content
+changes — and six live-computed warnings are pinned visible rather than moved behind hover.
+Deployment target is macOS 27 only, so Phase 3 uses no `if #available` guards; Liquid Glass is
+deliberately NOT applied, because Apple reserves it for the control layer and the SDK exposes no
+`Form`/`Section` glass API at all.
+
+**Provenance lives on `FeatureMatrix`** (`App/Settings/FeatureMatrix.swift`): 22 features × 2
+projections, each with a support level, the vendor's term and key, the effect, and a dated verification
+(device-proven / unverified / refuted), plus value-dependent notes. It is also the placement table for
+exclusive keys and the two-way restriction mapping (`carPlayLimitedUIElements`,
+`androidAutoDrivingStatus`; `typicalDriving` ⇒ AA mask 26, the value `AASession` used to hardcode;
+keyboard and keypad share AA bit 2; media/other lists have no AA bit, video/voice/configuration no
+CarPlay element — a projection that cannot express a member says so). **Verification state as of
+2026-09-04** (corrected the same day — an earlier draft of this paragraph listed AA tier 5, the
+portrait tiers and both CarPlay metadata tiers as unverified, and that stale claim was encoded into
+`FeatureMatrix` before it was caught): **all nine AA codec tiers are device-verified** (Pixel 10 /
+gearhead 17.5, wireless, one at a time — `docs/androidauto/01_SESSION_AND_AV.md`), but the evidence is
+per **(tier, fps)**: tiers 1/2/3/6 ran at 60 fps, tiers 4 and 5 at both 30 and 60, tiers 7/8/9 at 30
+only — so 3840×2160 is proven at 30 and 60 while a pairing like 1080×1920@60 has never run.
+2560×1440 declared as H.264 is refuted (the phone answers "not allowed for the codec type").
+**CarPlay metadata tiers:** `extended` is device-proven on the AirPlayTunnel arm (twice: 2026-07-25 at
+340 B and 2026-08-10 at 342 B Identify, `0x1D02` accepted — `docs/carplay/05_METADATA_AND_CONTROLS.md`
+§5.3/§6.6) and NOT proven on the wired arm, where no `extended` Identify has been run; the only
+`extended` rejection on record (§6.1, an earlier form without the Stop ids) was on the tunnel arm and
+is why the Stop fields exist. `all` is **REFUTED** on the tunnel arm (device evidence 2026-08-10, §
+the tier-`all` box: iOS named the `voice_over_cursor` ids, and skipping them still drew a generic
+param-6 reject). This matters because a `0x1D03` identification reject is unrecoverable within a
+session — params 6/7 are `REQUIRED_IDENT_PARAMS`, the retry is byte-identical, and CarPlay stays dead
+until the phone is unplugged and replugged — so `all` must never be the default. **Still unverified on a
+device:** driver position CENTER (wire 3) and AA voice at 24 kHz. AA insets, status-bar policy and
+powertrain are recorded in the profile but NOT sent.
+
+**Two export artifacts, deliberately not merged.** Vehicle tab ▸ *Generated YAML* disclosure +
+*Export YAML…* (CarPlay-badged) writes the RENDERED Apple-schema document — the bytes the box receives.
+Vehicle tab ▸ *Profile document* (Import… / Export… / Presets) reads and writes the NEUTRAL
+`VehicleProfileDocument`: JSON with a YAML-shaped key layout, `*.vehicleprofile.json`, Foundation's
+coder with sorted keys and pretty-printing, so equal documents are byte-equal and re-encoding is a
+no-op. It carries `schemaVersion` (1) with a per-version migration ladder; a newer schema is refused
+rather than guessed at; a missing key at ANY depth takes that field's
+default (corrected 2026-09-04 — decoding was all-or-nothing below the top level, which meant one new
+nested field would have refused every profile a user had already exported). Only fields declared
+without a default stay required: `BrandIcon.pngBase64/width/height` and `ConnectorSpec.type`. It is JSON, not a hand-rolled YAML subset, because docs/carplay/04 B3 already lost a
+pushed document to one unescaped quote. Sixteen presets ship: the fixture-locked default, ten derived
+from Google's DHU `config/*.ini` (`all_720p` / `loaded_720p` are one entry — not because the files are
+identical, as this line said until 2026-09-04, but because their only difference is `loaded_720p`'s
+`[sensors]` block, which is a runtime feed rather than a profile fact; `docs/ops/03_REFERENCE_INDEX.md` §F),
+five from Apple's CarPlay Simulator templates. `dhu-6in` (750×450) is below the app's 800×480 floor
+and is clamped on load with a notice rather than silently loading a different geometry. Note the clamp
+is NOT CarPlay-only: `clampInPlace()` runs on the model before EITHER renderer sees it, so Android Auto
+gets 800×480 too and only the 6.0" diagonal survives the load. Google's own `default_6in.ini` expresses
+that panel as tier 800×480 with `marginwidth 50` / `marginheight 30` (visible 750×450, pixel-exact);
+this app declares the whole tier and scales ×0.94 to the panel, which the AA renderer now states in a
+negotiation note.
+
+**Persistence is unchanged:** UserDefaults `vc.*`, the observable `VehicleConfigModel`. New neutral
+keys (`driverPosition`, `theme`, `dpi`, `diagonalInches`, status-bar and AA-only restriction flags,
+`wifiAccessPoint`, voice rate, telephony-over-projection, the three metadata feeds, the two AA
+extension flags) default sanely when absent. A one-shot `vc.profileKeysV1` migration seeds
+`driverPosition` / `theme` from the legacy `rightHandDrive` / `nightMode` booleans exactly once; those
+two keep being written to UserDefaults `vc.*` as DERIVED values so a downgrade still reads something
+sane — UserDefaults only for `nightMode`: the pushed YAML has carried neither key since 2026-09-02
+(`crates/vendor/receiver/src/vehicle_config.rs`, the `EMITTED_BUT_UNREAD` comment). **2026-09-05:
+`rightHandDrive` returns to the pushed YAML**, derived from `driverPosition == right`, because it is a
+CarPlay `/info` boolean after all (R14G17 `AirPlayCommon.h:1103`); the box now parses it and emits
+`/info rightHandDrive` — unverified on a device (docs/carplay/04_CAPABILITIES_AND_CONFIG.md
+§rightHandDrive). Beyond that, nothing new is pushed to the box except `wifi_ap: false`.
+
+**Vendor reference files.** Apple's CarPlay Simulator ships `VehicleConfigs/Configs/*.yaml`; Google's
+Desktop Head Unit ships the same kind of thing as `config/*.ini` (see `docs/ops/03_REFERENCE_INDEX.md`
+§F). Neither is a wire format: CarPlay's goes out as the AirPlay `/info` plist plus iAP2 Identify
+parameters, Android Auto's as `gal.ServiceDiscoveryResponse`.
+
+**Tests.** `host/CarPlayHost/tests/SettingsTests.swift` (`runSettingsTests()`, wired into
+`run_tests.sh` / `main.swift` by the integrator) covers the document round-trip and determinism, all
+presets, schema tolerance, the on-disk read/write path, the restriction mapping in both directions,
+`FeatureMatrix` completeness, and the neutral → Android Auto rendering. The `vc.profileKeysV1`
+migration is NOT covered there: `VehicleConfigModel.migrateProfileKeysV1(_:)` takes the defaults
+domain as a parameter for exactly that purpose, but it lives in `SettingsWindow.swift`, which the
+harness cannot compile (AppKit / SwiftUI / `@MainActor`, and it drags in the decoder stack). The test
+body exists behind `-D SETTINGS_TESTS_HAVE_MODEL` and prints SKIP otherwise; moving the migration into a
+Foundation-only file (`App/VehicleConfig.swift` exists for this) makes it live.
+
 ### Android Auto in Settings ▸ stream performance (2026-09-03)
 `StreamPerfSection` reads the OCBM decrypt layer's accumulators, which AA traffic never reaches (it
 rides `CH_IP` → `AASession`), so an entire AA drive rendered four all-zero CarPlay rows. `AASession`
@@ -274,6 +411,88 @@ the first 25 s, then none), which is what motivated moving that hand-off off the
 off-main-thread `renderQueue` change is built and unit-tested (53 harness cases) but UNMEASURED ON
 DEVICE.** The next relaunch must confirm the start-of-session enqueue-queue burst is gone, `dropFps`≈0
 in steady state, and `handoffLatencyMs` stays inside one frame interval.
+
+### Bench control surface — `ControlServer` (`CARLINK_CTRL_PORT`), 2026-09-07
+
+`App/ControlServer.swift` is a localhost line protocol that drives the app's INTENTS programmatically —
+off unless `CARLINK_CTRL_PORT` is set, bound to `127.0.0.1` only, one command per line, one reply line
+per command (`printf 'get session\n' | nc 127.0.0.1 $CARLINK_CTRL_PORT`). Three design rules, each
+the answer to a bug that cost a session: every actuation goes through `ControlsBridge` exactly like
+the UI buttons (a side path to the transport would hide the routing bug under test); `set` is an
+explicit allowlist that writes the same `VehicleConfigModel` fields the form writes (a generic
+writer could push a YAML the emitter has never seen); every read is one-line JSON and side-effect-free.
+
+| Verb | Reply | Notes |
+|---|---|---|
+| `key <home\|back\|select\|up\|down\|left\|right\|play\|pause\|playpause\|next\|prev\|answer\|end\|assistant>` | prose | D-Pad / media / telephony panels |
+| `knob <select\|home\|back\|cw\|ccw\|up\|down\|left\|right>` | prose | the knob panel — a separate call-site set from `key` |
+| `tap <x 0-10000> <y 0-10000>` | prose | down+up through the view's real touch path |
+| `dark\|night\|limitedui <on\|off>`, `siri`, `status` | prose | |
+| `get session\|box\|av\|profile\|aa\|viewarea\|presets` | JSON | read-only |
+| `preset <id>`, `set <key> <value>`, `save` | JSON | `save` commits; it lands at the next SUBSCRIBE. **Clamps are reported, not silent** — see below |
+| `viewarea arm <WxH@X,Y>` / `viewarea off` (alias `viewarea arm off`) | JSON | arm the second main view area through the model |
+| `viewarea request <index>` | JSON | command a view-area transition |
+| `shot [path]` | JSON | PNG of the current decoded main-lane frame |
+
+**`shot [path]`** — `{"ok":true,"path":..,"width":..,"height":..,"frameAgeMs":..,"sequence":..,
+"decodeFailures":..}`, default path `/tmp/vashots/shot-<epoch>.png`; `{"ok":false,"path":..,"reason":..}`
+before the first IDR. Why it exists: over WIRED CarPlay the phone's port is on the box, so there is no
+phone log on this Mac, and iOS renders its view-area lockout banner ("CarPlay does not support this
+display resolution") INTO the video stream and reports it in no log the accessory can read — the
+pixels are the only verdict. The frame is NOT a screen capture: `Video/VideoDecoder.swift` renders
+through `AVSampleBufferDisplayLayer`, whose renderer decodes internally and exposes no pixel buffer
+(`copyDisplayedPixelBuffer()` is specified to return NULL while the synchronizer rate is non-zero,
+and ours runs at 1.0 all session). So `FrameTap` (same file) takes the exact `CMSampleBuffer` the
+renderer ACCEPTED (`drainEnqueue`, after `.enqueued`) and decodes it a second time through an explicit
+`VTDecompressionSession`, keeping only the newest BGRA picture; `shot` writes it as sRGB RGBA8 PNG via
+CoreImage. Identical bytes, no permission, nothing on the render path changed; the cost is a second
+hardware decode, so the tap is installed only on the CarPlay `main` lane and only when the control
+server is on. Read `frameAgeMs` before trusting a shot: a number that grows between shots means the
+stream stopped and the PNG is the last thing iOS sent. `shot` runs on the socket thread, not the main
+queue, so a 4K PNG encode does not stall the UI. **Unverified on device** (2026-09-07): built and
+compiled; the first live session must confirm the shadow session decodes HEVC and H.264 and that
+`frameAgeMs` tracks the live stream.
+
+**A clamp is never silent (2026-09-07).** `set width/height/fps/dpi` answer with `stored` (what the
+model now holds, read back) and `pendingClamp` (a DRY RUN of `clampInPlace`, i.e. what `save` will
+actually do — the value is stored as given so `set width 480; set height 800` is order-independent);
+`save` answers with `clamped` and the resulting `panel`; `get viewarea` carries `clampNotes` beside
+the `panel` it verdicts against. **A caller that writes a value and does not read it back has no way
+to know it was rewritten, and that cost a whole test pass**: the panel envelope used to be per-axis,
+so `set height 3840` was silently clamped to 2160, every portrait view area then failed containment,
+and five sweep cases scored INCONCLUSIVE while appearing to run. The envelope is now `PanelRule`
+(orientation-agnostic, floor by the panel's own aspect) — see ../carplay/04_CAPABILITIES_AND_CONFIG.md.
+
+**`viewarea arm <WxH@X,Y>`** writes `viewArea2Enabled/X/Y/W/H` — the same fields the Settings form
+writes — and answers `{"ok":true,"armed":{"enabled","rect":{x,y,width,height},"spec","panel":{width,
+height},"verdict":null|string,"legal":bool,"floor":{width,height},"active":bool},"dirty":bool,
+"note":"not pushed until 'save'"}`. `verdict` is `ViewArea2Rule.verdict` — nil = legal, else the form's
+own message in severity order (containment, parity, positivity: teardowns; product floor: lockout).
+An illegal rect IS written (so `get viewarea` shows what was asked) but `active` stays false and the
+emitter leaves the YAML byte-identical, exactly as the form behaves. `viewarea off` clears the enable
+flag. Nothing is pushed until `save`; the rect lands at the next SUBSCRIBE. The spec grammar is the
+bench tools' `WxH@X,Y` (`ViewAreaSpec` in `App/VehicleConfig.swift`, harness-tested); `:initial` is
+refused because the app model does not author it. `get viewarea` now carries the same `armed` block
+beside `observed` (what iOS reports) and `pushed` (what the last SUBSCRIBE carried) — `armed.active`
+true while `pushed` lacks it means "save and reconnect".
+
+**`viewarea request <index>`** — `{"ok":true,"index":n,"wire":..,"note":..}` or `{"ok":false,
+"index":n,"reason":..}` (Android Auto owns the box, or no session). Path: `ControlsBridge.
+requestViewArea` (intent table entry `.viewArea`, CarPlay-only, outcome in `lastSent`) →
+`OCBMClient.sendViewArea` → `[INPUT_COMMAND 0x04][CMD_VIEW_AREA 0x11][index]` on `CH_INPUT` → ocbmd
+relays opaquely → airplayd `handle_input_frame` → `receiver::events::switch_view_area(DISPLAY_UUID,
+idx, "host viewArea")`, the SAME function that answers the phone's own `requestViewArea`, so the two
+paths share one policy: an index `/info` never declared is refused box-side (`[events] host viewArea
+index=N REFUSED — only M area(s) declared`), else `updateViewArea{uuid, viewAreaIndex,
+animationDurationMillis: 3000, adjacentViewAreas}` goes out. `ok:true` means accepted for send, not
+that iOS moved — confirm with `get viewarea` (`changes`, observed rect) and `shot`. Device-proven
+2026-09-05: iOS's own request is advisory and the accessory is the authority, which is why commanding
+the answer directly is a legitimate transition, not a hack. **Requires the 2026-09-07 airplayd on the
+box** (`build.sh`'s airplayd stanza → `target/armv7-unknown-linux-musleabihf/release/airplayd`, push
+with `ocbm-host`); an older airplayd logs `unknown INPUT_COMMAND 0x11 — dropped` and the fallback is
+`tap` on the Dock resize button. ocbmd needs no change. **Unverified on device** as of 2026-09-07.
+
+`tools/va_wired_sweep.sh` (docs/ops/02_TESTING.md) is the consumer these three were built for.
 
 ### Cross-cutting theme
 The unifying story is **finish the OCBM migration**: the CarPlay path is correct where it was ported

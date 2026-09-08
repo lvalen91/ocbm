@@ -8,7 +8,18 @@ Owner-directed work items that are neither an open defect nor a verification gap
 state it starts from and what "done" means. When a task lands, replace its body with a one-line
 pointer to the doc that now owns the result — do not leave a stale plan beside a shipped feature.
 
-## T1. Settings redesign — projection-aware, vehicle-centric (raised 2026-09-04)
+## T1. Settings redesign — projection-aware, vehicle-centric (raised 2026-09-04; IMPLEMENTED 2026-09-04)
+
+> **State (2026-09-04):** built the same day under the design contract
+> `host/CarPlayHost/carlink_macOS/App/Settings/DESIGN.md`; the result is described in
+> `../host/00_MACOS_HOST_APP.md` §"Settings window" and the AA side in
+> `../androidauto/00_ARCHITECTURE.md` §4. The shape that landed differs from the plan below in two
+> ways worth knowing: (1) the tabs are **Vehicle / Adapter / Diagnostics**, not Vehicle / CarPlay /
+> Android Auto / Transport — protocol-exclusive settings are badged sub-groups INSIDE the feature they
+> belong to, never a protocol tab; (2) the AA engine no longer snapshots the CarPlay model
+> (`AACapability.init(config:)` is retired) — it renders the neutral `VehicleProfile` through
+> `AACapability(profile:adapter:warn:)`, exactly as the CarPlay YAML is rendered from the same profile.
+> Kept below for the record of what was asked; the plan text is no longer the spec.
 
 **Why.** The app supports two projection protocols, Apple CarPlay and Android Auto, each wired and
 wireless. The Settings window does not reflect that: its Configuration tab is one long list built
@@ -16,10 +27,16 @@ around the CarPlay `VehicleConfig` YAML (`host/CarPlayHost/carlink_macOS/App/Set
 three tabs: Configuration, CCPA, Diagnostics), and everything Android Auto specific is an
 environment lever read at launch (`AA_FORCE_RES`, `AA_NO_TOUCH`, `AA_DRIVER_POSITION`,
 `AA_TELEPHONY_SINK`, `AA_LEGACY_VIDEO`, `AA_SKIP_AUDIO_ACK`, `AA_TRACE_UNHANDLED`, `AA_P12`,
-`AA_P12_PASS`, …) with no UI at all. Some vehicle facts are shared but only half-wired: the
-`rightHandDrive` toggle drives Android Auto's `driver_position` since 2026-09-04 but is inert for
-CarPlay (`docs/carplay/04_CAPABILITIES_AND_CONFIG.md` §rightHandDrive); `nightMode` is a CarPlay
-sensor and an AA sensor but its config-field form is stored and not pushed.
+`AA_P12_PASS`, …) with no UI at all. Some vehicle facts are shared but only half-wired: driver side
+reaches Android Auto's `driver_position`, and its CarPlay consumer — the `/info rightHandDrive`
+boolean, R14G17 `AirPlayCommon.h:1103` — is landing 2026-09-05, unverified on a device (until then this
+sentence said it "has no CarPlay consumer", which conflated no-consumer-on-the-box with no-key;
+`docs/carplay/04_CAPABILITIES_AND_CONFIG.md` §rightHandDrive); night mode is a CarPlay runtime command and
+an AA sensor but its config-field form is stored and not pushed. (Corrected 2026-09-04: this sentence said "the `rightHandDrive` toggle
+drives `driver_position`". After the reorganisation the source is the neutral `driverPosition`
+ternary — `left` / `right` / `center` → wire 2 / 1 / 3 — and `rightHandDrive` / `nightMode` survive
+only as write-only UserDefaults values derived from `driverPosition` / `theme` for an app downgrade;
+neither is in the pushed YAML since 2026-09-02.)
 
 **Target shape.**
 
@@ -52,8 +69,9 @@ sensor and an AA sensor but its config-field form is stored and not pushed.
 - The generated YAML preview and the "unsaved changes" flow are kept; the YAML schema may grow but
   must not break `tools/proto_check.py` or the existing config push.
 - Model split follows the UI: a shared vehicle model, plus a per-protocol model, so the AA engine
-  keeps taking a `Sendable` snapshot (`AACapability.init(config:)`) and never reads the observable
-  model from the session thread.
+  keeps taking a `Sendable` snapshot and never reads the observable model from the session thread.
+  (As landed: the snapshot is `AACapability(profile:adapter:warn:)` over the neutral `VehicleProfile`;
+  `init(config:)` over the CarPlay model is gone.)
 
 **Done means.** No `AA_*` environment variable is required for a normal session; the drive-side
 toggle changes both protocols (CarPlay half needs the box consumer wired — see the open item); the

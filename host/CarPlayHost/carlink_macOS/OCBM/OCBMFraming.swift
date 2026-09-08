@@ -273,6 +273,10 @@ enum OCBM {
     static let cmdUIAppearance: UInt8 = 0x0E   // uiAppearanceUpdate{uuid, appearanceMode}
     static let cmdMapAppearance: UInt8 = 0x0F  // mapAppearanceUpdate{uuid, appearanceMode}
     static let cmdNightMode: UInt8 = 0x10      // setNightMode{nightMode}
+    // View-area switch (2026-09-07): [inputCommand, cmdViewArea, index] -> airplayd answers
+    // updateViewArea{uuid: DISPLAY_UUID, viewAreaIndex: index, ...} for the MAIN display, refusing an
+    // index /info never declared. The deterministic form of the CarPlay Dock resize button.
+    static let cmdViewArea: UInt8 = 0x11
     static let appearanceStreamMain: UInt8 = 0x00 // DISPLAY_UUID
     static let appearanceStreamAlt: UInt8 = 0x01  // ALT_DISPLAY_UUID (alt-screen-gated)
     static let appearanceModeLight: UInt8 = 0x00

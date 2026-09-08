@@ -266,7 +266,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Snapshot the vehicle profile HERE, on the main actor, and hand the value to the session
         // thread — the AA engine must not reach into the observable model from its own thread.
-        let cap = AACapability(config: VehicleConfigModel.shared)
+        // Rendered from the NEUTRAL profile (W2, 2026-09-04), not the six CarPlay-shaped fields;
+        // `theme == .auto` is resolved here because AACapability must stay AppKit-free.
+        let cap = AACapability(profile: VehicleConfigModel.shared.profile,
+                               adapter: VehicleConfigModel.shared.adapterSettings,
+                               autoThemeIsDark: NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua)
         let player = self.audioPlayer   // AA's three sinks play through the same engine as CarPlay
         DispatchQueue.global(qos: .userInitiated).async {
             guard let transport = AATCPTransport(host: host, port: port) else {
@@ -374,7 +378,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let aaMic = MicCapture()
         self.aaMicCapture = aaMic
         aaTransport = transport
-        let cap = AACapability(config: VehicleConfigModel.shared)   // main-actor snapshot; see above
+        let cap = AACapability(profile: VehicleConfigModel.shared.profile,   // main-actor snapshot; see above
+                               adapter: VehicleConfigModel.shared.adapterSettings,
+                               autoThemeIsDark: NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua)
         // T4: margins → the window follows the VISIBLE size and the view centre-crops the codec frame.
         aaVisibleSize = cap.hasMargins ? (Int(cap.touchSize.w), Int(cap.touchSize.h)) : nil
         view.aaMarginCrop = cap.hasMargins
@@ -712,6 +718,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // CCPA tab: the OCBM link is gone — clear any latched busy, stop claiming "Connected", and
         // mark the last snapshot stale so pre-unplug data doesn't read as live.
         CCPABridge.shared.sessionEnded()
+        // A view-area rect from the previous session must not read as live on the next one — same
+        // reasoning as CCPABridge.sessionEnded()'s own clearing of box health / BT phase.
+        ScreenGeometry.reset()
+        ConfigIntegrity.shared.sessionEnded()   // same reasoning: no stale verdict/RS_OPEN across sessions
+        SessionFailureTracker.shared.sessionEnded()   // the APP ended this — drop the open attempt, keep the history
         // Stop the A/V performance sampler + write a final sessionActive:false metrics snapshot.
         StreamMetricsMonitor.shared.stop()
         // Nil the per-session helper too: a stale Task queued before teardown could otherwise touch it
@@ -881,6 +892,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Create H.264 decoder — give it the view's display layer
         let decoder = VideoDecoder()
         decoder.label = "main"
+        // Bench-only shadow decode for the ControlServer's `shot` (see FrameTap): the CarPlay MAIN
+        // lane only, and only when the control server is on — a second hardware decode nobody can
+        // read would be a pure cost. The AA and alt/cluster lanes are deliberately not tapped.
+        if controlServer != nil { decoder.frameTap = FrameTap.shared }
         self.mainDecoder = decoder
         // 05-M3 (verify_02, APPROVED): mirror the alt lane's onDimensions wiring below (`altDecoder
         // .onDimensions`) — without this the main lane's window sizing/aspect never followed the
@@ -963,6 +978,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let text = self.activePairingCode == nil ? s : Self.pairingInstruction
             self.windowController.carPlayView.updateStatus(text)
         }
+        // Second overlay line (2026-09-05): the last session failure in the box's words, or nil when
+        // there is none. Same AA guard; a pending pairing code keeps the overlay to its instruction.
+        coord.onStatusDetail = { [weak self] d in
+            guard let self else { return }
+            if self.aaSession != nil || self.parkedCarPlayDecoder != nil { return }
+            self.windowController.carPlayView.updateStatusDetail(self.activePairingCode == nil ? d : nil)
+        }
         coord.onStreaming = { [weak self] on in
             guard let self else { return }
             // AA owns the view whenever a session is up or the CarPlay decoder is parked. The
@@ -998,8 +1020,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         BoxLogStore.shared.startSession()
         client.logStreamEnabled = BoxLogSettings.shared.streamEnabled
         client.logStreamCapKB = UInt16(clamping: BoxLogSettings.shared.capKB)
-        client.onBoxLog = { entries in BoxLogStore.shared.ingest(entries) }
+        // The same entries also feed the session-failure classifier (2026-09-05): it reads the
+        // receiver's teardown/rejection lines out of this stream so the status overlay, the app log
+        // and `get session` can say WHY a session died instead of cycling two hopeful strings. It is
+        // told whether the stream is armed so the UI can admit blindness when it is off.
+        SessionFailureTracker.shared.noteLogStream(enabled: BoxLogSettings.shared.streamEnabled)
+        client.onBoxLog = { entries in
+            BoxLogStore.shared.ingest(entries)
+            SessionFailureTracker.shared.ingest(entries)
+        }
         BoxLogSettings.shared.applyNow = { [weak client] enabled, cap in
+            SessionFailureTracker.shared.noteLogStream(enabled: enabled)
             client?.logStreamEnabled = enabled
             client?.logStreamCapKB = cap
             client?.sendLogCtl(enabled: enabled, capKB: cap)
@@ -1082,6 +1113,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // drives the app window geometry so the window shape matches what the iPhone encodes.
         let cfg = VehicleConfigModel.shared
         client.sessionConfig = cfg.data()
+        // The structured twin of those bytes, for the config-in-force check (2026-09-05). Same
+        // source `AirPlaySetupSession` authors from below: the COMMITTED config, i.e. what was
+        // rendered into `cfg.data()`, never the live form.
+        client.sessionConfigStructured = cfg.committedConfig ?? cfg.config
         // App-driven SETUP (plan P3): gate on the pushed config's `appDrivenSetup` toggle (default ON —
         // wired since 2026-08-09, wireless since the 2026-08-10 flip; it now drives both transports).
         // When ON, the box relays each RTSP/SETUP exchange over CH_RTSP and THIS app authors the response
@@ -1106,6 +1141,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // config the box never loaded is precisely the drift this detects.
             relay.onOpen = { [weak coord] _, _, boxCRC, _ in
                 session.reset()
+                // Config-in-force check (2026-09-05): record that THIS stream had an RS_OPEN at all.
+                // The `cfg_crc == 0` arm below detects a box on defaults ONLY IF an RS_OPEN arrives —
+                // and on 2026-09-05 none did, because the no-config path also clears `appsetup`
+                // and SETUP went box-driven. `ConfigIntegrity` raises the same verdict from the
+                // ABSENCE of this callback once A/V flows (its `noteCoded`).
+                ConfigIntegrity.shared.noteSetupOpen(boxCRC: boxCRC)
                 let ours = CRC32.compute(cfg.data())
                 let detail: String
                 if boxCRC == ours {

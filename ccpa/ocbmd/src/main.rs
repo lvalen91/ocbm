@@ -536,6 +536,9 @@ struct Daemon {
     subscribed: bool,
     last_hb: Option<std::time::Instant>,
     present: bool,
+    /// When a `CT_HEARTBEAT` from an UNSUBSCRIBED host was last answered with a `SEV_HOST_GONE`
+    /// nudge (see the `CT_HEARTBEAT` arm in `handle`). None = not since the last SUBSCRIBE.
+    hb_unsub_nudged_at: Option<std::time::Instant>,
     /// Who the host says it is: an optional UTF-8 label carried after the nonce in CT_HELLO.
     ///
     /// The nonce distinguishes host PROCESSES; it says nothing about what KIND of host they are. The
@@ -611,6 +614,12 @@ struct Daemon {
 /// USB stall without the session actually being dead; 10s absorbs that while still bounding a truly-gone
 /// host well under any user-perceptible hang.
 const HEARTBEAT_GRACE: Duration = Duration::from_secs(10);
+
+/// Re-nudge cadence for a host that heartbeats WITHOUT having SUBSCRIBEd this daemon (2026-09-05).
+/// The first such beat is answered immediately (log + `SEV_HOST_GONE`); a host that still has not
+/// re-SUBSCRIBEd after this long is nudged again, so an app whose first re-SUBSCRIBE write failed is
+/// not stranded, while a 1 Hz heartbeat can never turn this into a 1 Hz log line.
+const HB_UNSUBSCRIBED_NUDGE: Duration = Duration::from_secs(30);
 
 /// Where airplayd publishes the connected phone's identity (mirrors `receiver::session`'s constant;
 /// ocbmd does not link that crate).
@@ -3690,6 +3699,7 @@ impl Daemon {
                     // host receiver active: record its ephemeral config, stamp liveness, go present
                     self.subscribed = true;
                     self.last_hb = Some(Instant::now());
+                    self.hb_unsub_nudged_at = None; // the unsubscribed-heartbeat nudge is spent
                     // FRESH-SESSION A/V RESYNC (2026-09-03). CT_HELLO clears these already; a SUBSCRIBE
                     // that did NOT follow a HELLO (a host re-arming over an attach that is still up)
                     // would otherwise hand the receiver the PREVIOUS session's queued tail — a partial
@@ -3784,9 +3794,48 @@ impl Daemon {
                         self.raise_presence(Instant::now());
                     }
                 } else if pl.first() == Some(&p::CT_HEARTBEAT) {
-                    self.last_hb = Some(Instant::now());
+                    let now = Instant::now();
+                    self.last_hb = Some(now);
                     if self.subscribed {
                         self.set_present(true); // recover if a prior beat had lapsed
+                    } else {
+                        // A heartbeat from a host this daemon has NEVER seen SUBSCRIBE (2026-09-05).
+                        // The host only beats while IT believes it is subscribed, so this is exactly
+                        // "a host that believes a config is in force when it is not" — the box-side
+                        // signal that existed all along and was discarded here. It fired for real:
+                        // the supervisor's L2 watchdog restarted ocbmd (`ocbmd wedged (alive mtime
+                        // stale >=1min, gadget CONFIGURED, pid=71)`), the fresh daemon unlinked
+                        // /tmp/carplay_cfg.yaml at startup, the app kept heartbeating into it with
+                        // `subscribed=true` on its side, and the still-running airplayd_wl served the
+                        // reconnecting phone compiled defaults (1920×720/H.264 against a pushed
+                        // 2400×960/HEVC) for hours. The app's own RS_OPEN `cfg_crc==0` guard never
+                        // ran because the no-config path also clears `appsetup` — no relay, no RS_OPEN.
+                        //
+                        // Answer with `SEV_HOST_GONE`: the app decodes it as "the box dropped my
+                        // subscription", sets its `subscribed=false` and re-SUBSCRIBEs immediately
+                        // (OCBMClient.swift, `ctSessionEvent` arm), which re-lands the config and
+                        // re-arms the supervisor. Once per nudge window, not per beat — the host
+                        // beats at 1 Hz and its 1 Hz tick also re-sends SUBSCRIBE while unsubscribed,
+                        // so one nudge is normally enough; the window is for a host whose first
+                        // re-SUBSCRIBE write failed. Not `set_present(false)`: presence never rose,
+                        // so there is no edge to drop and `/tmp/host_present` is already 0.
+                        let due = match self.hb_unsub_nudged_at {
+                            None => true,
+                            Some(t) => now.duration_since(t) >= HB_UNSUBSCRIBED_NUDGE,
+                        };
+                        if due {
+                            self.hb_unsub_nudged_at = Some(now);
+                            eprintln!(
+                                "[ocbmd] HEARTBEAT from an unsubscribed host — it believes it is \
+                                 subscribed (config NOT in force on this daemon); re-SUBSCRIBE \
+                                 required, sending SEV_HOST_GONE"
+                            );
+                            self.send(
+                                p::CH_CTRL,
+                                p::F_SOM | p::F_EOM,
+                                &[p::CT_SESSION_EVENT, p::SEV_HOST_GONE],
+                            );
+                        }
                     }
                 } else if pl.first() == Some(&p::CT_STOP) {
                     // A clean host close IS the end of the session. Take the identical path heartbeat
@@ -4082,6 +4131,7 @@ fn main() {
         subscribed: false,
         last_hb: None,
         present: false,
+        hb_unsub_nudged_at: None,
         host_name: None,
         box_health: None,
         bt,
@@ -4593,6 +4643,7 @@ mod tests {
             subscribed: false,
             last_hb: None,
             present: false,
+            hb_unsub_nudged_at: None,
             host_name: None,
             box_health: None,
             // No thread: the tests drive the atomics directly. Seeded with a FRESH all-false sample
@@ -5237,6 +5288,65 @@ mod tests {
         let mut d = td();
         d.handle(p::CH_CTRL, p::F_SOM | p::F_EOM, &hello(1, b"bench tool"));
         assert!(d.box_info_json().contains("\"host_name\":\"bench tool\""));
+    }
+
+    /// 2026-09-05: a host that heartbeats into a daemon that never saw it SUBSCRIBE (the L2-restart
+    /// shape) must be told, once per nudge window, that its subscription is not in force — and the
+    /// nudge must be spent by a SUBSCRIBE so a live session never sees it.
+    #[test]
+    fn heartbeat_from_an_unsubscribed_host_is_nudged_once_with_host_gone() {
+        let _flag = presence_flag_lock();
+        let mut d = td();
+        assert!(!d.subscribed);
+        d.handle(p::CH_CTRL, p::F_SOM | p::F_EOM, &[p::CT_HEARTBEAT]);
+        let out = sent(&mut d);
+        assert_eq!(out.len(), 1, "first unsubscribed beat → exactly one nudge: {out:?}");
+        assert_eq!(out[0].0, p::CH_CTRL);
+        assert_eq!(out[0].2, vec![p::CT_SESSION_EVENT, p::SEV_HOST_GONE]);
+        assert!(!d.present, "a nudge must not touch presence — it never rose");
+        // Subsequent beats inside the window are silent (1 Hz beats must not become 1 Hz nudges).
+        d.handle(p::CH_CTRL, p::F_SOM | p::F_EOM, &[p::CT_HEARTBEAT]);
+        d.handle(p::CH_CTRL, p::F_SOM | p::F_EOM, &[p::CT_HEARTBEAT]);
+        assert!(sent(&mut d).is_empty(), "beats inside the nudge window are silent");
+        // Past the window, the host is nudged again.
+        d.hb_unsub_nudged_at = Some(Instant::now() - HB_UNSUBSCRIBED_NUDGE);
+        d.handle(p::CH_CTRL, p::F_SOM | p::F_EOM, &[p::CT_HEARTBEAT]);
+        let out = sent(&mut d);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].2, vec![p::CT_SESSION_EVENT, p::SEV_HOST_GONE]);
+        // A SUBSCRIBE spends the nudge — driven through `handle()`, NOT by setting the fields.
+        //
+        // The first cut of this test set `subscribed`/`hb_unsub_nudged_at` by hand, which meant it
+        // passed with the reset at the CT_SUBSCRIBE site DELETED (proved by mutation during review,
+        // 2026-09-05). That is the reset that matters: without it, nudge → SUBSCRIBE → go_idle →
+        // an unsubscribed beat inside the old 30 s window is met with silence, i.e. up to 30 more
+        // seconds of exactly the blackout this fix exists to end. Drive the real frame so the test
+        // is pinned to the production path.
+        d.handle(p::CH_CTRL, p::F_SOM | p::F_EOM, &[p::CT_SUBSCRIBE, b'x']);
+        assert!(d.subscribed, "CT_SUBSCRIBE must mark the daemon subscribed");
+        assert!(
+            d.hb_unsub_nudged_at.is_none(),
+            "CT_SUBSCRIBE must SPEND the nudge stamp — otherwise a later go_idle leaves the host \
+             un-nudged for the remainder of the old window"
+        );
+        let _ = sent(&mut d); // drain whatever SUBSCRIBE emitted; this test is about the nudge
+        d.handle(p::CH_CTRL, p::F_SOM | p::F_EOM, &[p::CT_HEARTBEAT]);
+        assert!(
+            sent(&mut d).iter().all(|f| f.2 != vec![p::CT_SESSION_EVENT, p::SEV_HOST_GONE]),
+            "a subscribed host must never be told GONE for a heartbeat"
+        );
+
+        // And the case the hand-set version could not see: after the session goes idle, the very
+        // next unsubscribed beat must nudge IMMEDIATELY, not wait out the stamp from before the
+        // SUBSCRIBE. This is what fails if the reset at the CT_SUBSCRIBE site is removed.
+        d.go_idle(false);
+        assert!(!d.subscribed, "go_idle must leave the daemon unsubscribed");
+        d.handle(p::CH_CTRL, p::F_SOM | p::F_EOM, &[p::CT_HEARTBEAT]);
+        let out = sent(&mut d);
+        assert!(
+            out.iter().any(|f| f.2 == vec![p::CT_SESSION_EVENT, p::SEV_HOST_GONE]),
+            "the first unsubscribed beat AFTER a subscribe/idle cycle must nudge immediately: {out:?}"
+        );
     }
 
     #[test]

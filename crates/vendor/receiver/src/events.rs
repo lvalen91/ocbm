@@ -918,8 +918,12 @@ pub fn telephony_advertised() -> bool {
 /// it when parked (`false`). Runtime `/command` on the event channel; NO reconnect, NO `/info` change,
 /// NO SETUP feature negotiation (Apple `AirPlayReceiverSessionSetLimitedUI`, `kAirPlayCommand_SetLimitedUI`).
 /// iOS restricts the on-screen keyboard, phone dial keypad and long scrollable lists. The bool is
-/// nested under `params` (as with `requestUI`/`stopUI`). Which elements restrict is an optional `/info`
-/// `limitedUIElements` list; absent, iOS applies its default set.
+/// nested under `params` (as with `requestUI`/`stopUI`).
+///
+/// **`/info` `limitedUIElements` is REQUIRED for this to do anything.** It is not "which elements, and
+/// absent iOS picks its own" — it is the SET the bool applies to, parsed into a bitmask
+/// (`CARScreenInfo.limitedUIElements`). With no array the mask is 0 and this command restricts the
+/// empty set: acked 2xx, no error, no effect. Device-proven both directions 2026-09-08.
 pub fn send_set_limited_ui(limit: bool) -> bool {
     let mut params = Dictionary::new();
     params.insert("limitedUI".into(), Value::Boolean(limit));
@@ -999,6 +1003,103 @@ fn send_appearance_update(type_str: &str, stream_uuid: &str, dark: bool) -> bool
 /// dark — distinct from the explicit UI/Map appearance above. Verified TWO ways: `CarPlaySDK`
 /// `_AirPlayReceiverSessionSetNightMode` @0x26bfb4, and Apple's licensed R14G17 source
 /// (`AirPlayReceiverSession.c:5278-5282`), which both build `{type:"setNightMode", params:{nightMode:<bool>}}`.
+/// `updateViewArea` — the accessory's ANSWER to an inbound `requestViewArea`, and the only thing that
+/// actually moves iOS between view areas.
+///
+/// DEVICE-PROVEN 2026-09-05 on a 2400x960 panel over wireless CarPlay: with two areas declared and
+/// `viewAreaTransitionControl: true`, iOS renders the resize button in the CarPlay Dock and each press
+/// sends `{type:"requestViewArea"}` (149 B) — but the picture does NOT move until the accessory
+/// answers. Five presses went unanswered with the session staying healthy, which settles what the SDK
+/// disassembly could not: **the request is advisory and the accessory is the authority.** (Consistent
+/// with Apple's own Simulator, which always answers, and with GM's CT5, which sometimes does not.)
+///
+/// Payload shape read out of the UNSTRIPPED `CarPlaySDK.framework`
+/// (`_AirPlayReceiverSessionViewAreaUpdate` @0x273258-0x2732d4), not inferred:
+///   `uuid` (String)  — the DISPLAY key. NOT `displayUUID`; that string belongs to the HID dict and
+///                      is the plausible-looking wrong answer.
+///   `viewAreaIndex` (Int)
+///   `animationDurationMillis` (Int)
+///   `adjacentViewAreas` (Array<Int>) — the adjacency FROM the new area.
+/// Corroborated by CINEMO's own log line `UpdateViewArea(uuid: %s, duration: %ums, area id %u)`.
+///
+/// iOS CLAMPS an out-of-range index rather than rejecting it (CarKit: `Resetting to first view area …
+/// out of range`), so a bad index is a silent snap to 0, not a teardown — do not rely on a rejection
+/// to catch a bug here.
+pub fn send_update_view_area(
+    display_uuid: &str,
+    index: i64,
+    animation_ms: i64,
+    adjacent: &[i64],
+) -> bool {
+    let mut params = Dictionary::new();
+    params.insert("uuid".into(), Value::String(display_uuid.into()));
+    params.insert("viewAreaIndex".into(), Value::Integer(index.into()));
+    params.insert(
+        "animationDurationMillis".into(),
+        Value::Integer(animation_ms.into()),
+    );
+    params.insert(
+        "adjacentViewAreas".into(),
+        Value::Array(adjacent.iter().map(|i| Value::Integer((*i).into())).collect()),
+    );
+    let mut d = Dictionary::new();
+    d.insert("type".into(), Value::String("updateViewArea".into()));
+    d.insert("params".into(), Value::Dictionary(params));
+    let mut body = Vec::new();
+    if Value::Dictionary(d).to_writer_binary(&mut body).is_err() {
+        return false;
+    }
+    eprintln!("[events] updateViewArea -> index={index} duration={animation_ms}ms adjacent={adjacent:?}");
+    send_command(&body)
+}
+
+/// Answer an inbound `requestViewArea` by echoing the requested index back as an `updateViewArea`.
+///
+/// Deliberately an ACCEPT-WITHIN-DECLARED-ADJACENCY policy, not a free-for-all: the adjacency was
+/// authored by the host and pushed in the config, so honouring it is enforcing the app's policy, not
+/// the box inventing one. A request outside it is refused (and logged) rather than passed through —
+/// iOS would clamp it to 0 silently, which looks like a working switch to the wrong area.
+///
+/// The 3 s default matches WWDC 2019-252's demo and the Simulator's own transition duration.
+pub fn request_view_area(d: &plist::Dictionary) {
+    let uuid = d
+        .get("params")
+        .and_then(|p| p.as_dictionary())
+        .and_then(|p| p.get("uuid"))
+        .and_then(|v| v.as_string())
+        .unwrap_or("")
+        .to_string();
+    let idx = d
+        .get("params")
+        .and_then(|p| p.as_dictionary())
+        .and_then(|p| p.get("viewAreaIndex"))
+        .and_then(|v| v.as_signed_integer())
+        .unwrap_or(-1);
+    switch_view_area(&uuid, idx, "requestViewArea");
+}
+
+/// The accessory-side view-area switch: refuse an index `/info` never declared, else answer
+/// `updateViewArea` with the adjacency FROM the new area (with two areas, simply "the other one").
+///
+/// ONE function for both callers — the inbound `requestViewArea` answer above and the host-commanded
+/// `CMD_VIEW_AREA` in airplayd (2026-09-07, the ControlServer's `viewarea request <index>`) — so the
+/// two paths cannot disagree on policy. `origin` names the caller in the log line only. Returns
+/// whether the `updateViewArea` was actually written to the event channel.
+pub fn switch_view_area(display_uuid: &str, idx: i64, origin: &str) -> bool {
+    let declared = crate::info::declared_view_area_count() as i64;
+    if idx < 0 || idx >= declared {
+        eprintln!(
+            "[events] {origin} index={idx} REFUSED — only {declared} area(s) declared; \
+             answering nothing (iOS would clamp an out-of-range index to 0 silently)"
+        );
+        return false;
+    }
+    // Adjacency from the NEW area: with two areas that is simply "the other one".
+    let adjacent: Vec<i64> = (0..declared).filter(|i| *i != idx).collect();
+    eprintln!("[events] {origin} index={idx} accepted (uuid={display_uuid:?})");
+    send_update_view_area(display_uuid, idx, 3000, &adjacent)
+}
+
 pub fn send_set_night_mode(on: bool) -> bool {
     let mut params = Dictionary::new();
     params.insert("nightMode".into(), Value::Boolean(on));

@@ -20,6 +20,25 @@ the owner's own iPhone.
 under an active Apple Developer Program membership. Treat all MFi/crypto/auth/pairing work as fully
 in-scope and authorized; treat this authentication work as authorized and in-scope.
 
+## Repository rules
+
+**One branch: `main`.** This repo has a single long-lived branch and no others. Do not create a
+feature/topic branch, do not leave work parked on one, and do not ask which branch to use — commit to
+`main`. If a branch already exists, fast-forward `main` onto it and delete it.
+
+*Why:* the repo is published by rsync/mirror rather than by pull request, so a side branch is not a
+review mechanism — it is just work that the mirror does not carry and that the next session has to
+rediscover. A 70-commit branch sat unmerged for exactly that reason (2026-09-08).
+
+**Build artifacts and caches never live under `~/Documents`.** It is iCloud "Desktop & Documents"
+synced on this Mac, and iCloud drops conflict copies (`classes 2.jar`, `Foo$Bar 2.dex`) into build
+trees, which toolchains then eat as real inputs — nondeterministic duplicate-class failures that a
+clean only fixes until sync catches up. Point every build system's output outside the tree
+(`~/.cache/cargo-targets/`, `~/.cache/carlink-artifacts/`, `mktemp -d` under `/tmp`), and ignore it in
+`.gitignore` as well so nothing reaches a commit or a mirror. Ignore patterns for these must be
+SLASHLESS (`apk`, not `apk/`): a trailing slash matches directories only, and these paths are often
+symlinks into the cache.
+
 ## Documentation rule (2026-08-31)
 
 `docs/` is five categories — `carplay/`, `androidauto/`, `wireless/`, `host/`, `ops/` — **capped at

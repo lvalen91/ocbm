@@ -802,14 +802,63 @@ static multi-view-area) are documented with their implementation cost + teardown
   RECORD `-17483`); validate against a hand-authored 2-cluster Simulator config first.
 
 ### 2. Static multiple view areas per stream
+
+> **`viewArea` and `safeArea` are two different things and solve two different problems. Do not
+> conflate them** (owner directive, 2026-09-05 — they are nested keys with adjacent names and the
+> distinction is easy to lose). **Apple defines both in WWDC 2019-252**, in this order, before it
+> introduces resizing (`reference/wwdc_transcripts/wwdc2019-252.txt`):
+>
+> > "some car displays are fitted with pieces of trim that may obscure parts of the CarPlay user
+> > interface" (:11) — "First, your system defines a view area." (:13) — "A view area can also contain
+> > a safe area. The safe area is also a rectangular area and **must be a subset of the view area**.
+> > The safe area represents the portion of the display that will contain interactive content."
+> > (:15-17) — "Displays themselves may be non-rectangular or portions of the display may be occluded
+> > by other elements. With iOS 13, CarPlay can use safe areas to better support non-rectangular
+> > shaped displays. … The view area rectangle in this case would be made up of the **widest and
+> > tallest points** of the display. Then a safe area rectangle will be declared for the part of the
+> > display where a CarPlay UI is guaranteed to be visible and interactable." (:21-26)
+>
+> Apple's own worked example is the instrument cluster (:50-57): behind two virtual tachometers the
+> VIEW area is the whole rectangle between and behind them, and the SAFE area is the strip between
+> them where nothing is occluded. For content inside a round tachometer, the view area is the square
+> bounding the circle and the safe area is the rectangle inscribed within it. Resizing is then
+> introduced as a SEPARATE capability built on the first (:62, :70-71): "the size of the CarPlay UI
+> can change on the fly at the user's request by declaring multiple view areas for that display …
+> declare the first view area for the widest configuration and include a safe area as discussed
+> earlier" — i.e. multiple view areas, each carrying its own safe area.
+>
+> | | **`viewArea`** | **`safeArea`** |
+> |---|---|---|
+> | Answers | WHERE on the panel CarPlay draws at all | WHERE INSIDE that, interactive UI must stay |
+> | Shape | origin + size — a sub-rect of the display | inset box within the view area |
+> | Problem it solves | CarPlay occupying part of a larger panel — shrink/collapse or enlarge/extend into a defined region | a **non-rectangular or partly occluded physical display** — rounded corners, curved edges, a bezel intrusion. CarPlay shifts its elements inward to keep them reachable and visible |
+> | Runtime | switchable mid-session (§3) — this is the resize feature | static for a given view area |
+> | Cardinality | a LIST; each entry is a selectable layout | exactly one, NESTED INSIDE each view area |
+>
+> So every view area carries its own safe area: change the view area and the safe area changes with
+> it, because a smaller region of the same physical panel has different occluded edges. Video always
+> fills the whole view area — the safe area constrains UI placement only, never the picture.
+>
+> The safe area is ONE of two mechanisms for non-rectangular panels, and they are **mutually
+> exclusive per display**: `cornerMasks` (per-corner opaque bitmaps) is the other, and declaring both
+> hard-fails the iPhone's validator (see "Mutual exclusion — REAL and per-display" below). A safe
+> area insets a rectangle; corner masks paint over shaped corners. Pick per display.
+
 - `displays[].viewAreas[]` is a LIST; multiple entries = selectable layouts (e.g. wide full-screen +
   narrow split-screen), each with its own `safeArea`. Identified by **array index** (no `viewAreaID`
   on the wire). [CAP]/[SIM]
 - Sibling keys on the display: **`initialViewArea`** (starting index) and **`adjacentViewAreas`** (array
   of indices you may transition to; `[]` = no runtime switching). The genuine box sent one area,
   `initialViewArea:0`, `adjacentViewAreas:[]`. [CAP]
+- **The three per-area flags and `drawUIOutsideSafeArea` are emitted ONLY for a type-110 (main)
+  screen dict** — `_AirPlayScreenDictSetViewAreas` gates them on `cmp x8, 0x6e` (@0x273cc0/0x273da8),
+  so Apple's own SDK never sends them for a cluster display. Settled 2026-09-05 [SDK]; it retires the
+  question of cluster multi-area declaration, which is not a thing Apple expresses.
 - Per-view-area keys: `originXPixels/originYPixels/widthPixels/heightPixels`, **`viewAreaTransitionControl`**
-  (bool — participates in animated resize), **`viewAreaStatusBarEdge`** (int — which edge the CarPlay
+  (bool — participates in animated resize), **`viewAreaStatusBarEdge`** (int; **0 = Auto, 1 = Bottom,
+  2 = Driver**, settled 2026-09-05 from the Simulator's `CarPlayConfigs.StatusBarEdge` rawValue
+  getter @0x26eca8 and its identity `airPlayValue` @0x2eab4; GM's CT5 sends 2 on both areas,
+  `CPDisplay.java:149`) — which edge the CarPlay
   status bar pins to for this area; 2023 status-bar override), and the nested `safeArea`. [CAP]
 - Simulator ships multi-area templates (`Widescreen Instrument Cluster.yaml` main=2 areas, cluster=3;
   `Portrait.yaml` main=2). ncm currently emits a single-element array only. [SIM]
@@ -818,19 +867,203 @@ static multi-view-area) are documented with their implementation cost + teardown
   today). Additive; risk only if an index is out of range or a safeArea exceeds the panel.
 
 ### 3. Dynamic resizing / runtime view-area switching (DOCUMENT-ONLY here; for the Android port)
-- **Command (accessory → iPhone):** `AirPlayReceiverSessionViewAreaUpdate(session, displayUUID CFString,
-  uint32 viewAreaIndex, uint32 transitionDuration_ms, uint32 flags, const uint32* rect[x,y,w,h],
-  completion, ctx)` (ordinal `0x0001f2b8`, in the Simulator's `CarPlaySDK.framework`), which emits the
-  `/command` **`kAirPlayCommand_RequestViewArea`**. This is "please switch to view area N over this
-  duration." [SIM]/[SDK] (the 3 uint32 ordering is [I]).
-- **Callback (iPhone → accessory):** **`handleViewAreaDimensionsChanged:toRect:`** — during the ~3 s
-  animated resize iOS reports the CURRENT encoded-image rectangle so the vehicle re-lays-out its own
-  chrome in lock-step. The encoded size is NOT in frame framing and NOT a separate /command — it is this
-  session callback. [SIM]
-- **Trigger:** the "Always Available" resize button is **accessory-side** (Simulator `__selectedViewAreaPicker`,
-  `currentViewAreaIndices`, `SessionClusterViewAreaPopoverView`); it drives `RequestViewArea`. Capability
-  declared by the accessory via the same `viewAreas` / `supportsViewAreas` feature already negotiated in
-  SETUP. Only areas listed in `adjacentViewAreas` may be requested. [SIM]
+> **DIRECTION CORRECTED 2026-09-05.** This section previously said
+> `AirPlayReceiverSessionViewAreaUpdate` emits `kAirPlayCommand_RequestViewArea` and carries a rect —
+> i.e. it had the two messages pointing the same way and the payload wrong. They are OPPOSITE
+> directions and they are different messages. `05_METADATA_AND_CONTROLS.md` §1.1 had it right.
+
+- **Request (iPhone → accessory):** `/command` **`requestViewArea`** — "the user asked to switch
+  display X to view area N". iPhone side: `carEndpoint_RequestViewArea(FigEndpointExtendedRef,
+  CFStringRef displayUUID, CFIndex viewAreaIndex)` logging `requested viewArea %d for display %@`
+  (`reference/ios27_extract/mined/AirPlaySender.strings.txt:11259-11262`). The Simulator, acting as the
+  accessory, RECEIVES it: `kAirPlayCommand_RequestViewArea received` → `Transitioning from %u to %ld`
+  (CarPlaySimulator strings 3890-3892). [SDK]/[SIM]
+- **Update (accessory → iPhone):** `OSStatus AirPlayReceiverSessionViewAreaUpdate(session,
+  CFStringRef displayUUID, uint32, uint32, uint32, const uint32 *, completion, ctx)` emits the
+  `/command` **`updateViewArea`**, whose keys are `viewAreaIndex`, `animationDurationMillis` and
+  `adjacentViewAreas` — an INDEX and a duration, **not** a rect. **Argument order SETTLED
+  2026-09-05** from the unstripped `CarPlaySDK.framework` (@0x273258-0x2732d4), superseding the
+  earlier `[I]`: `AirPlayReceiverSessionViewAreaUpdate(session, uuid, animationDurationMillis,
+  viewAreaIndex, adjacentCount, adjacentArray, completion, ctx)` — arg3 → `animationDurationMillis`,
+  arg4 → `viewAreaIndex`, arg5 is the loop count over arg6, appended as `adjacentViewAreas`.
+  **The display key in `params` is `uuid`, NOT `displayUUID`** (cfstr @0x3eb470, the same key
+  `setNightMode` / `setLimitedUI` / `hidSendReport` use; the `displayUUID` string nearby belongs to
+  the HID dictionary). Inbound `requestViewArea` carries `uuid` + `viewAreaIndex` likewise.
+  Corroborated by CINEMO's own log line `UpdateViewArea(uuid: %s, duration: %ums, area id %u)`.
+  iPhone handler:
+  `carEndpoint_updateViewArea` logging `viewAreaUpdate for display %@: viewArea %d adjacentViewAreas
+  %@ animationDurationMillis %d` (AirPlaySender 10767-10772); CarKit `CARSession
+  -_sessionUpdatesQueue_handleViewAreaChangeWithPayload:`. The accessory may emit this on its own
+  (native trigger) or in answer to a `requestViewArea`. [SDK] (the three `uint32` ordering is [I] —
+  the symbol is stripped.)
+- **During the animation (iPhone → accessory): the rect rides IN-BAND on the screen stream, in the
+  128-byte `AirPlayScreenHeader` of every opcode-1 (VideoConfig) record.** Not a `/command`, not
+  RTSP, not RCS. SETTLED 2026-09-05 by disassembling `CarPlaySDK.framework` — the binary is **not**
+  stripped (`nm` lists `_ScreenStreamSetViewArea` @0x1ca30, `_AirPlayReceiverSessionViewAreaUpdate`
+  @0x2731fc), so this is read out of the code rather than inferred. An earlier revision of this
+  section said the transport was "silent in every string table"; it is not silent, it was unlooked.
+
+  `_AirPlayReceiverSessionScreen_ProcessFrames` @0x1300c-0x13070 branches on `hdr[4] == 1`, builds a
+  0x38-byte record from the header floats and hands it to `__…ConfigStreamQueue` @0x27b370, which
+  calls `ScreenStreamSetWidthHeight(...)` then `ScreenStreamSetViewArea(...)`. Header layout:
+
+  | offset | type | meaning |
+  |---|---|---|
+  | `+0x10` / `+0x14` | f32, f32 | coded width, height (R14G17 `AirPlayReceiverSessionScreen.c:549` params[1]) |
+  | `+0x20` / `+0x24` | f32, f32 | view-area **originX, originY** |
+  | `+0x28` / `+0x2c` | f32, f32 | view-area **width, height** |
+
+  **Signature corrected:** `void ScreenStreamSetViewArea(ScreenStreamRef, width, height, originX,
+  originY)` — @0x1ca90-0x1cae8 boxes arg2→`width`, arg3→`height`, arg4→`originX`, arg5→`originY`
+  before invoking the delegate `handleViewAreaDimensionsChanged:toRect:`. This section previously
+  documented it as `(x, y, w, h)`, which is both the wrong order and the wrong first pair. WWDC
+  2019-252 :76-77 agrees on intent: "CarPlay is telling the native system the size of the encoded
+  image in the H.264 frame".
+
+  **This matters for us more than it looks.** The box already forwards the WHOLE 128-byte header —
+  the SEAV frame is `[hdr 128B][body]` (`01_OCBM_PROTOCOL.md`), and the header is also the AEAD AAD
+  (`OCBM/OCBMAVDecrypt.swift:12`), so the host cannot avoid having it. `session.rs:2356-2357` reads
+  only `body_size` and `opcode` and forwards the rest verbatim. **The view-area rect is already on
+  the wire, already reaching the app, and currently discarded.** Consuming it needs no new OCBM
+  opcode, no relay route and no box-side change — four `f32` reads in the host's existing header
+  parse. Any plan that adds a box→host event to carry this rect is solving a problem that does not
+  exist.
+
+  Apple's receiver tolerates BOTH candidate iOS behaviours, so we should too:
+  `_ScreenStreamSetSampleEntryAtom` @0x282098 `memcmp`s a new avcC/hvc1 against the stored one —
+  identical ⇒ no-op (constant coded size, moving crop); different ⇒ `_ScreenStreamProcessData`
+  @0x282314 runs `VTDecompressionSessionCanAcceptFormatDescription`, else Invalidate + Create, all
+  in line with **no TEARDOWN**. That is the mechanism behind the session surviving a resize.
+  **STILL OPEN:** which one iOS actually does. CINEMO's `InsertViewArea crop:%u,%u,%u,%u
+  aspect:%u,%u` favours constant-size-with-crop, but that is CINEMO's CHOICE of downstream
+  representation, not an observation of iOS. The first capture answers it: log `hdr[0x10..0x30]`
+  plus the SPS dimensions of every opcode-1 across one animation. [SDK]
+- **Bench lever, 2026-09-05 — what is device-proven and what broke.** `CARPLAY_VIEWAREA2=WxH@X,Y[:initial]`
+  (or `/tmp/carplay_viewarea2`; `info.rs::ViewArea2`) declares a second MAIN area with
+  `viewAreaTransitionControl: true` on both, `initialViewArea` = 1 only with `:initial`, and
+  `adjacentViewAreas` DERIVED as "the other index". Unset ⇒ the byte-pinned single-area default.
+  **APP-DRIVEN since later the same day (2026-09-05):** the pushed YAML's
+  `mainVideoStream.viewAreas[1].viewArea` (+ our `initial: true` extension key) is the source
+  (`vehicle_config.rs::second_main_view_area` → `DeviceConfig::main_view_area_2`); the lever is
+  consulted ONLY when the config carries no second area, and a config rect that fails containment
+  declares one area rather than falling through to the lever. Host: `VehicleConfigModel.viewArea2*`
+  + `ViewArea2Rule` (App/VehicleConfig.swift). Every rule below holds for both sources.
+  - **What `ViewArea2Rule` enforces, in severity order** (CORRECTED 2026-09-05, same day — an
+    earlier revision of this bullet stated the `385 * 0.65 * scale` formula as the floor; that
+    formula is refuted below and is no longer in the code): (1) containment, (2) ALL FOUR values
+    EVEN, (3) positive dimensions — each a session TEARDOWN — then (4) the PRODUCT FLOOR
+    (800x480 landscape / 480x800 portrait, owner decision, see the bullets below), a lockout the
+    session survives. The verdict names the failing value and quotes the bound for the typed
+    orientation. iOS reports none of the four at declaration time, which is why the app validates
+    up front; the box re-checks containment only.
+  - GOOD (`box-20260905-033634.log`, 2400x960, wireless): `1600x960@800,0` — iOS negotiated
+    `viewAreas`, rendered the Dock button, sent `requestViewArea` per press, and the box's
+    `updateViewArea` answer moved the picture (255 in-band rect updates, coded size constant, animated
+    crop — strong evidence for constant-size-with-crop, but NOT settled: that is ONE wireless run on ONE 2400x960 panel with one area pair. A different panel, a coded size that is not the panel size, or the re-encode path Apple's own receiver also supports (`_ScreenStreamSetSampleEntryAtom` @0x282098 memcmps the new avcC and rebuilds the decoder when it differs) could still show the other behaviour — build for both).
+  - BAD, same night (`-034729.log` wireless on a 1416x842 panel, `-035236.log` wired on 2400x960):
+    `1416x842@492,59:initial`. iOS issued TEARDOWN in the same millisecond as RECORD's session-focus
+    handshake, before its own screen SETUP (wired: nothing after RECORD; wireless: only the
+    DataStream-130 SETUP). The `RTSP/1.0 400` on the event channel is one of `requestUI`/`changeModes`
+    being answered by an endpoint already tearing down — the same two commands succeeded in the good
+    run — so it is the SYMPTOM of a refused declaration, not a command fault. The wired run's config
+    CRC equalled the good run's, isolating the lever spec.
+  - PORTRAIT + cornerMasks A/B, 2026-09-05 (`box-20260905-051923.log`, 1080x1920 wireless):
+    `1080x1600@0,160` ACCEPTED with `cornerMasks` **off** — declared, projected, Dock button pressed,
+    picture resized. This matters for two reasons. (a) Every earlier bench row ran cornerMasks ON,
+    where `view_areas()` SUPPRESSES `safeArea` in every entry, so the second area's own nested
+    panel-coordinate `safeArea` had NEVER executed on hardware; it does, and iOS accepts it.
+    (b) cornerMasks is therefore ORTHOGONAL to view-area acceptance — the same rect passes in both
+    mask states. Note the arm requires `enablesViewAreas: true` explicitly: the `viewAreas` token is
+    `enablesViewAreas || enablesCornerMasks || safeAreaInsetPresent`, so clearing cornerMasks alone
+    drops the feature and tests nothing. Portrait `1080x1600@0,160` (floating — touching NO panel
+    edge) also refutes the "an area must touch a vertical edge" rule inferred from three landscape
+    points. [DEV]
+  - Two declaration faults, now enforced in code: (1) the area must fit the panel (the wireless
+    arm's 1416x842 area at 492,59 reached 1908x901 on a 1416x842 panel — refused with a `***` log);
+    (2) adjacency is derived from the initial area and can never contain it (the old constant `[1]`
+    with `:initial` declared the start area adjacent to itself — CarKit holds a single
+    `CARScreenInfo.adjacentViewArea` beside `currentViewArea`).
+  - **SOLVED 2026-09-05 — every `-16720` in this project was an ODD PIXEL VALUE.** The error
+    originates in **`carEndpoint_copyScreenInfo:7001`** and propagates up through
+    `setupScreenStreams:8536` -> `setupStreams:8957` -> `activateInternal:9987` ->
+    `Activate_block_invoke_2:10117`. Only the TOP frame (`:10117`) had ever been captured before, which
+    is why a binary search of `carEndpoint_Activate` correctly found no geometry check — the check is
+    not there. Device-proven, one-pixel isolation on a 1080x1920 panel:
+    `356x400@240,760` renders; `357x400@240,760` tears down with the chain above; `601x400@240,760`
+    (odd width, 245 px ABOVE the size floor, so size cannot be the cause) tears down identically.
+    Retrospective fit: `1600x960@800,0` passed (all even), while `1416x842@492,59` and
+    `1600x842@800,59` both failed with an odd ORIGIN Y. HEVC 4:2:0 chroma subsampling cannot express
+    an odd extent, so this is an encoder-level invalid parameter, not a geometry judgement.
+    **Two distinct failure classes, do not conflate them:** an odd value is a TEARDOWN (the session
+    dies); an undersized area is a `viewAreaTooSmall` LOCKOUT (black area, session survives). [iOS]/[DEV]
+  - **PRODUCT FLOOR (owner decision, 2026-09-05) — 800x480 landscape / 480x800 portrait.** This is
+    the app's HARD minimum for any view area, in BOTH CarPlay and Android Auto, and it OVERRIDES
+    everything measured below. iOS tolerates far smaller areas (measured: 350x304 on a 1080x1920
+    panel), but tolerance is not support: 800x480 is the documented CarPlay/AA minimum display
+    resolution and a resizable second area must never take the projected surface below it. The
+    Settings validator REFUSES anything smaller — this is a product rule, not a device limit, so do
+    not "correct" it against the measured numbers below. Orientation is chosen by the area's own
+    aspect: w >= h uses 800x480, w < h uses 480x800. [OWNER]
+  - **iOS's OWN tolerance, measured — RECORDED FOR PROTOCOL UNDERSTANDING ONLY, not the
+    shipping rule (see the product floor above).** iOS locks the display out
+    with `[DBLockOut] lockOutMode updating to viewAreaTooSmall` and the string
+    `LOCKOUT_VIEW_AREA_TOO_SMALL_MESSAGE` -> "CarPlay does not support this display resolution."
+    Measured on the 1080x1920 panel (even values only): width floor in **(348, 356]**, height floor in
+    **(300, 312]**. Passes: 356x400, 366x400, 384x400, 400x400, 480x400, 600x400, 600x312.
+    Locked out: 240x400, 312x312, 348x400, 480x300, 600x300, 1080x180.
+    The extracted `385 * 0.65 * scale` by `240 * 0.65 * scale` formula (500.5 x 312 at scale 2) is
+    **REFUTED as the gate**: it predicts 400x400 and 480x400 would fail, and both render. Its 385 term
+    is above the measured width floor. Treat these as MEASURED BOUNDS FOR THIS PANEL, not a formula to
+    extrapolate — no single scale reconciles a width floor near 350 with a height floor near 312. [DEV]
+  - **"FOR THIS PANEL" is now proven literally, not just cautioned (2026-09-07, wired).** On a
+    **2160x3840** panel — exactly twice the 1080x1920 above in each dimension — `480x800` LOCKS OUT,
+    while `720x1280` renders (mean luma 76.6). On the 1080x1920 panel a 480x800 area sits far above
+    both measured floors and would render. **So the same rect renders on one panel and locks out on a
+    larger one: the floor scales with the panel.** Consequence for the product: the owner floor of
+    800x480 landscape / 480x800 portrait is NOT panel-independent, and on a 4K portrait panel the
+    portrait value is below iOS's lockout floor. The 2160x3840 floor lies in (480x800, 720x1280] and
+    is unbisected. This does NOT revive the `385 * 0.65 * scale` formula — that stays refuted on its
+    own mispredictions — it only says a floor quoted without its panel is meaningless. [DEV]
+  - **History of this bullet, kept as a warning about method.** It has said, in order: (a) the
+    `1416x842` failure was a SIZE FLOOR — refuted, every bench rect clears the real floor; (b) an
+    area must TOUCH A VERTICAL EDGE — refuted by a floating portrait area; (c) the cause was a
+    feature/structure check (`focusTransfer` / `cornerMasks`+`safeArea` / `adjacentViewAreas`) and
+    was "STILL OPEN" — refuted, both levers are orthogonal and accept. The actual cause was an ODD
+    ORIGIN Y, recorded in the SOLVED bullet above. Three hypotheses were built by inference from a
+    handful of points that happened to share a property; each survived until a point was tested that
+    varied ONE thing. When a rect is rejected, capture the phone's own log (`tools/va_limit_probe.sh`,
+    wireless only) and read the reason — do not infer a rule from which rects happened to pass. Over
+    WIRED CarPlay there is no phone log on the Mac; the ControlServer's `shot` dumps the decoded frame
+    and a LOCKOUT is read from the pixels (docs/host/00_MACOS_HOST_APP.md, 2026-09-07). [DEV]
+- **Out-of-range indices are CLAMPED by iOS, not rejected** — CarKit logs `Resetting to first view
+  area … out of range` and `Request for view area index … out of range` (`CarKit.strings.txt:605-606`).
+  So a bad index is a silent snap to area 0, not a teardown; do not rely on a rejection to catch it.
+  Size floors exist (`minAcceptableViewAreaSizeLandscape/Portrait`, `minViewAreaPixelSize`) but their
+  VALUES are silent in the strings. [iOS]
+- **Validator strings — our error oracles.** `viewAreas or initialViewArea or adjacentViewAreas
+  structures not found` (**fail**), `… structures found but feature not declared in setup response`
+  (**warning only — the session comes up healthy and the feature is silently dead**, which is the
+  failure shape to grep for rather than trust a green session), `cornerMasks flag set but a safeArea
+  defined in viewAreas` (fail), plus the parallel `focusTransfer` pair
+  (`AirPlaySender.strings.txt:10905-10914`). The Simulator's own `Invalid View Area` /
+  `not a valid power of 2` / `Safe Area rectangle exceeds View Area` checks are the SIMULATOR'S
+  choice and are enforced locally — they never reach the phone, so passing them proves nothing about
+  iOS. [iOS]/[SIM]
+- **Trigger:** the "Always Available" resize button is **in the CarPlay UI, on the iPhone side** —
+  WWDC 2019-252 (`reference/wwdc_transcripts/wwdc2019-252.txt:64`): "CarPlay can provide an Always
+  Available button for the user to trigger a resize request from within the CarPlay UI." The accessory
+  ENABLES it per area with **`viewAreaTransitionControl: true`** (iOS: `CARScreenViewArea
+  .displaysTransitionControl`, `CARScreenInfo.currentViewAreaTransitionControlType`). The Simulator's
+  `__selectedViewAreaPicker` is the SIMULATOR'S OWN accessory-side control for driving an update
+  natively — it is not the CarPlay Dock button, and the earlier text conflated the two. A vehicle may
+  also switch natively with no button at all: GM's CT5 sets `transitionControl=false` and calls
+  `UpdateViewArea` itself. Only areas listed in `adjacentViewAreas` may be requested. [SIM]/[WWDC]/[CT5]
+- **Android Auto has NO equivalent** (verified 2026-09-05 against the DHU binary — see
+  `../androidauto/01_SESSION_AND_AV.md`, "AA HAS NO RUNTIME GEOMETRY CHANGE"). AA fixes its geometry
+  at negotiation: margins, content insets, and a `video_configs` priority list gearhead resolves once.
+  So this feature is CarPlay-exclusive, and the app-side design must not assume the two projections
+  are symmetric here — `AACapability` computes its geometry once and hands over an immutable value,
+  whereas CarPlay needs a rect that changes mid-stream.
 - Distinct nearby feature (do NOT couple): **Focus Transfer** (`viewAreaSupportsFocusTransfer` /
   `enablesFocusTransfer`) — knob focus moving between CarPlay and native UI; not required for resize.
 - **Local Simulator coverage:** all three (2nd cluster/112, static multi-area, runtime ViewAreaUpdate)
@@ -1046,8 +1279,12 @@ streams `topLeftCornerMask`; toggle OFF → Apple radius + black corner fill.
 
 The AirPlay/CarPlay negotiation logs are os_log `<private>` and **not** in the legacy syslog relay, so
 `idevicesyslog` shows nothing useful. What worked:
-1. Install Apple's **CarPlay/AirPlay logging profile** on the iPhone (developer.apple.com
-   profiles-and-logs) to unredact + raise the level.
+1. ~~Install Apple's **CarPlay/AirPlay logging profile** on the iPhone to unredact + raise the
+   level.~~ **CORRECTED 2026-09-05 — skip this step.** No Apple profile unredacts `com.apple.car*`,
+   and on iOS 27 a hand-rolled logging payload is rejected unless Apple-signed (`../ops/02_TESTING.md`
+   gate 4). The step that mattered here was 2, the `pymobiledevice3` unified-log capture, not the
+   profile; the rejection string below was recoverable without one. Keep the Bluetooth profile if you
+   need `com.apple.bluetooth`.
 2. Capture the **unified** log with **`pymobiledevice3 syslog live`** (uses `os_trace_relay`; captures
    os_log — `idevicesyslog` does not). Grep for `cornerMask` / `displayCornerMasksEnabled` /
    `carEndpoint_…`. This surfaced iOS's exact rejection string.

@@ -10,6 +10,15 @@
 // The box consumes a growing subset (today: main resolution, enablesHEVC, enablesDPad); the rest are
 // forward-compatible schema fields (serde ignores what the box doesn't yet read), so the full config
 // is authored here and the box adopts each field as it learns to.
+//
+// LAYOUT (Settings reorganisation, DESIGN.md §6 Phase 0, 2026-09-04): this file holds the MODEL and
+// its YAML emitter, `SettingsRootView` and the AppKit host. The views live in App/Settings/
+// (FieldInfo.swift, VehicleTab.swift, AdapterTab.swift, DiagnosticsTab.swift), moved byte-for-byte.
+// `VehicleConfigModel` must NOT move and its emitter members must keep their exact declaration
+// lines: tools/regen_app_yaml_fixture.py extracts `var yaml: String {`, `altDisplayPanelsYAML`,
+// `clusterInitialURL`, `accessoryFields()`, `metadataYAML`, `audioYAML`, `viewArea2YAML` and `limitedUIFields()`
+// from THIS path by string anchor and compiles them against a stub model. Relocating or reflowing
+// any of those silently disarms the app→box drift guard (check_app_yaml_fixture.py).
 
 import AppKit
 import CoreImage
@@ -33,10 +42,14 @@ struct AudioFormatRow: Identifiable, Codable, Equatable {
 final class VehicleConfigModel: ObservableObject {
     static let shared = VehicleConfigModel()
 
-    // Resolution / frame-rate bounds (user directive 2026-07-12). 24 fps was dropped from the box's
+    // Frame-rate vocabulary (user directive 2026-07-12). 24 fps was dropped from the box's
     // vocabulary — offering it silently yielded the default, so it is no longer offered.
-    static let minWidth = 800, maxWidth = 3840
-    static let minHeight = 480, maxHeight = 2160
+    // The PANEL envelope is `PanelRule` (VehicleConfig.swift), not a set of constants here: each
+    // axis admits 480–3840 and the product floor is applied by the panel's own orientation, the
+    // way `ViewArea2Rule` applies it to a view area. The per-axis `minWidth/maxWidth/minHeight/
+    // maxHeight` (800–3840 x 480–2160) that lived here until 2026-09-07 were a landscape-shaped
+    // envelope: a portrait 2160x3840 panel was silently squared to 2160x2160 and the wired portrait
+    // view-area sweep measured nothing for five cases. Every consumer now reads `PanelRule`.
     static let frameRates = [30, 60]
 
     /// The persisted main-video resolution — reads the SAME `vc.*` keys `save()` writes, with the
@@ -85,6 +98,14 @@ final class VehicleConfigModel: ObservableObject {
     // head-unit engine over CH_IP. Default ON — the box's own default is opt-out (`android_auto: false`).
     // CarPlay is unaffected either way: an iPhone always wins the CarPlay path first.
     @Published var androidAutoEnabled: Bool { didSet { markDirty() } }
+    // Wi-Fi access point (our `wifi_ap:` YAML extension). The box's session_supervisor.sh
+    // `wifi_ap_enabled()` greps the pushed document for an EXPLICIT `wifi_ap: false`; anything else
+    // (absent, true, misspelt) means enabled. So the default is emitted as NOTHING — the document
+    // stays byte-identical to every pre-2026-09-04 push — and only a deliberate `false` reaches the
+    // wire (`yaml`, beside the other emit-nothing-for-default blocks). false = the BT-only bridge
+    // role (radio_ap_up.sh: Bluetooth + MFi only, no SoftAP is raised, so no wireless projection
+    // gets a Wi-Fi leg). Until 2026-09-04 this key had no UI at all (DESIGN.md §7 defect 8).
+    @Published var wifiAccessPoint: Bool { didSet { markDirty() } }
 
     // Main video
     @Published var mainWidth: Int { didSet { markDirty() } }
@@ -98,6 +119,22 @@ final class VehicleConfigModel: ObservableObject {
     @Published var mainSafeRight: Int { didSet { markDirty() } }
     @Published var mainSafeBottom: Int { didSet { markDirty() } }
     @Published var mainDrawOutsideSafe: Bool { didSet { markDirty() } }
+    // Second MAIN view area (the CarPlay Dock "resize" button), in PANEL pixels — app-driven since
+    // 2026-09-05; the box-side `CARPLAY_VIEWAREA2` lever is now the app-less fallback only. The
+    // model VALIDATES (`viewArea2Verdict`, via `ViewArea2Rule`) and CLAMPS (`clampInPlace`); the
+    // view renders the verdict. Emitted as the main stream's `viewAreas[1]` ONLY when enabled AND
+    // the verdict is nil, so an off or invalid rect leaves the pushed YAML byte-identical.
+    @Published var viewArea2Enabled: Bool { didSet { markDirty() } }
+    @Published var viewArea2X: Int { didSet { markDirty() } }
+    @Published var viewArea2Y: Int { didSet { markDirty() } }
+    @Published var viewArea2W: Int { didSet { markDirty() } }
+    @Published var viewArea2H: Int { didSet { markDirty() } }
+    /// What the last `clampInPlace()` CHANGED, one line each; empty when it stored every value as
+    /// typed. Not persisted, never dirties the model. The Vehicle tab renders it under the panel
+    /// fields and the control socket returns it from `set` / `save` / `get profile` — the honesty
+    /// signal for a clamp (2026-09-07), the same shape as `AACapability.negotiationNotes`. A clamp
+    /// that left no trace is how a landscape-only panel envelope survived a whole wired sweep.
+    @Published private(set) var clampNotes: [String] = []
 
     // Alt / Nav video (instrument cluster / secondary panel)
     @Published var altVideoEnabled: Bool { didSet { markDirty() } }
@@ -225,22 +262,20 @@ final class VehicleConfigModel: ObservableObject {
     /// The audio-format vocabulary the box + app support — mirrors `receiver::info::audio_format_bit`.
     /// These are the exact `in:`/`out:` tokens the box parses. `verifiedCodecs` is the subset device-
     /// proven end-to-end today (the rest advertise + negotiate but are not yet decode-confirmed on-box).
-    static let audioCodecs = [
-        "none", "pcm_16k_mono", "pcm_48k_stereo",
-        "aac_lc_44k_stereo", "aac_lc_48k_stereo",
-        "aac_eld_48k_stereo", "aac_eld_44k_stereo",
-        "aac_eld_16k_mono", "aac_eld_24k_mono", "aac_eld_32k_mono",
-        "aac_eld_44k_mono", "aac_eld_48k_mono",
-        "opus_16k_mono", "opus_24k_mono", "opus_48k_mono",
-    ]
+    /// ALIASES (2026-09-04) of `CarPlayExtensions.AudioFormat.codecs` / `.types` /
+    /// `.streamTypes`. The lists moved into that Foundation-only file so the harness — which cannot
+    /// compile THIS file (AppKit/SwiftUI, `@MainActor`) — can test `AudioFormat.validated()`, the
+    /// guard that stops a hand-edited profile document putting free text into the pushed YAML.
+    /// Kept under these names because the UI Pickers and `save()` already read them.
+    static let audioCodecs = CarPlayExtensions.AudioFormat.codecs
     static let verifiedCodecs: Set<String> = [
         "none", "pcm_16k_mono", "pcm_48k_stereo", "aac_lc_48k_stereo", "aac_eld_16k_mono",
     ]
     /// `audioType` values iOS routes against (empty = the wired PCM catch-all — no audioType key).
-    static let audioTypes = ["", "media", "default", "telephony", "speechRecognition", "alert", "compatibility"]
+    static let audioTypes = CarPlayExtensions.AudioFormat.types
     /// CarPlay audio stream types the box arms: 100 MainAudio (bidir, carries mic), 101 AltAudio,
     /// 102 MainHighAudio (realtime media, AAC-LC).
-    static let audioStreamTypes = [100, 101, 102]
+    static let audioStreamTypes = CarPlayExtensions.AudioFormat.streamTypes
     /// The seed for a fresh "custom" list: the three device-proven entries (media, Siri/mic, PCM
     /// compatibility) — a working baseline the user then edits toward the HU config under test.
     static let defaultCustomFormats: [AudioFormatRow] = [
@@ -280,6 +315,53 @@ final class VehicleConfigModel: ObservableObject {
     // a future box-side consumer lands; only the wire emission was dropped.
     @Published var nightMode: Bool { didSet { markDirty() } }
     @Published var rightHandDrive: Bool { didSet { markDirty() } }
+
+    // Neutral vehicle-profile fields (Settings reorganisation, DESIGN.md §5, 2026-09-04). These are
+    // the protocol-agnostic SOURCE both renderers derive from: `VehicleProfile` (W1's `profile`
+    // extension) and `AACapability` (Android Auto). NONE of them is read by the CarPlay emitter
+    // below — the box has no consumer for any of them — so the pushed YAML is unchanged for every
+    // existing configuration. `nightMode` / `rightHandDrive` above stay stored and `save()` keeps
+    // writing them so a DOWNGRADE to a build that only knows those two keys still reads sane
+    // values; on this build `driverPosition` / `theme` are authoritative and the legacy pair is
+    // derived from them (W1). Both were seeded ONCE from the legacy booleans by the
+    // `profileKeysV1` migration in `init`.
+    //
+    // `driverPosition` = `DriverPosition` raw value ("left" / "right" / "center"; center declares
+    // AA wire 3 and is unverified on device). `theme` = `AppearanceTheme` raw value ("auto" /
+    // "light" / "dark"; auto = follow this Mac's effective appearance — DHU `uitheme` is NOT a wire
+    // field, gearhead only ever sees the night_mode sensor, DESIGN.md §10).
+    @Published var driverPosition: String { didSet { markDirty() } }
+    @Published var theme: String { didSet { markDirty() } }
+    // Panel physical description. `dpi` is what Android Auto declares as `density` (replaces the
+    // `AA_DENSITY` default; CarPlay has no wire field for it). `diagonalInches` is informational,
+    // 0 = unknown (nil in the profile).
+    @Published var dpi: Int { didSet { markDirty() } }
+    @Published var diagonalInches: Double { didSet { markDirty() } }
+    // Status-bar policy — recorded only; neither renderer sends it until the AA field numbers are
+    // confirmed (FeatureMatrix `.statusBar`).
+    @Published var hideClock: Bool { didSet { markDirty() } }
+    @Published var hideSignal: Bool { didSet { markDirty() } }
+    @Published var hideBattery: Bool { didSet { markDirty() } }
+    // The three `DrivingRestrictionSet` members with NO CarPlay `limitedUIConfig` element (video /
+    // voiceInput / configuration are Android Auto `driving_status` bits only). The Apple five keep
+    // living on `limitedUI*` below so the emitter's inputs are untouched.
+    @Published var restrictVideo: Bool { didSet { markDirty() } }
+    @Published var restrictVoiceInput: Bool { didSet { markDirty() } }
+    @Published var restrictConfiguration: Bool { didSet { markDirty() } }
+    // Audio profile: the voice/mic sink rate AA negotiates (replaces the `AA_VOICE_RATE` default;
+    // the env var still overrides on the bench) and whether calls ride the projection link.
+    @Published var voiceRateHz: Int { didSet { markDirty() } }
+    @Published var telephonyOverProjection: Bool { didSet { markDirty() } }
+    // Data feeds, individually (AA service descriptors, replacing `AA_METADATA`). CarPlay's own
+    // `metadataTier` picker below governs its declaration and is untouched.
+    @Published var metadataNowPlaying: Bool { didSet { markDirty() } }
+    @Published var metadataNavigation: Bool { didSet { markDirty() } }
+    @Published var metadataTelephony: Bool { didSet { markDirty() } }
+    // Android Auto–exclusive rendering knobs (`AndroidAutoExtensions`): fit a non-tier panel with
+    // margins instead of snapping to the nearest tier; prefer HEVC at ≤1080p.
+    @Published var aaFitPanelWithMargins: Bool { didSet { markDirty() } }
+    @Published var aaPreferHEVC: Bool { didSet { markDirty() } }
+
     @Published var enablesUIAppearance: Bool { didSet { markDirty() } }
     @Published var enablesMapAppearance: Bool { didSet { markDirty() } }
     @Published var enablesCornerMasks: Bool { didSet { markDirty() } }
@@ -352,6 +434,23 @@ final class VehicleConfigModel: ObservableObject {
         dirty = true
     }
 
+    /// ONE-SHOT MIGRATION (Settings reorganisation, DESIGN.md §5, 2026-09-04): `driverPosition` and
+    /// `theme` replace the `rightHandDrive` / `nightMode` booleans as the authoritative neutral
+    /// values. Seed them from the legacy pair EXACTLY ONCE, so an owner who had right-hand drive or
+    /// night mode set keeps it across the upgrade; afterwards the new keys are independent, and the
+    /// legacy booleans — which `save()` keeps writing as DERIVED values for a downgrade — must never
+    /// overwrite them again. Same idiom as `mbaDefaultFlippedB4` in `init`: a marker key checked for
+    /// ABSENCE, so this runs once per defaults domain and is a no-op on every later launch. Takes
+    /// the domain as a parameter (rather than reading `UserDefaults.standard` inline) so the test
+    /// harness can run it against a throwaway suite (DESIGN.md §9 test 7 pins both halves).
+    /// DELEGATES to `VehicleProfileKeyMigration.run` in the Foundation-only `App/VehicleConfig.swift`.
+    /// The body moved there so `tests/run_tests.sh` — which cannot compile this AppKit/SwiftUI,
+    /// `@MainActor` file — exercises the SHIPPED migration instead of a hand-copied twin of it
+    /// (DESIGN.md §9 test 7). Keep this thin: the logic has exactly one home.
+    static func migrateProfileKeysV1(_ ud: UserDefaults) {
+        VehicleProfileKeyMigration.run(prefix: prefix, ud: ud)
+    }
+
     private init() {
         loading = true
         let ud = UserDefaults.standard
@@ -366,6 +465,7 @@ final class VehicleConfigModel: ObservableObject {
             ud.removeObject(forKey: Self.prefix + "enablesMainBufferedAudio")
             ud.set(true, forKey: Self.prefix + "mbaDefaultFlippedB4")
         }
+        Self.migrateProfileKeysV1(ud)
         func b(_ k: String, _ def: Bool) -> Bool { ud.object(forKey: Self.prefix + k) as? Bool ?? def }
         func i(_ k: String, _ def: Int) -> Int { ud.object(forKey: Self.prefix + k) as? Int ?? def }
         name = ud.string(forKey: Self.prefix + "name") ?? "CarLink Widescreen"
@@ -374,10 +474,14 @@ final class VehicleConfigModel: ObservableObject {
         pairingNumericComparison = b("pairingNumericComparison", false)
         pairingInteractiveAnswer = b("pairingInteractiveAnswer", false)
         androidAutoEnabled = b("androidAutoEnabled", true)
+        wifiAccessPoint = b("wifiAccessPoint", true)
         mainWidth = i("mainWidth", 1920); mainHeight = i("mainHeight", 1080); maxFPS = i("maxFPS", 60)
         mainSafeLeft = i("mainSafeLeft", 0); mainSafeTop = i("mainSafeTop", 0)
         mainSafeRight = i("mainSafeRight", 0); mainSafeBottom = i("mainSafeBottom", 0)
         mainDrawOutsideSafe = b("mainDrawOutsideSafe", false)
+        viewArea2Enabled = b("viewArea2Enabled", false)
+        viewArea2X = i("viewArea2X", 0); viewArea2Y = i("viewArea2Y", 0)
+        viewArea2W = i("viewArea2W", 0); viewArea2H = i("viewArea2H", 0)
         altVideoEnabled = b("altVideoEnabled", false)
         altWidth = i("altWidth", 800); altHeight = i("altHeight", 480); altFPS = i("altFPS", 30)
         altSafeLeft = i("altSafeLeft", 0); altSafeTop = i("altSafeTop", 0)
@@ -439,6 +543,23 @@ final class VehicleConfigModel: ObservableObject {
         primaryInput = Self.primaryInputs.contains(savedPrimary) ? savedPrimary : "Touchpad"
         nightMode = b("nightMode", false)
         rightHandDrive = b("rightHandDrive", false)
+        // Neutral profile fields (DESIGN.md §5). The enum-valued strings coerce a stale/unknown
+        // persisted value to the default, same as `audioMode` / `metadataTier` above — the raw
+        // value must always round-trip through the contract enum, or W1's `profile` getter would
+        // have to invent a fallback at every read.
+        driverPosition = DriverPosition(rawValue: ud.string(forKey: Self.prefix + "driverPosition") ?? "")?.rawValue ?? "left"
+        theme = AppearanceTheme(rawValue: ud.string(forKey: Self.prefix + "theme") ?? "")?.rawValue ?? "light"
+        dpi = i("dpi", 160)
+        diagonalInches = ud.object(forKey: Self.prefix + "diagonalInches") as? Double ?? 0
+        hideClock = b("hideClock", false); hideSignal = b("hideSignal", false); hideBattery = b("hideBattery", false)
+        restrictVideo = b("restrictVideo", false); restrictVoiceInput = b("restrictVoiceInput", false)
+        restrictConfiguration = b("restrictConfiguration", false)
+        voiceRateHz = i("voiceRateHz", 48000)
+        telephonyOverProjection = b("telephonyOverProjection", false)
+        metadataNowPlaying = b("metadataNowPlaying", true); metadataNavigation = b("metadataNavigation", true)
+        metadataTelephony = b("metadataTelephony", true)
+        aaFitPanelWithMargins = b("aaFitPanelWithMargins", true)
+        aaPreferHEVC = b("aaPreferHEVC", false)
         // Apple sets both true in all 10 vehicle-config templates.
         enablesUIAppearance = b("enablesUIAppearance", true)
         enablesMapAppearance = b("enablesMapAppearance", true)
@@ -492,6 +613,20 @@ final class VehicleConfigModel: ObservableObject {
     @discardableResult
     func save() -> Bool {
         guard !loading else { return true }
+        // COMMIT ANY FIELD STILL BEING EDITED, before anything reads the model.
+        //
+        // `TextField(value:format:)` on macOS writes its binding only on Return or when focus moves
+        // to another responder — and a SwiftUI Button does NOT take focus. So clicking Save (or ⌘S)
+        // with the caret still in a numeric field silently persisted the OLD value while the field
+        // kept displaying what was typed and the bar said "Saved". Measured 2026-09-05: an owner set
+        // dpi to 200, `get profile` still read 160 with `settingsDirty:false`, and the model had
+        // never held 200. It affects every numeric field here — width, height, dpi, diagonal, and the
+        // safe-area insets — i.e. whichever one was edited LAST before saving.
+        //
+        // Ending editing on the key window makes the field write its binding synchronously; `didSet`
+        // then marks dirty and the save proceeds with the real value. Harmless when nothing is being
+        // edited, and harmless on the control-socket `save` path (no key window).
+        NSApp.keyWindow?.makeFirstResponder(nil)
         saving = true
         defer { saving = false }
         clampInPlace()
@@ -523,10 +658,14 @@ final class VehicleConfigModel: ObservableObject {
         d.set(pairingNumericComparison, forKey: s + "pairingNumericComparison")
         d.set(pairingInteractiveAnswer, forKey: s + "pairingInteractiveAnswer")
         d.set(androidAutoEnabled, forKey: s + "androidAutoEnabled")
+        d.set(wifiAccessPoint, forKey: s + "wifiAccessPoint")
         d.set(mainWidth, forKey: s + "mainWidth"); d.set(mainHeight, forKey: s + "mainHeight"); d.set(maxFPS, forKey: s + "maxFPS")
         d.set(mainSafeLeft, forKey: s + "mainSafeLeft"); d.set(mainSafeTop, forKey: s + "mainSafeTop")
         d.set(mainSafeRight, forKey: s + "mainSafeRight"); d.set(mainSafeBottom, forKey: s + "mainSafeBottom")
         d.set(mainDrawOutsideSafe, forKey: s + "mainDrawOutsideSafe")
+        d.set(viewArea2Enabled, forKey: s + "viewArea2Enabled")
+        d.set(viewArea2X, forKey: s + "viewArea2X"); d.set(viewArea2Y, forKey: s + "viewArea2Y")
+        d.set(viewArea2W, forKey: s + "viewArea2W"); d.set(viewArea2H, forKey: s + "viewArea2H")
         d.set(altVideoEnabled, forKey: s + "altVideoEnabled")
         d.set(altWidth, forKey: s + "altWidth"); d.set(altHeight, forKey: s + "altHeight"); d.set(altFPS, forKey: s + "altFPS")
         d.set(altSafeLeft, forKey: s + "altSafeLeft"); d.set(altSafeTop, forKey: s + "altSafeTop")
@@ -537,6 +676,20 @@ final class VehicleConfigModel: ObservableObject {
         // false on every relaunch (audit M-f). Persist them here.
         d.set(nightMode, forKey: s + "nightMode")
         d.set(rightHandDrive, forKey: s + "rightHandDrive")
+        // Neutral profile fields (DESIGN.md §5) — persisted under their own `vc.` keys.
+        d.set(driverPosition, forKey: s + "driverPosition")
+        d.set(theme, forKey: s + "theme")
+        d.set(dpi, forKey: s + "dpi")
+        d.set(diagonalInches, forKey: s + "diagonalInches")
+        d.set(hideClock, forKey: s + "hideClock"); d.set(hideSignal, forKey: s + "hideSignal"); d.set(hideBattery, forKey: s + "hideBattery")
+        d.set(restrictVideo, forKey: s + "restrictVideo"); d.set(restrictVoiceInput, forKey: s + "restrictVoiceInput")
+        d.set(restrictConfiguration, forKey: s + "restrictConfiguration")
+        d.set(voiceRateHz, forKey: s + "voiceRateHz")
+        d.set(telephonyOverProjection, forKey: s + "telephonyOverProjection")
+        d.set(metadataNowPlaying, forKey: s + "metadataNowPlaying"); d.set(metadataNavigation, forKey: s + "metadataNavigation")
+        d.set(metadataTelephony, forKey: s + "metadataTelephony")
+        d.set(aaFitPanelWithMargins, forKey: s + "aaFitPanelWithMargins")
+        d.set(aaPreferHEVC, forKey: s + "aaPreferHEVC")
         d.set(audioMode, forKey: s + "audioMode")
         d.set(metadataTier, forKey: s + "metadataTier")
         d.set(metadataSkip, forKey: s + "metadataSkip")
@@ -569,7 +722,7 @@ final class VehicleConfigModel: ObservableObject {
         // the pushed YAML was inert for the life of a session. `repushConfig` re-SUBSCRIBEs, and
         // declines while a CarPlay transport owns the box (see its doc: the box's presence dip would
         // restart a live CarPlay session).
-        CCPABridge.shared.client?.repushConfig(data())
+        CCPABridge.shared.client?.repushConfig(data(), structured: config)   // `config` == committedConfig here
         return true
     }
 
@@ -663,25 +816,104 @@ final class VehicleConfigModel: ObservableObject {
         if FileManager.default.fileExists(atPath: p) { loadOemIcon(from: URL(fileURLWithPath: p)) }
     }
 
-    /// Clamp numeric fields to the allowed ranges (called on every save; the UI also clamps on commit).
-    /// Assign only when the value changes — every write to an @Published prop still notifies SwiftUI,
-    /// and the reentrancy guard already stops the didSet→save recursion.
-    private func clampInPlace() {
-        func clamp(_ v: inout Int, _ lo: Int, _ hi: Int) { let c = min(max(v, lo), hi); if c != v { v = c } }
-        clamp(&mainWidth, Self.minWidth, Self.maxWidth)
-        clamp(&mainHeight, Self.minHeight, Self.maxHeight)
-        clamp(&altWidth, Self.minWidth, Self.maxWidth)
-        clamp(&altHeight, Self.minHeight, Self.maxHeight)
+    /// Clamp numeric fields to the allowed ranges (called on load, on every save, and after
+    /// `apply`). Assign only when the value changes — every write to an @Published prop still
+    /// notifies SwiftUI, and the reentrancy guard already stops the didSet→save recursion.
+    ///
+    /// NEVER SILENT (2026-09-07): every value this moves is named in the returned notes and — unless
+    /// `dryRun` — in `clampNotes`. `dryRun` computes what a commit WOULD change without writing, so
+    /// the control-socket door can tell a caller what Save will do to the value it just stored.
+    /// Panels go through `PanelRule` (orientation-agnostic envelope, floor by the panel's own
+    /// aspect); the view-area fields are clamped to the CLAMPED panel, so the order here matters.
+    ///
+    /// INTERNAL, not `private`: `VehicleConfigModel+Profile.swift`'s `apply(_:)` must re-clamp after
+    /// writing fields from an imported document or a preset (DESIGN.md §8), and Swift `private` is
+    /// file-scoped. Duplicating the clamp in that extension would let the two copies drift — the
+    /// imported-document path would then accept geometry the UI path rejects. `clampInsets` below
+    /// stays private; only this outer entry point is shared.
+    @discardableResult
+    func clampInPlace(dryRun: Bool = false) -> [String] {
+        var notes: [String] = []
+        // Work on locals and commit at the end, so a dry run touches nothing.
+        var mw = mainWidth, mh = mainHeight, aw = altWidth, ah = altHeight
+        var fps = maxFPS, afps = altFPS
+        var ml = mainSafeLeft, mt = mainSafeTop, mr = mainSafeRight, mb = mainSafeBottom
+        var al = altSafeLeft, at = altSafeTop, ar = altSafeRight, ab = altSafeBottom
+        var vx = viewArea2X, vy = viewArea2Y, vw = viewArea2W, vh = viewArea2H
+
+        func panel(_ label: String, _ w: inout Int, _ h: inout Int) {
+            let c = PanelRule.clamped(width: w, height: h)
+            if let n = PanelRule.clampNote(label, requested: (w, h), applied: c) { notes.append(n) }
+            w = c.width; h = c.height
+        }
+        panel("Panel", &mw, &mh)
+        panel("Alt display", &aw, &ah)
         // 24 fps left the box's vocabulary — coerce a stale persisted 24 to the nearest offered rate.
-        if !Self.frameRates.contains(maxFPS) { maxFPS = maxFPS == 24 ? 30 : 60 }
-        if !Self.frameRates.contains(altFPS) { altFPS = 30 }
+        if !Self.frameRates.contains(fps) {
+            let to = fps == 24 ? 30 : 60
+            notes.append("Frame rate \(fps) is not offered — stored as \(to) fps (offered: 30, 60).")
+            fps = to
+        }
+        if !Self.frameRates.contains(afps) {
+            notes.append("Alt display frame rate \(afps) is not offered — stored as 30 fps (offered: 30, 60).")
+            afps = 30
+        }
         // Safe-area insets: never negative, and opposite edges must leave a positive safe box (≥16px).
         // The box also re-validates and falls back to full-bleed, so this is a UX guard, not the gate.
-        clampInsets(left: &mainSafeLeft, top: &mainSafeTop, right: &mainSafeRight, bottom: &mainSafeBottom,
-                    width: mainWidth, height: mainHeight)
-        clampInsets(left: &altSafeLeft, top: &altSafeTop, right: &altSafeRight, bottom: &altSafeBottom,
-                    width: altWidth, height: altHeight)
+        func insets(_ label: String, _ l: inout Int, _ t: inout Int, _ r: inout Int, _ b: inout Int,
+                    width: Int, height: Int) {
+            let before = (l, t, r, b)
+            clampInsets(left: &l, top: &t, right: &r, bottom: &b, width: width, height: height)
+            if before != (l, t, r, b) {
+                notes.append("\(label) insets \(before.0)/\(before.1)/\(before.2)/\(before.3) → \(l)/\(t)/\(r)/\(b) "
+                             + "(left/top/right/bottom): never negative, and a ≥16 px safe box must remain.")
+            }
+        }
+        insets("Panel", &ml, &mt, &mr, &mb, width: mw, height: mh)
+        insets("Alt display", &al, &at, &ar, &ab, width: aw, height: ah)
+        // Second view area: per-field bounds only (never negative, never larger than the panel's own
+        // axis). Containment (`x + w <= W`) is deliberately NOT clamped here — trimming either the
+        // origin or the size would silently change what the owner typed; it is reported by
+        // `viewArea2Verdict` and gates emission instead (`viewArea2YAML`).
+        func field(_ what: String, _ v: inout Int, _ hi: Int) {
+            let c = min(max(v, 0), hi)
+            if c != v { notes.append("View area \(what) \(v) → \(c) (0–\(hi) on this panel)."); v = c }
+        }
+        field("X", &vx, mw); field("Y", &vy, mh); field("width", &vw, mw); field("height", &vh, mh)
+
+        if dryRun { return notes }
+        func commit(_ v: Int, _ prop: ReferenceWritableKeyPath<VehicleConfigModel, Int>) {
+            if self[keyPath: prop] != v { self[keyPath: prop] = v }
+        }
+        commit(mw, \.mainWidth); commit(mh, \.mainHeight); commit(aw, \.altWidth); commit(ah, \.altHeight)
+        commit(fps, \.maxFPS); commit(afps, \.altFPS)
+        commit(ml, \.mainSafeLeft); commit(mt, \.mainSafeTop); commit(mr, \.mainSafeRight); commit(mb, \.mainSafeBottom)
+        commit(al, \.altSafeLeft); commit(at, \.altSafeTop); commit(ar, \.altSafeRight); commit(ab, \.altSafeBottom)
+        commit(vx, \.viewArea2X); commit(vy, \.viewArea2Y); commit(vw, \.viewArea2W); commit(vh, \.viewArea2H)
+        if clampNotes != notes { clampNotes = notes }
+        return notes
     }
+
+    /// The second view area's verdict for the CURRENT panel: `nil` = legal, else one message in
+    /// `ViewArea2Rule.verdict`'s SEVERITY order (containment → odd value → non-positive dimension,
+    /// all teardowns → the product floor, a lockout), naming the failing value and quoting the bound
+    /// that applies to what was typed. This is the contract with the Settings view: the view renders
+    /// this string and does not re-derive any rule. Evaluated whether or not the area is enabled, so
+    /// the form can show the verdict while the owner is still typing.
+    var viewArea2Verdict: String? {
+        ViewArea2Rule.verdict(x: viewArea2X, y: viewArea2Y, w: viewArea2W, h: viewArea2H,
+                              panelW: mainWidth, panelH: mainHeight)
+    }
+
+    /// The product floor that applies to the typed area's own orientation (800×480 landscape,
+    /// 480×800 portrait — `ViewArea2Rule.minimumSize`), for the view to display next to the fields.
+    var viewArea2MinimumSize: (width: Int, height: Int) {
+        ViewArea2Rule.minimumSize(width: viewArea2W, height: viewArea2H)
+    }
+
+    /// Enabled AND legal — the ONLY condition under which `viewAreas[1]` is emitted and `viewAreas`
+    /// is auto-armed in the SETUP author (`config.viewArea2Present`).
+    var viewArea2Active: Bool { viewArea2Enabled && viewArea2Verdict == nil }
 
     private func clampInsets(left: inout Int, top: inout Int, right: inout Int, bottom: inout Int,
                              width: Int, height: Int) {
@@ -747,6 +979,28 @@ final class VehicleConfigModel: ObservableObject {
          ("enablesDCX", enablesDCX), ("appDrivenSetup", appDrivenSetup)]
     }
 
+    /// The main stream's SECOND `viewAreas[]` entry (the Dock resize target), or "" — appended to
+    /// `va()`'s output inside `yaml`. Emitted ONLY when `viewArea2Enabled` AND `ViewArea2Rule.verdict`
+    /// is nil for the current panel, so a disabled or illegal rect leaves the document BYTE-IDENTICAL
+    /// to a build without the feature (the fixture guard pins the OFF document). Shape: same 4-space
+    /// list level as `va()`'s `- viewArea:`; a LEADING newline because `va()`'s literal has none, and
+    /// NO trailing newline because the enclosing literal's next line supplies it (the glued-`initialURL`
+    /// trap, see `the_apps_real_emitted_document_parses`). The nested `safeArea` is the area itself in
+    /// PANEL coordinates (Apple's Widescreen template shape; the box emits it full-bleed regardless).
+    /// The box reads `viewArea` only (`vehicle_config.rs::second_main_view_area`); `initial` is not
+    /// authored here, so the session starts in the full panel and the first press collapses.
+    private var viewArea2YAML: String {
+        guard viewArea2Enabled,
+              ViewArea2Rule.verdict(x: viewArea2X, y: viewArea2Y, w: viewArea2W, h: viewArea2H,
+                                    panelW: mainWidth, panelH: mainHeight) == nil
+        else { return "" }
+        return "\n    - viewArea:\n        originX: \(viewArea2X)\n        originY: \(viewArea2Y)\n"
+            + "        width: \(viewArea2W)\n        height: \(viewArea2H)\n"
+            + "      safeArea:\n        originX: \(viewArea2X)\n        originY: \(viewArea2Y)\n"
+            + "        width: \(viewArea2W)\n        height: \(viewArea2H)\n"
+            + "      drawUIOutsideSafeArea: \(mainDrawOutsideSafe)"
+    }
+
     /// The structured, SETUP-relevant slice of this config (plan P3) — the single source the app-driven
     /// SETUP author reads. Materialized from the SAME `@Published` fields the `yaml` above interpolates,
     /// so the YAML pushed to the box and the host-authored SETUP answers are built from one set of
@@ -770,6 +1024,7 @@ final class VehicleConfigModel: ObservableObject {
             enablesMainBufferedAudio: enablesMainBufferedAudio,
             altVideoStreamsPresent: altVideoEnabled,
             safeAreaInsetPresent: mainInset || altInset,
+            viewArea2Present: viewArea2Active,
             appDrivenSetup: appDrivenSetup,
             mainWidth: mainWidth, mainHeight: mainHeight, maxFPS: maxFPS,
             altWidth: altWidth, altHeight: altHeight, altFPS: altFPS
@@ -805,6 +1060,7 @@ final class VehicleConfigModel: ObservableObject {
         name: "\(YamlEmit.quotedBody(name))"
         wireless: \(wirelessEnabled)
         hot_handover: \(hotHandover)
+        rightHandDrive: \(driverPosition == DriverPosition.right.rawValue)
         pairing: \(pairingNumericComparison ? (pairingInteractiveAnswer ? "numeric_comparison_interactive" : "numeric_comparison") : "just_works")
         android_auto: \(androidAutoEnabled)
         displayPanelsConfig:
@@ -821,7 +1077,7 @@ final class VehicleConfigModel: ObservableObject {
               width: \(mainWidth)
               height: \(mainHeight)
             maxFPS: \(maxFPS)
-        \(va(mainWidth, mainHeight, mainSafeLeft, mainSafeTop, mainSafeRight, mainSafeBottom, mainDrawOutsideSafe))
+        \(va(mainWidth, mainHeight, mainSafeLeft, mainSafeTop, mainSafeRight, mainSafeBottom, mainDrawOutsideSafe))\(viewArea2YAML)
             hidConfig:
               dPadSupport: \(dPadSupport)
               knobSupport: \(knobSupport)
@@ -892,6 +1148,12 @@ final class VehicleConfigModel: ObservableObject {
                 y += "  visible: \(oemIconVisible)\n"
             }
         }
+        // `wifi_ap` — our top-level extension read by the box's session_supervisor.sh
+        // (`wifi_ap_enabled()` greps for an explicit `wifi_ap: false`; absent = enabled). Enabled ⇒
+        // emit nothing, so every pre-existing configuration pushes a byte-identical document — the
+        // drift-guard fixture (tools/regen_app_yaml_fixture.py) runs with the default and pins that.
+        // Only a deliberate OFF (the BT-only bridge role) reaches the wire.
+        if !wifiAccessPoint { y += "wifi_ap: false\n" }
         y += audioYAML
         y += metadataYAML
         y += iapConfigYAML
@@ -1103,8 +1365,10 @@ final class VehicleConfigModel: ObservableObject {
         pairingNumericComparison = false
         pairingInteractiveAnswer = false
         androidAutoEnabled = true
+        wifiAccessPoint = true
         mainWidth = 1920; mainHeight = 1080; maxFPS = 60
         mainSafeLeft = 0; mainSafeTop = 0; mainSafeRight = 0; mainSafeBottom = 0; mainDrawOutsideSafe = false
+        viewArea2Enabled = false; viewArea2X = 0; viewArea2Y = 0; viewArea2W = 0; viewArea2H = 0
         altVideoEnabled = false; altWidth = 800; altHeight = 480; altFPS = 30
         altSafeLeft = 0; altSafeTop = 0; altSafeRight = 0; altSafeBottom = 0; altDrawOutsideSafe = false
         enablesHEVC = true; enablesMainBufferedAudio = false
@@ -1120,6 +1384,12 @@ final class VehicleConfigModel: ObservableObject {
         touchpadSupport = false; touchpadButtonsSupport = false
         touchScreenHighFidelity = true; touchScreenSupportsCancel = true; touchScreenSupportsMultiTouch = false; primaryInput = "Touchpad"
         nightMode = false; rightHandDrive = false
+        driverPosition = "left"; theme = "light"; dpi = 160; diagonalInches = 0
+        hideClock = false; hideSignal = false; hideBattery = false
+        restrictVideo = false; restrictVoiceInput = false; restrictConfiguration = false
+        voiceRateHz = 48000; telephonyOverProjection = false
+        metadataNowPlaying = true; metadataNavigation = true; metadataTelephony = true
+        aaFitPanelWithMargins = true; aaPreferHEVC = false
         enablesUIAppearance = true; enablesMapAppearance = true; enablesCornerMasks = false
         enablesVideoPlayback = true; enablesViewAreas = false; enablesEnhancedSiri = false
         enablesFocusTransfer = false; enablesUIContext = false; enablesUISync = false
@@ -1139,1224 +1409,21 @@ final class VehicleConfigModel: ObservableObject {
     }
 }
 
-// MARK: - Info popover infrastructure
-
-/// A short plain-language explanation of a config field, shown in an (i) popover. Text is grounded in
-/// the CarPlay SDK (docs/carplay/04_CAPABILITIES_AND_CONFIG.md glossary).
-// Strings grounded in the CarPlaySDK glossary research (docs/carplay/04_CAPABILITIES_AND_CONFIG.md); each ≤ ~240 chars for a tooltip.
-enum FieldInfo {
-    /// YAML keys the box currently serde-IGNORES (2026-07-31 review): they ride the pushed config
-    /// forward-compatibly but have zero on-wire effect today. Their tooltips keep the descriptive
-    /// text and get the same ⚠️ marker convention nightMode/rightHandDrive already carry (inline,
-    /// below), so no control overclaims what it does. LIVE levers (wireless, pairing, resolution,
-    /// frame rate, safe areas, HEVC, the alt stream + its geometry, audio formats, dPadSupport,
-    /// enablesViewAreas) are deliberately NOT in this set.
-    private static let inertKeys: Set<String> = [
-        "name",
-        "enablesVideoPlayback", "primaryInput",
-        // NOT inert, removed 2026-08-10 after a doc-vs-code sweep: airplayd ARMS all three from the
-        // pushed config — knobSupport at main.rs:624 (set_knob_advertised -> the uid-4 hidDevices
-        // entry), telephonyButtonsSupport at :626 (uid-5), enablesCornerMasks at :641. Marking them
-        // inert told the owner a live setting does nothing.
-        "mediaButtonsSupport",
-        "knobSupportsHomeAndBackButton", "knobSupportsNudge", "touchpadSupport",
-        "touchpadButtonsSupport", "touchScreenHighFidelity", "touchScreenSupportsCancel",
-        // C-2: joins its already-inert HID siblings above. Auto-marking is the convention BECAUSE
-        // the "un-mark it when it lands" ritual is removing the key here — a hand-written warning in
-        // the description would be missed when C-7/C-8 wires the features word.
-        "steeringWheelSupport",
-        // enablesUIAppearance/enablesMapAppearance/enablesFocusTransfer removed 2026-09-02 (verify_06
-        // 10-M1): airplayd arms all three per connection (main.rs:797-799, levers::set_ui_appearance/
-        // map_appearance/focus_transfer) — they were live, not inert.
-        "enablesUIContext", "enablesUISync", "enablesFileTransfer",
-        "enablesVehicleDataProtocol", "enablesDCX",
-    ]
-    private static let inertMarker =
-        " ⚠️ Not yet implemented on the box — this setting rides the config but currently has no effect on the wire."
-
-    static let text: [String: String] = {
-        var t = descriptions
-        for k in inertKeys { t[k] = (t[k] ?? "") + inertMarker }
-        return t
-    }()
-
-    private static let descriptions: [String: String] = [
-        // Config metadata only: the box (vehicle_config.rs) deliberately does NOT map YAML `name` to
-        // the advertised accessory name, which is derived on-box from the MAC + serial.
-        "name": "A label for this configuration template — config metadata only. The box deliberately does not use it as the advertised accessory name (that is derived on-box from the adapter's MAC + serial).",
-        "wireless": "Advertise the box for wireless CarPlay (Bluetooth pairing + Wi-Fi handoff, shown as “CarLink” on the iPhone). The radios come up when this app connects and idle when it disconnects. Wired USB CarPlay works regardless — the box accepts whichever transport connects first. Off = wired-only (radios stay off).",
-        "pairing": "Bluetooth pairing style. Off = Just-Works: iOS shows a simple “Pair?” prompt with no code (the proven Carlinkit dongle behavior). On = Numeric Comparison: the iPhone AND this app both show a 6-digit code (in the status area) to confirm they match — a more OEM-head-unit-like experience. Experimental for a dongle; iOS may be pickier about the CarPlay handshake in this mode.",
-        "android_auto": "Project Android Auto from an Android phone plugged into the box. On (default): when an Android phone is on the box's USB bus and no CarPlay session owns it, the box switches the phone into accessory (AOAP) mode and pumps the Android Auto stream to this app, which runs the head unit itself. Off: an Android phone only charges. CarPlay is unaffected — an iPhone always takes the CarPlay path, and whichever phone connects first owns the box.",
-        "hotHandover": "What happens when a USB cable is plugged into a live wireless session. Off = Standard (Apple-conformant default): the session stays wireless and USB just charges. On = Hot Hand-Over: the box forces a switch to wired on cable insert — a non-standard extension unique to this adapter.",
-        // ⚠️ NOT YET IMPLEMENTED BOX-SIDE (2026-07-25; updated 2026-08-01): these two were previously
-        // described as "sent in /info" / "switchable live via setNightMode", which was false — no
-        // `nightMode`/`rightHandDrive` /info key exists and `vehicle_config.rs` does not parse them
-        // (serde ignores them harmlessly). UPDATE 2026-08-01: a live `setNightMode` sender DOES now exist
-        // (events.rs::send_set_night_mode, the Display-Appearance feature) — but the VehicleConfig
-        // `nightMode` field here is still not wired to it, so both fields still have ZERO on-wire effect.
-        // These descriptions are about the config fields, not the separate live appearance command.
-        "rightHandDrive": "Driver seat side. Android Auto: LIVE — declared as driver_position at session start (device-verified 2026-09-04: on = app rail on the right edge, off = left; takes effect on the next AA session). CarPlay: tells iOS the driver sits on the right so it mirrors driver-focused layout. Off = left-hand drive. ⚠️ Not implemented on the box for CarPlay — the box has no consumer for this key, so as of 2026-09-02 it is stored locally but no longer pushed in the config at all.",
-        "nightMode": "Drives CarPlay's light/dark UI (dark night appearance when on). ⚠️ The box has no consumer for this key, so as of 2026-09-02 it is stored locally but no longer pushed in the config at all. Runtime night mode IS available via the live Night Mode toggle (Display Appearance — Live), which sends the separate setNightMode command; this field does not.",
-        "mainResolution": "The exact pixel grid CarPlay renders/streams (sets displays[].widthPixels/heightPixels + the touch coordinate space). Primary resolution lever; a change needs a fresh session. W 800–3840, H 480–2160.",
-        "maxFPS": "Caps the video refresh rate to this display (Apple uses 60). Higher = smoother but more decode/bandwidth. Advertised as displays[].maxFPS; reconnect-only.",
-        "safeArea": "Insets (px from each edge) of the box CarPlay keeps its UI inside. The video still fills the whole resolution; only interactive UI is held within the safe box — for curved/irregular panels where the corners/edges are occluded. 0 = flush (no inset). iOS honors this whenever View areas is negotiated — a real (non-zero, non-full-panel) inset here arms it automatically, even with View areas off, matching the adapter's own local behavior.",
-        "drawUIOutsideSafeArea": "Let CarPlay draw non-interactive UI in the gap between the full frame and the safe box. Off (default) = keep all UI strictly inside the safe area.",
-        "altResolution": "Pixel size of the secondary (instrument-cluster / navigation) video stream — typically a smaller cluster screen. Omit for single-screen units.",
-        "enablesHEVC": "Publishes non-null hevcInfo so iOS can stream efficient HEVC (H.265) instead of only H.264. Requires the unit to decode/forward HEVC.",
-        "enablesVideoPlayback": "Advertises allowVideoPlayback so iOS can stream arbitrary fullscreen video apps (media/streaming), not just the CarPlay UI. Off = UI/nav only.",
-        "enablesMainBufferedAudio": "Advertises mainBufferedInfo (~2-min media buffer, streamed from iPhone faster than real time) for playback resilience on an UNINTENTIONAL drop — media keeps playing while the link recovers. Does NOT improve audio quality. Advertise/negotiate is device-tested (wired: iOS negotiates it DISABLED over USB — it is a wireless-drop remedy). The box does not serve a buffered stream yet (the ~2-min buffer will live in THIS app — docs/carplay/04_CAPABILITIES_AND_CONFIG.md's owner-corrected architectural model, 2026-08-07), so on WIRELESS this is a deliberate per-session experiment: if iOS moves media to the buffered stream, media goes silent until you turn this off and reconnect. Default off; applies at the next connection.",
-        "audioFormats": "The exact set of audio capabilities the box advertises to iOS (the /info audioFormats). iOS negotiates one entry per audioType from this set. Auto = match the transport (PCM over USB, the AAC set over wireless). Presets are ready-made sets; Custom lets you author any codec/rate/stream-type combination to test a specific head-unit audio config.",
-        "metadataTier": "Which metadata feeds the accessory DECLARES to iOS in its iAP2 identification (and then subscribes to): now playing, call state, route guidance, and so on. Proven is the declaration a real iPhone accepted on 2026-07-25 and is what the adapter uses when nothing is pushed — leave it here unless you are deliberately testing a wider set. Extended adds the full paired Start/Stop set — accepted once on a wireless session's tunnel Identify (2026-07-25), but NOT proven on the wired Identify, where an earlier extended form was rejected. All declares everything in the capability table. ⚠️ iOS validates this: a declaration it rejects kills the whole identification for that connection and cannot be retried within it, so raise the tier one step at a time and watch the phone's own log (idevicesyslog -p accessoryd). Applies at the next iAP2 link — unplug/replug the phone, not just a reconnect of this app.",
-        "accessoryName": "The name this adapter shows as on the iPhone. Leave empty to keep the adapter's built-in per-box name (CarLink plus the last four characters of its Wi-Fi address), which is what ships today and is what keeps two adapters distinguishable. A name you set is used verbatim, so make it distinct yourself. ⚠️ Not yet applied by the adapter — it is stored and pushed, but changing the advertised name touches the AirPlay /info name, the Bonjour service name and the iAP2 identification together, so it is enabled in a later step with the phone's own log being watched.",
-        "engineTypes": "What powers this vehicle. Sent to iOS as part of the vehicle identification so CarPlay and Maps can adapt — the electric setting is the foundation for EV features such as charging-aware routing. A hybrid is genuinely two selections (for example gasoline AND electric); Apple's format allows several. Selecting nothing keeps the adapter's built-in default of gasoline, which is what it has always sent. Applied on the next phone plug — iap2d snapshots the pushed config once per process and builds it into the wired Identify (param 20); watch the phone's rejection log after changing it, because iOS can refuse a whole identification it dislikes and cannot be asked again until the phone is replugged.",
-        "chargingConnectors": "Which charging connectors this vehicle physically has, and optionally how fast each can charge. Only meaningful for electric or plug-in hybrid vehicles. Each connector type may appear ONCE — Apple's format carries one power rating per type, so a repeated type cannot be represented and the adapter keeps only the first. Set the power to 0 to leave the rating unstated; 0 is sent as \"no rating\", not as zero watts. Applied on the next phone plug — iap2d snapshots the pushed config once per process and builds it into the wired Identify (param 20).",
-        "vehicleStatusEnabled": "Declares that this vehicle can report live status to the phone — range, temperatures, charge state and so on. ⚠️ DISABLED until the adapter can service it. The adapter does not yet declare the messages that carry this data, so announcing the capability without them is exactly the kind of inconsistency iOS rejects, and a rejected identification kills CarPlay for that connection and cannot be retried until the phone is replugged. The control is shown greyed rather than hidden so you can see the capability is planned; it will unlock when the adapter declares the messages that carry this data.",
-        "steeringWheelSupport": "This vehicle has steering-wheel buttons for CarPlay (up/down/left/right/select). Corresponds to the Direction Buttons capability iOS looks for. It is not yet wired to the display capability word the adapter sends — that is a later step, because correcting the word also drops a capability the adapter currently claims without backing it, which is a change worth watching a real session for.",
-        "metadataSkip": "Comma-separated feature names to DROP from the declaration above (e.g. call_history). Use this to narrow a tier that iOS rejected, rather than dropping back a whole level. Names are the adapter's feature-table names; anything unrecognized is ignored. Leave empty for the full tier.",
-        "audioModeAuto": "Advertise the set that matches how the phone connects: PCM-only over the USB/wired link (iOS delivers media as PCM there); the full AAC set (media AAC-LC + Siri/mic AAC-ELD) over wireless. The app pushes both arms explicitly and the adapter presents the matching one. The proven default — use this unless you're testing a specific config.",
-        "audioFormatRow": "One advertised capability: a stream type (100 MainAudio carries the mic; 102 MainHighAudio is high-latency media (AAC-LC)), an audioType iOS routes against (e.g. media, speechRecognition), an input codec (mic capture; None = playback-only) and an output codec (playback to the box).",
-        "enablesEnhancedSiri": "Publishes enhancedSiriInfo so the vehicle's own hardware Siri button can invoke Siri (siriAction prewarm / button-down / button-up), with supported-language hints and mixable Siri audio. Off = basic Siri via the CarPlay Siri button. Either way Siri listens on the car's microphone (the speechRecognition audio path) — enhanced just adds the hardware-button trigger, language hints, and audio mixing. ⚠️ Out of scope — not pursued (needs an independent hot-word / voice-analysis stack); the box does not declare enhancedSiri, so this toggle has no effect.",
-        // Corrected 2026-07-31 against info.rs:335-370: dPadSupport gates ONLY the hidDevices[] D-Pad
-        // entry and contributes NO display features bit (0x20 DirectionButtons comes from
-        // steeringWheelSupport; 0x10 is Touchpad).
-        "dPadSupport": "Advertises the 4/8-way directional-pad HID device, so list navigation (Up/Down/Left/Right/Select) works. Gates only the D-Pad hidDevices[] entry — it contributes no display features bit (Direction-Buttons 0x20 comes from steeringWheelSupport). Absent on knob-only units.",
-        "mediaButtonsSupport": "Advertises play/pause/skip transport keys as a HID device.",
-        "telephonyButtonsSupport": "Advertises accept/end call keys so hardware call control works.",
-        "knobSupport": "Advertises a rotary knob HID — turn = scroll/rotate, press = select; CarPlay uses a focus-based UI. Prerequisite for the knob sub-options. NOTE the knob descriptor bytes are still the open item — Apple's literal builders (HIDKnob.c, 70 B and 51 B forms) have not been ported yet, so the device is advertised but its descriptor provenance is unresolved.",
-        "knobSupportsHomeAndBackButton": "The knob reports dedicated Home and Back presses. Requires knob support.",
-        "knobSupportsNudge": "The knob reports tilts (left/right/up/down) plus rotation, for grid navigation.",
-        "touchpadSupport": "Advertises an absolute touchpad HID (finger position drives a focus cursor). Often paired with Primary input = Touchpad.",
-        "touchpadButtonsSupport": "The touchpad reports press/click buttons in addition to position. Requires touchpad support.",
-        "touchScreenHighFidelity": "High-fidelity absolute touch HID streaming continuous coords, so scroll/drag/gestures work like a phone. Maps to the HighFidelityTouch display bit (0x08). Off = no touchscreen (touchScreenMode: Disabled).",
-        "touchScreenSupportsCancel": "The touch HID includes a cancel flag so interrupted / palm-rejected touches aren't treated as false taps.",
-        "touchScreenSupportsMultiTouch": "Advertise a two-finger touch HID descriptor instead of single-finger. Live: the box swaps its touch descriptor per connection to match. Default off — multi-touch gestures are untested on this project; enable deliberately and verify on real hardware before shipping it.",
-        "primaryInput": "The main input device, so CarPlay optimizes its control model: Touchpad (remote pad drives focus) or Knobs (rotary controller). Maps to displays[].primaryInputDevice.",
-        "enablesUIAppearance": "Advertises UI-appearance control so the head unit can drive CarPlay's look (uiAppearanceUpdate). Enabled in every Apple template.",
-        "enablesMapAppearance": "Advertises map-appearance control (mapAppearanceUpdate, changeMapZoomLevel); also required for the alt/cluster map stream.",
-        "enablesCornerMasks": "Declares the display can be masked at the corners (rounded/cut edges); the car streams per-corner opaque bitmaps at runtime. CarPlay's \"cutout\" mechanism.",
-        "enablesViewAreas": "Support declaring view areas / safe areas within the display (a usable sub-rectangle inside a wider panel, split layouts).",
-        "enablesFocusTransfer": "Focus can move between CarPlay and the head unit's own UI (split screens / multi-display). Off = CarPlay keeps focus.",
-        "enablesUIContext": "Publishes/updates UI context (which app/screen is showing) so the car can react. Off = no context reporting.",
-        "enablesUISync": "CarPlay and the head unit keep certain UI state in step. Off = no sync. [inferred]",
-        "enablesFileTransfer": "Advertises the file/asset transfer capability so iOS can push assets to the accessory. Exact wire use is not evidenced in Apple's sources. [inferred]",
-        "enablesLogTransfer": "Advertises logTransfer — the accessory tells iOS it can supply a diagnostic log archive. The advertise/negotiate handshake is device-proven on the wire (wired). The box deliberately does NOT serve the archive and won't: not a privacy limit — Apple won't troubleshoot a non-conventional CarPlay implementation, so it would be wasted effort. Advertise/negotiate only; default off.",
-        "enablesVehicleDataProtocol": "Advertises vehicleStateProtocol, opening the two-channel Vehicle Data Protocol for route status + vehicle state (VDC). Needed for turn-by-turn cluster / nav telemetry.",
-        "enablesDCX": "\"DCX\" — purpose NOT evidenced. Only the property name exists in the simulator; no CarPlaySDK string or wire mapping was found. A \"dynamic content\" meaning is unverified. Leave default.",
-        "appDrivenSetup": "Default ON, BOTH transports (wireless included since 2026-08-10). When on, the box relays the RTSP/SETUP negotiation to this app over CH_RTSP and the app AUTHORS the response the phone sees (the box's own local response is the sticky fallback on any relay failure). On wireless the app authors the video/audio streams it knows, echoes the box's own answer for the type-130 RCS DataStream that only that transport carries, and preserves the two adapter-only feature tokens it has no setting for (iAPChannel, sessionManagement) — dropping the first would break the phone's iAP2 metadata link. Off = fully box-driven SETUP. Takes effect on the NEXT connection, not immediately: reconnect the phone (unplug/replug) or restart the adapter — the app-side connection cycle alone is not enough, because airplayd reads the config per phone connection.",
-        "limitedUIConfig": "Declares WHICH CarPlay UI elements the limited-UI (Drive) restriction applies to — advertised in /info as limitedUIElements. Off = declare nothing: iOS applies its own default restriction set (the proven behavior). The restriction itself is toggled at runtime in Window ▸ Controls ▸ UI.",
-    ]
-}
-
-/// A form-row label with an (i) button that reveals the field's explanation in a popover.
-private struct InfoLabel: View {
-    let title: String
-    let key: String
-    @State private var show = false
-    var body: some View {
-        HStack(spacing: 5) {
-            Text(title)
-            if let info = FieldInfo.text[key] {
-                Button { show.toggle() } label: {
-                    Image(systemName: "info.circle").foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .popover(isPresented: $show, arrowEdge: .trailing) {
-                    Text(info).font(.callout).padding(12).frame(width: 300)
-                }
-            }
-        }
-    }
-}
-
-/// A Toggle whose label carries an (i) info popover.
-private struct InfoToggle: View {
-    let title: String
-    let key: String
-    @Binding var isOn: Bool
-    var body: some View { Toggle(isOn: $isOn) { InfoLabel(title: title, key: key) } }
-}
-
-// MARK: - Configuration form
-
-private struct ResolutionField: View {
-    let title: String
-    @Binding var width: Int
-    @Binding var height: Int
-    var infoKey: String = "mainResolution"  // alt row passes "altResolution" so its (i) shows the alt text
-
-    /// Preset options; nil dims = Custom (fields become editable). `shortLabel` fits the segmented control.
-    private static let presets: [(shortLabel: String, w: Int?, h: Int?)] = [
-        ("SD", 1280, 720),
-        ("HD", 1920, 1080),
-        ("4K", 3840, 2160),
-        ("Custom", nil, nil),
-    ]
-
-    /// Custom is an explicit user choice, NOT derivable from the numbers: e.g. 1280×720 both *is* the
-    /// SD preset and is a legal custom value. Deriving `isCustom` purely from a preset match made
-    /// "Custom" unreachable whenever the dims happened to equal a preset (the picker snapped back and
-    /// the fields stayed greyed). Track the choice; seed it true when a loaded config matches no preset.
-    @State private var forceCustom = false
-
-    private static var customIndex: Int { presets.count - 1 }
-    private var matchedPreset: Int? {
-        Self.presets.firstIndex { $0.w == width && $0.h == height }
-    }
-    /// The preset index matching the current W×H, or the Custom index if the user chose Custom / no
-    /// preset matches.
-    private var selectedIndex: Int {
-        if forceCustom { return Self.customIndex }
-        return matchedPreset ?? Self.customIndex
-    }
-    private var isCustom: Bool { selectedIndex == Self.customIndex }
-
-    private var widthError: Bool {
-        isCustom && (width < VehicleConfigModel.minWidth || width > VehicleConfigModel.maxWidth)
-    }
-    private var heightError: Bool {
-        isCustom && (height < VehicleConfigModel.minHeight || height > VehicleConfigModel.maxHeight)
-    }
-
-    var body: some View {
-        // Segmented preset picker (matches the Frame Rate picker style).
-        Picker(selection: Binding(
-            get: { selectedIndex },
-            set: { idx in
-                if let w = Self.presets[idx].w, let h = Self.presets[idx].h {
-                    width = w; height = h; forceCustom = false
-                } else {
-                    // Custom: keep current values; unlock the fields for editing.
-                    forceCustom = true
-                }
-            }
-        )) {
-            ForEach(Self.presets.indices, id: \.self) { Text(Self.presets[$0].shortLabel).tag($0) }
-        } label: {
-            InfoLabel(title: title, key: infoKey)
-        }
-        .pickerStyle(.segmented)
-
-        // The manual custom fields, labeled "Resolution"; editable only in Custom.
-        LabeledContent("Resolution") {
-            HStack(spacing: 4) {
-                TextField("W", value: $width, format: .number)
-                    .frame(width: 62).multilineTextAlignment(.trailing)
-                    .foregroundStyle(widthError ? Color.red : Color.primary)
-                Text("×").foregroundStyle(.secondary)
-                TextField("H", value: $height, format: .number)
-                    .frame(width: 62).multilineTextAlignment(.trailing)
-                    .foregroundStyle(heightError ? Color.red : Color.primary)
-                Text("px").foregroundStyle(.tertiary).font(.caption)
-            }
-            .textFieldStyle(.roundedBorder)
-            .disabled(!isCustom)
-            .opacity(isCustom ? 1 : 0.5)
-        }
-    }
-}
-
-/// A live, proportional picture of the display: a faded box at the resolution's aspect ratio (the
-/// viewArea — the video always fills this) with an inner solid box for the safe area, positioned by
-/// the insets. Lets the user SEE the safe area, not just read numbers (WWDC 2019-252: the safe area
-/// is the rectangle where CarPlay keeps interactive UI; outside it is black unless "draw outside" is on).
-private struct SafeAreaPreview: View {
-    let resW: Int, resH: Int
-    let left: Int, top: Int, right: Int, bottom: Int
-    private let maxW: CGFloat = 260, maxH: CGFloat = 132
-
-    /// The on-screen canvas for the display box — the resolution's aspect, scaled to fit maxW×maxH.
-    private var canvas: CGSize {
-        guard resW > 0, resH > 0 else { return CGSize(width: maxW, height: maxW * 9 / 16) }
-        let a = CGFloat(resW) / CGFloat(resH)
-        var w = maxW, h = maxW / a
-        if h > maxH { h = maxH; w = maxH * a }
-        return CGSize(width: w.rounded(), height: h.rounded())
-    }
-
-    var body: some View {
-        let c = canvas
-        let fw = CGFloat(max(resW, 1)), fh = CGFloat(max(resH, 1))
-        let l = CGFloat(max(0, left)), t = CGFloat(max(0, top))
-        let sw = max(1, fw - l - CGFloat(max(0, right)))
-        let sh = max(1, fh - t - CGFloat(max(0, bottom)))
-        VStack(spacing: 5) {
-            ZStack(alignment: .topLeading) {
-                // The display / viewArea — faded fill (video fills the whole rectangle).
-                RoundedRectangle(cornerRadius: 5)
-                    .fill(Color.accentColor.opacity(0.12))
-                    .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(Color.secondary.opacity(0.55)))
-                // The safe area — solid inner box, offset + sized proportionally to the insets.
-                RoundedRectangle(cornerRadius: 3)
-                    .fill(Color.accentColor.opacity(0.30))
-                    .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(Color.accentColor, lineWidth: 1.5))
-                    .frame(width: c.width * sw / fw, height: c.height * sh / fh)
-                    .offset(x: c.width * l / fw, y: c.height * t / fh)
-            }
-            .frame(width: c.width, height: c.height)
-            HStack(spacing: 12) {
-                legend(Color.accentColor.opacity(0.18), "Display \(resW)×\(resH)")
-                legend(Color.accentColor.opacity(0.55), "Safe area")
-            }
-            .font(.caption2).foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 2)
-    }
-
-    private func legend(_ color: Color, _ text: String) -> some View {
-        HStack(spacing: 4) {
-            RoundedRectangle(cornerRadius: 2).fill(color)
-                .frame(width: 12, height: 10)
-                .overlay(RoundedRectangle(cornerRadius: 2).strokeBorder(.secondary.opacity(0.5)))
-            Text(text)
-        }
-    }
-}
-
-/// Per-edge safe-area inset editor with a live visual preview. The user enters px from each edge; the
-/// resulting safe box is shown as a number AND drawn to scale. Converted to the wire's absolute rect
-/// (originX/width) on Save. `allowsDrawOutside` gates the drawUIOutsideSafeArea toggle — a main-display-
-/// only flag (WWDC 2023-10150), so cluster streams hide it.
-private struct SafeAreaField: View {
-    @Binding var left: Int
-    @Binding var top: Int
-    @Binding var right: Int
-    @Binding var bottom: Int
-    @Binding var drawOutside: Bool
-    let resWidth: Int
-    let resHeight: Int
-    var allowsDrawOutside: Bool = true
-
-    private var safeW: Int { resWidth - max(0, left) - max(0, right) }
-    private var safeH: Int { resHeight - max(0, top) - max(0, bottom) }
-    private var invalid: Bool {
-        left < 0 || top < 0 || right < 0 || bottom < 0 || safeW < 16 || safeH < 16
-    }
-    private var isInset: Bool { left > 0 || top > 0 || right > 0 || bottom > 0 }
-
-    private func field(_ label: String, _ value: Binding<Int>) -> some View {
-        HStack(spacing: 3) {
-            Text(label).font(.caption).foregroundStyle(.secondary).frame(width: 16, alignment: .leading)
-            TextField("0", value: value, format: .number)
-                .frame(width: 54).multilineTextAlignment(.trailing)
-                .foregroundStyle(invalid ? Color.red : Color.primary)
-        }
-    }
-
-    var body: some View {
-        LabeledContent {
-            Grid(horizontalSpacing: 10, verticalSpacing: 4) {
-                GridRow { field("L", $left); field("T", $top) }
-                GridRow { field("R", $right); field("B", $bottom) }
-            }
-            .textFieldStyle(.roundedBorder)
-        } label: {
-            InfoLabel(title: "Safe area (insets, px)", key: "safeArea")
-        }
-
-        LabeledContent("Safe box") {
-            Text(isInset ? "\(max(0, safeW)) × \(max(0, safeH)) px @ (\(max(0, left)), \(max(0, top)))"
-                         : "full frame (no inset)")
-                .font(.caption)
-                .foregroundStyle(invalid ? Color.red : .secondary)
-        }
-        if invalid {
-            Text("Insets leave too little room — each side must keep ≥16 px.")
-                .font(.caption).foregroundStyle(.red)
-        }
-
-        SafeAreaPreview(resW: resWidth, resH: resHeight, left: left, top: top, right: right, bottom: bottom)
-
-        // drawUIOutsideSafeArea is a MAIN-display-only flag (WWDC 2023-10150) — cluster streams omit it.
-        if allowsDrawOutside {
-            InfoToggle(title: "Allow UI outside safe area", key: "drawUIOutsideSafeArea", isOn: $drawOutside)
-                .disabled(!isInset)
-                .opacity(isInset ? 1 : 0.5)
-        }
-    }
-}
-
-private struct FrameRatePicker: View {
-    let title: String
-    @Binding var fps: Int
-    var body: some View {
-        Picker(selection: $fps) {
-            ForEach(VehicleConfigModel.frameRates, id: \.self) { Text("\($0) fps").tag($0) }
-        } label: { InfoLabel(title: title, key: "maxFPS") }
-        .pickerStyle(.segmented)
-    }
-}
-
-// MARK: - Audio capability config
-
-/// Friendly labels for the audio vocabulary (the raw tokens are the box's wire names).
-enum AudioLabels {
-    static func codec(_ t: String) -> String {
-        if t == "none" { return "None" }
-        return t
-            .replacingOccurrences(of: "aac_lc", with: "AAC-LC")
-            .replacingOccurrences(of: "aac_eld", with: "AAC-ELD")
-            .replacingOccurrences(of: "pcm", with: "PCM")
-            .replacingOccurrences(of: "opus", with: "Opus")
-            .replacingOccurrences(of: "_", with: " ")
-    }
-    static func stream(_ t: Int) -> String {
-        switch t {
-        case 100: return "100 · MainAudio"
-        case 101: return "101 · AltAudio"
-        case 102: return "102 · MainHighAudio"
-        default: return "\(t)"
-        }
-    }
-    static func audioType(_ t: String) -> String { t.isEmpty ? "— (catch-all)" : t }
-    /// One-line summary of what a non-custom mode advertises, so the user SEES the resolved set.
-    static func modeSummary(_ mode: String) -> String {
-        switch mode {
-        case "auto": return "PCM over wired · full AAC set over wireless (matches how the phone connects)."
-        case "wired_pcm": return "PCM 16k/48k on types 100/101 — the wired media path (no audioType)."
-        case "wireless_8": return "8 entries: AAC-LC media (102) · AAC-ELD Siri/mic (100) · AAC-ELD alert (100/101) · PCM compatibility."
-        default: return ""
-        }
-    }
-}
-
-/// A codec picker that marks each option device-verified (●) vs advertisable-but-not-yet-proven (○), so
-/// the user knows which formats are documented-capable today. This is the honesty surface the config is
-/// meant to provide.
-private struct CodecPicker: View {
-    let title: String
-    @Binding var value: String
-    var body: some View {
-        Picker(title, selection: $value) {
-            ForEach(VehicleConfigModel.audioCodecs, id: \.self) { c in
-                let mark = VehicleConfigModel.verifiedCodecs.contains(c) ? "●" : "○"
-                Text("\(mark)  \(AudioLabels.codec(c))").tag(c)
-            }
-        }
-    }
-}
-
-/// The custom `audio.formats` editor: an add/remove list of advertised entries, each with stream type,
-/// audioType, input (mic) and output (playback) codec pickers. Fully declarative — this is where any
-/// head-unit audio configuration is authored for testing.
-private struct AudioFormatsEditor: View {
-    @ObservedObject var model: VehicleConfigModel
-
-    var body: some View {
-        ForEach($model.audioFormats) { $row in
-            GroupBox {
-                Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 6) {
-                    GridRow {
-                        Text("Stream").font(.caption).foregroundStyle(.secondary).gridColumnAlignment(.leading)
-                        Picker("", selection: $row.streamType) {
-                            ForEach(VehicleConfigModel.audioStreamTypes, id: \.self) {
-                                Text(AudioLabels.stream($0)).tag($0)
-                            }
-                        }.labelsHidden()
-                    }
-                    GridRow {
-                        Text("Type").font(.caption).foregroundStyle(.secondary)
-                        Picker("", selection: $row.audioType) {
-                            ForEach(VehicleConfigModel.audioTypes, id: \.self) {
-                                Text(AudioLabels.audioType($0)).tag($0)
-                            }
-                        }.labelsHidden()
-                    }
-                    GridRow {
-                        Text("In (mic)").font(.caption).foregroundStyle(.secondary)
-                        CodecPicker(title: "", value: $row.input).labelsHidden()
-                    }
-                    GridRow {
-                        Text("Out").font(.caption).foregroundStyle(.secondary)
-                        CodecPicker(title: "", value: $row.output).labelsHidden()
-                    }
-                }
-                HStack {
-                    Spacer()
-                    Button(role: .destructive) {
-                        model.audioFormats.removeAll { $0.id == row.id }
-                    } label: { Label("Remove", systemImage: "trash").labelStyle(.iconOnly) }
-                    .buttonStyle(.borderless)
-                }
-            }
-        }
-        Button {
-            model.audioFormats.append(AudioFormatRow())
-        } label: { Label("Add format", systemImage: "plus.circle") }
-        if model.audioFormats.allSatisfy({ $0.output == "none" }) {
-            Text("At least one entry needs an output codec, or the box keeps its default set.")
-                .font(.caption).foregroundStyle(.orange)
-        }
-    }
-}
-
-/// A read-only reference of every audio format the box + app support (the vocabulary a custom config
-/// draws from). Fulfills the "list the capabilities that can be configured" ask; ● = device-verified.
-private struct AudioCapabilitiesReference: View {
-    @State private var expanded = false
-    var body: some View {
-        DisclosureGroup("Supported audio formats", isExpanded: $expanded) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text("● device-verified · ○ advertisable, not yet on-box proven")
-                    .font(.caption2).foregroundStyle(.secondary)
-                ForEach(VehicleConfigModel.audioCodecs.filter { $0 != "none" }, id: \.self) { c in
-                    let ok = VehicleConfigModel.verifiedCodecs.contains(c)
-                    HStack(spacing: 6) {
-                        Text(ok ? "●" : "○").foregroundStyle(ok ? Color.green : Color.secondary)
-                        Text(AudioLabels.codec(c))
-                        Spacer()
-                        Text(c).font(.system(.caption2, design: .monospaced)).foregroundStyle(.tertiary)
-                    }
-                    .font(.caption)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-}
-
-/// Live (runtime) display-appearance controls — the Light/Dark and Night Mode toggles the Simulator
-/// exposes per display. These send `uiAppearanceUpdate` / `mapAppearanceUpdate` / `setNightMode` on the
-/// live session (via `ControlsBridge`), distinct from the `/info` capability flags in the config
-/// "Appearance" section above. The same state drives the inline sun/moon titlebar buttons; a change
-/// here moves those and vice-versa. Requires the matching `enablesUIAppearance`/`enablesMapAppearance`
-/// capability declared for iOS to honour it (the config section above).
-private struct LiveAppearanceSection: View {
-    @ObservedObject var bridge: ControlsBridge
-
-    private func uiBinding(alt: Bool) -> Binding<Bool> {
-        Binding(get: { alt ? bridge.altUIDark : bridge.mainUIDark },
-                set: { bridge.setUIAppearance(alt: alt, dark: $0) })
-    }
-    private func mapBinding(alt: Bool) -> Binding<Bool> {
-        Binding(get: { alt ? bridge.altMapDark : bridge.mainMapDark },
-                set: { bridge.setMapAppearance(alt: alt, dark: $0) })
-    }
-
-    var body: some View {
-        Section {
-            Toggle("Main display — Dark UI", isOn: uiBinding(alt: false))
-            Toggle("Main display — Dark map", isOn: mapBinding(alt: false))
-            Toggle("Alt/cluster display — Dark UI", isOn: uiBinding(alt: true))
-            Toggle("Alt/cluster display — Dark map", isOn: mapBinding(alt: true))
-            Toggle("Send night mode now (day/night signal)",
-                   isOn: Binding(get: { bridge.nightModeOn }, set: { bridge.setNightMode($0) }))
-        } header: {
-            Text("Display Appearance — Live")
-        } footer: {
-            Text("Sends Light/Dark to the phone on the live session (same as the sun/moon in each window's title bar). Needs a connected session; the choice is remembered and re-sent on reconnect. The four Light/Dark toggles require \"UI/Map appearance sync\" (the config Appearance section above) so iOS accepts them; the night-mode signal is independent. Distinct from the static \"Night mode\" config flag above, which is a /info capability declaration, not a live command.")
-                .font(.caption)
-        }
-    }
-}
-
-struct ConfigurationTab: View {
-    @ObservedObject var model = VehicleConfigModel.shared
-    @State private var showYAML = false
-
-    var body: some View {
-        Form {
-            Section("Identity") {
-                // Inert on the box (see FieldInfo "name") — same InfoLabel/(i) affordance as the
-                // other inert controls so the field doesn't overclaim what it does.
-                TextField(text: $model.name) { InfoLabel(title: "Name", key: "name") }
-            }
-
-            Section {
-                InfoToggle(title: "Wireless CarPlay", key: "wireless", isOn: $model.wirelessEnabled)
-                if model.wirelessEnabled {
-                    InfoToggle(title: "Numeric Comparison pairing", key: "pairing", isOn: $model.pairingNumericComparison)
-                    InfoToggle(title: "Answer the pairing code in this app (not usable with iPhone)", key: "pairing_interactive", isOn: $model.pairingInteractiveAnswer)
-                        .disabled(!model.pairingNumericComparison)
-                    InfoToggle(title: "Hot Hand-Over", key: "hotHandover", isOn: $model.hotHandover)
-                }
-                InfoToggle(title: "Android Auto", key: "android_auto", isOn: $model.androidAutoEnabled)
-            } header: {
-                Text("Connectivity")
-            }
-
-            Section {
-                ResolutionField(title: "Preset", width: $model.mainWidth, height: $model.mainHeight)
-                FrameRatePicker(title: "Frame rate", fps: $model.maxFPS)
-                SafeAreaField(left: $model.mainSafeLeft, top: $model.mainSafeTop,
-                              right: $model.mainSafeRight, bottom: $model.mainSafeBottom,
-                              drawOutside: $model.mainDrawOutsideSafe,
-                              resWidth: model.mainWidth, resHeight: model.mainHeight)
-                InfoToggle(title: "HEVC (H.265)", key: "enablesHEVC", isOn: $model.enablesHEVC)
-                InfoToggle(title: "Video playback", key: "enablesVideoPlayback", isOn: $model.enablesVideoPlayback)
-            } header: {
-                Text("Main Video")
-            } footer: {
-                Text("Width must be \(VehicleConfigModel.minWidth)–\(VehicleConfigModel.maxWidth) px and height \(VehicleConfigModel.minHeight)–\(VehicleConfigModel.maxHeight) px. Out-of-range values show in red and are corrected on Save.")
-                    .font(.caption)
-            }
-
-            Section("Alt / Navigation Video") {
-                Toggle("Enable alt video stream", isOn: $model.altVideoEnabled)
-                if model.altVideoEnabled {
-                    ResolutionField(title: "Preset", width: $model.altWidth, height: $model.altHeight, infoKey: "altResolution")
-                    FrameRatePicker(title: "Frame rate", fps: $model.altFPS)
-                    SafeAreaField(left: $model.altSafeLeft, top: $model.altSafeTop,
-                                  right: $model.altSafeRight, bottom: $model.altSafeBottom,
-                                  drawOutside: $model.altDrawOutsideSafe,
-                                  resWidth: model.altWidth, resHeight: model.altHeight,
-                                  allowsDrawOutside: false)
-                }
-            }
-
-            Section {
-                Picker(selection: $model.audioMode) {
-                    Text("Auto — match transport").tag("auto")
-                    Text("Wired — PCM").tag("wired_pcm")
-                    Text("Wireless — AAC (full 8)").tag("wireless_8")
-                    Text("Custom…").tag("custom")
-                } label: { InfoLabel(title: "Audio formats", key: "audioFormats") }
-
-                if model.audioMode == "custom" {
-                    InfoLabel(title: "Custom advertised set", key: "audioFormatRow")
-                    AudioFormatsEditor(model: model)
-                } else {
-                    Text(AudioLabels.modeSummary(model.audioMode))
-                        .font(.caption).foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-
-                AudioCapabilitiesReference()
-
-                InfoToggle(title: "Main buffered audio (media)", key: "enablesMainBufferedAudio", isOn: $model.enablesMainBufferedAudio)
-                InfoToggle(title: "Enhanced Siri", key: "enablesEnhancedSiri", isOn: $model.enablesEnhancedSiri)
-
-            } header: {
-                Text("Audio")
-            } footer: {
-                Text("The set of audio capabilities the box advertises to iOS. Auto keeps the proven per-transport default; Custom authors any codec/rate/stream-type combination for a specific head-unit test.")
-                    .font(.caption)
-            }
-
-            Section("Input — HID (hidConfig)") {
-                Picker(selection: $model.primaryInput) {
-                    ForEach(VehicleConfigModel.primaryInputs, id: \.self) { Text($0).tag($0) }
-                } label: { InfoLabel(title: "Primary input", key: "primaryInput") }
-                InfoToggle(title: "D-Pad support", key: "dPadSupport", isOn: $model.dPadSupport)
-                InfoToggle(title: "Media buttons", key: "mediaButtonsSupport", isOn: $model.mediaButtonsSupport)
-                InfoToggle(title: "Telephony buttons", key: "telephonyButtonsSupport", isOn: $model.telephonyButtonsSupport)
-                InfoToggle(title: "Knob support", key: "knobSupport", isOn: $model.knobSupport)
-                if model.knobSupport {
-                    InfoToggle(title: "Knob Home/Back buttons", key: "knobSupportsHomeAndBackButton", isOn: $model.knobSupportsHomeAndBackButton)
-                    InfoToggle(title: "Knob nudge (4-way)", key: "knobSupportsNudge", isOn: $model.knobSupportsNudge)
-                }
-                InfoToggle(title: "Touchpad", key: "touchpadSupport", isOn: $model.touchpadSupport)
-                if model.touchpadSupport {
-                    InfoToggle(title: "Touchpad buttons", key: "touchpadButtonsSupport", isOn: $model.touchpadButtonsSupport)
-                }
-                InfoToggle(title: "Touchscreen high-fidelity", key: "touchScreenHighFidelity", isOn: $model.touchScreenHighFidelity)
-                InfoToggle(title: "Touchscreen supports cancel", key: "touchScreenSupportsCancel", isOn: $model.touchScreenSupportsCancel)
-                InfoToggle(title: "Touchscreen multi-touch", key: "touchScreenSupportsMultiTouch", isOn: $model.touchScreenSupportsMultiTouch)
-                InfoToggle(title: "Steering-wheel buttons", key: "steeringWheelSupport", isOn: $model.steeringWheelSupport)
-            }
-
-            // Vehicle identity (docs/carplay/04_CAPABILITIES_AND_CONFIG.md C6/C7) — what the car IS, as opposed to what its screen is.
-            // Everything here is absent-off: leave it untouched and the adapter presents exactly the
-            // identity it presented before this panel existed.
-            Section("Vehicle Identity") {
-                TextField(text: $model.accessoryName, prompt: Text("CarLink-<box id>")) {
-                    InfoLabel(title: "Accessory name", key: "accessoryName")
-                }
-                InfoLabel(title: "Engine type", key: "engineTypes")
-                ForEach(VehicleConfigModel.engineTypeNames, id: \.self) { e in
-                    Toggle(VehicleConfigModel.engineDisplayNames[e] ?? e, isOn: Binding(
-                        get: { model.engineTypes.contains(e) },
-                        set: { on in
-                            if on { model.engineTypes.insert(e) } else { model.engineTypes.remove(e) }
-                        }))
-                }
-                if model.engineTypes.contains("electric") || !model.chargingConnectors.isEmpty {
-                    InfoLabel(title: "Charging connectors", key: "chargingConnectors")
-                    ForEach($model.chargingConnectors) { $row in
-                        HStack {
-                            Picker("", selection: $row.type) {
-                                ForEach(VehicleConfigModel.connectorNames, id: \.self) { Text($0).tag($0) }
-                            }.labelsHidden().frame(width: 110)
-                            TextField("kW", value: Binding(
-                                get: { (row.powerWatts ?? 0) / 1000 },
-                                // CLAMP BEFORE THE MULTIPLY: UInt32 overflow traps, and any entry
-                                // above 4,294,967 kW would crash the app on a stray keystroke.
-                                // 1,000 kW is already far beyond any production charger.
-                                set: { row.powerWatts = $0 > 0 ? min($0, 1_000) * 1000 : nil }
-                            ), format: .number).frame(width: 60)
-                            Text("kW").foregroundStyle(.secondary)
-                            Button(role: .destructive) {
-                                model.chargingConnectors.removeAll { $0.id == row.id }
-                            } label: { Image(systemName: "minus.circle") }.buttonStyle(.borderless)
-                        }
-                    }
-                    Button("Add connector") {
-                        // Offer a type not already used: Apple's per-connector power sub is
-                        // single-valued, so a duplicate row cannot be represented on the wire and
-                        // the adapter would drop it.
-                        let used = Set(model.chargingConnectors.map(\.type))
-                        let next = VehicleConfigModel.connectorNames.first { !used.contains($0) }
-                        if let next { model.chargingConnectors.append(.init(type: next, powerWatts: nil)) }
-                    }
-                    .disabled(model.chargingConnectors.count >= VehicleConfigModel.connectorNames.count)
-                }
-                InfoToggle(title: "Declare vehicle status", key: "vehicleStatusEnabled", isOn: $model.vehicleStatusEnabled)
-                    .disabled(!VehicleConfigModel.vehicleStatusUnlocked)
-                if model.vehicleStatusEnabled {
-                    Text("⚠️ Not yet supported by the adapter — the messages that service this component are not declared, and iOS can reject the whole identification for the connection. Leave off until the adapter ships it.")
-                        .font(.caption).foregroundStyle(.orange)
-                    ForEach(VehicleConfigModel.vehicleStatusCapNames, id: \.self) { c in
-                        Toggle(c, isOn: Binding(
-                            get: { model.vehicleStatusCaps.contains(c) },
-                            set: { on in
-                                if on { model.vehicleStatusCaps.insert(c) } else { model.vehicleStatusCaps.remove(c) }
-                            }))
-                        // Apple: the unified range warning and the per-engine ones are mutually
-                        // exclusive, so show which selections are being ignored rather than
-                        // silently dropping them at emission.
-                        .foregroundStyle(
-                            model.vehicleStatusCaps.contains("rangeWarning")
-                                && VehicleConfigModel.perEngineRangeWarnings.contains(c)
-                                ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
-                    }
-                    if model.vehicleStatusCaps.contains("rangeWarning")
-                        && !model.vehicleStatusCaps.isDisjoint(with: VehicleConfigModel.perEngineRangeWarnings) {
-                        Text("Apple's spec forbids combining the unified range warning with the per-engine ones — the greyed entries will not be sent.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-            }
-
-            Section("Appearance") {
-                InfoToggle(title: "Right-hand drive", key: "rightHandDrive", isOn: $model.rightHandDrive)
-                InfoToggle(title: "Night mode", key: "nightMode", isOn: $model.nightMode)
-                InfoToggle(title: "UI appearance sync", key: "enablesUIAppearance", isOn: $model.enablesUIAppearance)
-                InfoToggle(title: "Map appearance sync", key: "enablesMapAppearance", isOn: $model.enablesMapAppearance)
-                InfoToggle(title: "Corner masks (cutout)", key: "enablesCornerMasks", isOn: $model.enablesCornerMasks)
-            }
-
-            LiveAppearanceSection(bridge: ControlsBridge.shared)
-
-            Section {
-                InfoToggle(title: "Declare limited UI elements", key: "limitedUIConfig",
-                           isOn: $model.limitedUIConfigEnabled)
-                if model.limitedUIConfigEnabled {
-                    Toggle("On-screen keyboard", isOn: $model.limitedUISoftKeyboard)
-                    Toggle("Phone keypad", isOn: $model.limitedUISoftPhoneKeypad)
-                    Toggle("Music lists", isOn: $model.limitedUIMusicLists)
-                    Toggle("Non-music lists", isOn: $model.limitedUINonMusicLists)
-                    Toggle("Japan maps", isOn: $model.limitedUIJapanMaps)
-                    Toggle("Long alerts", isOn: $model.limitedUILongAlerts)
-                    // NOT capability toggles: real Apple LimitedUIConfig keys that airPlayElements
-                    // never emits — kept only so exported YAML round-trips the full Apple schema.
-                    Text("The four below are parsed for YAML round-trip only — Apple never emits them, so they NEVER appear in /info limitedUIElements.")
-                        .font(.caption).foregroundStyle(.orange)
-                    Toggle("Paired devices (round-trip only)", isOn: $model.limitedUIPairedDevices)
-                    Toggle("Theme customization (round-trip only)", isOn: $model.limitedUIThemeCustomization)
-                    Toggle("Automaker settings (round-trip only)", isOn: $model.limitedUIAutomakerSettings)
-                    Toggle("Automaker settings info button (round-trip only)", isOn: $model.limitedUIAutomakerSettingsInfoButton)
-                }
-            } header: {
-                Text("Limited UI Elements")
-            } footer: {
-                Text("Which UI elements iOS restricts while limited-UI (Drive) mode is on — the runtime on/off lives in Window ▸ Controls ▸ UI. Disabled: nothing is declared and iOS keeps its own default restriction set.")
-                    .font(.caption)
-            }
-
-            Section {
-                Toggle("Show OEM icon on home screen", isOn: $model.oemIconEnabled)
-                if model.oemIconEnabled {
-                    HStack(spacing: 12) {
-                        if !model.oemIconBase64.isEmpty,
-                           let data = Data(base64Encoded: model.oemIconBase64),
-                           let img = NSImage(data: data) {
-                            Image(nsImage: img).resizable().aspectRatio(contentMode: .fit)
-                                .frame(width: 44, height: 44).cornerRadius(6)
-                            Text("\(model.oemIconW)×\(model.oemIconH) PNG").font(.caption).foregroundStyle(.secondary)
-                        } else {
-                            Text("No image chosen").font(.caption).foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Button("Choose PNG…") { model.pickOemIcon() }
-                        Button("Use Simulator icon") { model.useSimulatorOemIcon() }
-                    }
-                    TextField("Label (name shown on the home screen)", text: $model.oemIconLabel)
-                    Toggle("Show icon in CarPlay", isOn: $model.oemIconVisible)
-                    Text(model.oemIconVisible
-                         ? "iOS shows the icon (oemIconVisible: true)."
-                         : "iOS hides the icon (oemIconVisible: false is sent). Use this to hide it — turning off \"Show OEM icon\" only stops sending the config, which leaves the last icon on screen.")
-                        .font(.caption2).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                }
-            } header: {
-                Text("OEM Icon")
-            } footer: {
-                Text("The vehicle-maker logo on the CarPlay home screen (Apple oemIconConfig → /info oemIcons/oemIconLabel/oemIconVisible). PNG, square (Apple ships 120/180/256). Static config — takes effect on the next connect. \"Show OEM icon\" advertises the config; \"Show icon in CarPlay\" is the oemIconVisible flag. To HIDE an icon iOS already cached, keep \"Show OEM icon\" ON and turn \"Show icon in CarPlay\" OFF (sends visible:false) — turning the config off entirely just stops sending it, leaving the last icon on screen.")
-                    .font(.caption)
-            }
-
-            Section("Advanced Capabilities") {
-                InfoToggle(title: "View areas", key: "enablesViewAreas", isOn: $model.enablesViewAreas)
-                InfoToggle(title: "Focus transfer", key: "enablesFocusTransfer", isOn: $model.enablesFocusTransfer)
-                InfoToggle(title: "UI context handoff", key: "enablesUIContext", isOn: $model.enablesUIContext)
-                InfoToggle(title: "UI sync", key: "enablesUISync", isOn: $model.enablesUISync)
-                InfoToggle(title: "File transfer", key: "enablesFileTransfer", isOn: $model.enablesFileTransfer)
-                InfoToggle(title: "Log transfer", key: "enablesLogTransfer", isOn: $model.enablesLogTransfer)
-                InfoToggle(title: "Vehicle data protocol", key: "enablesVehicleDataProtocol", isOn: $model.enablesVehicleDataProtocol)
-                InfoToggle(title: "DCX", key: "enablesDCX", isOn: $model.enablesDCX)
-                InfoToggle(title: "App-driven SETUP (default, both transports)", key: "appDrivenSetup", isOn: $model.appDrivenSetup)
-                Picker(selection: $model.metadataTier) {
-                    Text("Proven — device-accepted baseline").tag("proven")
-                    Text("Extended — full paired Start/Stop set").tag("extended")
-                    Text("All — every capability in the table").tag("all")
-                } label: { InfoLabel(title: "Metadata declaration", key: "metadataTier") }
-                HStack {
-                    InfoLabel(title: "Skip features", key: "metadataSkip")
-                    TextField("e.g. call_history", text: $model.metadataSkip)
-                        .textFieldStyle(.roundedBorder)
-                }
-            }
-
-            Section {
-                DisclosureGroup("Generated YAML", isExpanded: $showYAML) {
-                    Text(model.yaml)
-                        .font(.system(.caption, design: .monospaced))
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                HStack {
-                    Button("Export YAML…", systemImage: "square.and.arrow.up") { exportYAML() }
-                    Spacer()
-                    Button("Revert to Default", systemImage: "arrow.uturn.backward", role: .destructive) {
-                        confirmReset = true
-                    }
-                }
-            }
-        }
-        .formStyle(.grouped)
-        .safeAreaInset(edge: .bottom) {
-            // Save bar — makes it explicit what's committed and when it applies.
-            HStack(spacing: 10) {
-                if model.dirty {
-                    Label("Unsaved changes", systemImage: "pencil.circle.fill").foregroundStyle(.orange)
-                } else {
-                    Label("Saved — pushed to the adapter now (deferred while a CarPlay session is live)", systemImage: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                }
-                Spacer()
-                Button("Save") { model.save() }
-                    .keyboardShortcut("s", modifiers: .command)
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!model.dirty)
-            }
-            .font(.callout)
-            .padding(12)
-            .background(.bar)
-        }
-        .confirmationDialog("Revert all configuration to the default?", isPresented: $confirmReset) {
-            Button("Revert to Default", role: .destructive) { model.resetToDefault() }
-            Button("Cancel", role: .cancel) {}
-        }
-    }
-
-    @State private var confirmReset = false
-
-    private func exportYAML() {
-        let panel = NSSavePanel()
-        panel.title = "Export VehicleConfig YAML"
-        panel.nameFieldStringValue = "carlink_vehicleconfig.yaml"
-        panel.allowedContentTypes = [.yaml]
-        panel.canCreateDirectories = true
-        panel.begin { response in
-            guard response == .OK, let url = panel.url else { return }
-            // Export the LIVE yaml — the same document the "Generated YAML" preview shows. (The
-            // committed snapshot is what's pushed to the box, but exporting something other than
-            // what's on screen was silently dishonest.)
-            do {
-                try Data(model.yaml.utf8).write(to: url)
-            } catch {
-                let alert = NSAlert()
-                alert.messageText = "Export Failed"
-                alert.informativeText = error.localizedDescription
-                alert.alertStyle = .warning
-                alert.runModal()
-            }
-        }
-    }
-}
-
-// MARK: - CCPA management tab — live box state (CT_BOX_HEALTH / CT_BT_PHASE / CT_PHONE_IDENT)
-
-/// `CT_BOX_HEALTH` bitmask (`OCBM.bh*`), named per docs/carplay/01_OCBM_PROTOCOL.md.
-struct BoxHealth: OptionSet, Codable, Equatable {
-    let rawValue: UInt8
-    static let hciPresent = BoxHealth(rawValue: OCBM.bhHciPresent)
-    static let ssp = BoxHealth(rawValue: OCBM.bhSsp)
-    static let iap2d = BoxHealth(rawValue: OCBM.bhIap2d)
-    static let airplayd = BoxHealth(rawValue: OCBM.bhAirplayd)
-    static let carplayWireless = BoxHealth(rawValue: OCBM.bhCarplayWireless)
-    static let wlanAp = BoxHealth(rawValue: OCBM.bhWlanAp)
-    static let rootfsOk = BoxHealth(rawValue: OCBM.bhRootfsOk)
-
-    /// `(label, ok)` pairs in wire-bit order, for a ✓/✗ list.
-    var checklist: [(label: String, ok: Bool)] {
-        [
-            ("HCI present", contains(.hciPresent)),
-            ("SSP", contains(.ssp)),
-            ("iap2d", contains(.iap2d)),
-            ("airplayd", contains(.airplayd)),
-            ("carplay-wireless", contains(.carplayWireless)),
-            ("Wi-Fi AP", contains(.wlanAp)),
-            ("rootfs OK", contains(.rootfsOk)),
-        ]
-    }
-}
-
-/// `CT_BT_PHASE` value (`OCBM.btp*`). An unrecognised raw byte decodes to `nil` — advisory per
-/// docs/carplay/01_OCBM_PROTOCOL.md, never coerced to a known phase.
-enum BtPhase: UInt8, Codable {
-    case idle = 0x00
-    case linkUp = 0x01
-    case authenticating = 0x02
-    case authenticated = 0x03
-    case identifying = 0x04
-    case identified = 0x05
-    case wifiHandoff = 0x06
-
-    var displayName: String {
-        switch self {
-        case .idle: return "Idle"
-        case .linkUp: return "Link up"
-        case .authenticating: return "Authenticating"
-        case .authenticated: return "Authenticated"
-        case .identifying: return "Identifying"
-        case .identified: return "Identified"
-        case .wifiHandoff: return "Wi-Fi handoff"
-        }
-    }
-}
-
-/// Live bridge between the CCPA tab and the OCBM client (set by AppDelegate on connect, like
-/// `ControlsBridge`). Holds the latest adapter snapshot + drives the box control actions over CH_MGMT.
-@MainActor
-final class CCPABridge: ObservableObject {
-    static let shared = CCPABridge()
-    weak var client: OCBMClient?
-    @Published var info: CCPAInfo?
-    @Published var lastUpdated: Date?
-    @Published var statusText: String = "Not connected"
-    @Published var busy = false
-    /// True when the snapshot predates the current adapter session (set by `sessionEnded()`) — the
-    /// data shown is from BEFORE the unplug/teardown. Cleared by a fresh query / successful receiveInfo.
-    @Published var stale = false
-
-    // Live box state — mirrored 1:1 from OCBMClient's CT_BOX_HEALTH/CT_BT_PHASE/CT_PHONE_IDENT
-    // callbacks. Deliberately NOT persisted across a session: `sessionEnded()` clears all three so a
-    // reconnect never shows a phantom carry-over from the previous box/phone — a fresh CT_SUBSCRIBE
-    // always re-emits its own current values (docs/carplay/01_OCBM_PROTOCOL.md, "re-emitted after
-    // each CT_SUBSCRIBE").
-    @Published var boxHealth: BoxHealth?
-    @Published var boxHealthUpdated: Date?
-    @Published var btPhase: BtPhase?
-    @Published var btPhaseUpdated: Date?
-    @Published var phoneIdent: PhoneIdent?
-    @Published var phoneIdentUpdated: Date?
-
-    private var busyGen = 0
-
-    /// Session teardown (AppDelegate.endSession): the OCBM link is gone, so any latched busy will
-    /// never be ACKed and "Connected" is a lie. Keep the last snapshot visible but mark it stale.
-    func sessionEnded() {
-        clearBusy()
-        statusText = "Disconnected"
-        if info != nil { stale = true }
-        boxHealth = nil
-        boxHealthUpdated = nil
-        btPhase = nil
-        btPhaseUpdated = nil
-        phoneIdent = nil
-        phoneIdentUpdated = nil
-    }
-
-    func receiveBoxHealth(_ bits: UInt8) {
-        boxHealth = BoxHealth(rawValue: bits)
-        boxHealthUpdated = Date()
-    }
-    func receiveBtPhase(_ phase: UInt8) {
-        btPhase = BtPhase(rawValue: phase)
-        btPhaseUpdated = Date()
-    }
-    func receivePhoneIdent(_ ident: PhoneIdent?) {
-        phoneIdent = ident
-        phoneIdentUpdated = Date()
-    }
-
-    /// (Re)query the adapter snapshot. Also clears a stuck `busy` (an action whose ACK never arrived —
-    /// e.g. reboot dropped the link), so Refresh always recovers the UI. No-op if not connected.
-    ///
-    /// The box answers CH_MGMT while idle (ocbmd's handle_mgmt has no session gate), which is why this
-    /// tab works pre-projection — so no `subscribed` gate is wanted here, only the reply deadline below.
-    func refresh() {
-        clearBusy()
-        guard let client else { info = nil; statusText = "Adapter not connected"; return }
-        statusText = "Querying adapter…"
-        stale = false
-        client.requestBoxInfo()
-        // Deadline: without it a box that never replies left "Querying adapter…" latched forever.
-        armTimeout()
-    }
-    func receiveInfo(_ info: CCPAInfo?) {
-        clearBusy()
-        if let info {
-            self.info = info
-            lastUpdated = Date()
-            statusText = "Connected"
-            stale = false
-        } else {
-            statusText = "Failed to read adapter info"
-        }
-    }
-    func receiveAck(verb: UInt8, status: UInt8) {
-        clearBusy()
-        if status != 0 { statusText = "Action failed" }
-        // A reboot drops the OCBM link; anything else, re-query to reflect the new state.
-        if verb != OCBM.mgmtReboot && verb != OCBM.mgmtEnterNCM { client?.requestBoxInfo() }
-        if verb == OCBM.mgmtEnterNCM && status == 0 { statusText = "Rebooting into NCM mode…" }
-    }
-    func restartWireless() { setBusy(); client?.boxRestartWireless() }
-    func forgetAll() { setBusy(); client?.boxForgetAll() }
-    func forgetDevice(_ mac: String) { setBusy(); client?.boxForgetDevice(mac) }
-    func reboot() { setBusy("Rebooting adapter…"); client?.boxReboot() }
-    /// Sticky NCM maintenance mode (ssh/telnet over USB-NCM, no OCBM). Return via ssh:
-    /// `rm /script/ncm_only; reboot`. Also reachable without the UI via `carlink://box/enter-ncm`.
-    func enterNCM() { setBusy("Entering NCM mode…"); client?.boxEnterNCM() }
-
-    /// Enter the busy state with a self-healing timeout: if no ACK/info clears it within 6 s (a lost ACK,
-    /// or an action that tore the link down before replying), reset so the form isn't stuck disabled.
-    private func setBusy(_ status: String? = nil) {
-        busy = true
-        if let status { statusText = status }
-        armTimeout()
-    }
-    /// Arm the shared 6 s self-heal deadline (generation-guarded — a newer action, receiveInfo's
-    /// clearBusy or a re-arm voids it). Shared by setBusy() and refresh() so a query with no reply
-    /// resolves to "No response from adapter" instead of latching its "…" status forever.
-    private func armTimeout() {
-        busyGen += 1
-        let gen = busyGen
-        Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 6_000_000_000)
-            guard let self, self.busyGen == gen else { return } // a newer action / a completion voided it
-            self.busy = false
-            if self.statusText.hasSuffix("…") { self.statusText = "No response from adapter" }
-        }
-    }
-    /// Clear busy and void any pending timeout (bump the generation so a stale timer no-ops).
-    private func clearBusy() {
-        busy = false
-        busyGen += 1
-    }
-
-    /// "1d 03:14:05" style uptime from seconds.
-    static func uptime(_ s: Int) -> String {
-        let d = s / 86400, h = (s % 86400) / 3600, m = (s % 3600) / 60, sec = s % 60
-        return d > 0 ? String(format: "%dd %02d:%02d:%02d", d, h, m, sec)
-                     : String(format: "%02d:%02d:%02d", h, m, sec)
-    }
-}
-
-/// A green/red status dot + label for a health row.
-private struct HealthRow: View {
-    let title: String
-    let ok: Bool
-    var detail: String = ""
-    var body: some View {
-        LabeledContent(title) {
-            HStack(spacing: 6) {
-                Circle().fill(ok ? Color.green : Color.red).frame(width: 8, height: 8)
-                Text(detail.isEmpty ? (ok ? "up" : "down") : detail).foregroundStyle(.secondary)
-            }
-        }
-    }
-}
-
-struct CCPATab: View {
-    @ObservedObject var store = CCPABridge.shared
-    @State private var confirmReboot = false
-    @State private var confirmForgetAll = false
-    @State private var confirmEnterNCM = false
-    @State private var forgetMac: String?
-
-    var body: some View {
-        Form {
-            if let i = store.info {
-                Section("Identity") {
-                    LabeledContent("Name", value: i.name)
-                    LabeledContent("Bluetooth MAC", value: i.bt_mac)
-                    LabeledContent("Wi-Fi MAC", value: i.wifi_mac)
-                    LabeledContent("Serial", value: i.serial)
-                }
-                Section("Health") {
-                    LabeledContent("Uptime", value: CCPABridge.uptime(i.uptime_s))
-                    LabeledContent("Storage", value: "\(i.rootfs_pct)% used · \(i.rootfs_free_kb / 1024) MB free")
-                    HealthRow(title: "Bluetooth", ok: i.hci_up && i.ssp,
-                              detail: i.hci_up ? (i.ssp ? "up · SSP on" : "up · SSP OFF") : "down")
-                    HealthRow(title: "Wi-Fi AP", ok: i.wlan_ap)
-                    LabeledContent("Transport", value: i.transport.isEmpty ? "idle" : i.transport)
-                    // Phone presence is a state, not a fault — show it plainly (like Transport), not a red dot.
-                    LabeledContent("Phone", value: i.phone_present ? "connected" : "none")
-                    // Daemon health = the always-on core (ocbmd). airplayd/iap2d are on-demand (session-only),
-                    // so requiring them would falsely read as a fault at idle; the detail lists what's running.
-                    HealthRow(title: "Daemons", ok: i.daemons.ocbmd, detail: daemonSummary(i.daemons))
-                }
-                Section("Known Devices") {
-                    if i.devices.isEmpty {
-                        Text("No paired devices").foregroundStyle(.secondary)
-                    } else {
-                        ForEach(i.devices, id: \.self) { mac in
-                            HStack {
-                                Text(mac).font(.system(.body, design: .monospaced))
-                                Spacer()
-                                Button("Forget") { forgetMac = mac }
-                                    .buttonStyle(.borderless).foregroundStyle(.red)
-                            }
-                        }
-                    }
-                }
-            }
-            // Live receive-side A/V stream health (measured on the Mac). Independent of the box mgmt
-            // snapshot above — it reads the OCBM decrypt layer's per-stream counters at ~1 Hz.
-            StreamPerfSection()
-            Section {
-                Button { store.restartWireless() } label: {
-                    Label("Restart wireless stack", systemImage: "wifi")
-                }
-                Button(role: .destructive) { confirmForgetAll = true } label: {
-                    Label("Forget all paired devices", systemImage: "trash")
-                }
-                Button(role: .destructive) { confirmReboot = true } label: {
-                    Label("Restart adapter", systemImage: "arrow.clockwise.circle")
-                }
-                Button(role: .destructive) { confirmEnterNCM = true } label: {
-                    Label("Enter NCM maintenance mode", systemImage: "terminal")
-                }
-            } header: {
-                Text("Controls")
-            } footer: {
-                Text("Restart adapter reboots the CCPA — the reliable recovery if Bluetooth wedges. It interrupts any live CarPlay session. NCM mode reboots the box as a USB network device for ssh maintenance; CarPlay stays off until it is returned with `rm /script/ncm_only; reboot` over ssh.")
-                    .font(.caption)
-            }
-        }
-        .formStyle(.grouped)
-        .disabled(store.busy)
-        .safeAreaInset(edge: .bottom) {
-            HStack(spacing: 10) {
-                if store.busy { ProgressView().controlSize(.small) }
-                Text(statusLine).font(.callout).foregroundStyle(.secondary)
-                Spacer()
-                Button("Refresh", systemImage: "arrow.clockwise") { store.refresh() }
-            }
-            .padding(12).background(.bar)
-        }
-        .onAppear { store.refresh() }
-        .confirmationDialog("Restart the adapter now?", isPresented: $confirmReboot) {
-            Button("Restart Adapter", role: .destructive) { store.reboot() }
-            Button("Cancel", role: .cancel) {}
-        } message: { Text("The CCPA will reboot and any live CarPlay session will drop.") }
-        .confirmationDialog("Forget all paired devices?", isPresented: $confirmForgetAll) {
-            Button("Forget All", role: .destructive) { store.forgetAll() }
-            Button("Cancel", role: .cancel) {}
-        } message: { Text("Every phone will need to pair again.") }
-        .confirmationDialog("Reboot into NCM maintenance mode?", isPresented: $confirmEnterNCM) {
-            Button("Enter NCM Mode", role: .destructive) { store.enterNCM() }
-            Button("Cancel", role: .cancel) {}
-        } message: { Text("The CCPA reboots as a USB network device with ssh/telnet enabled and no CarPlay. It stays in NCM mode until returned over ssh (rm /script/ncm_only; reboot).") }
-        .confirmationDialog("Forget this device?", isPresented: Binding(
-            get: { forgetMac != nil }, set: { if !$0 { forgetMac = nil } }
-        )) {
-            Button("Forget", role: .destructive) { if let m = forgetMac { store.forgetDevice(m) }; forgetMac = nil }
-            Button("Cancel", role: .cancel) { forgetMac = nil }
-        } message: { Text(forgetMac.map { "\($0) will need to pair again." } ?? "") }
-    }
-
-    private var statusLine: String {
-        if let d = store.lastUpdated, store.info != nil {
-            let ago = max(0, Int(Date().timeIntervalSince(d)))
-            // `stale` = the snapshot predates the current session (set on teardown) — say so rather
-            // than let an old capture read as live data.
-            let staleMark = store.stale ? " · stale (from previous session)" : ""
-            return "\(store.statusText) · updated \(ago)s ago\(staleMark)"
-        }
-        return store.statusText
-    }
-
-    private func daemonSummary(_ d: CCPAInfo.Daemons) -> String {
-        var up: [String] = []
-        if d.ocbmd { up.append("ocbmd") }
-        if d.iap2d { up.append("iap2d") }
-        if d.airplayd { up.append("airplayd") }
-        if d.carplay_wireless { up.append("wireless") }
-        return up.isEmpty ? "none" : up.joined(separator: ", ")
-    }
-}
-
 struct SettingsRootView: View {
     var body: some View {
+        // Tabs are named for WHO OWNS the setting, not for a protocol (DESIGN.md §1): Vehicle is the
+        // neutral profile with each row's per-protocol rendering shown inline, Adapter is the box and
+        // its radios, Diagnostics is neither. Protocol-exclusive settings live as badged sub-groups
+        // inside the feature they belong to — there is deliberately no "CarPlay" or "Android Auto" tab.
         TabView {
-            ConfigurationTab()
-                .tabItem { Label("Configuration", systemImage: "slider.horizontal.3") }
-            CCPATab()
-                .tabItem { Label("CCPA", systemImage: "cpu") }
+            VehicleTab()
+                .tabItem { Label("Vehicle", systemImage: "car") }
+            AdapterTab()
+                .tabItem { Label("Adapter", systemImage: "cpu") }
             DiagnosticsTab()
                 .tabItem { Label("Diagnostics", systemImage: "text.alignleft") }
         }
         .frame(width: 460, height: 620)
-    }
-}
-
-// MARK: - Box Log settings (CT_LOG_CTL — NOT part of the pushed VehicleConfig YAML)
-
-/// "Stream box log to this app" + cap — persisted directly in UserDefaults (its own keys, not the
-/// `VehicleConfigModel.prefix` namespace) because this does not ride the YAML pushed at SUBSCRIBE: the
-/// box arms/disarms CH_LOG purely from `CT_LOG_CTL` on CH_CTRL (docs/carplay/01_OCBM_PROTOCOL.md
-/// CH_LOG). Default ON / 256 KB matches the box's own CT_LOG_CTL default (cap 0 ⇒ 256 KB).
-@MainActor
-final class BoxLogSettings: ObservableObject {
-    static let shared = BoxLogSettings()
-
-    private static let enabledKey = "boxLogStreamEnabled"
-    private static let capKey = "boxLogCapKB"
-    private let d = UserDefaults.standard
-
-    @Published var streamEnabled: Bool { didSet { d.set(streamEnabled, forKey: Self.enabledKey); applyNow?(streamEnabled, UInt16(clamping: capKB)) } }
-    @Published var capKB: Int { didSet { d.set(capKB, forKey: Self.capKey); applyNow?(streamEnabled, UInt16(clamping: capKB)) } }
-
-    /// Wired by AppDelegate to the live `OCBMClient` (nil when disconnected) — lets a Settings change
-    /// take effect immediately over `sendLogCtl` rather than waiting for the next SUBSCRIBE.
-    var applyNow: ((Bool, UInt16) -> Void)?
-
-    private init() {
-        streamEnabled = d.object(forKey: Self.enabledKey) as? Bool ?? true
-        capKB = d.object(forKey: Self.capKey) as? Int ?? 256
-    }
-}
-
-struct DiagnosticsTab: View {
-    @ObservedObject var settings = BoxLogSettings.shared
-
-    var body: some View {
-        Form {
-            Section {
-                Toggle("Stream box log to this app", isOn: $settings.streamEnabled)
-                Stepper("Cap: \(settings.capKB) KB", value: $settings.capKB, in: 32...4096, step: 32)
-                    .disabled(!settings.streamEnabled)
-            } header: {
-                Text("Box Log")
-            } footer: {
-                Text("Streams the box's universal log (/tmp/box.log) over OCBM CH_LOG into Window ▸ Box Log, and into this app's own combined session log. Re-armed automatically after every SUBSCRIBE.")
-                    .font(.caption)
-            }
-        }
-        .formStyle(.grouped)
     }
 }
 
@@ -2383,15 +1450,13 @@ final class SettingsWindowController: NSWindowController {
 }
 
 // MARK: - AA projection from the observable model
-
-extension AACapability {
-    /// Snapshot the shared vehicle profile on the main actor, then hand the Sendable value to the
-    /// AA session thread. Lives here, not in AACapability.swift, so that file stays free of the
-    /// UI model and compiles in the hardware-free test harness.
-    @MainActor
-    init(config: VehicleConfigModel, warn: (String) -> Void = { NSLog("[AA] \($0)") }) {
-        self.init(mainWidth: config.mainWidth, mainHeight: config.mainHeight, maxFPS: config.maxFPS,
-                  name: config.name, nightMode: config.nightMode,
-                  rightHandDrive: config.rightHandDrive, warn: warn)
-    }
-}
+//
+// REMOVED 2026-09-04: `AACapability.init(config:)`, the six-field bridge that snapshotted
+// mainWidth/mainHeight/maxFPS/name/nightMode/rightHandDrive out of this CarPlay-shaped model.
+// Android Auto now renders from the NEUTRAL profile via `AACapability.init(profile:adapter:
+// autoThemeIsDark:warn:)` in AA/AACapability+Profile.swift, which is what AppDelegate calls.
+//
+// The old bridge could not be kept as a convenience: it is structurally incapable of expressing the
+// two values that made the profile neutral in the first place — `theme == .auto` and
+// `driverPosition == .center` both collapse into the legacy booleans it read. Leaving it in place
+// would have offered a call site that silently downgrades them.

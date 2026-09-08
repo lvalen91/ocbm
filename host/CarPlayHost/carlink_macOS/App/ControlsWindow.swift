@@ -75,6 +75,7 @@ final class ControlsBridge: ObservableObject {
         case limitedUI          // AA: driving_status bitmask
         case keyframe           // AA has NO head-unit keyframe request at all
         case altDisplay         // AA projects one display
+        case viewArea           // CarPlay-only: the Dock resize transition (updateViewArea). AA has no view areas
     }
 
     /// Can the ACTIVE protocol express this intent?
@@ -85,7 +86,7 @@ final class ControlsBridge: ObservableObject {
             return true
         case .displayAppearance:
             return true            // mapped onto night_mode — the only AA appearance lever
-        case .callExtras, .navAppearance, .keyframe, .altDisplay:
+        case .callExtras, .navAppearance, .keyframe, .altDisplay, .viewArea:
             return false           // no AA counterpart exists
         case .cluster:
             return false           // AA supports it; WE do not yet (docs/androidauto/01_SESSION_AND_AV.md Phase 4)
@@ -100,6 +101,7 @@ final class ControlsBridge: ObservableObject {
         case .navAppearance:   return "Android Auto derives appearance from Night Mode"
         case .keyframe:        return "Android Auto has no head-unit keyframe request"
         case .altDisplay:      return "Android Auto projects a single display"
+        case .viewArea:        return "Android Auto has no view areas"
         case .cluster:         return "instrument cluster not implemented for Android Auto yet"
         default:               return "not available on Android Auto"
         }
@@ -318,6 +320,18 @@ final class ControlsBridge: ObservableObject {
     /// airplayd `handle_input_frame` -> `events::send_force_key_frame()`), exposed for the case the
     /// detectors miss: frames arriving and decoding, but the PICTURE wrong. Nothing new on the wire.
     /// No-op between sessions, by the box's own check.
+    /// Command a MAIN-display view-area transition (2026-09-07) — the deterministic form of pressing
+    /// the CarPlay Dock resize button. Reaches the box as `[inputCommand][cmdViewArea][index]`; the
+    /// box answers `updateViewArea` and refuses an undeclared index. Used by the ControlServer's
+    /// `viewarea request <index>` and routed here, like every other intent, so an AA session cannot
+    /// receive a CarPlay /command and the outcome lands in `lastSent` where the UI shows it.
+    func requestViewArea(_ index: UInt8) {
+        let wire = "/command updateViewArea {viewAreaIndex: \(index)}"
+        if refuseIfUnavailable(.viewArea, wire) { return }
+        guard let client else { report(.droppedNotSubscribed, wire); return }
+        client.sendViewArea(index) { [weak self] o in self?.report(o, wire) }
+    }
+
     func requestKeyframe() {
         // AA has NO head-unit keyframe request (docs/androidauto/01_SESSION_AND_AV.md): there is no message to send, and recovery
         // waits for the phone's periodic IDR. Sending the OCBM one during an AA session would command

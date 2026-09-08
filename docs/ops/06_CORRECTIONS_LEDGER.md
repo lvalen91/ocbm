@@ -835,7 +835,9 @@ setter, not the line.)* GROUND TRUTH is `vehicle_config.rs`'s accessors plus the
 calls in `ccpa/airplayd/src/main.rs` — not this list, and not the app's.
 
 (This is the generic `inertMarker` set; a few other dead fields — e.g. `rightHandDrive`, `nightMode` —
-carry their own inline "not implemented" note in their entry below instead of appearing in this list.)
+carry their own inline "not implemented" note in their entry below instead of appearing in this list.
+`rightHandDrive` stopped being dead on 2026-09-05 — it is an `/info` key, emission landing, unverified;
+see R-26-1's correction and docs/carplay/04_CAPABILITIES_AND_CONFIG.md §rightHandDrive.)
 Treat any capability below as a *declaration of intent* unless its wiring is confirmed in
 `info.rs`/`vehicle_config.rs`. (`dPadSupport` is NOT inert — it gates the `hidDevices[]` entry — but per
 ../carplay/05_METADATA_AND_CONTROLS.md §2.7.4 it contributes nothing to `displays[].features`.)
@@ -885,6 +887,15 @@ by `CMD_NIGHT_MODE` (`ocbm-proto` 0x10) from the host Controls window, and the h
 is still not parsed and still not an `/info` key** — the live path is a runtime appearance command, not
 that config field — and **`rightHandDrive` is still fully inert** (no `/info` key, no parser). docs/carplay/04_CAPABILITIES_AND_CONFIG.md's
 entries now say so instead of claiming either is sent.
+
+**CORRECTED 2026-09-05 — "no `/info` key" was wrong for `rightHandDrive`.** R14G17 defines
+`kAirPlayKey_RightHandDrive "rightHandDrive"` as an Info Message boolean (`AppleCarPlay/Sources/AirPlayCommon.h:1103`,
+emitted into `/info` at `AirPlayReceiverServer.c:637-646`, Integration Guide line 385), and
+docs/carplay/03_SDK_GROUND_TRUTH.md §3 listed it among the `/info` keys the whole time. "No parser" was
+true. The 2026-09-02 drop-from-YAML resolution (docs/ops/04_OPEN_ITEMS.md) stands for `nightMode` only;
+`rightHandDrive` is reopened as an unimplemented-not-absent capability, with box `/info` emission +
+parser + app re-emit landing 2026-09-05 and NOT yet device-verified. Owning entry:
+docs/carplay/04_CAPABILITIES_AND_CONFIG.md §rightHandDrive.
 
 ### R-26-2 · Four of the "missing optional features" have since landed
 

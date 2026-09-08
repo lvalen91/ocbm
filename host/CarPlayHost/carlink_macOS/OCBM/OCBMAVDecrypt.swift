@@ -220,6 +220,10 @@ final class OCBMAVDecrypt: @unchecked Sendable {
     /// the decrypt layer no longer sniffs the codec). Surfaced in the metrics `codec` field per lane.
     func setVideoCodec(_ label: String, stream: StreamKind) {
         stats.withLock { $0.metrics.setVideoCodec(stream, label) }
+        // Config-in-force check (2026-09-05): the codec the decoder ACTUALLY parsed is the second
+        // tell — that session was H.264 with `hevc: true` pushed. Main lane only; the alt lane has
+        // no pushed codec of its own.
+        if stream == .mainVideo { ConfigIntegrity.shared.noteCodec(label) }
     }
 
     // D1 decouple (perf 2026-08-09): the USB read thread must ONLY demux. Each lane's whole feed (seam
@@ -563,6 +567,11 @@ final class OCBMAVDecrypt: @unchecked Sendable {
         return false
     }
 
+    /// The last video key + stream id we saw, to tell a NEW stream from a seam-reconnect re-send of
+    /// the same one. See the boundary note in `drainVideo`.
+    private var lastVideoKeyMaterial: [UInt8] = []
+    private var lastVideoSCID: [UInt8] = []
+
     private func drainVideo() {
         while let msg = nextVideoMessage() {
             guard let marker = msg.first else { continue }
@@ -574,6 +583,29 @@ final class OCBMAVDecrypt: @unchecked Sendable {
                 // longer applies, so re-earn it (worst case is the always-safe OR-both path for longer).
                 videoNoKeyDrops = 0
                 log.info("received video key")
+                // Per-STREAM boundary for the config-in-force check (2026-09-05): the RS_OPEN that
+                // vouches for THIS stream is the one seen since the previous key. Observation-only
+                // publish into a Foundation singleton — no settings model reaches this path.
+                //
+                // ONLY on a genuinely NEW key. airplayd re-sends the SAME key on a seam RECONNECT,
+                // not just on a new SETUP (`session.rs:2417` `out.is_none() || !key_sent`, and
+                // `:2440` clears `key_sent` when a write drops the seam). Treating that as a new
+                // stream cleared `setupOpenSeen` mid-session and made the next VideoConfig report
+                // "no RS_OPEN … BOX IS ON BUILT-IN DEFAULTS … touch is scaled against the box's
+                // panel" about a stream whose SETUP really was app-driven and whose touch was fine.
+                // That fires precisely during an ocbmd restart — the incident this whole guard
+                // exists for — so it would have handed the operator a confident wrong diagnosis at
+                // the exact moment they were looking. A byte-identical key+scid is the same stream.
+                let keyMaterial = Array(msg[1..<33])
+                let scid = msg.count >= 41 ? Array(msg[33..<41]) : []
+                let isNewStream = keyMaterial != lastVideoKeyMaterial || scid != lastVideoSCID
+                lastVideoKeyMaterial = keyMaterial
+                lastVideoSCID = scid
+                if isNewStream {
+                    ConfigIntegrity.shared.noteVideoStreamStarted()
+                } else {
+                    log.info("video key re-sent for the same stream (seam reconnect) — config-in-force verdict kept")
+                }
             case 0x01 where msg.count >= 1 + 8 + 128: // [0x01][seq 8 LE][hdr 128][body]
                 var seq: UInt64 = 0
                 for k in 0..<8 { seq |= UInt64(msg[1 + k]) << (8 * k) }
@@ -581,8 +613,31 @@ final class OCBMAVDecrypt: @unchecked Sendable {
                 let body = msg[137...]   // decrypt takes DataProtocol slices → no per-frame copy (MB on a 4K IDR).
                 let opcode = msg[13]     // header offset 4 = msg[9+4]; hdr is now a NON-0-based slice.
                 if opcode == 1 {
+                    // STAGE 0 (2026-09-05): read the VIEW-AREA RECT that has been arriving here all
+                    // along and been discarded.
+                    //
+                    // Apple carries the current view area IN-BAND, in this 128-byte header, on every
+                    // opcode-1 (VideoConfig) record — not as a /command, not over RTSP. Settled by
+                    // disassembling the (unstripped) CarPlaySDK.framework:
+                    // `_AirPlayReceiverSessionScreen_ProcessFrames` @0x1300c reads these floats and
+                    // hands them to `ScreenStreamSetWidthHeight` + `ScreenStreamSetViewArea`
+                    // (docs/carplay/06_AV_PIPELINE.md §3). The box forwards the whole header verbatim
+                    // — it is also this frame's AEAD AAD — so the app has always had it.
+                    //
+                    // Reading it needs NO box change, NO new OCBM opcode and NO relay route. With a
+                    // single full-panel view area (today's config) the rect is CONSTANT and equal to
+                    // the panel, which makes this self-verifying: right offsets ⇒ one line naming the
+                    // panel and silence forever after; wrong offsets ⇒ obvious garbage immediately.
+                    //
+                    // ORDER (2026-09-05): the delegate goes FIRST. The bridge's `receiveConfig` parses
+                    // avcC/hvcC and fires `onCodec` → `setVideoCodec` → `ConfigIntegrity.noteCodec`
+                    // synchronously on this lane queue, so by the time `observe` publishes the coded
+                    // size the codec is already known and the config-in-force verdict is ONE line
+                    // naming both (`box coded 1920x720 (H.264), pushed 2400x960 (HEVC)`), not a
+                    // geometry line followed by a codec line.
                     // VideoConfig: plaintext avcC/hvcC — no decrypt, no counter.
                     delegate?.avDidReceiveVideoConfig(Data(body))
+                    ScreenGeometry.observe(hdr)
                 } else if opcode == 0 {
                     guard let key = videoKey else {
                         // Silent otherwise: no key ⇒ every frame is discarded and both tallies stay 0.
@@ -1011,5 +1066,107 @@ final class OCBMAVDecrypt: @unchecked Sendable {
             }
             return false
         }
+    }
+}
+
+
+// MARK: - View-area geometry carried in the screen header (Stage 0)
+
+/// The coded frame size and current view-area rect, as iOS reports them in every opcode-1
+/// (VideoConfig) screen header.
+///
+/// LAYOUT (`CarPlaySDK.framework`, `_AirPlayReceiverSessionScreen_ProcessFrames` @0x1300c-0x13070;
+/// all little-endian f32):
+///
+///     +0x10 / +0x14   coded width, height      (R14G17 AirPlayReceiverSessionScreen.c:549 params[1])
+///     +0x20 / +0x24   view-area originX, originY
+///     +0x28 / +0x2c   view-area width, height
+///
+/// NOTE the SDK's setter is `ScreenStreamSetViewArea(stream, width, height, originX, originY)` — this
+/// project's docs previously recorded it as `(x, y, w, h)`, wrong in both order and first pair.
+///
+/// Deliberately observation-only: it logs on CHANGE and publishes the latest value for the control
+/// socket. Nothing consumes it to move a window yet — that is Stage 2, and it must not land before a
+/// capture tells us whether iOS keeps the coded size constant and moves the crop, or re-encodes at the
+/// new size. Apple's own receiver tolerates both, so ours will have to.
+struct ScreenGeometry: Sendable, Equatable {
+    var codedWidth: Float = 0
+    var codedHeight: Float = 0
+    var originX: Float = 0
+    var originY: Float = 0
+    var width: Float = 0
+    var height: Float = 0
+
+    /// True when the view area covers the whole coded frame — the single-area case, and what a
+    /// correct parse must report on today's config.
+    var isFullFrame: Bool {
+        originX == 0 && originY == 0 && width == codedWidth && height == codedHeight
+    }
+
+    var summary: String {
+        "coded \(Int(codedWidth))x\(Int(codedHeight)) area \(Int(width))x\(Int(height))"
+            + "@\(Int(originX)),\(Int(originY))\(isFullFrame ? " (full frame)" : " (SUB-RECT)")"
+    }
+
+    /// The most recent geometry, for `ControlServer`'s `get viewarea`. `nil` until the first
+    /// VideoConfig of a session.
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var _latest: ScreenGeometry?
+    nonisolated(unsafe) private static var _changes = 0
+    static var latest: (geometry: ScreenGeometry, changes: Int)? {
+        lock.lock(); defer { lock.unlock() }
+        guard let g = _latest else { return nil }
+        return (g, _changes)
+    }
+    /// Session teardown — a stale rect from the previous session must not read as live.
+    static func reset() {
+        lock.lock(); defer { lock.unlock() }
+        _latest = nil; _changes = 0
+    }
+
+    /// Parse one screen header and record it, logging only when the value CHANGES.
+    ///
+    /// Per-change, not per-record: a config record repeats on every keyframe, so logging each one
+    /// would bury the transition we are actually hunting for. The change count is what answers the
+    /// open question — with one view area it must stay at 1 for a whole session.
+    static func observe(_ hdr: ArraySlice<UInt8>) {
+        let base = hdr.startIndex
+        guard hdr.count >= 0x30 else { return }
+        func f32(_ off: Int) -> Float {
+            var raw: UInt32 = 0
+            for k in 0..<4 { raw |= UInt32(hdr[base + off + k]) << (8 * k) }
+            return Float(bitPattern: raw)
+        }
+        let g = ScreenGeometry(codedWidth: f32(0x10), codedHeight: f32(0x14),
+                               originX: f32(0x20), originY: f32(0x24),
+                               width: f32(0x28), height: f32(0x2c))
+        // A header whose floats are not finite means the offsets are wrong, not that iOS sent
+        // nonsense — say so once rather than publishing garbage.
+        guard g.codedWidth.isFinite, g.codedHeight.isFinite, g.width.isFinite, g.height.isFinite,
+              g.codedWidth > 0, g.codedHeight > 0 else {
+            lock.lock(); let first = _changes == 0; _changes = -1; lock.unlock()
+            if first {
+                Logger(subsystem: "com.carlink.ocbm", category: "screengeom")
+                    .error("view-area header parse looks wrong — non-finite/zero floats at +0x10..+0x2c")
+            }
+            return
+        }
+        lock.lock()
+        let changed = _latest != g
+        if changed { _latest = g; _changes += 1 }
+        let n = _changes
+        lock.unlock()
+        if changed {
+            Logger(subsystem: "com.carlink.ocbm", category: "screengeom")
+                .info("view area #\(n, privacy: .public): \(g.summary, privacy: .public)")
+        }
+        // Config-in-force check (2026-09-05): the coded size is what the phone is ACTUALLY encoding,
+        // and it is compared against the pushed main panel in `ConfigIntegrity` — which is where the
+        // pushed side lives, so this path stays free of the settings model. That session ran
+        // 1920×720 against a pushed 2400×960 and this header carried the truth on every keyframe;
+        // it was parsed and never compared. Published on EVERY record, not only on change: a new
+        // stream with the same geometry as the last (phone reconnect) still needs its own verdict —
+        // `ConfigIntegrity` clears per stream and logs each distinct verdict once.
+        ConfigIntegrity.shared.noteCoded(width: Int(g.codedWidth), height: Int(g.codedHeight))
     }
 }

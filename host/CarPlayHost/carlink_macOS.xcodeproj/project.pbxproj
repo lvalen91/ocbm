@@ -41,6 +41,17 @@
 		AAB1C0E22F99EEEE00D517FC /* ControlPopups.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAB1C0E32F99EEEE00D517FC /* ControlPopups.swift */; };
 		AA5F9E062F99BBBB00D517FC /* MetadataWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5F9E072F99BBBB00D517FC /* MetadataWindow.swift */; };
 		AA5F9E082F99CCCC00D517FC /* SettingsWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5F9E092F99CCCC00D517FC /* SettingsWindow.swift */; };
+		AA5F9F502F9C000100D517FC /* VehicleProfile.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5F9F512F9C000100D517FC /* VehicleProfile.swift */; };
+		AA5F9F522F9C000100D517FC /* FeatureMatrix.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5F9F532F9C000100D517FC /* FeatureMatrix.swift */; };
+		AA5F9F602F9C000100D517FC /* VehicleConfigModel+Profile.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5F9F612F9C000100D517FC /* VehicleConfigModel+Profile.swift */; };
+		AA5F9F622F9C000100D517FC /* ProfileDocumentIO.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5F9F632F9C000100D517FC /* ProfileDocumentIO.swift */; };
+		AA5F9F642F9C000100D517FC /* ProfileDocumentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5F9F652F9C000100D517FC /* ProfileDocumentView.swift */; };
+		AA5F9F662F9C000100D517FC /* FeatureBadges.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5F9F672F9C000100D517FC /* FeatureBadges.swift */; };
+		AA5F9F682F9C000100D517FC /* AACapability+Profile.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5F9F692F9C000100D517FC /* AACapability+Profile.swift */; };
+		AA5F9F542F9C000100D517FC /* FieldInfo.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5F9F552F9C000100D517FC /* FieldInfo.swift */; };
+		AA5F9F562F9C000100D517FC /* VehicleTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5F9F572F9C000100D517FC /* VehicleTab.swift */; };
+		AA5F9F582F9C000100D517FC /* AdapterTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5F9F592F9C000100D517FC /* AdapterTab.swift */; };
+		AA5F9F5A2F9C000100D517FC /* DiagnosticsTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5F9F5B2F9C000100D517FC /* DiagnosticsTab.swift */; };
 		AA5F9E0A2F99DDDD00D517FC /* AltVideoWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5F9E0B2F99DDDD00D517FC /* AltVideoWindow.swift */; };
 		AA5F9E042F99010000D517FC /* KeyboardShortcutsPresenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5F9E052F99010000D517FC /* KeyboardShortcutsPresenter.swift */; };
 		AA5F9E062F99020000D517FC /* FileLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5F9E072F99020000D517FC /* FileLogger.swift */; };
@@ -57,6 +68,8 @@
 		E61D7BE4B6132194E00B591E /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEBE045458DB252D4476DB37 /* main.swift */; };
 		F621BDDDBF1E9D1A423CAD4D /* OCBMAVDecrypt.swift in Sources */ = {isa = PBXBuildFile; fileRef = D83EB7ADF0D3FC747CC5484B /* OCBMAVDecrypt.swift */; };
 		AA5F9E202F9B000100D517FC /* StreamMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5F9E212F9B000100D517FC /* StreamMetrics.swift */; };
+		AA5F9E302F9B000100D517FC /* ConfigIntegrity.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5F9E312F9B000100D517FC /* ConfigIntegrity.swift */; };
+		AA5F9E402F9B000200D517FC /* SessionFailureTracker.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5F9E412F9B000200D517FC /* SessionFailureTracker.swift */; };
 		AA5F9E222F9B000100D517FC /* StreamMetricsMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5F9E232F9B000100D517FC /* StreamMetricsMonitor.swift */; };
 		F8779BC87BCFB9EF9BB50152 /* USBDeviceManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A914C2B05DD40EB5DE6A3E29 /* USBDeviceManager.swift */; };
 /* End PBXBuildFile section */
@@ -96,6 +109,17 @@
 		AAB1C0E32F99EEEE00D517FC /* ControlPopups.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlPopups.swift; sourceTree = "<group>"; };
 		AA5F9E072F99BBBB00D517FC /* MetadataWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetadataWindow.swift; sourceTree = "<group>"; };
 		AA5F9E092F99CCCC00D517FC /* SettingsWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsWindow.swift; sourceTree = "<group>"; };
+		AA5F9F512F9C000100D517FC /* VehicleProfile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VehicleProfile.swift; sourceTree = "<group>"; };
+		AA5F9F532F9C000100D517FC /* FeatureMatrix.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeatureMatrix.swift; sourceTree = "<group>"; };
+		AA5F9F612F9C000100D517FC /* VehicleConfigModel+Profile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "VehicleConfigModel+Profile.swift"; sourceTree = "<group>"; };
+		AA5F9F632F9C000100D517FC /* ProfileDocumentIO.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ProfileDocumentIO.swift"; sourceTree = "<group>"; };
+		AA5F9F652F9C000100D517FC /* ProfileDocumentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ProfileDocumentView.swift"; sourceTree = "<group>"; };
+		AA5F9F672F9C000100D517FC /* FeatureBadges.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FeatureBadges.swift"; sourceTree = "<group>"; };
+		AA5F9F692F9C000100D517FC /* AACapability+Profile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AACapability+Profile.swift"; sourceTree = "<group>"; };
+		AA5F9F552F9C000100D517FC /* FieldInfo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FieldInfo.swift; sourceTree = "<group>"; };
+		AA5F9F572F9C000100D517FC /* VehicleTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VehicleTab.swift; sourceTree = "<group>"; };
+		AA5F9F592F9C000100D517FC /* AdapterTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdapterTab.swift; sourceTree = "<group>"; };
+		AA5F9F5B2F9C000100D517FC /* DiagnosticsTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsTab.swift; sourceTree = "<group>"; };
 		AA5F9E0B2F99DDDD00D517FC /* AltVideoWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AltVideoWindow.swift; sourceTree = "<group>"; };
 		AA5F9E052F99010000D517FC /* KeyboardShortcutsPresenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardShortcutsPresenter.swift; sourceTree = "<group>"; };
 		AA5F9E072F99020000D517FC /* FileLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileLogger.swift; sourceTree = "<group>"; };
@@ -111,6 +135,8 @@
 		D21D5C532BEB88E16FE6FFAB /* ic_phone_projection.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; name = ic_phone_projection.png; path = App/ic_phone_projection.png; sourceTree = "<group>"; };
 		D83EB7ADF0D3FC747CC5484B /* OCBMAVDecrypt.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = OCBMAVDecrypt.swift; sourceTree = "<group>"; };
 		AA5F9E212F9B000100D517FC /* StreamMetrics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamMetrics.swift; sourceTree = "<group>"; };
+		AA5F9E312F9B000100D517FC /* ConfigIntegrity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigIntegrity.swift; sourceTree = "<group>"; };
+		AA5F9E412F9B000200D517FC /* SessionFailureTracker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionFailureTracker.swift; sourceTree = "<group>"; };
 		AA5F9E232F9B000100D517FC /* StreamMetricsMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamMetricsMonitor.swift; sourceTree = "<group>"; };
 		D86F8F134EDEB5EB6D991D9B /* USBTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = USBTransport.swift; sourceTree = "<group>"; };
 		DEBE045458DB252D4476DB37 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
@@ -144,6 +170,7 @@
 				AA22220000000000000002 /* AATLS.swift */,
 				AA33330000000000000002 /* AASession.swift */,
 				AA55550000000000000012 /* AACapability.swift */,
+				AA5F9F692F9C000100D517FC /* AACapability+Profile.swift */,
 			);
 			path = AA;
 			sourceTree = "<group>";
@@ -166,6 +193,23 @@
 			path = USB;
 			sourceTree = "<group>";
 		};
+		AA5F9F5C2F9C000100D517FC /* Settings */ = {
+			isa = PBXGroup;
+			children = (
+				AA5F9F512F9C000100D517FC /* VehicleProfile.swift */,
+				AA5F9F532F9C000100D517FC /* FeatureMatrix.swift */,
+				AA5F9F552F9C000100D517FC /* FieldInfo.swift */,
+				AA5F9F572F9C000100D517FC /* VehicleTab.swift */,
+				AA5F9F592F9C000100D517FC /* AdapterTab.swift */,
+				AA5F9F5B2F9C000100D517FC /* DiagnosticsTab.swift */,
+				AA5F9F612F9C000100D517FC /* VehicleConfigModel+Profile.swift */,
+				AA5F9F632F9C000100D517FC /* ProfileDocumentIO.swift */,
+				AA5F9F652F9C000100D517FC /* ProfileDocumentView.swift */,
+				AA5F9F672F9C000100D517FC /* FeatureBadges.swift */,
+			);
+			path = Settings;
+			sourceTree = "<group>";
+		};
 		30B5817AA1A6FE0E72B98AD4 /* App */ = {
 			isa = PBXGroup;
 			children = (
@@ -181,6 +225,7 @@
 				AAB1C0E32F99EEEE00D517FC /* ControlPopups.swift */,
 				AA5F9E072F99BBBB00D517FC /* MetadataWindow.swift */,
 				AA5F9E092F99CCCC00D517FC /* SettingsWindow.swift */,
+				AA5F9F5C2F9C000100D517FC /* Settings */,
 				AA5F9E112F9A000100D517FC /* VehicleConfig.swift */,
 				AA5F9E0B2F99DDDD00D517FC /* AltVideoWindow.swift */,
 				AA5F9E052F99010000D517FC /* KeyboardShortcutsPresenter.swift */,
@@ -219,6 +264,8 @@
 				526DB240DAD948CE22812B03 /* OCBMFraming.swift */,
 				D83EB7ADF0D3FC747CC5484B /* OCBMAVDecrypt.swift */,
 				AA5F9E212F9B000100D517FC /* StreamMetrics.swift */,
+				AA5F9E312F9B000100D517FC /* ConfigIntegrity.swift */,
+				AA5F9E412F9B000200D517FC /* SessionFailureTracker.swift */,
 				0876A9B25E0763AC0FD2C4BD /* OCBMClient.swift */,
 				29A098A6F1EA51CBFAB6817E /* OCBMSessionCoordinator.swift */,
 				AA5F9E132F9A000100D517FC /* OCBMControlRelay.swift */,
@@ -348,6 +395,17 @@
 				AAB1C0E22F99EEEE00D517FC /* ControlPopups.swift in Sources */,
 				AA5F9E062F99BBBB00D517FC /* MetadataWindow.swift in Sources */,
 				AA5F9E082F99CCCC00D517FC /* SettingsWindow.swift in Sources */,
+				AA5F9F502F9C000100D517FC /* VehicleProfile.swift in Sources */,
+				AA5F9F522F9C000100D517FC /* FeatureMatrix.swift in Sources */,
+				AA5F9F602F9C000100D517FC /* VehicleConfigModel+Profile.swift in Sources */,
+				AA5F9F622F9C000100D517FC /* ProfileDocumentIO.swift in Sources */,
+				AA5F9F642F9C000100D517FC /* ProfileDocumentView.swift in Sources */,
+				AA5F9F662F9C000100D517FC /* FeatureBadges.swift in Sources */,
+				AA5F9F682F9C000100D517FC /* AACapability+Profile.swift in Sources */,
+				AA5F9F542F9C000100D517FC /* FieldInfo.swift in Sources */,
+				AA5F9F562F9C000100D517FC /* VehicleTab.swift in Sources */,
+				AA5F9F582F9C000100D517FC /* AdapterTab.swift in Sources */,
+				AA5F9F5A2F9C000100D517FC /* DiagnosticsTab.swift in Sources */,
 				AA5F9E0A2F99DDDD00D517FC /* AltVideoWindow.swift in Sources */,
 				AA5F9E042F99010000D517FC /* KeyboardShortcutsPresenter.swift in Sources */,
 				AA5F9E062F99020000D517FC /* FileLogger.swift in Sources */,
@@ -371,6 +429,8 @@
 				A84FD317611E0236CE7499AA /* OCBMFraming.swift in Sources */,
 				F621BDDDBF1E9D1A423CAD4D /* OCBMAVDecrypt.swift in Sources */,
 				AA5F9E202F9B000100D517FC /* StreamMetrics.swift in Sources */,
+				AA5F9E302F9B000100D517FC /* ConfigIntegrity.swift in Sources */,
+				AA5F9E402F9B000200D517FC /* SessionFailureTracker.swift in Sources */,
 				AA5F9E222F9B000100D517FC /* StreamMetricsMonitor.swift in Sources */,
 				28969F3960BFC750D789CF9D /* OCBMClient.swift in Sources */,
 				7C5803C7CBB4077EA7368C11 /* OCBMSessionCoordinator.swift in Sources */,

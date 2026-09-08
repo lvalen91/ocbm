@@ -43,6 +43,10 @@ final class CarPlayView: NSView {
     private let statusOverlay = CALayer()
     private let statusIconLayer = CALayer()
     private let statusTextLayer = CATextLayer()
+    /// Second overlay line (2026-09-05): the last session failure in the box's own words, from
+    /// OCBMSessionCoordinator.onStatusDetail. Empty ⇒ hidden, and the layout above it is untouched,
+    /// so a healthy idle box renders exactly as it did before this line existed.
+    private let statusDetailLayer = CATextLayer()
     private var isStreaming = false
 
     // Pairing-code panel (2026-09-03): the wireless SSP Numeric-Comparison code, one digit per shaded
@@ -127,6 +131,20 @@ final class CarPlayView: NSView {
         statusTextLayer.frame = CGRect(x: 0, y: 0, width: 400, height: 24)
         statusOverlay.addSublayer(statusTextLayer)
 
+        // Failure detail — smaller, wrapped, error-tinted, below the status line. Wrapped because the
+        // box's summary is a sentence, not a label ("iPhone sent TEARDOWN after RECORD (reason=…);
+        // before it the box logged: command response NOT OK: 'RTSP/1.0 400 Bad Request'; …").
+        statusDetailLayer.string = ""
+        statusDetailLayer.isHidden = true
+        statusDetailLayer.fontSize = 12
+        statusDetailLayer.font = NSFont.systemFont(ofSize: 12, weight: .regular)
+        statusDetailLayer.alignmentMode = .center
+        statusDetailLayer.isWrapped = true
+        statusDetailLayer.truncationMode = .end
+        statusDetailLayer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2.0
+        statusDetailLayer.frame = CGRect(x: 0, y: 0, width: 640, height: 64)
+        statusOverlay.addSublayer(statusDetailLayer)
+
         pairingPanel.isHidden = true
         pairingDash.cornerRadius = 18
         pairingDash.cornerCurve = .continuous
@@ -165,6 +183,12 @@ final class CarPlayView: NSView {
 
         statusIconLayer.contents = isDark ? iconDark : iconLight
         statusTextLayer.foregroundColor = textCG
+        // Failure text is an error: systemRed, resolved in this appearance like the label colours.
+        var detailCG: CGColor = CGColor(red: 1, green: 0.3, blue: 0.3, alpha: 0.9)
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            detailCG = NSColor.systemRed.withAlphaComponent(isDark ? 0.9 : 0.85).cgColor
+        }
+        statusDetailLayer.foregroundColor = detailCG
         applyPairingAppearance(isDark: isDark)
 
         CATransaction.commit()
@@ -235,6 +259,17 @@ final class CarPlayView: NSView {
             y: centerY - iconSize - gap - textH,
             width: 400,
             height: textH
+        )
+        // Detail hangs BELOW the status line without entering `totalH`: the icon/text block never
+        // moves when a failure appears or clears. Width tracks the window (with a margin) so the
+        // summary wraps instead of truncating on a narrow window.
+        let detailW = min(max(bounds.width - 48, 200), 720)
+        let detailH: CGFloat = 64
+        statusDetailLayer.frame = CGRect(
+            x: bounds.midX - detailW / 2,
+            y: centerY - iconSize - gap - textH - 8 - detailH,
+            width: detailW,
+            height: detailH
         )
         CATransaction.commit()
     }
@@ -406,6 +441,16 @@ final class CarPlayView: NSView {
         CATransaction.commit()
     }
 
+    /// The failure line under the status (nil/empty hides it). See `statusDetailLayer`.
+    func updateStatusDetail(_ text: String?) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        let t = text ?? ""
+        statusDetailLayer.string = t
+        statusDetailLayer.isHidden = t.isEmpty
+        CATransaction.commit()
+    }
+
     func setStreaming(_ streaming: Bool) {
         isStreaming = streaming
         CATransaction.begin()
@@ -460,6 +505,7 @@ final class CarPlayView: NSView {
         // Keep the status text crisp when the window moves between displays
         // with different backing scales (Retina ↔ non-Retina).
         statusTextLayer.contentsScale = window?.backingScaleFactor ?? 2.0
+        statusDetailLayer.contentsScale = window?.backingScaleFactor ?? 2.0
     }
 
     // MARK: - Mouse → Touch

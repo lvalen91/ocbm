@@ -1,0 +1,57 @@
+// =============================================================================================
+// NOT THE CANONICAL BUILD. `tools/build_apk.sh` is the shipping build path — it packages the
+// native libcarplayjni.so (this Gradle project does NOT), and without that .so the APK is signed,
+// installable, and PAIRING-INCAPABLE. These Gradle files exist for Android Studio editing/indexing
+// only. If you must build with Gradle: (a) the jniLibs.srcDirs below expects the .so to have been
+// built first by `cargo build --release --target x86_64-linux-android` in native/carplay-jni; and
+// (b) versionCode/versionName are kept in sync with AndroidManifest.xml (7 / "4.0") so a Gradle
+// build is not a silent downgrade that `adb install -r` rejects.
+// =============================================================================================
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace "zeno.gmccpa"  // install id == source package again; the fixed-handler squat was reverted 2026-09-08
+    compileSdk 32
+
+    defaultConfig {
+        applicationId "zeno.gmccpa"
+        minSdk 26          // safe floor for AAOS units
+        targetSdk 32       // Android 12 (GM Info 3.7 / API 32)
+        versionCode 7      // MUST match AndroidManifest.xml — kept constant across hardening
+        versionName "4.0"  // so install -r never rejects a rollback as a downgrade
+    }
+
+    sourceSets {
+        // The canonical build (build_apk.sh) builds and stores this .so; mirror the path here so a
+        // Gradle build at least packages whatever was last cargo-built rather than shipping none.
+        main.jniLibs.srcDirs += ["${rootProject.projectDir}/../native/jniLibs"]
+    }
+
+    buildTypes {
+        debug {
+            // default debuggable; sideload-friendly
+        }
+        release {
+            minifyEnabled false
+            // If minify is ever enabled, MfiRelay's methods are resolved by string name from Rust
+            // (call_method "copyCertificate"/"createSignature") and MUST NOT be renamed/stripped.
+            proguardFiles 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+    kotlinOptions {
+        jvmTarget = '1.8'
+    }
+}
+
+dependencies {
+    // Intentionally none. Everything used is in the platform SDK so the APK stays tiny and
+    // has no transitive AndroidX/version friction when sideloaded onto a locked user build.
+}

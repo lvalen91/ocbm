@@ -82,6 +82,15 @@ Wireless rides BT pair -> WiFi handoff -> AirPlay/RTSP -> OCBM; the inbound iAP2
 RemoteControlSession DataStream, stream type 130. App-driven SETUP is the default on **both**
 transports, with box-driven SETUP as the selectable sticky fallback.
 
+**Head-unit CarPlay app (`host/gm_ccpa/`) — device-proven on a 2024 Silverado.** A second, inverted
+architecture, merged in 2026-09-08: the phone streams CarPlay over the **vehicle's own** hotspot to an
+unprivileged AAOS app, and the adapter is reduced to the Bluetooth radio and the MFi coprocessor,
+carrying no media at all. Proven end to end against a real iPhone — BT/iAP2, the `0x5703` handoff,
+pair-setup and pair-verify, HEVC 2400x960 on the Intel hardware decoder, AAC-LC audio, touch, now-playing
+metadata on the AAOS media card, CarPlay dynamic resize, and vehicle state driving the CarPlay UI
+(drive-restricted UI from `GEAR_SELECTION`, day/night from `NIGHT_MODE`). It links this tree's
+`receiver`/`pairing`/`mfi` crates through JNI, so the protocol has one home.
+
 **Android Auto — wired and wireless, both device-proven against a Pixel 10.** Wired: the box does
 the AOAP switch and pumps raw bytes (`ccpa/aa-bridge`). Wireless: the box pages the bonded phone,
 completes an HFP hands-free link (the gate gearhead waits on), the phone dials the box's own AA
@@ -116,10 +125,12 @@ every client against it — the Swift client, the Kotlin client, and a sibling c
 passed. A value that disagrees is an error; a constant a client has not defined is a gap, and an
 error only for channels, `CT_*` opcodes and frame flags.
 
-**Sibling project.** `gm_ccpa` is a different architecture (a GM head-unit bridge), but it is not
-independent: its `carplay-jni` takes `receiver`, `pairing` and `mfi` as cargo path deps into this
-checkout, and its `OcbmProto.kt` is a symlink to this repo's copy, so the protocol is edited once
-here. Its app-level code is deliberately its own.
+**In-tree, not a sibling.** `host/gm_ccpa/` is a different architecture — wireless CarPlay as an
+unprivileged AAOS app, with the adapter reduced to the Bluetooth radio and the MFi coprocessor — and it
+was merged into this repo on 2026-09-08 (`git subtree add`, history preserved). It shares this tree's
+protocol rather than copying it: its `carplay-jni` takes `receiver`, `pairing` and `mfi` as cargo path
+deps, and its `OcbmProto.kt` is a symlink to this repo's copy, so the protocol is edited once, here. Its
+app-level code is deliberately its own.
 
 ## Architecture in brief
 
@@ -197,6 +208,9 @@ phone modification, no soldered chip). See [`docs/ops/01_RECOVERY.md`](docs/ops/
 | `crates/box-common/` | Protocol-agnostic box layer shared by the CarPlay and Android Auto sets: usbdevfs primitives, phone-type detection, the single projection-owner arbitration flag, and the app-pushed config levers |
 | `c2air/` | C2Air (Allwinner V821, riscv32) — a second adapter. OCBM proven; `btattach` is deliberately the only board-specific Rust |
 | `pizero/` | Raspberry Pi Zero 2 W bring-up. Measurement only — no OCBM port yet, and the board facts differ from the CCPA |
+| `host/gm_ccpa/` | **Wireless CarPlay as an unprivileged AAOS app** on a 2024 Silverado (GM Info 3.7, API 32). The phone streams over the *vehicle's own* hotspot; the adapter carries no media. Device-proven end to end — pairing, HEVC 2400x960 hardware decode, audio, touch, drive-restricted UI, day/night. Its Rust core links this tree's crates. See [`host/gm_ccpa/README.md`](host/gm_ccpa/README.md) |
+| `host/CarlinkAndroid/` | AAOS head-unit host app (Kotlin) for GM Info 3.7 — full OCBM, wireless CarPlay over the *adapter's* radios. The opposite division of labour to `gm_ccpa/`. See [`host/CarlinkAndroid/OCBMANDROID.md`](host/CarlinkAndroid/OCBMANDROID.md) |
+| `host/mfi-probe/` | Host-side exerciser for `mfid`: proves the MFi coprocessor answers with a real certificate and signature over USB-NCM, before anything depends on it |
 | `host/aa-headunit/` | Rust Android Auto head-unit reference client (TCP / `adb forward`) — the de-risking path the macOS engine was built against |
 | `host/CarPlayHost/` | The shipping macOS host app (Xcode project `carlink_macOS`) — VideoToolbox decode, audio, touch/media-key uplink, Settings/YAML, OCBM client |
 | `host/CallSim/` | Android app: self-managed Telecom `ConnectionService` that fakes real phone calls (ringing, answer/hang-up, HFP/SCO audio routing) for testing AA telephony without a SIM |

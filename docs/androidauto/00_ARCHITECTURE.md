@@ -164,6 +164,18 @@ Handling rules:
 **Host responsibilities (the head unit):**
 - TLS termination and the AA handshake with the GAL credential.
 - Channel setup (`ServiceDiscoveryRequest/Response`), video/audio/input/sensor channels.
+- **Where the head-unit facts in that response come from (corrected 2026-09-04).** Until the Settings
+  reorganisation the AA engine snapshotted six values from the CarPlay configuration model
+  (`AACapability.init(config:)`: main width/height, max fps, name, `nightMode`, `rightHandDrive`) and
+  took everything else from constants or `AA_*` environment levers. It now renders from the neutral
+  `VehicleProfile` + `AdapterSettings` (`App/Settings/VehicleProfile.swift`) through
+  `AACapability(profile:adapter:warn:)` (`AA/AACapability+Profile.swift`) — the same profile the
+  CarPlay YAML is rendered from, so a vehicle fact is entered once and both projections see it:
+  panel → resolution tier (+ margins), dpi → density, theme → `night_mode` sensor, driver position →
+  `driver_position` 2/1/3, the restriction set → the `driving_status` mask, HEVC policy → codec, voice
+  rate / telephony sink / metadata services from the profile's audio and feed blocks. Bench `AA_*`
+  variables still override for tests. Contract: `App/Settings/DESIGN.md` §8; app-side description:
+  `docs/host/00_MACOS_HOST_APP.md` §"Settings window".
 - Decode and render (reuse of the CarPlay host's decode/audio/input stack), and session geometry
   handling per §5.
 

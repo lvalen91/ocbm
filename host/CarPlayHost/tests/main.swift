@@ -741,6 +741,12 @@ do {
     var cfgInset = VehicleConfig()
     cfgInset.safeAreaInsetPresent = true
     check(cfgInset.enabledFeatures() == ["viewAreas"], "safeAreaInsetPresent alone arms viewAreas")
+    // 2026-09-05: a second main view area (the Dock resize button) arms viewAreas the same way —
+    // mirrors the box's view_areas_enabled() second-area auto-arm. Without it the feature-intersection
+    // gate drops the area and the button never appears.
+    var cfgVA2 = VehicleConfig()
+    cfgVA2.viewArea2Present = true
+    check(cfgVA2.enabledFeatures() == ["viewAreas"], "viewArea2Present alone arms viewAreas")
     // No-inset default (0,0,0,0 edges, full panel) must NOT arm it — byte-equivalent to pre-fix output.
     check(VehicleConfig.hasRealSafeAreaInset(left: 0, top: 0, right: 0, bottom: 0, width: 1920, height: 1080) == false,
           "zero edges cover the full panel — not a real inset")
@@ -1654,6 +1660,16 @@ do {
     check(waitUntil(2.0) { nmOut.withLock { $0 } != nil }, "sendNightMode completes")
     check(lastPayload(t, channel: OCBM.chInput) == [OCBM.inputCommand, OCBM.cmdNightMode, 1],
           "nightMode payload = [inputCommand][cmdNightMode][1]")
+
+    // View-area switch (2026-09-07): the ControlServer's `viewarea request <index>` wire shape, pinned
+    // against ocbm_proto::CMD_VIEW_AREA (0x11) and airplayd's `[cmd][index]` reader.
+    let vaOut = Mutex<SendOutcome?>(nil)
+    c.sendViewArea(1) { o in vaOut.withLock { $0 = o } }
+    check(waitUntil(2.0) { vaOut.withLock { $0 } != nil }, "sendViewArea completes")
+    check(vaOut.withLock { $0 } == .sent, "sendViewArea reports .sent while subscribed")
+    check(OCBM.cmdViewArea == 0x11, "cmdViewArea is 0x11 (matches ocbm_proto::CMD_VIEW_AREA)")
+    check(lastPayload(t, channel: OCBM.chInput) == [OCBM.inputCommand, OCBM.cmdViewArea, 1],
+          "viewArea payload = [inputCommand][cmdViewArea][index]")
 
     let telOut = Mutex<SendOutcome?>(nil)
     c.sendTelephony(9) { o in telOut.withLock { $0 = o } }
@@ -2786,6 +2802,341 @@ do {
     check(au?.0.count == 60 && [UInt8](au!.0) == pkt, "the air packet reaches the bridge byte-for-byte")
     check(au?.1?.isMSBC == true && au?.1?.plainLE == true, "the per-AU format copy says mSBC and plain")
 }
+
+// MARK: - ConfigIntegrity — "is the pushed config actually in force?" (2026-09-05)
+//
+// Pins the verdict against the measured failure: a wireless session that ran at the box's compiled
+// 1920×720/H.264 while the app had pushed 2400×960/HEVC with appDrivenSetup=true, and no RS_OPEN
+// was relayed (the no-config path clears `appsetup`). Also pins the case the geometry/codec compare
+// cannot see — a real config equal to the default — and the once-per-stream emission discipline.
+
+section("ConfigIntegrity — pure verdict")
+do {
+    var pushed = VehicleConfig()
+    pushed.mainWidth = 2400; pushed.mainHeight = 960; pushed.enablesHEVC = true; pushed.appDrivenSetup = true
+
+    check(ConfigIntegrity.evaluate(pushed: nil, codedWidth: 1920, codedHeight: 720, codec: "H.264",
+                                   setupOpenSeen: false) == .pending,
+          "nothing pushed ⇒ pending (idle box, nothing to compare against)")
+    check(ConfigIntegrity.evaluate(pushed: pushed, codedWidth: nil, codedHeight: nil, codec: "HEVC",
+                                   setupOpenSeen: true) == .pending,
+          "no coded size yet ⇒ pending (codec alone does not judge)")
+
+    // The 2026-09-05 session, exactly.
+    let tonight = ConfigIntegrity.evaluate(pushed: pushed, codedWidth: 1920, codedHeight: 720,
+                                           codec: "H.264", setupOpenSeen: false)
+    check(tonight.matches == false, "2026-09-05: box 1920x720/H.264 vs pushed 2400x960/HEVC ⇒ NOT in force")
+    let t = tonight.detail ?? ""
+    check(t.hasPrefix("CONFIG NOT IN FORCE: box coded 1920x720 (H.264), pushed 2400x960 (HEVC)"),
+          "the one line names both sides in the agreed shape: \(t)")
+    check(t.contains("BOX IS ON BUILT-IN DEFAULTS — our push never landed or was rejected"),
+          "…and carries the RS_OPEN-absent verdict in the AppDelegate wording")
+
+    // Everything in sync.
+    let ok = ConfigIntegrity.evaluate(pushed: pushed, codedWidth: 2400, codedHeight: 960,
+                                      codec: "HEVC", setupOpenSeen: true)
+    check(ok.matches == true, "matching geometry + codec + RS_OPEN ⇒ in force")
+    check((ok.detail ?? "").hasPrefix("CONFIG IN FORCE: box coded 2400x960 (HEVC) matches pushed 2400x960 (HEVC)"),
+          "the confirmation line names both sides too: \(ok.detail ?? "")")
+    check(ConfigIntegrity.evaluate(pushed: pushed, codedWidth: 2400, codedHeight: 960, codec: nil,
+                                   setupOpenSeen: true).matches == true,
+          "codec pending is not a mismatch (bridge latches it a moment later)")
+
+    // Fix 5: a real config that EQUALS the compiled default. Geometry and codec cannot tell; the
+    // missing RS_OPEN with appDrivenSetup=true can.
+    var likeDefault = VehicleConfig()
+    likeDefault.mainWidth = 1920; likeDefault.mainHeight = 720; likeDefault.enablesHEVC = false
+    likeDefault.appDrivenSetup = true
+    let v5 = ConfigIntegrity.evaluate(pushed: likeDefault, codedWidth: 1920, codedHeight: 720,
+                                      codec: "H.264", setupOpenSeen: false)
+    check(v5.matches == false, "config == default: RS_OPEN expected-but-absent still flags NOT in force")
+    check((v5.detail ?? "").contains("no RS_OPEN although appDrivenSetup=true"), "…naming the reason")
+    check(ConfigIntegrity.evaluate(pushed: likeDefault, codedWidth: 1920, codedHeight: 720,
+                                   codec: "H.264", setupOpenSeen: true).matches == true,
+          "config == default WITH its RS_OPEN ⇒ in force")
+
+    // Box-driven SETUP was asked for: no RS_OPEN is expected, none is required.
+    var boxDriven = pushed; boxDriven.appDrivenSetup = false
+    check(ConfigIntegrity.evaluate(pushed: boxDriven, codedWidth: 2400, codedHeight: 960, codec: "HEVC",
+                                   setupOpenSeen: false).matches == true,
+          "appDrivenSetup=false ⇒ RS_OPEN not expected")
+
+    // Each tell alone is enough.
+    check(ConfigIntegrity.evaluate(pushed: pushed, codedWidth: 2400, codedHeight: 960, codec: "H.264",
+                                   setupOpenSeen: true).matches == false,
+          "codec alone (HEVC pushed, H.264 coded) ⇒ NOT in force")
+    check(ConfigIntegrity.evaluate(pushed: pushed, codedWidth: 1920, codedHeight: 720, codec: "HEVC",
+                                   setupOpenSeen: true).matches == false,
+          "geometry alone ⇒ NOT in force")
+}
+
+section("ConfigIntegrity — per-stream flow: RS_OPEN attribution, once-per-verdict emission, teardown")
+do {
+    var pushed = VehicleConfig()
+    pushed.mainWidth = 2400; pushed.mainHeight = 960; pushed.enablesHEVC = true; pushed.appDrivenSetup = true
+
+    let ci = ConfigIntegrity()
+    let emitted = Mutex<[ConfigVerdict]>([])
+    ci.onVerdict = { v in emitted.withLock { $0.append(v) } }
+    func drain() -> [ConfigVerdict] { emitted.withLock { let v = $0; $0.removeAll(); return v } }
+
+    check(ci.snapshot.verdict == .pending && ci.snapshot.pushed == nil, "fresh: pending, nothing pushed")
+    ci.notePushed(pushed)
+    check(ci.snapshot.pushed == pushed, "the landed SUBSCRIBE's config is the pushed side")
+
+    // Healthy stream: RS_OPEN at pair-verify → key → codec (bridge, synchronous) → coded size.
+    ci.noteSetupOpen(boxCRC: 0xDEAD_BEEF)
+    ci.noteVideoStreamStarted()
+    check(ci.snapshot.setupOpenSeen && ci.snapshot.setupOpenCRC == 0xDEAD_BEEF,
+          "the RS_OPEN seen before the key is attributed to this stream")
+    ci.noteCodec("HEVC")
+    check(drain().isEmpty, "codec alone emits nothing (pending until the coded size)")
+    ci.noteCoded(width: 2400, height: 960)
+    var out = drain()
+    check(out.count == 1 && out.first?.matches == true, "first coded size ⇒ exactly one IN FORCE line")
+    ci.noteCoded(width: 2400, height: 960)
+    ci.noteCoded(width: 2400, height: 960)
+    ci.noteCodec("HEVC")
+    check(drain().isEmpty, "repeated identical records (every keyframe) never re-emit")
+    check(ci.snapshot.verdict.matches == true, "snapshot reports matchesProfile=true")
+
+    // 2026-09-05 shape: the phone re-projects through a restarted ocbmd — a NEW stream with NO
+    // RS_OPEN, coded at the compiled default. The earlier stream's RS_OPEN must not vouch for it.
+    ci.noteVideoStreamStarted()
+    check(ci.snapshot.setupOpenSeen == false && ci.snapshot.verdict == .pending,
+          "new stream: RS_OPEN not carried over, verdict back to pending")
+    ci.noteCodec("H.264")
+    ci.noteCoded(width: 1920, height: 720)
+    out = drain()
+    check(out.count == 1 && out.first?.matches == false, "the restarted-ocbmd stream ⇒ exactly one NOT IN FORCE line")
+    check((out.first?.detail ?? "").hasPrefix("CONFIG NOT IN FORCE: box coded 1920x720 (H.264), pushed 2400x960 (HEVC)"),
+          "…in the agreed shape: \(out.first?.detail ?? "")")
+    ci.noteCoded(width: 1920, height: 720)
+    check(drain().isEmpty, "the same verdict is not repeated per keyframe")
+    check(ci.snapshot.verdict.matches == false, "snapshot reports matchesProfile=false")
+
+    // A re-SUBSCRIBE with the SAME config (SEV_HOST_GONE recovery) keeps the observation; a
+    // DIFFERENT config clears it (the box rebuilds the session on a changed push).
+    ci.notePushed(pushed)
+    check(ci.snapshot.verdict.matches == false, "same config re-pushed: observation kept")
+    var other = pushed; other.mainWidth = 1920; other.mainHeight = 720
+    ci.notePushed(other)
+    check(ci.snapshot.verdict == .pending && ci.snapshot.codedWidth == nil, "changed config: observation cleared")
+
+    // App-session teardown clears the stream and any pending RS_OPEN, keeps `pushed`.
+    ci.noteSetupOpen(boxCRC: 1)
+    ci.sessionEnded()
+    ci.noteVideoStreamStarted()
+    check(ci.snapshot.setupOpenSeen == false, "a pre-teardown RS_OPEN does not survive into the next session")
+    check(ci.snapshot.pushed == other, "pushed survives teardown (it is still what the box was last told)")
+}
+
+// MARK: - SessionFailureTracker — "the session died; say WHY, in the box's words" (2026-09-05)
+//
+// Pins the classifier against the measured retry loop: RECORD reached, iOS answers a command with
+// 400, sends TEARDOWN, closes the event channel — three times — while the app showed two hopeful
+// strings. Each check names the one-line production mutation it catches.
+
+section("SessionFailureTracker — line parsers")
+do {
+    check(SessionFailureTracker.teardownReason("[session] full TEARDOWN reason=host-request — stopping stream threads + resetting session state") == "host-request",
+          "full TEARDOWN → token after reason= (catches: token extraction eating the trailing text)")
+    check(SessionFailureTracker.teardownReason("[session] TEARDOWN reason=link-loss (Drop with no prior host TEARDOWN) — stopping stream threads + resetting session state") == "link-loss",
+          "Drop-path TEARDOWN (no 'full') → link-loss (catches: requiring the 'full ' prefix)")
+    check(SessionFailureTracker.teardownReason("[receiver] TEARDOWN /1234 (enc, 42 B body)") == nil,
+          "the receiver's verbose request line is NOT a teardown reason (catches: matching 'TEARDOWN' without the [session] tag)")
+    check(SessionFailureTracker.precursor("[events] command response NOT OK: 'RTSP/1.0 400 Bad Request'") == "command response NOT OK: 'RTSP/1.0 400 Bad Request'",
+          "NOT OK response → verbatim body (catches: stripping the status line)")
+    check(SessionFailureTracker.precursor("[events] command response: 'RTSP/1.0 200 OK'") == nil,
+          "a 2xx response line is not a precursor (catches: matching 'command response' without NOT OK)")
+    check(SessionFailureTracker.precursor("[receiver] idle backstop tearing down session (screen_focused=false)") == "idle backstop tearing down session (screen_focused=false)",
+          "idle backstop → precursor with its screen_focused fact")
+    check(SessionFailureTracker.handshakeFailure("[receiver] pair-verify M2 FAIL: bad signature") == "pair-verify M2 FAIL: bad signature",
+          "pair-verify FAIL → verbatim (catches: dropping the Mn)")
+    check(SessionFailureTracker.handshakeFailure("[receiver] pair-verify M2 ok") == nil,
+          "pair-verify ok is not a failure (catches: dropping the ' FAIL: ' requirement)")
+    check(SessionFailureTracker.handshakeFailure("[receiver] auth-setup FAILED: Mfi(Timeout)") == "auth-setup FAILED: Mfi(Timeout)",
+          "auth-setup FAILED → verbatim")
+}
+
+section("SessionFailureTracker — the 2026-09-05 retry loop, three times")
+do {
+    let t = SessionFailureTracker()
+    let logged = Mutex<[(Bool, String)]>([])
+    t.onLog = { e, l in logged.withLock { $0.append((e, l)) } }
+    let changes = Mutex<Int>(0)
+    t.onChange = { _ in changes.withLock { $0 += 1 } }
+
+    check(t.snapshot.phase == .idle && t.snapshot.consecutiveFailures == 0 && t.snapshot.last == nil,
+          "fresh: idle, nothing failed (catches: a non-zero initial count)")
+
+    func oneAttempt() {
+        t.notePhonePresent(true)
+        t.noteBoxLine("[session] RECORD: session-focus handshake sent (requestUI=true, takeScreen=true)")
+        t.noteBoxLine("[session] RECORD done")
+        t.noteBoxLine("[events] command response NOT OK: 'RTSP/1.0 400 Bad Request'")
+        t.noteBoxLine("[receiver] TEARDOWN /8462 (enc, 42 B body)")
+        t.noteBoxLine("[session] full TEARDOWN reason=host-request — stopping stream threads + resetting session state")
+        t.noteBoxLine("[events] reader: EOF — iPhone closed the event channel")
+        t.notePhonePresent(false)
+    }
+
+    t.notePhonePresent(true)
+    check(t.snapshot.phase == .connecting, "phone present, no RECORD yet ⇒ connecting (catches: phase ignoring presence)")
+    t.noteBoxLine("[session] RECORD done")
+    check(t.snapshot.phase == .recorded, "RECORD done ⇒ recorded (catches: the milestone not moving the phase)")
+    t.noteBoxLine("[session] partial TEARDOWN reason=host-request — stopped streams [100], session kept")
+    check(t.snapshot.consecutiveFailures == 0 && t.snapshot.phase == .recorded,
+          "partial TEARDOWN keeps the session: no failure, attempt still open (catches: dropping the partial guard)")
+    t.noteBoxLine("[events] command response NOT OK: 'RTSP/1.0 400 Bad Request'")
+    t.noteBoxLine("[session] full TEARDOWN reason=host-request — stopping stream threads + resetting session state")
+    t.notePhonePresent(false)
+    check(t.snapshot.consecutiveFailures == 1 && t.snapshot.phase == .idle,
+          "first teardown without streaming ⇒ 1 failure, back to idle (catches: not incrementing)")
+
+    oneAttempt(); oneAttempt()
+    let s = t.snapshot
+    check(s.consecutiveFailures == 3, "three teardowns without streaming ⇒ 3 in a row, got \(s.consecutiveFailures) (catches: the verbose [receiver] TEARDOWN line double-counting, or ABSENT double-counting)")
+    check(s.repeating, "identical signature each time ⇒ repeating (catches: signature including the date)")
+    let f = s.last ?? SessionFailure(date: Date(), kind: .unreported, boxReason: nil, precursor: nil,
+                                     lastCommandSent: nil, reachedRecord: false, streamed: true)
+    check(s.last != nil, "last failure recorded (catches: `last` never assigned)")
+    check(f.kind == .iphoneTeardown && f.boxReason == "host-request", "kind/reason from the box's token (catches: mapping host-request to linkLoss)")
+    check(f.precursor == "command response NOT OK: 'RTSP/1.0 400 Bad Request'", "the 400 is attached as the precursor (catches: precursor cleared before the teardown)")
+    check(f.lastCommandSent == "session-focus handshake sent (requestUI=true, takeScreen=true)", "the last command the box logged sending is a separate fact (catches: not recording it)")
+    check(f.reachedRecord && !f.streamed, "reached RECORD, never streamed (catches: streamed defaulting true)")
+    check(f.iphoneClosedEventChannel, "the EOF after the teardown is folded in (catches: EOF ignored once the attempt is closed)")
+    check(f.summary == "iPhone sent TEARDOWN after RECORD (reason=host-request); before it the box logged: command response NOT OK: 'RTSP/1.0 400 Bad Request'; last command the box logged sending: session-focus handshake sent (requestUI=true, takeScreen=true); then the iPhone closed the event channel",
+          "the one summary line, exactly: \(f.summary)")
+    let errs = logged.withLock { $0.filter { $0.0 } }
+    check(errs.count == 3 && errs.last!.1.hasPrefix("CARPLAY SESSION FAILED (3 in a row): iPhone sent TEARDOWN after RECORD (reason=host-request); before it the box logged: command response NOT OK"),
+          "one .error line per failure carrying the running count (catches: logging at info, or per-line relays): \(errs.last?.1 ?? "-")")
+    check(changes.withLock { $0 } >= 3, "onChange fired for each teardown so the overlay re-renders without waiting for a watchdog tick")
+
+    // Streaming is the one proof of success: it zeroes the run; a teardown AFTER it is an ending.
+    t.notePhonePresent(true)
+    t.noteBoxLine("[session] RECORD done")
+    t.noteStreaming(true)
+    check(t.snapshot.consecutiveFailures == 0 && t.snapshot.phase == .streaming, "A/V flowing ⇒ count reset to 0, phase streaming (catches: reset missing)")
+    logged.withLock { $0.removeAll() }
+    t.noteBoxLine("[session] full TEARDOWN reason=host-request — stopping stream threads + resetting session state")
+    check(t.snapshot.consecutiveFailures == 0 && t.snapshot.last?.streamed == true,
+          "a teardown after streaming is an ending, not counted (catches: counting every teardown)")
+    check(logged.withLock { $0 }.first.map { !$0.0 && $0.1.hasPrefix("CARPLAY SESSION ENDED after streaming:") } == true,
+          "…and logged at info as SESSION ENDED (catches: error level for a normal disconnect)")
+    t.notePhonePresent(false)
+    check(t.snapshot.consecutiveFailures == 0, "ABSENT after an already-closed ending records nothing (catches: ABSENT reopening an attempt)")
+}
+
+section("SessionFailureTracker — ABSENT/teardown-line race, unexplained teardown, phone come-and-go")
+do {
+    let t = SessionFailureTracker()
+    // SEV_PHONE_ABSENT lands BEFORE the receiver's teardown line reaches us via the tailer.
+    t.notePhonePresent(true)
+    t.noteBoxLine("[session] RECORD done")
+    t.notePhonePresent(false)
+    check(t.snapshot.consecutiveFailures == 1 && t.snapshot.last?.kind == .unreported,
+          "ABSENT after RECORD with no teardown line ⇒ one failure, 'no reason reported' (catches: guessing a reason)")
+    check(t.snapshot.last?.summary == "session ended after RECORD — no reason reported by the box", "the wording admits ignorance: \(t.snapshot.last?.summary ?? "-")")
+    t.noteBoxLine("[events] command response NOT OK: 'RTSP/1.0 400 Bad Request'")
+    t.noteBoxLine("[session] full TEARDOWN reason=host-request — stopping stream threads + resetting session state")
+    check(t.snapshot.consecutiveFailures == 1, "the late teardown line UPGRADES the record instead of counting again, got \(t.snapshot.consecutiveFailures) (catches: dropping the provisional upgrade)")
+    check(t.snapshot.last?.kind == .iphoneTeardown && t.snapshot.last?.precursor == "command response NOT OK: 'RTSP/1.0 400 Bad Request'" && t.snapshot.last?.reachedRecord == true,
+          "…with the box's reason, the late precursor and the RECORD fact preserved")
+    // A NEW attempt closes the upgrade window: a later teardown line is its own failure.
+    t.notePhonePresent(true)
+    t.noteBoxLine("[session] TEARDOWN reason=link-loss (Drop with no prior host TEARDOWN) — stopping stream threads + resetting session state")
+    check(t.snapshot.consecutiveFailures == 2 && t.snapshot.last?.kind == .linkLoss && t.snapshot.repeating == false,
+          "next attempt's link-loss is a second, different failure (catches: the provisional flag surviving a new attempt)")
+    t.notePhonePresent(false)
+    check(t.snapshot.consecutiveFailures == 2, "ABSENT after a line-closed attempt adds nothing")
+
+    // Phone present then absent with NO session milestone: nothing was established, nothing failed.
+    let u = SessionFailureTracker()
+    u.notePhonePresent(true); u.notePhonePresent(false)
+    check(u.snapshot.consecutiveFailures == 0 && u.snapshot.last == nil,
+          "come-and-go without a milestone is not a failure (catches: counting every presence flap)")
+
+    // link-loss with the box's own precursor; handshake FAIL before RECORD.
+    u.noteBoxLine("[receiver] pair-verify OK → control channel encrypted")
+    u.noteBoxLine("[receiver] idle backstop tearing down session (screen_focused=false)")
+    u.noteBoxLine("[session] TEARDOWN reason=link-loss (Drop with no prior host TEARDOWN) — stopping stream threads + resetting session state")
+    check(u.snapshot.last?.summary == "connection dropped with no TEARDOWN (reason=link-loss); before it the box logged: idle backstop tearing down session (screen_focused=false)",
+          "link-loss carries the idle-backstop fact the box printed first: \(u.snapshot.last?.summary ?? "-")")
+    u.noteBoxLine("[receiver] pair-setup M1 FAIL: pin mismatch")
+    check(u.snapshot.consecutiveFailures == 2 && u.snapshot.last?.kind == .handshakeFailed
+          && u.snapshot.last?.summary == "handshake failed before RECORD: pair-setup M1 FAIL: pin mismatch",
+          "handshake FAIL is a counted failure in the box's words: \(u.snapshot.last?.summary ?? "-")")
+
+    // sessionEnded (the APP tore down) drops the open attempt, keeps the history.
+    u.notePhonePresent(true); u.noteBoxLine("[session] RECORD done")
+    u.sessionEnded()
+    check(u.snapshot.phase == .idle && u.snapshot.consecutiveFailures == 2 && u.snapshot.last?.kind == .handshakeFailed,
+          "app teardown: attempt dropped uncounted, history kept (catches: sessionEnded wiping the count)")
+
+    // Backfill is replayed history: ignored by ingest.
+    let v = SessionFailureTracker()
+    let bf = LogEntry(source: OCBM.logSourceAirplayWl, flags: OCBM.logFlagBackfill, seq: 1, unixMs: 0,
+                      text: "[session] full TEARDOWN reason=host-request — stopping stream threads + resetting session state",
+                      droppedCount: nil, rawLen: 0)
+    v.ingest([bf])
+    check(v.snapshot.consecutiveFailures == 0, "a backfilled teardown line is not re-counted on reconnect (catches: dropping the isBackfill filter)")
+    let live = LogEntry(source: OCBM.logSourceAirplayWl, flags: 0, seq: 2, unixMs: 1_757_000_000_000,
+                        text: bf.text, droppedCount: nil, rawLen: 0)
+    v.ingest([live])
+    check(v.snapshot.consecutiveFailures == 1 && v.snapshot.last?.date == Date(timeIntervalSince1970: 1_757_000_000),
+          "a live entry counts and carries the box's own timestamp (catches: stamping host time)")
+}
+
+section("SessionStatusComposer — (a) no phone / (b) trying / (c) torn down / (d) config not in force")
+do {
+    func snap(_ n: Int, _ phase: SessionAttemptPhase, _ last: SessionFailure?, stream: Bool = true, repeating: Bool = false) -> SessionFailureSnapshot {
+        SessionFailureSnapshot(phase: phase, consecutiveFailures: n, last: last, boxLogStreamEnabled: stream, repeating: repeating)
+    }
+    let tonight = SessionFailure(date: Date(), kind: .iphoneTeardown, boxReason: "host-request",
+                                 precursor: "command response NOT OK: 'RTSP/1.0 400 Bad Request'",
+                                 lastCommandSent: nil, reachedRecord: true, streamed: false)
+
+    // (a) healthy idle, nothing ever failed: byte-identical to the historical text.
+    check(SessionStatusComposer.compose(base: "Waiting for phone…", snapshot: snap(0, .idle, nil), verdict: .pending)
+          == .init(headline: "Waiting for phone…", detail: nil),
+          "no failures ⇒ base headline, no detail (catches: decorating a healthy box)")
+    // (b) first attempt in progress.
+    check(SessionStatusComposer.compose(base: "iPhone connected — starting CarPlay…", snapshot: snap(0, .connecting, nil), verdict: .pending).headline
+          == "iPhone connected — starting CarPlay…",
+          "first attempt ⇒ unchanged headline (catches: 'retrying' on attempt one)")
+    // (c) torn down once, phone gone.
+    let once = SessionStatusComposer.compose(base: "Waiting for phone…", snapshot: snap(1, .idle, tonight), verdict: .pending)
+    check(once.headline == "CarPlay session failed once — waiting for phone to retry…", "one failure, idle: \(once.headline) (catches: '1× in a row')")
+    check(once.detail == "Last: iPhone sent TEARDOWN after RECORD (reason=host-request); before it the box logged: command response NOT OK: 'RTSP/1.0 400 Bad Request'",
+          "detail is the summary verbatim, no hint yet: \(once.detail ?? "-") (catches: hinting on a single failure)")
+    // (c) third identical failure while the phone is retrying.
+    let third = SessionStatusComposer.compose(base: "iPhone connected — starting CarPlay…", snapshot: snap(3, .connecting, tonight, repeating: true), verdict: .pending)
+    check(third.headline == "iPhone connected — retrying CarPlay (failed 3× in a row)…", "third attempt: \(third.headline) (catches: headline ignoring the count)")
+    check(third.detail?.hasSuffix(" — same failure each time; the iPhone's own log (idevicesyslog) names what it objects to") == true,
+          "repeating ×3 ⇒ the one knowable hint (catches: threshold off by one)")
+    check(SessionStatusComposer.compose(base: "x", snapshot: snap(2, .connecting, tonight, repeating: true), verdict: .pending).detail?.contains("idevicesyslog") == false,
+          "repeating ×2 ⇒ no hint yet")
+    // (d) config not in force on the last stream wins over the repeat hint.
+    let cfg = SessionStatusComposer.compose(base: "x", snapshot: snap(3, .idle, tonight, repeating: true), verdict: .notInForce("CONFIG NOT IN FORCE: …"))
+    check(cfg.detail?.hasSuffix(" — the last stream ran with the pushed config NOT in force (box on built-in defaults?)") == true,
+          "config not in force ⇒ that hint, and only that (catches: precedence swapped)")
+    // Unexplained + box log stream off: say the app is blind.
+    let blind = SessionFailure(date: Date(), kind: .unreported, boxReason: nil, precursor: nil, lastCommandSent: nil, reachedRecord: true, streamed: false)
+    check(SessionStatusComposer.compose(base: "x", snapshot: snap(1, .idle, blind, stream: false), verdict: .pending).detail
+          == "Last: session ended after RECORD — no reason reported by the box — box log stream is off (Settings ▸ Diagnostics); the reason cannot be seen",
+          "no reason + stream off ⇒ says where the reason went (catches: dropping the blindness admission)")
+    check(SessionStatusComposer.compose(base: "x", snapshot: snap(1, .idle, blind, stream: true), verdict: .pending).detail?.contains("stream is off") == false,
+          "no reason + stream ON ⇒ just 'no reason reported' (catches: unconditional blindness text)")
+    // An ending after streaming never decorates; streaming never decorates.
+    let ended = SessionFailure(date: Date(), kind: .iphoneTeardown, boxReason: "host-request", precursor: nil, lastCommandSent: nil, reachedRecord: true, streamed: true)
+    check(SessionStatusComposer.compose(base: "Waiting for phone…", snapshot: snap(0, .idle, ended), verdict: .pending) == .init(headline: "Waiting for phone…", detail: nil),
+          "a normal ending is not a failure banner (catches: keying on `last != nil`)")
+    check(SessionStatusComposer.compose(base: "CarPlay streaming", snapshot: snap(2, .streaming, tonight), verdict: .pending).detail == nil,
+          "streaming ⇒ no detail regardless of history (catches: stale banner under live video)")
+}
+
+runSettingsTests()
 
 // MARK: - Summary
 

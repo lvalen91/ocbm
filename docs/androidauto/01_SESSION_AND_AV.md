@@ -57,6 +57,30 @@ CarPlay/AA arbitration is settled ([`02_ARBITRATION.md`](02_ARBITRATION.md)).
   including at the cropped top and bottom edges. T4 is landed; remaining refinements (density from a
   physical panel size, `ui_config.margins` for asymmetric placement, a fallback configuration list)
   are in `../ops/08_FUTURE_TASKS.md`.
+
+  **AA HAS NO RUNTIME GEOMETRY CHANGE — verified 2026-09-05, negative result recorded so nobody
+  searches for it again.** CarPlay can switch the projected geometry MID-SESSION: the head unit
+  declares several `viewAreas`, the user presses a button in the CarPlay Dock, and iOS animates the
+  change while continuously reporting the new encoded rect — see `../carplay/06_AV_PIPELINE.md` §2-§3
+  (`requestViewArea` / `updateViewArea` / `ScreenStreamSetViewArea`, WWDC 2019-252). **Android Auto
+  has no counterpart.** `strings` over Google's own `desktop-head-unit` (v2.0, the AA analogue of the
+  CarPlay Simulator and this project's authority per `../ops/03_REFERENCE_INDEX.md` §F) returns no
+  `viewarea`, no `view_area` and no `reconfigure`; every `resize` hit is a macOS Cocoa symbol from the
+  DHU's own Mac window (`windowDidResize:`, `resizeLeftRightCursor`, `windowWillStartLiveResize:`),
+  not protocol. `VideoFocus` is adjacent but is screen OWNERSHIP, not geometry.
+
+  Everything AA has is fixed at negotiation: `width_margin`/`height_margin` and `cropmargins` above,
+  `contentinsets`/`stablecontentinsets`, and the repeated `MediaSinkService.video_configs` — of which
+  gearhead takes the first it allows, once (`../ops/08_FUTURE_TASKS.md` T4). That last one is the
+  closest structural analogue, a LIST like CarPlay's view areas, but it is selected at setup and
+  never revisited: no request, no update, no animated transition, no moving image rect. Changing AA
+  geometry means a new session.
+
+  Consequence for this codebase, and why `AACapability` is shaped the way it is: it computes tier,
+  margins, visible rect and density ONCE in `init` and hands a `Sendable` value to the session
+  thread. Nothing there anticipates the geometry moving, and nothing needs to. The CarPlay side would
+  need a live rect callback for the same feature — do not "unify" the two paths on the assumption
+  they are symmetric.
   **Density (2026-09-04):** `VideoConfiguration.density` is the DPI gearhead gives the virtual
   display it renders into (`createVirtualDisplay` with the declared value, unclamped), so UI
   elements scale by density/160 in pixels while tier, margins and the visible rect stay fixed, and
@@ -111,9 +135,14 @@ CarPlay/AA arbitration is settled ([`02_ARBITRATION.md`](02_ARBITRATION.md)).
   came. `onMicStart`/`onMicStop` now drive the app's real capture and `sendMicPCM` puts frames on 9;
   capture authorization is checked *before* answering `MicrophoneRequest`, so a denied mic is declined
   with a status the phone understands rather than answered with silence.
-- **Sensors:** night mode is live from the app-pushed vehicle profile, Day/Night device-verified.
+- **Sensors:** night mode is live from the neutral vehicle profile's `appearance.theme`
+  (`dark` → true, `light` → false, `auto` → this Mac's effective appearance, resolved at the
+  AppDelegate call site — corrected 2026-09-04, was the CarPlay model's `nightMode` boolean), Day/Night
+  device-verified.
 - **Driver position (2026-09-04):** `ServiceDiscoveryResponse.driver_position` (field 6) comes from
-  the profile's `rightHandDrive` toggle. Device-verified against gearhead 17.5: wire value **2 puts
+  the neutral profile's `driverPosition` (`left` / `right` / `center` → 2 / 1 / 3; until 2026-09-04 it
+  was the CarPlay model's `rightHandDrive` boolean, which cannot express center — CENTER (3) is
+  declared but unverified on a device). Device-verified against gearhead 17.5: wire value **2 puts
   the app rail on the LEFT edge, 1 on the RIGHT**, so 2 = LEFT and 1 = RIGHT (`AACapability.
   driverPositionLeft/Right`); the response used to hardcode 1, which is why the rail sat on the right
   for a left-hand-drive profile. aasdk's older reading of field 6 as a `left_hand_drive_vehicle` bool

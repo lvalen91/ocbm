@@ -587,7 +587,18 @@ restart_ocbmd_daemon() {
   pkill -9 -x /usr/sbin/ocbmd 2>/dev/null; pkill -9 -x ocbmd 2>/dev/null
   # Full path, matching inittab: the respawn wrapper polls `pgrep -f /usr/sbin/ocbmd` and is blind
   # to a bare-name `setsid ocbmd`, so the old spelling had it start a second daemon ~5 s later.
-  setsid /usr/sbin/ocbmd >> /tmp/ocbmd.log 2>&1 &
+  #
+  # stderr -> /tmp/box.log, NOT /tmp/ocbmd.log (2026-09-05). ocbmd streams a fixed list of files to
+  # the host over CH_LOG (`LOG_SOURCES`, ccpa/ocbmd/src/main.rs) and /tmp/ocbmd.log is not on it,
+  # so every ocbmd relaunched from here was INVISIBLE to the app for the rest of its life: on
+  # 2026-09-05 this L2 fired ("ocbmd wedged (alive mtime stale >=1min, gadget CONFIGURED, pid=71)"),
+  # the fresh ocbmd deleted /tmp/carplay_cfg.yaml at startup, airplayd_wl (left running) served the
+  # reconnecting phone from compiled defaults (1920x720, H.264) while the app believed 2400x960/HEVC
+  # was in force — and the app log carried ZERO box lines for the two minutes that decided it,
+  # because everything the new ocbmd said went to a file nobody tails. The inittab respawn path
+  # (ccpa/rootfs/script/run_ocbmd.sh) already appends to /tmp/box.log; this now matches it. `>>`
+  # opens O_APPEND, which ocbmd's own box.log rotation relies on (see `log_rotate` there).
+  setsid /usr/sbin/ocbmd >> /tmp/box.log 2>&1 &
   sleep 2
   if pgrep -x ocbmd >/dev/null 2>&1 || pgrep -x /usr/sbin/ocbmd >/dev/null 2>&1; then
     echo "[sup] L2: ocbmd restarted — host must re-SUBSCRIBE"

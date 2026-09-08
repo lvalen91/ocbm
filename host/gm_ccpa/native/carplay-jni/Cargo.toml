@@ -1,0 +1,64 @@
+[package]
+name = "carplay-jni"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "carplayjni"
+crate-type = ["cdylib"]
+
+[dependencies]
+jni = "0.21"
+libc = "0.2"
+# Vendored protocol crates from the sibling ccpa_custom checkout.
+#
+# THESE ARE PATH DEPS: cargo compiles whatever is on disk RIGHT NOW. The "rev" below is a RECORD of
+# what was last reviewed, not a mechanism — nothing enforces it. Treat a mismatch between this line
+# and `git -C ../../../ccpa_custom rev-parse --short HEAD` as "the build contains unreviewed code".
+#
+# LAST REVIEWED REV: 273aed1 (2026-08-09; was f1558f8).
+# ON-DISK HEAD AT LAST CHECK: 6bc326d (2026-08-11) — 21 commits AHEAD of the reviewed rev.
+#   The shipped libcarplayjni.so (built 2026-08-12 13:50) and apk/netprobe-debug-12bec00.apk were
+#   therefore built against 6bc326d, NOT 273aed1. Reviewed 2026-08-12 (docs/11 §"Upstream drift"):
+#   compiles clean; forward.rs / stream.rs / server.rs / net.rs / datastream.rs / iap_tunnel.rs and
+#   ALL of `pairing` and `mfi` are UNTOUCHED, so the :9001/:9002 seam contract, the control server,
+#   the pairing crypto and the MFi wire framing are unchanged. Drift is confined to session.rs (+188),
+#   vehicle_config.rs (+1059), levers.rs (+114), relay.rs (+122), info.rs (+86) — all on the
+#   app-driven-config path that gm_ccpa does not take. NOT truck-verified.
+#
+# @273aed1 flipped session.rs's OCBM_FWD_ENC default to forward-encrypted-ON; gm_ccpa sets
+# OCBM_FWD_ENC=0 in JNI_OnLoad to keep on-box decode. That opt-out is still honoured at 6bc326d
+# (levers::fwd_enc treats "0"/"false"/"off"/empty as the explicit opt-out).
+#
+# LEVERS, the other contract to re-check on every advance: levers are now "seeded from env once per
+# process, then WRITTEN per connection" — but the per-connection write is done by airplayd's
+# `load_device_config`/`VehicleConfig::apply()`, which gm_ccpa NEVER runs. So gm_ccpa's one-shot
+# `levers::set_hevc(true)` etc. in JNI_OnLoad still stands. If gm_ccpa ever adopts the config path,
+# re-verify this or HEVC silently drops out of the SETUP enabledFeatures echo while the static
+# /info still advertises hevcInfo — a half-gate, which is the worst kind (docs/05 §5).
+receiver = { path = "../../../../crates/vendor/receiver", default-features = false, features = ["mic-uplink"] }
+pairing  = { path = "../../../../crates/vendor/pairing" }
+mfi      = { path = "../../../../crates/vendor/mfi" }
+
+# `mic-uplink-eld` statically links a cross-built libfdk-aac, so it needs FDK_AAC_PREFIX pointing at
+# a prefix built for the SAME ABI. Only `install-android-x86_64` exists today, which is why the
+# aarch64 (Raspberry Pi) build cannot enable it yet.
+#
+# It is DEFAULT-ON so the x86_64 truck build is byte-for-byte unaffected — `tools/build_apk.sh`
+# needs no change and keeps producing the same artifact. The Pi build opts out with
+# `--no-default-features`, which costs only the Siri mic uplink — already a known gap
+# (README "Remaining known gaps"), not a blocker for a video/audio/touch session.
+# To restore it on arm64: build libfdk-aac 2.0.3 for aarch64 per docs/13_AUDIO_ROUTING.md
+# §229-250 and drop `--no-default-features`.
+[features]
+default = ["mic-uplink-eld"]
+mic-uplink-eld = ["receiver/mic-uplink-eld"]
+
+[profile.release]
+# NOT "abort": the box sets abort for a 12.5 MB rootfs, but on Android an abort from a protocol edge
+# case kills the whole app process with a native tombstone instead of a catchable error.
+panic = "unwind"
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = "symbols"

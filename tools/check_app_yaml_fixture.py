@@ -12,11 +12,13 @@ it to the literal embedded in `the_apps_real_emitted_document_parses`
 emitter without re-running the generator, so the Rust suite is now validating a document
 the app no longer sends — green tests, unguarded wire.
 
-Exit 0 = current. Exit 1 = stale (prints the diff). Exit 2 = could not check.
+Exit 0 = current. Exit 1 = stale (prints the diff) OR the harness itself no longer compiles
+(the stub lacks a property the emitter reads — a disarmed guard, so it is fatal, not a skip).
+Exit 2 = could not check (no usable `xcrun swift`).
 
   python3 tools/check_app_yaml_fixture.py [repo-root]
 """
-import subprocess, sys, os, difflib
+import subprocess, sys, os, re, difflib
 
 root = sys.argv[1] if len(sys.argv) > 1 else '.'
 gen_script = os.path.join(root, 'tools/regen_app_yaml_fixture.py')
@@ -39,6 +41,17 @@ except Exception as e:                                    # noqa: BLE001
     print(f"[fixture-check] SKIP — generator could not run: {e}", file=sys.stderr)
     sys.exit(2)
 if gen.returncode != 0:
+    # A Swift DIAGNOSTIC from the harness (`emit.swift:N:M: error:`) is not "xcrun unavailable" — it
+    # means the emitter reads a stored property the stub lacks, and there is no document to compare.
+    # That is a broken guard, not a missing toolchain, and it is FATAL: on 2026-09-03
+    # `pairingInteractiveAnswer` reached the emitter without the stub, this branch said SKIP, and
+    # run_tests.sh (which tolerates exit 2) stayed green with the wire unguarded for a day.
+    if re.search(r'\.swift:\d+:\d+: error: ', gen.stderr):
+        print("[fixture-check] *** BROKEN — the harness in regen_app_yaml_fixture.py no longer compiles ***")
+        print("*** The emitter reads a stored property the stub model lacks. Add it to the stub (with the")
+        print("*** value that emits nothing), then re-run. Compiler output:")
+        print(gen.stderr[:2000])
+        sys.exit(1)
     print("[fixture-check] SKIP — generator failed (xcrun swift unavailable?):", file=sys.stderr)
     print(gen.stderr[:800], file=sys.stderr)
     sys.exit(2)

@@ -108,7 +108,7 @@ Transport: `POST /command` (`_requestProcessCommand`), binary plist `{type, para
 **Inbound (iPhone→accessory, `..._f` callbacks):** `modesChanged`, `duckAudio`/`unduckAudio`, `showUI`, `stopSession` (`disconnectReason`), `startSession`, `performHapticFeedback`, `deviceOfferFocus`, `tearDownStreams`, `requestViewArea`, `setEnhancedSiriParams`, `setOEMLogConfiguration`, `handleLogArchiveRequest`.
 **`disableBluetooth` is NOT a real command in this SDK** — legacy; only `bluetoothIDs` (an `/info` array) exists. → reshapes task #19: dispatch the *real* set, not `disableBluetooth`.
 **Enums [E]:** entity{controller/accessory/none}; transferType{take/untake/borrow/unborrow}; priority{niceToHave/userInitiated/anytime/never}; speechMode{none/speaking/recognizing}; app-state{standby/audioOff/nativeVR/displayOff/backupCamera/uiNotification/videoPlayback}; gear{park/reverse/neutral/drive/unknown}; GPS-validity{deadReckonedAndValid/gpsOnlyAndValid/notValid}.
-**CORRECTED 2026-08-16** — this line previously claimed `events.rs` covers only four verbs and listed nine missing outbound; five of those nine have existed for some time, and §10's table had it right all along. `events.rs` implements **thirteen** outbound verbs: `iAPSendMessage`, `forceKeyFrame`, `changeMapZoomLevel`, `changeModes`, `requestUI`, `showUI`, `stopUI`, `setLimitedUI`, `uiAppearanceUpdate`, `mapAppearanceUpdate`, `setNightMode`, `requestSiri`(+`siriAction`), `hidSendReport`. Inbound `session.rs` acts on `modesChanged` + the iAP-tunnel frames and logs the rest. **Genuinely missing outbound:** `updateDisplayPanels`, `updateViewArea`, `updateVehicleInformation`, focus (`accessoryAcquireFocus`/`accessoryGiveFocus`), `changeUIContext`, `suggestUI`, `updateVocoderInfo`, `hidSetInputMode`, `requestViewArea` — i.e. exactly §10's list, which is the authoritative one.
+**CORRECTED 2026-08-16** — this line previously claimed `events.rs` covers only four verbs and listed nine missing outbound; five of those nine have existed for some time, and §10's table had it right all along. `events.rs` implements **thirteen** outbound verbs: `iAPSendMessage`, `forceKeyFrame`, `changeMapZoomLevel`, `changeModes`, `requestUI`, `showUI`, `stopUI`, `setLimitedUI`, `uiAppearanceUpdate`, `mapAppearanceUpdate`, `setNightMode`, `requestSiri`(+`siriAction`), `hidSendReport`. Inbound `session.rs` acts on `modesChanged` + the iAP-tunnel frames and logs the rest (inbound `requestUI`/`suggestUI` are logging-only BY DESIGN — docs/carplay/05_METADATA_AND_CONTROLS.md §1.1, 2026-09-05; do not add handlers). **Genuinely missing outbound:** `updateDisplayPanels`, `updateViewArea`, `updateVehicleInformation`, focus (`accessoryAcquireFocus`/`accessoryGiveFocus`), `changeUIContext`, `suggestUI`, `updateVocoderInfo`, `hidSetInputMode`, `requestViewArea` — i.e. exactly §10's list, which is the authoritative one.
 
 ### 10. Mapping to ccpa_custom + prioritized gaps
 | capability | Apple mechanism | ccpa_custom status |
@@ -646,9 +646,13 @@ The feeds that **do** flow — NowPlaying, RouteGuidance, CallState — parse cl
 
 **`nightMode` and `rightHandDrive` are advertised in the host UI beyond what the box implements.**
 `setNightMode` itself shipped — sender, OCBM command and corrected help text all exist. Still inert:
-`VehicleConfig.nightMode` is neither parsed nor emitted as an `/info` key, and `rightHandDrive` is
-fully inert (no `/info` key, no parser). Fix = emit both in `/info` and parse them, or correct the
-help text. Account: ../ops/06_CORRECTIONS_LEDGER.md `R-26-1`.
+`VehicleConfig.nightMode` is neither parsed nor emitted as an `/info` key (dropped from the pushed YAML
+2026-09-02; the live path is the runtime `setNightMode` command). `rightHandDrive` — **corrected
+2026-09-05**: this sentence read "fully inert (no `/info` key, no parser)"; the "no `/info` key" half
+was wrong — §3 above lists it among the `/info` keys, and R14G17 `AirPlayCommon.h:1103` /
+`AirPlayReceiverServer.c:637-646` / Integration Guide line 385 define it as an Info Message boolean.
+Box `/info` emission + parser + app re-emit are landing 2026-09-05, unverified on a device
+(docs/carplay/04_CAPABILITIES_AND_CONFIG.md §rightHandDrive). Account: ../ops/06_CORRECTIONS_LEDGER.md `R-26-1`.
 
 ---
 
@@ -853,7 +857,9 @@ absence is spec-conformant.
 `nightMode` and `rightHandDrive` are a step further along: the macOS host already writes both into
 the generated YAML with user-facing toggles (`SettingsWindow.swift:363-364`), but
 `vehicle_config.rs` never parses them, so serde drops them. Already recorded as a defect in docs/carplay/03_SDK_GROUND_TRUTH.md
-§89-94.
+§89-94. *(Historical as of 2026-09-02, when both were dropped from the YAML. 2026-09-05: `rightHandDrive`
+alone comes back — it is one of the twelve optional `/info` keys above, and box emission + parse + app
+re-emit are landing, unverified on a device; docs/carplay/04_CAPABILITIES_AND_CONFIG.md §rightHandDrive.)*
 
 ### 5. Alt / cluster video — root cause
 
@@ -1032,14 +1038,29 @@ verification and did not survive it:
 
 Deployed and retested the same day (`airplayd ea865488f8b55acf1c463193652dc1f5`):
 
-**`limitedUI` — REFUTED.** The `/info` declaration is not the gate. With the new binary serving both
-`limitedUI: false` and `buttonInfo: []`, session ESTABLISHED and `GET /info` served, both toggles
-reached the wire (`command setLimitedUI(true) sent=true`, `…(false) sent=true`) and iOS returned **2xx
-for both** — zero `command response NOT OK`. No observable change in CarPlay.
+**`limitedUI` — the 2026-07-30 "REFUTED" verdict was WRONG, and is corrected here (2026-09-08).**
 
-So all three candidate gates are now eliminated: `limitedUIElements` (Apple's own is empty in a working
-session), `limitedUI` (now emitted, no effect), and transport loss (command arrived and was acked). The
-command is byte-identical to `AirPlayReceiverSessionSetLimitedUI`. Whatever honours it is iOS-side.
+> **RESOLVED — `limitedUIElements` IS the gate. Device-proven 2026-09-08** on the AAOS app (gminfo38,
+> owner-observed both directions): declare the element array and the Apple Maps keyboard icon
+> disappears on shift out of Park, leaving only Siri, and returns in Park. Nothing else changed —
+> same `setLimitedUI` bytes, same `limitedUI: false`.
+>
+> **Mechanism.** `limitedUI` is a BOOLEAN; `limitedUIElements` is the SET it applies to. iOS 27 CarKit
+> carries both on `CARScreenInfo` (`B _limitedUI`, `Q _limitedUIElements` — a bitmask), and
+> `CARSessionConfiguration._limitableUserInterfaces` is built by
+> `+_limitableUserInterfacesFromLimitedUIValues:` from the `/info` STRING ARRAY. **With no array the
+> mask is 0, so `setLimitedUI(true)` faithfully restricts the empty set** — 2xx, no error, no effect.
+> That is exactly what the original test saw and misread as "iOS ignores the command".
+>
+> **Why the elimination reasoning failed.** The 2026-07-30 run served no `limitedUIElements` because
+> the box's YAML carried no `limitedUIConfig` at all — that feature landed the same day. So the mask
+> was empty in the failing case, and the key was never actually under test. The supporting claim,
+> "Apple's own is empty in a working session", was never observed: the Simulator logs on this Mac show
+> only `/info` being REQUESTED (`Requesting Server Value For - limitedUIElements / limitedUI`) and
+> contain no toggle exercise at all. An untested assumption was recorded as an eliminated candidate.
+>
+> The lesson worth keeping: a command that is acked 2xx and byte-identical to Apple's proves the
+> TRANSPORT, never the SEMANTICS. A boolean whose scope is declared elsewhere will always ack.
 
 Two things remain untested rather than refuted: whether anything restrictable was on screen when the
 toggle fired (limited UI acts on keyboards and long lists), and our deliberate non-enforcement of

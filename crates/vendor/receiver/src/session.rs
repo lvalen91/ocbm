@@ -1694,6 +1694,15 @@ impl SessionDelegate for AvSession {
                 crate::events::modes_changed(d);
             }
         }
+        // The CarPlay Dock's resize button. DEVICE-PROVEN 2026-09-05: iOS sends this per press and
+        // does NOT move the picture on its own — it waits for the accessory's `updateViewArea`, and a
+        // request left unanswered is harmless (five went unanswered with the session healthy). So this
+        // is the whole switching mechanism, and answering it is what makes the button work.
+        if ty == "requestViewArea" {
+            if let Some(d) = parsed.as_ref() {
+                crate::events::request_view_area(d);
+            }
+        }
         if is_iap {
             // From the single parse above — no second parse, no dictionary clone.
             if let Some(data) = parsed

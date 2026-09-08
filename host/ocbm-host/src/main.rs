@@ -6,6 +6,9 @@
 //!   ocbm-host mfi     [vid pid]                  genuine MFi 2.0C cert + signature
 //!   ocbm-host console [vid pid]                  MODE_SELECT CONSOLE -> root-shell bridge
 //!   ocbm-host settime [vid pid]                  push host wall clock -> box (no RTC battery)
+//!   ocbm-host ncm     [vid pid]                  CH_MGMT ENTER_NCM -> box reboots into USB-NCM maintenance
+//!                                                (ssh/scp at the NCM address). Return it with
+//!                                                `rm /script/ncm_only; reboot` over ssh.
 //!   ocbm-host push  [vid pid] <local> <remote> [mode-octal]   verified file deploy (default mode 755)
 //!   ocbm-host pull  [vid pid] <remote> <local> [mode-octal]   verified file retrieval (box -> host)
 //!   ocbm-host bridge [vid pid] [iface]         bridge the box netdev (default ncm0) over CH_ETH; decode frames
@@ -370,6 +373,44 @@ fn mode_mfi(link: &mut Link) {
         }
         _ => println!("MFI sign: no response"),
     }
+}
+
+/// `MGMT_ENTER_NCM` — ask the box to reboot into USB-NCM maintenance mode.
+///
+/// WHY THIS EXISTS: the opcode has been in `ocbm-proto` and handled by `ocbmd` since the CCPA tab
+/// shipped, but the ONLY way to send it was the macOS app (its "Enter NCM maintenance mode" button
+/// or the `carlink://box/enter-ncm` URL). That made every box deploy a manual mode flip: open the
+/// app, click, close the app so it releases the USB device, then push. With this verb the whole
+/// cycle scripts — see `tools/box_deploy.sh`, which latches on over OCBM, flips the box, waits for
+/// ssh and pushes over scp.
+///
+/// The box ACKs BEFORE it reboots (`ocbmd` arms `/script/ncm_only`, ACKs, then reboots), so a
+/// received ACK means "accepted", not "already in NCM" — the caller must poll for the NCM address.
+/// A missing ACK is reported rather than assumed: on a box that never armed the flag, a caller that
+/// blindly waited would hang for its whole timeout with no idea why.
+fn mode_ncm(link: &mut Link) {
+    link.send(p::CH_MGMT, p::F_SOM | p::F_EOM, &[p::MGMT_ENTER_NCM]);
+    // Same reassembler contract as push/pull: full-size buffer, and filter the CT_SETTIME chatter the
+    // clock auto-push generates on every connect.
+    let mut out = vec![0u8; p::MAX_PAYLOAD];
+    let deadline = Instant::now() + std::time::Duration::from_secs(5);
+    while Instant::now() < deadline {
+        let Some((ch, _flags, l)) = link.recv(&mut out, deadline) else { break };
+        if ch == p::CH_CTRL {
+            continue; // clock ack / keepalive
+        }
+        if ch == p::CH_MGMT && l >= 3 && out[0] == p::MGMT_ACK && out[1] == p::MGMT_ENTER_NCM {
+            if out[2] == 0 {
+                println!("ENTER_NCM accepted — the box is rebooting into NCM maintenance mode.");
+                println!("It will NOT come back on USB-OCBM until returned with: rm /script/ncm_only; reboot");
+                return;
+            }
+            eprintln!("ENTER_NCM refused by the box (status {}) — /script/ncm_only was not armed", out[2]);
+            std::process::exit(1);
+        }
+    }
+    eprintln!("ENTER_NCM: no ACK within 5 s — the box did not accept it; NOT assuming it rebooted");
+    std::process::exit(1);
 }
 
 fn mode_console(link: &mut Link) {
@@ -1553,6 +1594,7 @@ fn main() {
         "rtt" => mode_rtt(&mut link, secs),
         "mfi" => mode_mfi(&mut link),
         "console" => mode_console(&mut link),
+        "ncm" => mode_ncm(&mut link),
         "ip" => mode_ip(
             &mut link,
             args.get(4).map(String::as_str).unwrap_or("127.0.0.1:22"),

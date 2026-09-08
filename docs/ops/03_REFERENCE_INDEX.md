@@ -289,6 +289,34 @@ found no AA sources at all.
    the CarPlay Simulator and the authoritative statement of what a head unit is expected to do:
    - `config/default.ini` — Google's reference head-unit config (**800×480, dpi 160, 30 fps**, sensors
      location/night/driving). Every geometry/sensor choice in our ServiceDiscoveryResponse matches it.
+   - **`config/*.ini` is the AA analogue of Apple's CarPlay Simulator `VehicleConfigs/Configs/*.yaml`**
+     (checked on disk 2026-09-04): eleven files — `default`, `default_720p`, `default_1080p`,
+     `default_wide`, `default_6in`, `default_sensors`, `all_720p`, `loaded_720p`, `hybrid`, `rotary`,
+     `touchpad` — each a `[general]` section (`touch`, `touchpad`, `controller`, `instrumentcluster`,
+     `resolution`, `dpi`, `framerate`, …) and, in ten of the eleven, a `[sensors]` section
+     (`location`, `night_mode`, `driving_status`, …). **`all_720p` and `loaded_720p` are NOT the same
+     file** (corrected 2026-09-04 by re-reading both on disk; this index used to call them "the same
+     diff against `default`"): their `[general]` sections are identical (touch, touchpad,
+     touchpadnavigation, controller, instrumentcluster, playbackstatus all true; 1280×720, dpi 160,
+     30 fps), but `loaded_720p.ini` adds a `[sensors]` block (`location`/`night_mode`/`driving_status`
+     = true) and `all_720p.ini` is the only file with no `[sensors]` section at all. The app still
+     collapses them into ONE preset, and that stays defensible because the DHU's `[sensors]` entries
+     are runtime feeds the head unit simulates (location, day/night, driving state) rather than facts
+     about the vehicle a profile records — but the justification is that, not "the files are
+     identical". The running DHU also has a console with `restrict video|keyboard|voice|config|message`,
+     which is how the `driving_status` bits were confirmed to be a bitmask. **Neither vendor file is a
+     wire format**: CarPlay's YAML goes out as the AirPlay `/info` plist plus iAP2 Identify parameters,
+     the DHU's `.ini` as the protobuf `gal.ServiceDiscoveryResponse` — which is why the app's own
+     source of truth is a neutral profile that RENDERS to both (`docs/host/00_MACOS_HOST_APP.md`
+     §"Settings window"; the ten DHU-derived presets in `App/Settings/VehicleProfile.swift` are built
+     from these files). One DHU quirk: the binary carries both the protobuf enum name
+     `VIDEO_3840x2160` and, in its `.ini` parser's string table, `3840x1260` — the latter is a typo.
+     Tier 5 (3840×2160, H.265) IS device-verified — 2026-09-04, Pixel 10 / gearhead 17.5, wireless, at
+     both 30 and 60 fps, 0 drops — as are all nine codec tiers, each at the fps pairings listed in
+     `docs/androidauto/01_SESSION_AND_AV.md` (the verification is per (tier, fps): tiers 1/2/3/6 at
+     60, 4/5 at 30 and 60, 7/8/9 at 30 only; a pairing such as 1080×1920@60 has never run). This
+     index said "tier 5 is unverified on a device either way" until 2026-09-04; that claim was stale
+     the day it was written and is withdrawn.
    - `desktop-head-unit` — the binary; its protobuf namespace is **`gal.*`** (Google Automotive Link),
      and the symbol names carry the message shapes (`gal.ServiceDiscoveryResponse`, `gal.MediaSinkService`,
      `gal.VideoConfiguration`, `gal.NavFocusType`, `gal.AudioFocusRequestType`). `Controller::sendVersionRequest`

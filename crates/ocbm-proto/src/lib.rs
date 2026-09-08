@@ -479,6 +479,13 @@ pub const CMD_NAV_ZOOM_OUT: u8 = 0x0D; // changeMapZoomLevel zoomDirection=1 (âˆ
 pub const CMD_UI_APPEARANCE: u8 = 0x0E;
 pub const CMD_MAP_APPEARANCE: u8 = 0x0F;
 pub const CMD_NIGHT_MODE: u8 = 0x10;
+// View-area switch (2026-09-07): the host COMMANDS a main-display view-area transition instead of
+// pressing the CarPlay Dock resize button and hoping. `[INPUT_COMMAND][CMD_VIEW_AREA][index u8]` â†’
+// airplayd answers `updateViewArea{uuid: DISPLAY_UUID, viewAreaIndex, animationDurationMillis: 3000,
+// adjacentViewAreas}` through the SAME refuse-undeclared policy as the inbound `requestViewArea`
+// answer path (`receiver::events::switch_view_area`). Device-proven 2026-09-05: iOS's own request is
+// advisory and the accessory is the authority, so this is the deterministic way to drive a resize.
+pub const CMD_VIEW_AREA: u8 = 0x11;
 pub const APPEARANCE_STREAM_MAIN: u8 = 0x00;
 pub const APPEARANCE_STREAM_ALT: u8 = 0x01;
 pub const APPEARANCE_MODE_LIGHT: u8 = 0x00;
@@ -1063,6 +1070,23 @@ mod tests {
         assert_eq!(CT_LOG_CTL, 0x1B);
         assert_ne!(CT_LOG_CTL, CT_BOX_HEALTH);
         assert_eq!(LOG_F_DROPPED & LOG_F_TRUNCATED, 0);
+    }
+
+    #[test]
+    fn input_command_ids_are_distinct() {
+        // The CMD_* space is dispatched by a `match` in airplayd; a duplicate id would silently shadow
+        // the later arm. Pinned so a new command cannot reuse one.
+        let ids = [
+            CMD_REQUEST_UI, CMD_REQUEST_SIRI, CMD_SIRI_DOWN, CMD_SIRI_UP, CMD_NAV_START, CMD_NAV_STOP,
+            CMD_NAV_CARD, CMD_LIMITED_UI_ON, CMD_LIMITED_UI_OFF, CMD_NAV_APP, CMD_NAV_APPEARANCE,
+            CMD_NAV_ZOOM_IN, CMD_NAV_ZOOM_OUT, CMD_UI_APPEARANCE, CMD_MAP_APPEARANCE, CMD_NIGHT_MODE,
+            CMD_VIEW_AREA,
+        ];
+        let mut sorted = ids.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), ids.len(), "duplicate CMD_* id");
+        assert_eq!(CMD_VIEW_AREA, 0x11);
     }
 
     #[test]
