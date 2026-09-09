@@ -1,11 +1,11 @@
 [package]
-name = "carplay-wireless"
+name = "btd"
 version = "0.1.0"
 edition = "2021"
 description = "Wireless CarPlay Bluetooth bring-up (Phase A1: discoverability + Just-Works pairing) -- see docs/carplay/05_METADATA_AND_CONTROLS.md"
 
 [[bin]]
-name = "carplay-wireless"
+name = "btd"
 path = "src/main.rs"
 
 [dependencies]

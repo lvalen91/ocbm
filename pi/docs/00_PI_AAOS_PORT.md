@@ -37,7 +37,7 @@ there is no capture device at all: audio and microphone currently cannot both wo
 without a separate USB mic.
 
 **Preserved evidence:** `pi/evidence/` holds the state that lived only on the running box — the
-generated `VehicleConfig`, the launch environment, the key `airplayd` log lines, the app session
+generated `VehicleConfig`, the launch environment, the key `carplayd` log lines, the app session
 log, and a full device snapshot (kernel config, SELinux labels, codec registration, audio mode,
 occupant zones, process and socket state). `/tmp` is tmpfs, so none of it survives the shutdown.
 
@@ -59,9 +59,9 @@ The Pi provides **both radios**. The CCPA is reduced to **MFi coprocessor only**
 reached over the USB-NCM link rather than OCBM's `CH_MFI`.
 
 ```
-   iPhone ──── Bluetooth (Pi's CYW43455) ────────► carplay-wireless   ─┐
+   iPhone ──── Bluetooth (Pi's CYW43455) ────────► btd   ─┐
       │                                                                │ MFI1/TCP
-      └─────── 5 GHz Wi-Fi (Pi's own SoftAP) ─────► airplayd           │ 192.168.50.2:7789
+      └─────── 5 GHz Wi-Fi (Pi's own SoftAP) ─────► carplayd           │ 192.168.50.2:7789
                                                        │               ▼
                                               127.0.0.1:9001/:9002   mfid ── i2c ── MFi 2.0C
                                               (encrypted A/V seam)   (on the CCPA)
@@ -81,8 +81,8 @@ USB-C port, which currently carries adb.
 
 | Process | Role |
 |---|---|
-| `carplay-wireless` | BT bring-up, SSP, SDP, RFCOMM, iAP2, the `0x5702`/`0x5703` handoff |
-| `airplayd` | AirPlay/RTSP receiver: pair-setup/verify, auth-setup, SETUP, RECORD, A/V |
+| `btd` | BT bring-up, SSP, SDP, RFCOMM, iAP2, the `0x5702`/`0x5703` handoff |
+| `carplayd` | AirPlay/RTSP receiver: pair-setup/verify, auth-setup, SETUP, RECORD, A/V |
 | `rx-connect` | Bonjour advertise + the outbound `GET /ctrl-int/1/connect` nudge |
 | `hostapd` | 5 GHz AP on channel 36 (standalone, outside Android's Wi-Fi framework) |
 | `apdhcpd` | DHCP for the AP (see §4) |
@@ -92,12 +92,12 @@ Launch environment — every one of these is an opt-in gate; unset, the CCPA beh
 exactly as before:
 
 ```sh
-CARPLAY_HCI_BACKEND=native            # ioctl + raw HCI instead of hciconfig
-CARPLAY_RFCOMM_BACKEND=userspace      # userspace RFCOMM instead of the kernel module
+BT_HCI_BACKEND=native            # ioctl + raw HCI instead of hciconfig
+BT_RFCOMM_BACKEND=userspace      # userspace RFCOMM instead of the kernel module
 CARPLAY_MFI_ADDR=192.168.50.2:7789    # remote coprocessor
-CARPLAY_HOSTAPD_CONF=/data/local/tmp/hostapd_5g.conf
-CARPLAY_STATE_DIR=/data/local/tmp/carplay
-AIRPLAYD_BIN=/data/local/tmp/airplayd
+BOX_HOSTAPD_CONF=/data/local/tmp/hostapd_5g.conf
+BOX_STATE_DIR=/data/local/tmp/carplay
+AIRPLAYD_BIN=/data/local/tmp/carplayd
 RX_CONNECT_BIN=/data/local/tmp/rx-connect
 PEERSTORE_PATH=/data/local/tmp/carplay/carplay_peers.bin   # /etc is read-only
 ```
@@ -133,7 +133,7 @@ See §4.
 
 ### `crates/mfi-wire` — `MFI1` framing + client
 One implementation shared by all consumers. There are **three independent MFi chip users**
-and all three needed redirecting: `wireless/src/mfi_local.rs`, `airplayd`'s
+and all three needed redirecting: `wireless/src/mfi_local.rs`, `carplayd`'s
 `LocalMfiSigner`, and `crates/vendor/mfi-i2c-local` (which backs the AirPlay-tunnel iAP2
 handshake).
 
@@ -151,7 +151,7 @@ L2CAP PSM 3 and the next start failed with `Address already in use`.
 
 **`pgrep -x` matches opposite things on BusyBox and toybox.** BusyBox matches `argv[0]`
 (the full path); Android's toybox matches `comm` (the basename). `av.rs` passed the full
-path — correct on the CCPA, never matching on the Pi — so `airplayd` was declared dead
+path — correct on the CCPA, never matching on the Pi — so `carplayd` was declared dead
 while running, the transport flag was released, and iOS restarted the session in a loop.
 
 **Android deletes the `from all lookup main` ip rule.** The connected route for the AP
@@ -173,7 +173,7 @@ server-id/lease/netmask/router/DNS, pads to the 300-byte BOOTP minimum, and assi
 stably per MAC. Worked first try.
 
 **`/etc` is a symlink into the read-mostly `/system` partition**, so the peer store and BT
-link keys belong under `/data` (`PEERSTORE_PATH`, `CARPLAY_STATE_DIR`).
+link keys belong under `/data` (`PEERSTORE_PATH`, `BOX_STATE_DIR`).
 
 ---
 
@@ -236,7 +236,7 @@ Two habits that actually catch it, both now in the code:
 
 ## 6. What is NOT done
 
-1. **Nothing consumes `127.0.0.1:9001`.** `airplayd` forwards *encrypted* frames to a
+1. **Nothing consumes `127.0.0.1:9001`.** `carplayd` forwards *encrypted* frames to a
    localhost seam by design; the consumer that decrypts, decodes HEVC and renders is the
    Android app. Session established and streaming, **nothing on screen**. This is the
    next body of work — see `pi/docs/01_PROJECTION_APP_DESIGN.md`.
@@ -244,9 +244,9 @@ Two habits that actually catch it, both now in the code:
    `OMX.Intel.hw_vd.h265` on Intel; `docs/carplay/02_SESSION_LIFECYCLE.md` (gm_ccpa) calls HEVC MediaCodec
    "first-of-kind" in this ecosystem. Expect surprises here.
 3. **Nothing is persistent.** Binaries live in `/data/local/tmp`, `hostapd`/`apdhcpd` are
-   started by hand, and `carplay-wireless` is held by an adb session. Needs init services.
+   started by hand, and `btd` is held by an adb session. Needs init services.
 4. **The AirPlay-tunnel iAP2 MFi fix is built but not yet exercised** — it needs an
-   `airplayd` restart. Affects metadata/controls, not video.
+   `carplayd` restart. Affects metadata/controls, not video.
 5. **Mic uplink (AAC-ELD) is absent on arm64** — `mic-uplink-eld` needs a cross-built
    libfdk-aac. Already a known gap upstream.
 6. **Wired CarPlay** — out of scope for now (OTG/UDC role toggling).
@@ -295,7 +295,7 @@ grep -rn "PI-VERIFIED ONLY" --include='*.rs' --include='*.c' crates/ ccpa/
 | `wireless/src/ssp_agent.rs` | Link-key store read-modify-write serialized | Closes a genuine lost-update race, in the conservative direction. Guards how a CCPA remembers a paired phone across reboots. |
 
 **Additive and safe by construction** (unset environment keeps prior behaviour byte-for-byte):
-`CARPLAY_CFG_FILE` and the `receiver::uplink::set_display` call in `ccpa/airplayd/src/main.rs`, the
+`CARPLAY_CFG_FILE` and the `receiver::uplink::set_display` call in `ccpa/carplayd/src/main.rs`, the
 `onCodec` hook on the shared `VideoSeam.kt` (defaults null), and the `aarch64-linux-android` section
 in `.cargo/config.toml`.
 

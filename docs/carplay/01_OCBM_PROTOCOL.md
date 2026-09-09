@@ -26,7 +26,7 @@ hand in another language:
 | Implementation | File |
 |---|---|
 | box daemons (Rust) | `crates/ocbm-proto/src/lib.rs` — **canonical** |
-| macOS host app (Swift) | `host/CarPlayHost/carlink_macOS/OCBM/OCBMFraming.swift` |
+| macOS host app (Swift) | `host/MacHost/carlink_macOS/OCBM/OCBMFraming.swift` |
 | Android host app (Kotlin) | `host/CarlinkAndroid/app/src/main/kotlin/com/carlink/ocbm/OcbmProto.kt` |
 | gm_ccpa client (Kotlin) | **symlink** to this repo's Kotlin file (see below) |
 
@@ -153,7 +153,7 @@ host → box:  MODE_SELECT { mode }        (only when the host wants a non-defau
 | `0x07` | `CT_ETH_STOP` | host→box | *(empty)* — box tears the raw-frame bridge down |
 | `0x14` | `CT_UPLINK` | box→host | `[state u8][rate u32 LE][ch u8][codec u8]` — mic-uplink gate: `1`=on (iPhone opened a type-100 `input=true` SETUP, or an HFP call opened SCO; app starts capturing at rate/ch), `0`=off (TEARDOWN; app stops). `codec` added 2026-09-04: `0` PCM S16LE (every CarPlay uplink and HFP/CVSD), `4` mSBC — the app returns whole 60 B eSCO packets, not PCM. ON is 8 bytes; **OFF stays the 7-byte all-zero form**, so read `codec` only when `len ≥ 8` and default it to 0 |
 | `0x15` | `CT_PAIRING_CODE` | box→host | `[6 ascii digits \| empty]` — the wireless SSP Numeric-Comparison code to display for the user to match against the iPhone; empty payload = clear/hide | (macOS app, 2026-09-03: rendered one digit per shaded cell in the main-window overlay, grouped n/2 + n/2 with a dash for even lengths ≥ 4, semantic system colours, VoiceOver label; hidden when the payload is empty. The one-line status only carries the instruction.)
-| `0x1C` | `CT_PAIR_CONFIRM` | host→box | `[accept u8]` — the USER'S answer to the `CT_PAIRING_CODE` prompt: `1` = the codes match, pair; `0` = cancel. Any non-zero byte is a yes; a truncated frame reads as **cancel** (an unparseable request must never complete a bond nobody confirmed). SSP Numeric Comparison requires a real yes/no on BOTH devices, so the box no longer auto-accepts: it publishes the code, waits up to **55 s** (inside `pairing_aware_connect`'s 60 s hold), then replies `USER_CONFIRM_REPLY` or `USER_CONFIRM_NEG_REPLY`. ocbmd relays this to carplay-wireless's control port as `{"cmd":"pair_answer","accept":…}` (127.0.0.1:9115). An answer with no prompt outstanding is ignored. (macOS app, 2026-09-03: **Pair** default/Return and **Cancel**/Escape under the code panel, disabled after one answer until the box clears the code.) See docs/wireless/01_BT_AND_RADIO.md |
+| `0x1C` | `CT_PAIR_CONFIRM` | host→box | `[accept u8]` — the USER'S answer to the `CT_PAIRING_CODE` prompt: `1` = the codes match, pair; `0` = cancel. Any non-zero byte is a yes; a truncated frame reads as **cancel** (an unparseable request must never complete a bond nobody confirmed). SSP Numeric Comparison requires a real yes/no on BOTH devices, so the box no longer auto-accepts: it publishes the code, waits up to **55 s** (inside `pairing_aware_connect`'s 60 s hold), then replies `USER_CONFIRM_REPLY` or `USER_CONFIRM_NEG_REPLY`. ocbmd relays this to btd's control port as `{"cmd":"pair_answer","accept":…}` (127.0.0.1:9115). An answer with no prompt outstanding is ignored. (macOS app, 2026-09-03: **Pair** default/Return and **Cancel**/Escape under the code panel, disabled after one answer until the box clears the code.) See docs/wireless/01_BT_AND_RADIO.md |
 | `0x16` | `CT_RADIO` | host→box | `[0 \| 1]` — `0` = radios off now, `1` = clear the inhibit (the pushed cfg still governs). Any other value is logged and ignored; a fresh `CT_SUBSCRIBE` clears the inhibit **unconditionally**, so a config push always overrides a prior `off`. See the note below before trying to change that |
 | `0x17` | `CT_BT_PHASE` | box→host | `[BTP_* u8]` — Bluetooth/iAP2 handshake progress. See below |
 | `0x18` | `CT_PHONE_IDENT` | box→host | `[utf8 JSON \| empty]` — who the connected phone is: `{"name","deviceID","model","osName","osVersion"}`, lifted from the phone's own AirPlay phase-1 SETUP plist. `deviceID` is the BR/EDR MAC, so it joins `MGMT_INFO`'s bonded list. Sent only while subscribed, on **change** only, re-emitted after each `CT_SUBSCRIBE`; empty payload = no identity yet / cleared |
@@ -168,14 +168,14 @@ host → box:  MODE_SELECT { mode }        (only when the host wants a non-defau
 | `0x01` | `BH_HCI_PRESENT` | `hci0` exists **and is UP** (`HCI_UP` in `/sys/class/bluetooth/hci0/flags`) |
 | `0x02` | `BH_SSP` | Secure Simple Pairing enabled on `hci0` |
 | `0x04` | `BH_IAP2D` | `iap2d` running (wired CarPlay identify path) |
-| `0x08` | `BH_AIRPLAYD` | `airplayd` running |
-| `0x10` | `BH_CARPLAY_WIRELESS` | `carplay-wireless` running |
+| `0x08` | `BH_AIRPLAYD` | `carplayd` running |
+| `0x10` | `BH_CARPLAY_WIRELESS` | `btd` running |
 | `0x20` | `BH_WLAN_AP` | `hostapd` running — the box is raising its **own** AP |
 | `0x40` | `BH_ROOTFS_OK` | rootfs has headroom (≥5% or 2 MB) |
 
 **Why it exists.** Until this, the only way a host could learn anything about the box's health was to
 ask — `MGMT_GET_INFO`, a JSON snapshot returned on request and nothing else. Hosts asked once at
-bring-up and never again, so a box whose `hci` went away or whose `carplay-wireless` died mid-session
+bring-up and never again, so a box whose `hci` went away or whose `btd` died mid-session
 was indistinguishable from a healthy one. A host cannot evaluate "am I ready **and** is the box ready"
 against a snapshot it took minutes ago.
 
@@ -209,7 +209,7 @@ A **clear** bit still covers the case that matters most, and it is the one that 
 controller registered at all. `hci_uart` is a loadable module on the CCPA, and if nothing `insmod`s it
 the `n_hci` line discipline is never registered, `hciattach` fails `EINVAL`, and `hci0` is never
 created — while the OCBM claim, the MFi relay, `CT_SUBSCRIBE` and `HOST_PRESENT` all still report
-success. A health of `0x50` (`carplay-wireless|rootfs-ok`) with bit 0 clear is that exact signature.
+success. A health of `0x50` (`btd|rootfs-ok`) with bit 0 clear is that exact signature.
 See `../ops/06_CORRECTIONS_LEDGER.md` R-20W-5.
 
 **Cost discipline.** The tick returns immediately when `!subscribed`, so an idle box does no work. SSP
@@ -242,7 +242,7 @@ lifecycle section below.
 > believes a host is present means the previous host died without `CT_STOP`: the box sets
 > `host_replaced`, and the next `CT_SUBSCRIBE` turns it into a silent 2 s dip of `/tmp/host_present`
 > (`Daemon::rearm_presence_silently`, which dips the flag and holds it for
-> `REARM_HOLD` = 2 s) so the supervisor respawns airplayd. The host is told
+> `REARM_HOLD` = 2 s) so the supervisor respawns carplayd. The host is told
 > `SEV_HOST_PRESENT` only, never `SEV_HOST_GONE` — sending GONE there was measured to tear
 > projection down. The **same** nonce is that host reattaching, which sets nothing: `CT_SUBSCRIBE`
 > then takes the ordinary path (a fresh `SEV_HOST_PRESENT`, or the plain `set_present(true)` edge if
@@ -404,8 +404,8 @@ explicitly requests `CONSOLE`. New modes are pure additions — no rewrite.
 | `0x0022` | ALT_AUDIO | box→host: voice-sink streams — telephony / speechRecognition / alert / default (box seam `:9003`, same seam framing as media) | projection |
 | `0x0023` | METADATA | box→host: session metadata, **plaintext** (box seam `:9004`; `[u32 BE "META"][u32 BE len][marker][payload]` v2 — the magic lets the host resync after a truncated frame, audit Fix #17 — with `META_CMD 0x01` / `META_JSON 0x02` / `META_ARTWORK 0x03` / `META_CORNERMASK 0x04` `[u32 BE display_width_px][PNG]`, iOS's own `topLeftCornerMask`, docs/carplay/06_AV_PIPELINE.md) | projection |
 | `0x0024` | ALT_VIDEO | box→host: the ALT / navigation (instrument-cluster) screen stream, decoded host-side on a **dedicated** decoder (box seam `:9005`) | projection |
-| `0x0030` | INPUT | host→box: **binary `INPUT_*` sub-frames** — `INPUT_TOUCH 0x01` (normalized u16 coords) / `INPUT_KEYFRAME 0x02` / `INPUT_MEDIA_BTN 0x03` (Consumer-Control HID uid 2) / `INPUT_COMMAND 0x04` / `INPUT_NAV 0x05` (D-Pad HID uid 3, `NAV_*`) / `INPUT_KEYFRAME_ALT 0x06` (re-IDRs the ALT/cluster stream **specifically**; a bare `INPUT_KEYFRAME` only re-IDRs main) / `INPUT_KNOB 0x07` (Knob HID uid 4) / `INPUT_TELEPHONY 0x08` (Telephony HID). `INPUT_COMMAND`'s payload is the `CMD_*` set — `CMD_REQUEST_UI 0x01`, `CMD_REQUEST_SIRI 0x02` *(deprecated, iOS ignores it)*, `CMD_SIRI_DOWN 0x03` / `CMD_SIRI_UP 0x04`, `CMD_NAV_START 0x05` / `CMD_NAV_STOP 0x06` / `CMD_NAV_CARD 0x07` / `CMD_NAV_APP 0x0A`, `CMD_LIMITED_UI_ON 0x08` / `CMD_LIMITED_UI_OFF 0x09`, `CMD_NAV_APPEARANCE 0x0B`, `CMD_NAV_ZOOM_IN 0x0C` / `CMD_NAV_ZOOM_OUT 0x0D`, `CMD_UI_APPEARANCE 0x0E` / `CMD_MAP_APPEARANCE 0x0F` / `CMD_NIGHT_MODE 0x10`, `CMD_VIEW_AREA 0x11` (`[cmd][index]` → `updateViewArea` for the MAIN display, refused if `/info` never declared the index; 2026-09-07). ocbmd relays every sub-frame opaquely to airplayd; airplayd taps the iPhone HID devices for touch/media/nav/knob/telephony, dispatches `INPUT_COMMAND` as an AirPlay `/command`, and turns `INPUT_KEYFRAME` / `INPUT_KEYFRAME_ALT` into a `forceKeyFrame` on the event channel (main / `VideoStream.Alt1`). Constants are authoritative in `crates/ocbm-proto/src/lib.rs` | all |
-| `0x0031` | MIC | host→box: mic-uplink PCM (S16LE at the CT_UPLINK-negotiated rate/ch); ocbmd relays to airplayd's mic-ingest seam → RTP uplink to the iPhone | projection |
+| `0x0030` | INPUT | host→box: **binary `INPUT_*` sub-frames** — `INPUT_TOUCH 0x01` (normalized u16 coords) / `INPUT_KEYFRAME 0x02` / `INPUT_MEDIA_BTN 0x03` (Consumer-Control HID uid 2) / `INPUT_COMMAND 0x04` / `INPUT_NAV 0x05` (D-Pad HID uid 3, `NAV_*`) / `INPUT_KEYFRAME_ALT 0x06` (re-IDRs the ALT/cluster stream **specifically**; a bare `INPUT_KEYFRAME` only re-IDRs main) / `INPUT_KNOB 0x07` (Knob HID uid 4) / `INPUT_TELEPHONY 0x08` (Telephony HID). `INPUT_COMMAND`'s payload is the `CMD_*` set — `CMD_REQUEST_UI 0x01`, `CMD_REQUEST_SIRI 0x02` *(deprecated, iOS ignores it)*, `CMD_SIRI_DOWN 0x03` / `CMD_SIRI_UP 0x04`, `CMD_NAV_START 0x05` / `CMD_NAV_STOP 0x06` / `CMD_NAV_CARD 0x07` / `CMD_NAV_APP 0x0A`, `CMD_LIMITED_UI_ON 0x08` / `CMD_LIMITED_UI_OFF 0x09`, `CMD_NAV_APPEARANCE 0x0B`, `CMD_NAV_ZOOM_IN 0x0C` / `CMD_NAV_ZOOM_OUT 0x0D`, `CMD_UI_APPEARANCE 0x0E` / `CMD_MAP_APPEARANCE 0x0F` / `CMD_NIGHT_MODE 0x10`, `CMD_VIEW_AREA 0x11` (`[cmd][index]` → `updateViewArea` for the MAIN display, refused if `/info` never declared the index; 2026-09-07). ocbmd relays every sub-frame opaquely to carplayd; carplayd taps the iPhone HID devices for touch/media/nav/knob/telephony, dispatches `INPUT_COMMAND` as an AirPlay `/command`, and turns `INPUT_KEYFRAME` / `INPUT_KEYFRAME_ALT` into a `forceKeyFrame` on the event channel (main / `VideoStream.Alt1`). Constants are authoritative in `crates/ocbm-proto/src/lib.rs` | all |
+| `0x0031` | MIC | host→box: mic-uplink PCM (S16LE at the CT_UPLINK-negotiated rate/ch); ocbmd relays to carplayd's mic-ingest seam → RTP uplink to the iPhone | projection |
 | `0x0040` | MGMT | box management, request/response (the app's "CCPA" tab): host→box `MGMT_GET_INFO 0x01` / `MGMT_REBOOT 0x02` / `MGMT_FORGET_ALL 0x03` / `MGMT_FORGET_DEVICE 0x04` / `MGMT_RESTART_WIRELESS 0x05` / `MGMT_ENTER_NCM 0x06` (added 2026-09-03: box arms the persistent `/script/ncm_only` flag, drops any `/script/ocbm_trial` dead-man, ACKs, reboots into NCM maintenance mode; sticky — return over ssh with `rm /script/ncm_only; reboot`. Reachable from the app's CCPA tab (confirmed) and from `open -a <carlink_macOS.app> carlink://box/enter-ncm` while the app holds the USB interface (the `-a` form is required for a bundle in a build directory: LaunchServices does not bind the `carlink` scheme for it, so a bare `open carlink://…` fails with kLSApplicationNotFoundErr)); box→host `MGMT_INFO 0x81` / `MGMT_ACK 0x82` | all |
 | `0x0041` | RTSP | box↔host: the **app-driven SETUP relay** (box seam `:9106`, `receiver::relay`). ocbmd is a dumb byte pipe; the endpoint framing is `[u32 BE "RTSP"][u32 BE len][msg]` (len ≤ 512 KiB, magic-resync) carrying the `RS_*` messages below. Rides **out_hi** with the control plane (timing-critical pair/SETUP/RECORD phase) | projection |
 | `0x0042` | LOG | **box→host only:** the box's own logs, streamed live. Payload = one or more back-to-back entries, `[source u8][flags u8][seq u16 LE][unix_ms u64 LE][len u16 LE][text]`, packed up to a 4096 B payload per frame. Off until the host sends `CT_LOG_CTL`. See below | all |
@@ -469,7 +469,7 @@ concurrent streams sharing the voice sink (telephony + alert) cannot clobber eac
   dropped (the rate is unknowable) and counted; the host must not run the RFC 2198 demux over it.
   Uplink for the same call is the existing mic path: the box's `CT_UPLINK` gate asks for
   `uplink on 8000 1` and the host answers with S16LE 8 kHz mono on `CH_MIC` in 20 ms (320 B) frames.
-  **Wideband (codec 4 mSBC), added 2026-09-04 behind the box lever `CARPLAY_HFP_WBS` / `/tmp/hfp_wbs`:**
+  **Wideband (codec 4 mSBC), added 2026-09-04 behind the box lever `BT_HFP_WBS` / `/tmp/hfp_wbs`:**
   when the AG negotiates mSBC the controller stops decoding, and the box forwards each transparent
   eSCO read VERBATIM as one `SEAM_PKT_PLAIN` — no 320 B aggregation, H2 headers untouched — under a
   `SEAM_FORMAT` of `codec 4, rate 16000, ch 1, bits 16, audio_type 1`, where `rate`/`bits` describe
@@ -482,8 +482,8 @@ concurrent streams sharing the voice sink (telephony + alert) cannot clobber eac
   `:9003` when the phone opens SCO and uses a FIXED scid `0x4846_5053_434F_0001` (ASCII `HFPSCO` +
   an ordinal), because there is exactly one SCO channel at a time; a scid in a host log therefore
   names its own origin. The uplink half has no ocbmd change at all: ocbmd's `CH_MIC` relay already
-  connects to `127.0.0.1:9112`, and during an Android Auto session — when airplayd is not running —
-  `carplay-wireless` listens there itself and speaks airplayd's protocol verbatim.
+  connects to `127.0.0.1:9112`, and during an Android Auto session — when carplayd is not running —
+  `btd` listens there itself and speaks carplayd's protocol verbatim.
 
 The datagram is the iPhone's packet verbatim: `[12B RTP hdr][ciphertext][16B tag][8B nonce]`. Nonce =
 `[0,0,0,0]‖pkt[len-8..]`, AAD = `pkt[4..12]` (ts‖ssrc), ciphertext‖tag = `pkt[12..len-8]`. **This lane
@@ -531,9 +531,9 @@ transports; the host preserves the box-only `iAPChannel`/`sessionManagement` tok
 wireless arm emits.
 
 ocbmd chunks the `:9106` seam bytes into ≤64 KiB OCBM frames both ways; **all message framing is
-endpoint-to-endpoint** (airplayd ↔ host app): `[u32 BE 0x52545350 "RTSP"][u32 BE len][msg]`, receiver
+endpoint-to-endpoint** (carplayd ↔ host app): `[u32 BE 0x52545350 "RTSP"][u32 BE len][msg]`, receiver
 resyncs by magic scan. Messages share the header `[op u8][conn u32 LE][cseq u32 LE]`; `conn` is
-monotonic per airplayd process (hijack ⇒ new conn, and the serve FIFO guarantees `RS_CLOSE(old)`
+monotonic per carplayd process (hijack ⇒ new conn, and the serve FIFO guarantees `RS_CLOSE(old)`
 precedes `RS_OPEN(new)`), the host drops messages for a non-current conn. Constants are authoritative
 in `receiver::relay` and mirrored in `ocbm-proto`/Swift (the META_* pattern).
 
@@ -554,7 +554,7 @@ The YAML must set `accessoryConfig.appDrivenSetup: true`, see `tools/setup_relay
 Because the A/V channels are the **live-UI** path, ocbmd carries them on dedicated **per-stream**
 queues (video / alt-video / audio) with **backpressure, not drop**: the poll loop only pulls a
 stream's next seam chunk once that stream's queue has drained, so a slow USB/host propagates back
-through the seam → airplayd → the iPhone's TCP screen socket. (That iOS then adapts its encode rate is
+through the seam → carplayd → the iPhone's TCP screen socket. (That iOS then adapts its encode rate is
 the design expectation, not a measured result.) **Video only:** `CH_MEDIA_AUDIO` and `CH_ALT_AUDIO`
 share one **ungated** queue, because their source is RTP over UDP and there is no transport flow control
 to propagate — a long host stall grows that queue to its cap and then drops whole frames, so in practice
@@ -576,7 +576,7 @@ answerable only in a lab.
 
 **`/tmp/box.log` is the box's universal log**, and the one the box OWNS: every daemon and script whose
 output nothing else parses appends to it with `O_APPEND` (the run scripts redirect stdout/stderr there,
-ocbmd's own included), and lines carry their own `[ocbmd]` / `[airplayd]` / `[sup]` prefixes. `/tmp` is
+ocbmd's own included), and lines carry their own `[ocbmd]` / `[carplayd]` / `[sup]` prefixes. `/tmp` is
 tmpfs on a 123 MB no-swap box, so it is a bounded **staging area, never storage**: the tailer
 `ftruncate`s it back to 0 at the cap. The file is small by construction, which is why "stream from
 offset 0" IS the backfill — everything since boot, with no separate dump opcode.
@@ -589,16 +589,16 @@ and never writes to them; only source 0 is rotated. Sources:
 | `source` | Name | Path | Policy |
 |---|---|---|---|
 | `0` | `box` | `/tmp/box.log` | **staged** — streamed, then `ftruncate`d at `cap_kb` |
-| `1` | `airplayd` | `/tmp/airplayd.log` | tail-only |
-| `2` | `airplayd_wl` | `/tmp/airplayd_wl.log` | tail-only |
+| `1` | `carplayd` | `/tmp/carplayd.log` | tail-only |
+| `2` | `carplayd_wl` | `/tmp/carplayd_wl.log` | tail-only |
 | `3` | `iap2d` | `/tmp/iap2d.log` | tail-only |
 | `4` | `aa-bridge` | `/tmp/aa-bridge.log` | tail-only |
 | `5` | `rx-connect` | `/tmp/rx-connect.log` | tail-only |
 | `6` | `bt` | `/tmp/bt.log` | tail-only |
 | `7` | `radio_ap_dhcp` | `/tmp/radio_ap_dhcp.log` | tail-only |
 | `8` | `radio_bt_attach` | `/tmp/radio_bt_attach.log` | tail-only |
-| `9` | `rx-connect_wl` | `/tmp/rx-connect_wl.log` | tail-only |
-| `10` | `wl` | `/tmp/wl.log` | tail-only (carplay-wireless stdout) |
+| `9` | `rx-connect-wl` | `/tmp/rx-connect-wl.log` | tail-only |
+| `10` | `wl` | `/tmp/wl.log` | tail-only (btd stdout) |
 | `255` | `internal` | — | the tailer itself: rotation / restart notes and drop reports |
 
 An **unknown source id is a display concern, never a reason to drop the entry** — a newer box may
@@ -639,7 +639,7 @@ read at. A writer that knows its own wall-clock time may instead prefix the line
 any source, parses the digits as the entry's `unix_ms`, and strips the prefix from `text` before
 encoding the entry; a line that does not open with it keeps the read-time stamp. Central Rust log
 helpers that funnel a daemon's own log lines (`iap2d`, `bt-common`'s `sdp_server`/`ssp_agent`,
-`carplay-wireless`'s `main`/`bt_driver`/`control`/`sdp_client`/`reconnect`/`arbiter_client`,
+`btd`'s `main`/`bt_driver`/`control`/`sdp_client`/`reconnect`/`arbiter_client`,
 `receiver`'s `iap_tunnel`) emit this prefix on every line; ocbmd's own `eprintln!`s into `box.log`
 and the shell-script writers (`session_supervisor.sh`, `ocbm_boot.sh`, `radio_hal.sh` et al.,
 `aa-bridge`/`rx-connect`'s ad hoc `eprintln!`s) do not, and stay read-time-stamped — deliberately:

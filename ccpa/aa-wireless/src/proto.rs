@@ -229,7 +229,7 @@ impl SecurityMode {
     /// Accept a raw value only if it is a member of the enum.
     ///
     /// Returns `None` rather than panicking: this code is destined to run INSIDE
-    /// `carplay-wireless`, which builds with `panic = "abort"`, so an assert here would take a
+    /// `btd`, which builds with `panic = "abort"`, so an assert here would take a
     /// live CarPlay session down over an Android-Auto-side configuration mistake.
     pub fn checked(v: i32) -> Option<SecurityMode> {
         let m = SecurityMode(v);

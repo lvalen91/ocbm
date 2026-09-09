@@ -77,9 +77,9 @@ fn now_ms() -> u64 {
 /// audio gateway is now CONNECTED TO instead (`attempt_headset`), and the RFCOMM link that creates
 /// holds the ACL by itself — so this lever is left only for a peer that offers nothing to connect
 /// to.
-/// Override: `CARPLAY_ACL_HOLD_SECS` or `/tmp/acl_hold_secs` (`0` disables the hold).
+/// Override: `BT_ACL_HOLD_SECS` or `/tmp/acl_hold_secs` (`0` disables the hold).
 ///
-/// Read from `CARPLAY_ACL_HOLD_SECS` or, because this daemon is `exec`d from inside the
+/// Read from `BT_ACL_HOLD_SECS` or, because this daemon is `exec`d from inside the
 /// supervisor's `setsid sh -c` where setting an env var means editing a shipped script, from
 /// `/tmp/acl_hold_secs`. The file form matches the project's existing bench-lever convention
 /// (`/tmp/carplay_metadata`), and `/tmp` is tmpfs so a reboot clears it.
@@ -87,8 +87,7 @@ const ACL_HOLD_DEFAULT_SECS: u64 = 30;
 
 fn acl_hold_secs() -> Option<u64> {
     let parse = |v: &str| v.trim().parse::<u64>().ok();
-    let configured = std::env::var("CARPLAY_ACL_HOLD_SECS")
-        .ok()
+    let configured = box_common::lever("BT_ACL_HOLD_SECS", "CARPLAY_ACL_HOLD_SECS")
         .and_then(|v| parse(&v))
         .or_else(|| std::fs::read_to_string("/tmp/acl_hold_secs").ok().and_then(|v| parse(&v)));
     match configured {
@@ -280,7 +279,7 @@ fn attempt_headset(
     // forces one, for a bench run that wants to isolate a failure to a single route.
     let forced = hfp_hf::forced_path();
     if let Some(p) = forced {
-        log(&format!("AA: headset path forced to {} by CARPLAY_AA_HEADSET_PATH", p.as_str()));
+        log(&format!("AA: headset path forced to {} by BT_AA_HEADSET_PATH", p.as_str()));
     }
     let candidates = headset_candidates(&services, forced);
     if candidates.is_empty() {
@@ -598,7 +597,7 @@ fn hold_headset_link_inner(
             return HeadsetLinkEnd::ShuttingDown;
         }
         // Answers to the AG: `AT+BCS=<id>` / `AT+BAC=…` (codec negotiation), and `ATA` under the
-        // bench lever (`CARPLAY_HFP_AUTOANSWER=1` / `/tmp/hfp_autoanswer`). Sent here rather than
+        // bench lever (`BT_HFP_AUTOANSWER=1` / `/tmp/hfp_autoanswer`). Sent here rather than
         // inside the line handler so the write is not nested inside the read that produced it, and
         // `impl Write for &File` keeps the caller's ownership of the socket intact.
         //

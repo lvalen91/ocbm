@@ -20,7 +20,7 @@
 # only recoverable retroactively (unplug the phone, plug it into the Mac, pull the archive — 02_TESTING).
 #
 # The two traps the wireless harness documents, carried forward so they are not reintroduced:
-#   1. `-pn airplayd` phone-log filter hid the lockout banner (rendered by CarPlay's UI process). Not
+#   1. `-pn carplayd` phone-log filter hid the lockout banner (rendered by CarPlay's UI process). Not
 #      applicable here — there is no phone log at all — which is why the LOCKOUT verdict is taken
 #      from the pixels of the armed rect instead.
 #   2. The app-restart dwell must be 12 s, not 3: the supervisor's teardown SIGTERM lands ~6 s after
@@ -293,7 +293,7 @@ run_one() { # PW PH AW AH LABEL
       if [ "$(jf "$r" .ok)" != "true" ]; then VERDICT="REFUSED-LOCALLY"; NOTE="save: $r"
       elif [ "$NO_RESTART" = 1 ]; then log "NO_RESTART=1: config lands at the next SUBSCRIBE — apply it yourself"
       else
-        # Pushed config is consumed at SUBSCRIBE, and a wired airplayd reads it per connection —
+        # Pushed config is consumed at SUBSCRIBE, and a wired carplayd reads it per connection —
         # so a fresh app connection (host GONE -> teardown -> host PRESENT -> arm) is what applies it.
         kill_app; launch_app
       fi
@@ -312,7 +312,7 @@ run_one() { # PW PH AW AH LABEL
       if live_log | grep "REFUSED" | grep -qF "$RECT"; then
         VERDICT="REFUSED-LOCALLY"; NOTE="app log REFUSED"; break; fi
       if [ "$decl" = 0 ] && since_log | grep -F "view areas: 2 declared" | grep -qF "[1] $RECT"; then
-        decl=1; log "declared: $(since_log | grep -F "view areas: 2 declared" | grep -F "[1] $RECT" | tail -1 | sed 's/.*\[airplayd\] //' | cut -c1-120)"; fi
+        decl=1; log "declared: $(since_log | grep -F "view areas: 2 declared" | grep -F "[1] $RECT" | tail -1 | sed 's/.*\[carplayd\] //' | cut -c1-120)"; fi
       if [ "$decl" = 1 ] && live_log | grep -q "full TEARDOWN"; then VERDICT="TEARDOWN"; NOTE="teardown after declaration"; break; fi
       local sess; sess=$(ctl "get session")
       if [ "$(jf "$sess" .sessionActive)" = "true" ]; then
@@ -341,7 +341,7 @@ run_one() { # PW PH AW AH LABEL
   if [ -z "$VERDICT" ]; then
     # TRIGGER=auto|request|tap. `auto` prefers the deterministic door and falls back to the Dock
     # button. Force `tap` when the APP has the door but the BOX has not been updated: the app answers
-    # {"ok":true} as soon as it has SENT CMD_VIEW_AREA 0x11, and an airplayd that predates that opcode
+    # {"ok":true} as soon as it has SENT CMD_VIEW_AREA 0x11, and an carplayd that predates that opcode
     # logs "unknown INPUT_COMMAND 0x11 — dropped". The trigger then looks accepted, nothing moves, and
     # every case scores INCONCLUSIVE at TRANSITION_TIMEOUT instead of falling back here.
     if [ "${TRIGGER_MODE:-auto}" = "tap" ]; then r='{"ok":false,"reason":"TRIGGER_MODE=tap"}'

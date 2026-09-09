@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# VERIFICATION NOTE: these logs were produced by ccpa/airplayd, which for the
+# VERIFICATION NOTE: these logs were produced by ccpa/carplayd, which for the
 # on-hardware validation REUSES ANOTHER PROJECT’S CarPlay receiver as the harness —
 # ncm_carplayd/receiver_core (its proven ControlServer for pair-setup/verify + auth-setup,
 # and, for the full-session capture, its AvSession for SETUP/RECORD/stream handling).

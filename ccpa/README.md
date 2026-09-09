@@ -59,7 +59,7 @@ with **neither** present the box boots the OCBM appliance. Always test
 > deploy dead-man on 2026-08-15 that no installer ships). `ocbm_boot.sh` is the mirror image: the
 > overlay copy is the one installed, and `tools/ocbm_boot.sh` is the stale duplicate.
 
-## Daemons — `ocbmd/`, `iap2d/`, `airplayd/` (shipped, hardware-validated) + `mfid/` (bring-up only)
+## Daemons — `ocbmd/`, `iap2d/`, `carplayd/` (shipped, hardware-validated) + `mfid/` (bring-up only)
 
 Each is a sibling crate (`Cargo.toml` + `src/`), cross-built for `armv7-unknown-linux-musleabihf`:
 
@@ -67,11 +67,11 @@ Each is a sibling crate (`Cargo.toml` + `src/`), cross-built for `armv7-unknown-
 |---|---|
 | `ocbmd/` | OCBM bulk-transport multiplexer — owns `/dev/usb_accessory`, MODE_SELECT/CONSOLE, channel demux + per-stream drain to the host over USB |
 | `iap2d/` | iAP2 / CarPlay control daemon (Identify, metadata — content selection is app-driven per docs/carplay/04_CAPABILITIES_AND_CONFIG.md; today's box tier levers are interim — session management) |
-| `airplayd/` | AirPlay receiver — pairing; SETUP/RECORD relayed to the app over `CH_RTSP` (app-driven SETUP is the default on both transports per docs/carplay/04_CAPABILITIES_AND_CONFIG.md, the local response is the fallback; wireless asserts from the app-pushed YAML); forward-encrypted A/V forwarding — the box never decrypts media by design (in-binary floor `fwd_enc()` in `../crates/vendor/receiver/src/levers.rs`; `OCBM_FWD_ENC` is the current-state mechanism) — input uplink |
-| `mfid/` | **not shipped** — an ephemeral MFi-chip service for NCM bring-up: serves the cert/sign ops over TCP so a host (the Pi) can reach the coprocessor when OCBM is not the transport. Shares the same `/tmp/carplay_mfi.lock` `flock` as `ocbmd`'s `CH_MFI`, `airplayd` and `iap2d`. Staged to `/tmp` by `tools/run_mfid.sh`, refuses to start in OCBM mode, erased by a reboot |
+| `carplayd/` | AirPlay receiver — pairing; SETUP/RECORD relayed to the app over `CH_RTSP` (app-driven SETUP is the default on both transports per docs/carplay/04_CAPABILITIES_AND_CONFIG.md, the local response is the fallback; wireless asserts from the app-pushed YAML); forward-encrypted A/V forwarding — the box never decrypts media by design (in-binary floor `fwd_enc()` in `../crates/vendor/receiver/src/levers.rs`; `OCBM_FWD_ENC` is the current-state mechanism) — input uplink |
+| `mfid/` | **not shipped** — an ephemeral MFi-chip service for NCM bring-up: serves the cert/sign ops over TCP so a host (the Pi) can reach the coprocessor when OCBM is not the transport. Shares the same `/tmp/carplay_mfi.lock` `flock` as `ocbmd`'s `CH_MFI`, `carplayd` and `iap2d`. Staged to `/tmp` by `tools/run_mfid.sh`, refuses to start in OCBM mode, erased by a reboot |
 
 The MFi authentication bridge and radio/link glue live in the vendor crates under `../crates/vendor/`.
 See [`../docs/carplay/01_OCBM_PROTOCOL.md`](../docs/carplay/01_OCBM_PROTOCOL.md) and [`../docs/ops/04_OPEN_ITEMS.md`](../docs/ops/04_OPEN_ITEMS.md).
 Build: **`./build.sh`** from the repo root. Do not invoke `cargo zigbuild` bare — Homebrew's `rustc`
-shadows rustup's and has no `armv7-unknown-linux-musleabihf` std, and airplayd's eld-codec needs the
+shadows rustup's and has no `armv7-unknown-linux-musleabihf` std, and carplayd's eld-codec needs the
 `CC`/`AR` zig pair that `build.sh` sets. `FDK_AAC_PREFIX` defaults to `$PWD/scratchpad/fdk/install`.

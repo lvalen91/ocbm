@@ -44,7 +44,7 @@ the `features.rs` generation contract, or `SENT_MSG_IDS`/`RCV_MSG_IDS`. The NEON
 ### The lost-command mechanism (handoff Open item 1) — solved
 
 The audit assembled a complete causal chain for "one `setLimitedUI` left the host, ocbmd's counter
-climbed, airplayd never saw it, zero write failures logged." Each link is confirmed at a `file:line`:
+climbed, carplayd never saw it, zero write failures logged." Each link is confirmed at a `file:line`:
 
 1. Every OCBM send runs `writeQueue.sync` into a blocking USB write whose worst case (~10–11 s, two
    `WritePipeTO` attempts + a `ClearPipeStallBothEnds`) **exceeds the box's 10 s heartbeat grace**
@@ -98,7 +98,7 @@ wire behavior change that needs the phone to confirm ELD acceptance — **deferr
 | `5ce9d1c` | Baseline — the uncommitted 07-29/30 review + Simulator-verification work (92 files) |
 | `9022eaf` | Build system — eld-codec cc-rs toolchain lookup + rerun-if-env-changed; build.sh builds all 6 box binaries |
 | `1d67278` | ocbmd/ocbm-proto — hoisted 64K per-wake buffers, table CRC-32, poll(POLLOUT) pacing, bounded ssp_enabled, truncated-FILE_CLOSE reject, Pty let-else, one Instant/pass |
-| `871384a` | iap2d/airplayd/iap2-core — bounded tx(), fatal i2c-open, empty-challenge Ignore, hermetic policy test, clippy; airplayd plock folded in |
+| `871384a` | iap2d/carplayd/iap2-core — bounded tx(), fatal i2c-open, empty-challenge Ignore, hermetic policy test, clippy; carplayd plock folded in |
 | `de3a46b` | receiver/rtsp — bounded uplink writes, plock sweep, single plist parse, gated RCS hex dumps, wantsDedicatedSocket log, rtsp FrameError taxonomy, clippy |
 | `34657a5` | wireless/pairing/mfi/eld — checked setsockopt, bounded flock/arbiter, strict i2c ioctl, reopen-race close, constant-time SRP M1, RNG error variant, M5 replay guard, frame_len-0 guard |
 | `75dde09` | host OCBM/USB/audio — heartbeatTimer race, CT_STOP logging, stats Mutex, frame oversize guard, unhandled-frame logs, device-manager logs, Sendable hygiene, V5 decrypt-fail keyframe, V6 short-body, V9 dead code, A1/A2/A3/A5 audio |
@@ -188,7 +188,7 @@ checking the USB bus" diagnosis; `preempt_wireless_for_wired()` exists; and the 
 reap landed. Only fix direction 3 is unlanded, deliberately. Text kept as the record.)* The
 dual-transport design assumed a session
 arbiter that preempts the loser; that arbiter *server was never implemented* (`wireless/src/main.rs:10-13`),
-so `carplay-wireless` runs `GrantedStandalone` and only tears down on SIGTERM (host-app-absent or the
+so `btd` runs `GrantedStandalone` and only tears down on SIGTERM (host-app-absent or the
 CCPA "restart wireless" button) — never on a USB plug. Concrete stale-state:
   1. `/tmp/carplay_transport` sticks at `"wireless"`: `av.rs:236` (`ensure_av_layer`) writes it at entry
      before the spawn is confirmed; the only authoritative clear is `teardown_av_layer()` (SIGTERM-gated).
@@ -200,8 +200,8 @@ CCPA "restart wireless" button) — never on a USB plug. Concrete stale-state:
      (`av.rs:148` in `teardown_av_layer`, `av.rs:349-351` in `ensure_av_layer` — not :336) → two
      `_airplay._tcp` advertisers.
   **Fix directions:** a supervisor preempt edge (genuine 05ac iPhone on USB + flag==wireless → SIGTERM
-  carplay-wireless → teardown clears flag+latch+daemons → `arm()`; stop `phone_on_bus` short-circuiting
-  so the raw USB check is still consulted); write the transport flag only in the `airplayd_up` success
+  btd → teardown clears flag+latch+daemons → `arm()`; stop `phone_on_bus` short-circuiting
+  so the raw USB check is still consulted); write the transport flag only in the `carplayd_up` success
   branch (av.rs:364), not at entry; reap rx-connect by both name forms. These are their own work items
   (touch the byte-pinned-Identify-adjacent wireless crate + supervisor — validate on a wireless session).
 
@@ -233,7 +233,7 @@ string probe of the binaries that existed at that moment confirms `batteryCharge
 
 The `power` and `device` records reached the app, hit `default:`, and were filed under **Other**.
 
-docs/carplay/04_CAPABILITIES_AND_CONFIG.md already warned that `host/CarPlayHost/build/` is stale and that `strings` is unreliable for
+docs/carplay/04_CAPABILITIES_AND_CONFIG.md already warned that `host/MacHost/build/` is stale and that `strings` is unreliable for
 confirming a change landed. Both traps fired. The app's session log prints only `Version: 1.0`; a
 build stamp would have made this a one-minute diagnosis and is the cheapest fix here.
 
@@ -503,7 +503,7 @@ operator reaches for to narrow a *failing* declaration, and attributed to the wr
   Truncate-per-session was taken instead — it also automates a step `docs/wireless/00_WIRELESS_CARPLAY.md` does by hand.
 - **Hoisting the MFi lock outside the retry loop.** The real worst case is ~51 s, not 30 s. The
   proposal delivers ~31 s while converting ~21 s of lock-*wait* into lock-*held* time, breaking the
-  invariant the 10 s ceilings were sized against and spuriously failing `airplayd`'s own
+  invariant the 10 s ceilings were sized against and spuriously failing `carplayd`'s own
   `LocalMfiSigner` — i.e. no session at all. It also cannot be written: `MfiLock` is private and
   `receiver` is `#![forbid(unsafe_code)]`.
 - **Deferring the `stream_flag` fix.** The reachability argument held, the cost argument did not:
@@ -539,7 +539,7 @@ Three of the four pending changes were verified correct; each verifier also foun
 
 `session.rs` opened a SECOND TCP connection to `127.0.0.1:9004` for inbound `/command` plists while
 `metadata.rs` held its own. ocbmd keeps one producer per channel
-(`av_conns.retain(|(_, c)| *c != ch)`), so the two connections inside the same `airplayd` process
+(`av_conns.retain(|(_, c)| *c != ch)`), so the two connections inside the same `carplayd` process
 mutually evicted each other — every command plist killed the JSON sink and vice versa. Observed live
 on 2026-07-29 as three `[meta] seam write failed — reconnecting` cycles, each exactly three
 `modesChanged` forwards after the previous reconnect. The JSON side logged its losses; the command
@@ -606,7 +606,7 @@ be re-wired?** (Live call state IS shown in the MetadataStore Phone pane; Now-Pl
   onto the wrong OCBM channel (e.g. 4K bytes as CH_ALT_VIDEO). Overlaps the :9005 reconnect path.
 - **M-b** `ocbmd/main.rs:529` [CONFIRMED] — `drain_q` uses `q.drain(0..w)` (O(n) front-shift) → O(n²)
   draining a 4K-frame `out_av` on the ARM box. (rx path was fixed with a cursor; tx wasn't.)
-- **M-c** `airplayd/main.rs:380-430` [CONFIRMED] — `CARPLAY_ALT_W/H` set but **never cleared** on any
+- **M-c** `carplayd/main.rs:380-430` [CONFIRMED] — `CARPLAY_ALT_W/H` set but **never cleared** on any
   path (else/parse-fail/no-config). Stale cluster dims from a prior connection leak into the next →
   wrong cluster resolution advertised to iOS.
 - **M-d** `AppDelegate.swift` [CONFIRMED] — **window-title state machine broken** ("stuck at
@@ -633,7 +633,7 @@ be re-wired?** (Live call state IS shown in the MetadataStore Phone pane; Now-Pl
 ---
 
 ### LOW — behavioral / robustness (selected; ~15 total)
-- `airplayd/main.rs` — `NAV_FORWARD` not reset on session teardown → a `CMD_NAV_START` then disconnect
+- `carplayd/main.rs` — `NAV_FORWARD` not reset on session teardown → a `CMD_NAV_START` then disconnect
   leaves the next session forwarding the cluster from the start [CONFIRMED]. `INPUT_NAV` sent to uid-3
   unconditionally regardless of `CARPLAY_DPAD` → silent no-op when D-pad off [CONFIRMED]. Media-btn
   index not range-validated [CONFIRMED].
@@ -701,7 +701,7 @@ pass; Swift app builds. Fixes, grounded in the audit:
 - Deferred `av_conns` accept to after the dispatch pass (no mid-pass index shift → no misrouting).
 - `av_backpressured` now resets on recovery; `eth` socket closed on session teardown.
 
-**airplayd / receiver (M-c, M-e, LOWs):**
+**carplayd / receiver (M-c, M-e, LOWs):**
 - `CARPLAY_ALT_W/H` cleared on every config path (no stale cluster dims).
 - `NAV_FORWARD` reset in `events::clear()` (no cross-session cluster-forward leak).
 - `INPUT_NAV` gated on `CARPLAY_DPAD`; `INPUT_MEDIA_BTN` index range-checked (1..=5).
@@ -732,7 +732,7 @@ pass; Swift app builds. Fixes, grounded in the audit:
   large; recommend a dedicated pass.
 - **MicCapture / NowPlayingManager / CallManager** (H3–H5): dead, but they are FEATURES (Siri mic
   uplink, Control Center, call notifications). **Retire (delete) or re-wire?** — user decision.
-- **Box deploy of the video fix**: staged (`ocbmd a2a770c8`, `airplayd e7ae805`) but NOT deployed — the
+- **Box deploy of the video fix**: staged (`ocbmd a2a770c8`, `carplayd e7ae805`) but NOT deployed — the
   UART serial adapter was disconnected mid-session. Deploy + on-hardware video-stability test pending.
 - Minor: FileLogger in-session size rotation; stereo-PCM uplink timestamp (unreachable today);
   OCBMAVDecrypt write-only `videoCounter`/`altVideoCounter`/`bits` fields.

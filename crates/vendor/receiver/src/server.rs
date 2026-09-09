@@ -84,7 +84,7 @@ pub struct ControlServer<'a, P: Pairings, S: MfiSigner> {
     session: Box<dyn crate::session::SessionDelegate>,
     verbose: bool,
     /// The advertised MAIN-display pixel width (displays[].widthPixels). Threaded in from
-    /// airplayd so `forward_corner_mask` can tell the host the exact width iOS's streamed
+    /// carplayd so `forward_corner_mask` can tell the host the exact width iOS's streamed
     /// `topLeftCornerMask` corresponds to — the host scales the corner by `png_n / display_width`.
     /// 0 = unset (corner-mask forwarding is skipped).
     display_width: u32,
@@ -236,7 +236,7 @@ impl<'a, P: Pairings, S: MfiSigner> ControlServer<'a, P, S> {
             // returns Ok(None) — with no size check of its own — for as long as no `\r\n\r\n`
             // terminator arrives. Any peer with network adjacency to `[::]:5000` (the wlan0 AP subnet,
             // the NCM link) could therefore stream header-less bytes until allocation failed, and
-            // under `panic = "abort"` that kills airplayd outright on a 123 MB no-swap box. Pre-auth,
+            // under `panic = "abort"` that kills carplayd outright on a 123 MB no-swap box. Pre-auth,
             // no session required. Deliberately the same bound as the encrypted path so this can never
             // reject a request `Request::parse` would have accepted; a tighter pre-encryption cap is
             // defensible (real pair-setup/verify/info messages are a few KB at most) but is a

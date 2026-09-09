@@ -11,9 +11,9 @@
 //! shared code. If the two ever need to diverge, that's a sign they should be unified for real; until
 //! then, duplication here is intentional insurance against a working file.
 //!
-//! One physical MFi chip, THREE potential concurrent users: `iap2d` (wired), `carplay-wireless`'s
+//! One physical MFi chip, THREE potential concurrent users: `iap2d` (wired), `btd`'s
 //! `bt_driver.rs` (wireless BT session — which per docs/wireless/00_WIRELESS_CARPLAY.md now stays alive until `disableBluetooth`,
-//! i.e. potentially overlapping with the AirPlay session's own iAP2-tunnel handshake), and `airplayd`'s
+//! i.e. potentially overlapping with the AirPlay session's own iAP2-tunnel handshake), and `carplayd`'s
 //! new AirPlay-tunnel iAP2 session (this crate). All three MUST serialize through the same
 //! `/tmp/carplay_mfi.lock` flock, or an interleaved i2c transaction corrupts across processes.
 
@@ -96,7 +96,7 @@ impl MfiLock {
             );
             return Err(MfiError::LockUnavailable);
         }
-        // BOUNDED acquire (LOCK_NB + deadline), matching `ccpa/airplayd/src/main.rs`'s own `MfiLock`
+        // BOUNDED acquire (LOCK_NB + deadline), matching `ccpa/carplayd/src/main.rs`'s own `MfiLock`
         // and `iap2d`'s. This was the only one of the four chip users still taking an UNBOUNDED
         // `LOCK_EX`, and it is called from `iap_tunnel::execute` with the global SESSION guard held —
         // so a wedged holder stalled the DataStream reader, and with it every inbound iAP2 frame, plus
@@ -308,7 +308,7 @@ fn sign_locked(chal: &[u8]) -> Option<Vec<u8>> {
     // ~2.1 s, and is — but only when every status read succeeds. `i2c_rd` is itself `for _ in 0..5`
     // with a 5 ms sleep, so under chip NAK each iteration costs ~35 ms and the loop ran ~7.1 s. That
     // is the case this poll exists for, and it blew straight through the 10 s ceilings that
-    // `airplayd`'s `LocalMfiSigner` and `MfiLock::acquire` were sized against — while holding the
+    // `carplayd`'s `LocalMfiSigner` and `MfiLock::acquire` were sized against — while holding the
     // chip lock AND, upstream, the tunnel's SESSION mutex.
     const SIGN_POLL_DEADLINE: std::time::Duration = std::time::Duration::from_millis(2500);
     let poll_start = std::time::Instant::now();

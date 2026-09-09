@@ -17,7 +17,7 @@
 //! control sequence below is the AA-specific part.
 //!
 //! SECOND TRANSPORT (2026-09-04). The same process also serves WIRELESS Android Auto, in `wireless`:
-//! a TCP listener on the SoftAP address that `carplay-wireless` advertised to the phone over
+//! a TCP listener on the SoftAP address that `btd` advertised to the phone over
 //! Bluetooth (`docs/androidauto/03_WIRELESS.md` §2f). It is armed only by `--wireless`, which the
 //! supervisor passes when it raises the wireless stack. Everything AOAP in this file is untouched by
 //! it; what the two arms share is the projection-owner arbitration, the single app-side socket
@@ -490,7 +490,7 @@ pub(crate) fn host_present() -> bool {
 ///
 /// `/tmp/host_present` is not purely "an app is subscribed": ocbmd deliberately DIPS it to 0 for
 /// `REARM_HOLD` (2 s) in `rearm_presence_silently()` while the host is still there, so that
-/// session_supervisor's shell poll sees a GONE→PRESENT edge and re-spawns airplayd. That fires on
+/// session_supervisor's shell poll sees a GONE→PRESENT edge and re-spawns carplayd. That fires on
 /// any relaunch arriving inside the stop grace / heartbeat grace — i.e. an ordinary "quit and
 /// reopen the app". Reading the dip as a departure would drop the claim and RESET the accessory
 /// mid-reconnect, bouncing the phone's AA session for no reason. Confirming over a window well

@@ -14,7 +14,7 @@ import com.carlink.logging.ProbeLog
  *
  * `pi/docs/01_PROJECTION_APP_DESIGN.md` §4 is the reasoning; this implements the "adopt immediately"
  * half — the parts that do **not** require the platform to own a radio, which on this Pi it does not
- * (`carplay-wireless` drives `hci0` directly and `hostapd` runs outside the Wi-Fi framework).
+ * (`btd` drives `hci0` directly and `hostapd` runs outside the Wi-Fi framework).
  *
  * What we take:
  *

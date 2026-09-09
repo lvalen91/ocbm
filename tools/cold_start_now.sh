@@ -3,7 +3,7 @@
 # reach Identified, bring up ncm0, then launch the presence-driven session supervisor (docs/carplay/02_SESSION_LIFECYCLE.md).
 # The iPhone-facing gadget is on ci_hdrc.0; the Mac-facing OCBM accessory is ci_hdrc.1, so reconfiguring
 # the iPhone gadget here does NOT disturb the OCBM link. Binaries are FHS-installed (iap_role_switch in
-# /usr/bin; iap2d/airplayd/rx_connect in /usr/sbin); scripts in /script. Watch /tmp/iap2d.log for
+# /usr/bin; iap2d/carplayd in /usr/sbin); scripts in /script. Watch /tmp/iap2d.log for
 # 'Identified'.
 set -u
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH
@@ -11,7 +11,7 @@ A=/sys/class/android_usb/android0
 I=/sys/bus/platform/devices/ci_hdrc.0/inputs
 L=/tmp/iap2d.log
 : > "$L"
-pkill -f iap2d 2>/dev/null; pkill -f airplayd 2>/dev/null; pkill -f rx_connect 2>/dev/null
+pkill -f iap2d 2>/dev/null; pkill -f carplayd 2>/dev/null
 pkill -f session_supervisor 2>/dev/null
 
 DN=$(lsusb | grep 05ac | sed 's/.*Device \([0-9]*\):.*/\1/' | head -1)

@@ -65,7 +65,7 @@ it is a raw byte pipe. Then `CT_HELLO` → `CT_HELLO_ACK`, `CT_SETTIME` (the box
 **The app is the ignition.** The box's radios are off at boot; `ocbmd` mirrors host presence to
 `/tmp/host_present` on the `CT_SUBSCRIBE` edge, and the box's `wireless_up()` brings the radios up from
 there, reading `wifi_ap:false` out of that same config to suppress its own SoftAP
-(`session_supervisor.sh:789-790`: `CARPLAY_WIFI_AP=0` → `"box SoftAP SUPPRESSED"`) while still bringing
+(`session_supervisor.sh:789-790`: `BOX_WIFI_AP=0` → `"box SoftAP SUPPRESSED"`) while still bringing
 up Bluetooth (`radio_hal.sh bt_on`, unconditional). If the app is not running and subscribed, no session
 can start. (Practical consequence: give the app a `device_filter.xml` +
 `ACTION_USB_DEVICE_ATTACHED` filter on `0x1314:0x2d00`, so plugging in the adapter *is* the trigger.)

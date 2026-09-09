@@ -248,7 +248,7 @@ things it never defines. Treat a WWDC mention as a *pointer* to look in §A/§C,
 ### Second host platform — the Raspberry Pi / AAOS port
 
 **There is a working non-CCPA host running this accessory stack.** A Raspberry Pi 4 on AAOS 16
-(arm64) runs `carplay-wireless` + `airplayd` + `rx-connect` natively, providing **both radios
+(arm64) runs `btd` + `carplayd` + `rx-connect` natively, providing **both radios
 itself** — its own Bluetooth and its own 5 GHz SoftAP — with the CCPA reduced to the **MFi
 coprocessor only**, reached over USB-NCM (`CARPLAY_MFI_ADDR` → `ccpa/mfid`). Device-proven end to
 end against an iPhone on iOS 27: pairing, iAP2, MFi auth, the `0x5702`/`0x5703` handoff, DHCP,
@@ -360,7 +360,7 @@ wireless rollout, or 4K/HDR named for Android Auto. Everything above 1080p, the 
 (`docs/androidauto/01_SESSION_AND_AV.md` §1) and the decompile.
 
 Our implementations to diff against: `host/aa-headunit/` (the Rust reference client) and
-`host/CarPlayHost/carlink_macOS/AA/` (the Swift engine that ships in the app). The box side carries no
+`host/MacHost/carlink_macOS/AA/` (the Swift engine that ships in the app). The box side carries no
 AA protocol at all — `ccpa/aa-bridge` is an AOAP byte pump (`docs/androidauto/00_ARCHITECTURE.md`, `docs/androidauto/00_ARCHITECTURE.md`).
 
 ### Note on the real-time cyber safeguard

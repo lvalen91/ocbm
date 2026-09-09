@@ -17,7 +17,7 @@ Companion to `docs/carplay/05_METADATA_AND_CONTROLS.md`.
 ### The discriminator — one grep, box-side, no phone trace needed
 
 ```sh
-./host/uart_cmd.sh 'grep -c "RX 0xAA00 -> CertSent" /tmp/airplayd_wl.log' 6
+./host/uart_cmd.sh 'grep -c "RX 0xAA00 -> CertSent" /tmp/carplayd_wl.log' 6
 ```
 
 `0xAA00` is `RequestAuthenticationCertificate` — the **device's** first move after it accepts the link.
@@ -28,8 +28,8 @@ Faster equivalent, fires ~10 ms earlier: any inbound frame with `ctrl=0x40` (i.e
 another SYN-ACK) proves the phone's link layer advanced.
 
 ```sh
-./host/uart_cmd.sh 'grep "datastream. RX" /tmp/airplayd_wl.log | grep -c "ctrl=0x40"' 6
-./host/uart_cmd.sh 'grep -c "ctrl=0xc0" /tmp/airplayd_wl.log' 6   # 1 = accepted; 31 = old behaviour
+./host/uart_cmd.sh 'grep "datastream. RX" /tmp/carplayd_wl.log | grep -c "ctrl=0x40"' 6
+./host/uart_cmd.sh 'grep -c "ctrl=0xc0" /tmp/carplayd_wl.log' 6   # 1 = accepted; 31 = old behaviour
 ```
 
 > **⚠️ THE THREE `ctrl=` GREPS ABOVE ARE DEAD — they read 0 on a HEALTHY box**, and a 0 on the
@@ -88,7 +88,7 @@ way. There was no way to see this from the wire — only from disassembly.
 
 ### Carrier discriminator (which carrier a frame actually took)
 
-`airplayd`'s `Event message received from 192.168.43.1:PORT, … Body N bytes, ID 0xNNNN` is the phone
+`carplayd`'s `Event message received from 192.168.43.1:PORT, … Body N bytes, ID 0xNNNN` is the phone
 receiving an accessory `POST /command`. The plist overhead is constant, so the body size names the frame:
 
 | iAP2 frame | plist body |
@@ -107,7 +107,7 @@ direction requires the RCS channel.
 
 ### Pre-flight gates (do these before starting a session)
 
-1. **Binary identity.** `md5sum /usr/sbin/airplayd` must equal the packed artefact you built. A run
+1. **Binary identity.** `md5sum /usr/sbin/carplayd` must equal the packed artefact you built. A run
    against a stale binary is worse than no run.
 2. **Runtime build identity.** ~~`grep -c "TX(RCS," $L` ≥ 3~~ — **DEAD, corrected 2026-08-16**: that
    line is gated behind `events_log()` and `CARPLAY_EVENTS_LOG` is never set, so it fails on a CORRECT
@@ -156,8 +156,8 @@ direction requires the RCS channel.
    record the exact build (e.g. iOS 27.0 24A5430a) alongside it — a bare "iOS 27" is not enough to
    reproduce or to trust later.
 5. **Arm the log-truncation guard.** `session_supervisor.sh::bound_logs` tail-truncates
-   `/tmp/airplayd_wl.log` to 64 KB once it passes 256 KB — destroying exactly the handshake window.
-   Snapshot at ~T+30 s: `cp /tmp/airplayd_wl.log /tmp/hs30.log`.
+   `/tmp/carplayd_wl.log` to 64 KB once it passes 256 KB — destroying exactly the handshake window.
+   Snapshot at ~T+30 s: `cp /tmp/carplayd_wl.log /tmp/hs30.log`.
    **`/tmp` is tmpfs — pull it off the box before anything reboots.**
 
 ### The trace persists — pull it retroactively
@@ -225,7 +225,7 @@ Two bench facts the scripts encode, so they are not rediscovered:
 rail (two arrows pointing inward, above the clock); from area 0 it is `tap 133 179` in the app's
 0..10000 space. It **moves with the area**, so the return press is elsewhere and no single constant
 works — which is why `viewarea request <index>` is the trigger and `TRIGGER_MODE=tap` is only for a
-box whose airplayd predates `CMD_VIEW_AREA 0x11`.
+box whose carplayd predates `CMD_VIEW_AREA 0x11`.
 
 **The LOCKOUT thresholds (`BLACK_MEAN=12`, `BLACK_DARK=0.85`) are KNOWN WRONG — do not trust an
 ACCEPTED verdict near a floor without looking at the PNG.** A real lockout frame (2026-09-07,
@@ -298,8 +298,8 @@ down — each is a candidate for the next stream-130-class discovery), `stale co
   > reads as "the phone never asked". Use the two greps below instead. Full reasoning:
   > [../ops/06_CORRECTIONS_LEDGER.md](../ops/06_CORRECTIONS_LEDGER.md) `R-46-2`.
 
-      grep -c "SETUP phase2 DataStream(130)" /tmp/airplayd_wl.log   # arrived AND reached its handler
-      grep -nE "SETUP stream type=|NOT IMPLEMENTED|skipping" /tmp/airplayd_wl.log   # any refusal, whatever guard adds one next
+      grep -c "SETUP phase2 DataStream(130)" /tmp/carplayd_wl.log   # arrived AND reached its handler
+      grep -nE "SETUP stream type=|NOT IMPLEMENTED|skipping" /tmp/carplayd_wl.log   # any refusal, whatever guard adds one next
 
   Non-zero on the first = the phone asked and we handled it. Zero on the first is **not** by itself proof
   the phone stayed silent — a guard can drop the SETUP with no log at all, which is how the 2026-08-10

@@ -2,7 +2,7 @@
 //!
 //! ⚠️ **PI-VERIFIED ONLY (2026-08-16). This module is new and runs on the CCPA too.**
 //!
-//! It was written for and exercised on the Raspberry Pi. `carplay-wireless` is a shared binary, so
+//! It was written for and exercised on the Raspberry Pi. `btd` is a shared binary, so
 //! a CCPA now also: binds `127.0.0.1:9115` for the process lifetime, and — when a policy is pushed
 //! — writes `projection_policy.json` into `ssp_agent::state_dir()`, which on a CCPA is
 //! `/etc/carplay`, i.e. **flash**. Only on a user toggle, so a handful of writes per box lifetime,
@@ -56,7 +56,7 @@
 //! that silently does nothing.
 //!
 //! Device *names* are not available here. The phone's name arrives in the iAP2 Identify, which
-//! `airplayd` sees and this process does not, so `name` is always empty and the app falls back to the
+//! `carplayd` sees and this process does not, so `name` is always empty and the app falls back to the
 //! address. Plumbing it is a follow-up, not a guess.
 
 // `Read` is needed for `Read::take` on the request reader — without it in scope the
@@ -403,7 +403,7 @@ pub fn order_bonds(bonds: &[[u8; 6]], order: &[[u8; 6]]) -> Vec<[u8; 6]> {
 // ---- policy persistence ---------------------------------------------------------------------
 
 /// The connection policy sits in the SAME directory as the link-key store, via the same helper —
-/// not a second `CARPLAY_STATE_DIR` read with its own default.
+/// not a second `BOX_STATE_DIR` read with its own default.
 ///
 /// They had diverged: this defaulted to `/tmp/carplay` while `ssp_agent` defaulted to
 /// `/etc/carplay`, so on a CCPA (where the variable is unset) the bonds were persistent while the

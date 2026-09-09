@@ -15,21 +15,21 @@ use std::time::{Duration, Instant};
 
 const ACC_DEV: &str = "/dev/usb_accessory";
 
-/// airplayd's local HID-input ingest (task #20). ocbmd relays each CH_INPUT sub-frame here, length-
-/// prefixed, and airplayd turns it into an encrypted `hidSendReport` to the iPhone. Lazy-connected; a
-/// failed write drops the socket so the next event reconnects (airplayd restarts per session).
+/// carplayd's local HID-input ingest (task #20). ocbmd relays each CH_INPUT sub-frame here, length-
+/// prefixed, and carplayd turns it into an encrypted `hidSendReport` to the iPhone. Lazy-connected; a
+/// failed write drops the socket so the next event reconnects (carplayd restarts per session).
 const INPUT_INGEST_ADDR: &str = "127.0.0.1:9110";
 
-/// airplayd's local mic-uplink ingest seam. ocbmd relays each CH_MIC payload here as `mic <len>\n<pcm>`
+/// carplayd's local mic-uplink ingest seam. ocbmd relays each CH_MIC payload here as `mic <len>\n<pcm>`
 /// and reads the `uplink on <rate> <ch>` / `uplink off` back-channel, which it re-emits to the host as
 /// CH_CTRL CT_UPLINK so the app gates mic capture on the real type-100 `input` SETUP edge. Bidirectional
 /// + non-blocking so it slots into the poll loop; a write error drops the socket to reconnect next chunk.
 const MIC_INGEST_ADDR: &str = "127.0.0.1:9112";
 
-/// airplayd's app-driven-SETUP relay seam (plan P1; `receiver::relay::start_listener` on the box).
-/// ocbmd is a DUMB BYTE PIPE for CH_RTSP: box→host it chunks whatever airplayd writes into ≤64 KiB
+/// carplayd's app-driven-SETUP relay seam (plan P1; `receiver::relay::start_listener` on the box).
+/// ocbmd is a DUMB BYTE PIPE for CH_RTSP: box→host it chunks whatever carplayd writes into ≤64 KiB
 /// OCBM frames; host→box it writes CH_RTSP payloads back verbatim. All message framing
-/// (`[u32 BE "RTSP"][u32 BE len][msg]`, RS_* ops) is endpoint-to-endpoint — airplayd ↔ host app.
+/// (`[u32 BE "RTSP"][u32 BE len][msg]`, RS_* ops) is endpoint-to-endpoint — carplayd ↔ host app.
 const RTSP_INGEST_ADDR: &str = "127.0.0.1:9106";
 
 /// What a pollfd slot represents, so the poll loop can dispatch after `poll()`.
@@ -39,8 +39,8 @@ enum Kind {
     Pty,
     Conn(u16),
     Eth,
-    Mic,             // the mic-uplink seam to airplayd (readable: `uplink on/off` back-channel)
-    Rtsp,            // the SETUP-relay seam to airplayd (readable: box→host RS_OPEN/RS_REQ/RS_CLOSE bytes)
+    Mic,             // the mic-uplink seam to carplayd (readable: `uplink on/off` back-channel)
+    Rtsp,            // the SETUP-relay seam to carplayd (readable: box→host RS_OPEN/RS_REQ/RS_CLOSE bytes)
     AvListen(usize), // a local A/V seam listener (index into av_listeners)
     AvConn(usize),   // an accepted A/V seam connection (index into av_conns)
 }
@@ -313,13 +313,13 @@ struct Mfi {
     addr: u16,
 }
 
-/// Bounded `flock` on `/tmp/carplay_mfi.lock`, the same file `airplayd`, `iap2d`,
-/// `carplay-wireless` and `mfi-i2c-local` use.
+/// Bounded `flock` on `/tmp/carplay_mfi.lock`, the same file `carplayd`, `iap2d`,
+/// `btd` and `mfi-i2c-local` use.
 ///
 /// `ocbmd` is the FIFTH chip user and took no lock at all — so a CH_MFI `sign` from the host could
 /// interleave its stateful write-challenge / poll / read-signature sequence with any other daemon's,
 /// corrupting both. The serialization guarantee every "four chip users" comment in the tree asserts
-/// was simply not complete. Same corruption class the 2026-07-25 QC pass fixed for `airplayd`.
+/// was simply not complete. Same corruption class the 2026-07-25 QC pass fixed for `carplayd`.
 ///
 /// Bounded, not `LOCK_EX`: a wedged peer must not hang the OCBM dispatch loop, which also carries
 /// video, audio and the console.
@@ -454,7 +454,15 @@ impl Mfi {
         }
         unsafe { libc::usleep(100_000) };
         let mut done = false;
-        for _ in 0..200 {
+        // Bounded by WALL CLOCK, not iteration count — the same defect audit #8 fixed in
+        // `mfi-i2c-local`. `for _ in 0..200` with a 10 ms sleep looks like ~2.1 s, and is, but only
+        // while every status read succeeds. The status read is itself `for _ in 0..5` with a 5 ms
+        // sleep, so under chip NAK each iteration costs ~35 ms and the loop runs ~7.1 s — and with
+        // the caller's retries that is ~21 s holding /tmp/carplay_mfi.lock, blowing through every
+        // other chip user's 10 s acquire deadline.
+        const SIGN_POLL_DEADLINE: std::time::Duration = std::time::Duration::from_millis(2500);
+        let poll_start = std::time::Instant::now();
+        while poll_start.elapsed() < SIGN_POLL_DEADLINE {
             let mut st = [0u8; 1];
             if self.rd(0x10, &mut st) && (st[0] & 0x10) != 0 {
                 done = true;
@@ -488,7 +496,7 @@ struct Daemon {
     ptm: Option<File>,
     file: FileState,
     eth: Option<RawFd>, // AF_PACKET raw socket bridging ncm0 <-> CH_ETH (host-driven, on demand)
-    // Local A/V ingest seam: the box AirPlay session (airplayd / AvSession) connects to these local
+    // Local A/V ingest seam: the box AirPlay session (carplayd / AvSession) connects to these local
     // ports and streams A/V; ocbmd muxes each onto its OCBM channel to the host app. The reusable
     // box-session -> ocbmd -> OCBM path (payload is decoded now via AvSession; encrypted later).
     av_listeners: Vec<(TcpListener, u16)>, // (listener, target OCBM channel)
@@ -532,7 +540,7 @@ struct Daemon {
     last_phone_check: Option<std::time::Instant>, // throttle the /tmp/phone_present stat (#673)
     // Session presence (docs/carplay/02_SESSION_LIFECYCLE.md lifecycle): the host app SUBSCRIBEs + HEARTBEATs; a watchdog declares
     // it gone if beats stop. `present` is the cross-process signal (also mirrored to /tmp/host_present)
-    // that rx_connect/airplayd will read to gate advertising + drive teardown.
+    // that carplayd will read to gate advertising + drive teardown.
     subscribed: bool,
     last_hb: Option<std::time::Instant>,
     present: bool,
@@ -564,10 +572,10 @@ struct Daemon {
     /// been visible long enough to raise the flag now or has to be held. See `raise_presence`.
     present_cleared_at: Option<std::time::Instant>,
     cfg: Vec<u8>, // last host-pushed YAML config — EPHEMERAL, per session, never persisted (docs/carplay/02_SESSION_LIFECYCLE.md)
-    input_sock: Option<TcpStream>, // lazy connection to airplayd's HID-input ingest (task #20)
+    input_sock: Option<TcpStream>, // lazy connection to carplayd's HID-input ingest (task #20)
     input_fwd: u64, // count of HID input events relayed (observability)
     input_dropped: u64, // count of HID input events dropped (bad size / no seam / failed send)
-    mic_sock: Option<TcpStream>, // lazy bidirectional connection to airplayd's mic-uplink seam (CH_MIC)
+    mic_sock: Option<TcpStream>, // lazy bidirectional connection to carplayd's mic-uplink seam (CH_MIC)
     mic_rx: Vec<u8>, // partial-line buffer for the mic seam's `uplink on/off` back-channel
     /// True between the `uplink on` we relayed to the host and the matching `uplink off`. When the
     /// seam drops in that window (peer closed after its `uplink off` raced our next PCM write, poll
@@ -576,7 +584,7 @@ struct Daemon {
     /// (measured 2026-09-04, first live HFP calls).
     mic_uplink_on: bool,
     mic_fwd: u64,    // count of mic PCM chunks relayed (observability)
-    // Bidirectional connection to airplayd's SETUP-relay seam (CH_RTSP ↔ :9106). EAGER while a host
+    // Bidirectional connection to carplayd's SETUP-relay seam (CH_RTSP ↔ :9106). EAGER while a host
     // is subscribed (see ensure_rtsp_seam) — the relay's RS_OPEN fires at pair-verify, BEFORE any
     // host→box bytes could lazily trigger a connect.
     rtsp_sock: Option<TcpStream>,
@@ -621,7 +629,7 @@ const HEARTBEAT_GRACE: Duration = Duration::from_secs(10);
 /// not stranded, while a 1 Hz heartbeat can never turn this into a 1 Hz log line.
 const HB_UNSUBSCRIBED_NUDGE: Duration = Duration::from_secs(30);
 
-/// Where airplayd publishes the connected phone's identity (mirrors `receiver::session`'s constant;
+/// Where carplayd publishes the connected phone's identity (mirrors `receiver::session`'s constant;
 /// ocbmd does not link that crate).
 const PHONE_IDENT_FILE: &str = "/tmp/phone_identity";
 
@@ -663,15 +671,13 @@ const LOG_FILE: &str = "/tmp/box.log";
 /// at 0: the retained tail is re-sent, which is the right failure direction for a log.
 const LOG_SOURCES: &[(u8, &str)] = &[
     (p::LOG_SRC_BOX, LOG_FILE),
-    (p::LOG_SRC_AIRPLAYD, "/tmp/airplayd.log"),
-    (p::LOG_SRC_AIRPLAYD_WL, "/tmp/airplayd_wl.log"),
+    (p::LOG_SRC_AIRPLAYD, "/tmp/carplayd.log"),
+    (p::LOG_SRC_AIRPLAYD_WL, "/tmp/carplayd_wl.log"),
     (p::LOG_SRC_IAP2D, "/tmp/iap2d.log"),
     (p::LOG_SRC_AA_BRIDGE, "/tmp/aa-bridge.log"),
-    (p::LOG_SRC_RX_CONNECT, "/tmp/rx-connect.log"),
     (p::LOG_SRC_BT, "/tmp/bt.log"),
     (p::LOG_SRC_RADIO_AP_DHCP, "/tmp/radio_ap_dhcp.log"),
     (p::LOG_SRC_RADIO_BT_ATTACH, "/tmp/radio_bt_attach.log"),
-    (p::LOG_SRC_RX_CONNECT_WL, "/tmp/rx-connect_wl.log"),
     (p::LOG_SRC_CARPLAY_WIRELESS, "/tmp/wl.log"),
 ];
 
@@ -893,7 +899,7 @@ fn parse_log_stamp(line: &[u8]) -> Option<(u64, &[u8])> {
 
 /// Connect to an `ip:port` target with a bounded deadline, then set the socket non-blocking so no
 /// subsequent read/write on it can stall the single-threaded poll loop (#789/#834/#846). A blocking
-/// connect to a dead/slow airplayd seam or an unreachable CH_IP target would otherwise wedge the whole
+/// connect to a dead/slow carplayd seam or an unreachable CH_IP target would otherwise wedge the whole
 /// daemon (and its OCBM console) for the OS default connect timeout.
 ///
 /// Literal addresses ONLY. `to_socket_addrs` on a hostname calls `getaddrinfo`, which has no
@@ -907,13 +913,13 @@ fn connect_seam(target: &str, timeout: Duration) -> Option<TcpStream> {
     Some(s)
 }
 
-/// One `pair_answer` request line for carplay-wireless's control port, newline-terminated because
+/// One `pair_answer` request line for btd's control port, newline-terminated because
 /// the server reads it with `read_line` and would otherwise block until its 5 s client timeout.
 fn pair_answer_request(accept: bool) -> String {
     format!("{{\"cmd\":\"pair_answer\",\"accept\":{accept}}}\n")
 }
 
-/// The cross-process host-presence flag rx_connect/airplayd read to gate the session (docs/carplay/02_SESSION_LIFECYCLE.md).
+/// The cross-process host-presence flag carplayd read to gate the session (docs/carplay/02_SESSION_LIFECYCLE.md).
 ///
 /// The `cfg(test)` alias is not cosmetic: the presence/teardown tests really write and delete these
 /// three files, and under the real names a `cargo test` on the box would tear down a live session.
@@ -924,7 +930,7 @@ const HOST_PRESENT_FLAG: &str = "/tmp/ocbmd_selftest_host_present";
 
 /// The wireless SSP Numeric-Comparison code the ssp_agent publishes during pairing (absent = none).
 const PAIRING_CODE_FILE: &str = "/tmp/pairing_code";
-/// carplay-wireless's loopback JSON control port (`control::CONTROL_PORT`), where the host's
+/// btd's loopback JSON control port (`control::CONTROL_PORT`), where the host's
 /// `CT_PAIR_CONFIRM` answer is delivered as `{"cmd":"pair_answer","accept":…}`. Loopback literal —
 /// `connect_seam` refuses anything it would have to resolve.
 ///
@@ -942,7 +948,7 @@ const BT_PHASE_FILE: &str = "/tmp/bt_phase";
 /// mirrors transitions to the host as SEV_PHONE_PRESENT/ABSENT (truthful "waiting for phone").
 const PHONE_PRESENT_FLAG: &str = "/tmp/phone_present";
 
-/// Ephemeral landing spot for the host-pushed `VehicleConfig` YAML (task #5 / docs/carplay/04_CAPABILITIES_AND_CONFIG.md). airplayd reads
+/// Ephemeral landing spot for the host-pushed `VehicleConfig` YAML (task #5 / docs/carplay/04_CAPABILITIES_AND_CONFIG.md). carplayd reads
 /// this per control connection to build `/info`. It is written on SUBSCRIBE and removed on STOP /
 /// heartbeat-loss / startup, so a config NEVER outlives its session (host-authoritative / ephemeral).
 #[cfg(not(test))]
@@ -953,7 +959,7 @@ const CARPLAY_CFG_FILE: &str = "/tmp/ocbmd_selftest_cfg.yaml";
 // --- CH_MGMT ("CCPA" tab) helpers. Dependency-free by design: direct /sys+/proc reads, no serde_json. ---
 /// Persistent BR/EDR bond store (mirrors ssp_agent's `LINK_KEY_STORE`); 25-byte records, bdaddr first.
 const BT_LINK_KEY_STORE: &str = "/etc/carplay/bt_link_keys";
-/// Flag the supervisor watches to bounce carplay-wireless (restart-wireless / forget-device reload).
+/// Flag the supervisor watches to bounce btd (restart-wireless / forget-device reload).
 const WIRELESS_RESTART_FLAG: &str = "/tmp/wireless_restart";
 // App-commanded radio inhibit (docs/carplay/04_CAPABILITIES_AND_CONFIG.md radio gating): present = radios must be OFF now.
 // Written/cleared ONLY from host CT_RADIO commands and the session lifecycle below (go_idle /
@@ -971,18 +977,53 @@ fn read_trim(path: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Which of `names` (process-exe basenames) are running — one scan of /proc/<pid>/exe (no `pgrep` spawn).
+/// Does a process whose `comm` and argv[0] basename are as given answer to `name`?
+///
+/// Split out of [`running_procs`] so the truncation rule is testable without a /proc to read:
+/// the kernel caps `comm` at TASK_COMM_LEN-1 = 15 bytes, and two of the names this box asks
+/// about are longer than that ("btd" is 16), so a naive `comm == name` misses
+/// exactly the daemon whose health bit matters most.
+fn proc_name_matches(comm: &str, argv0_base: &str, name: &str) -> bool {
+    let trunc = if name.len() > 15 { &name[..15] } else { name };
+    comm == name || comm == trunc || argv0_base == name
+}
+
+/// Which of `names` are running — one scan of /proc (no `pgrep` spawn), matching the kernel's
+/// `comm` and the basename of argv[0].
+///
+/// NOT `/proc/<pid>/exe`. That readlink resolves to the real file on disk, so any layout where the
+/// name a daemon is invoked as differs from the file it executes — a busybox-style multicall image
+/// behind `/usr/sbin/<name>` symlinks, or a rename — silently reports every daemon absent. That
+/// would dark `CT_BOX_HEALTH`'s BH_IAP2D/BH_AIRPLAYD/BH_CARPLAY_WIRELESS bits and `MGMT_INFO`'s
+/// process list while projection worked perfectly, which is the worst shape of a health bug: the
+/// host app believes the box is dead and the box believes it is fine. `comm` and argv[0] both
+/// follow the invoked path, so they survive that; this is also what every `pgrep`/`pkill` pattern
+/// in session_supervisor.sh matches on, so ocbmd and the supervisor now agree by construction.
+///
+/// `comm` is truncated by the kernel to TASK_COMM_LEN-1 = 15 bytes, so "btd" (16)
+/// arrives as "carplay-wireles" — match the truncation explicitly rather than missing it.
 fn running_procs(names: &[&str]) -> Vec<bool> {
     let mut found = vec![false; names.len()];
     if let Ok(rd) = std::fs::read_dir("/proc") {
         for ent in rd.flatten() {
-            if let Ok(target) = std::fs::read_link(ent.path().join("exe")) {
-                if let Some(base) = target.file_name().and_then(|s| s.to_str()) {
-                    for (i, n) in names.iter().enumerate() {
-                        if base == *n {
-                            found[i] = true;
-                        }
-                    }
+            let dir = ent.path();
+            let comm = std::fs::read_to_string(dir.join("comm"))
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
+            let argv0_base = std::fs::read(dir.join("cmdline"))
+                .ok()
+                .and_then(|b| {
+                    let first = b.split(|&c| c == 0).next()?.to_vec();
+                    let s = String::from_utf8_lossy(&first).into_owned();
+                    s.rsplit('/').next().map(|x| x.to_string())
+                })
+                .unwrap_or_default();
+            if comm.is_empty() && argv0_base.is_empty() {
+                continue;
+            }
+            for (i, n) in names.iter().enumerate() {
+                if proc_name_matches(&comm, &argv0_base, n) {
+                    found[i] = true;
                 }
             }
         }
@@ -1362,7 +1403,7 @@ fn forget_one_bond(mac: &str) -> bool {
         .is_ok()
 }
 
-/// Where airplayd persists AirPlay pairings — `[u8 id_len][id][32 B LTPK]` repeated.
+/// Where carplayd persists AirPlay pairings — `[u8 id_len][id][32 B LTPK]` repeated.
 const PEER_STORE: &str = "/etc/carplay_peers.bin";
 
 /// Drop every stored AirPlay pairing, so a forgotten phone genuinely re-pairs from scratch.
@@ -1380,11 +1421,11 @@ const PEER_STORE: &str = "/etc/carplay_peers.bin";
 /// pair-setup on their next connect — the slow path, not a prompt, since pair-setup is
 /// MFi-authenticated and automatic. A slightly longer reconnect once, and nothing the user sees.
 ///
-/// **Why deleting the file is enough.** A running airplayd holds the pairings in memory and
+/// **Why deleting the file is enough.** A running carplayd holds the pairings in memory and
 /// `save_peer` persists the WHOLE map, so a survivor would write the deleted keys straight back.
-/// It cannot survive: both callers request a wireless restart, and `wireless_down` reaps airplayd
+/// It cannot survive: both callers request a wireless restart, and `wireless_down` reaps carplayd
 /// (`pkill -f "[a]irplayd"`) whenever the wireless session owns it, so it reloads from the absent
-/// file. Absent is also airplayd's normal cold-start case ("peerstore: none ... (fresh)").
+/// file. Absent is also carplayd's normal cold-start case ("peerstore: none ... (fresh)").
 fn forget_airplay_peers() {
     match std::fs::remove_file(PEER_STORE) {
         Ok(()) => eprintln!("[ocbmd] mgmt: cleared AirPlay pairings ({PEER_STORE}) — next connect re-pairs"),
@@ -1394,7 +1435,7 @@ fn forget_airplay_peers() {
     }
 }
 
-/// Ask the supervisor to bounce carplay-wireless (it watches this flag).
+/// Ask the supervisor to bounce btd (it watches this flag).
 fn request_wireless_restart() {
     let _ = std::fs::write(WIRELESS_RESTART_FLAG, "1");
 }
@@ -1418,8 +1459,8 @@ fn json_escape(s: &str) -> String {
     o
 }
 
-/// Land the host's ephemeral YAML config for airplayd to read. Written atomically (`.tmp` + rename) so
-/// airplayd never reads a half-written file. An empty config removes the file (fall back to the box
+/// Land the host's ephemeral YAML config for carplayd to read. Written atomically (`.tmp` + rename) so
+/// carplayd never reads a half-written file. An empty config removes the file (fall back to the box
 /// default) rather than leaving a zero-byte one.
 fn write_cfg_file(bytes: &[u8]) {
     if bytes.is_empty() {
@@ -1611,7 +1652,7 @@ impl Daemon {
         ) {
             // LIVE-UI (VNC) path — CarPlay is the screen NOW, not a replay. BACKPRESSURE, don't drop
             // (task #33 efficiency): the poll loop only pulls the next chunk for a given stream once THAT
-            // stream's queue has drained, so a slow USB/host propagates back through the seam → airplayd →
+            // stream's queue has drained, so a slow USB/host propagates back through the seam → carplayd →
             // the iPhone's screen socket, and the iPhone adapts its encode rate instead of us dropping
             // P-frames (which poisons the decoder until the next IDR). Per-stream queues keep the two
             // video streams independent (audit H1). OUT_QUEUE_CAP is only an OOM backstop, not a drop policy.
@@ -1815,7 +1856,7 @@ impl Daemon {
     }
 
     /// Transition the host-present signal. Mirrors to `/tmp/host_present` (the cross-process flag
-    /// rx_connect/airplayd read to gate advertising + teardown) and notifies the host over CH_CTRL.
+    /// carplayd read to gate advertising + teardown) and notifies the host over CH_CTRL.
     /// No-op if unchanged, so it's cheap to call every watchdog tick.
     fn set_present(&mut self, present: bool) {
         if self.present == present {
@@ -1862,7 +1903,7 @@ impl Daemon {
     /// two of its samples never existed as far as it is concerned. Since `CT_STOP` became an
     /// immediate teardown, a scripted quit->relaunch does exactly that: `go_idle` writes 0, the
     /// SUBSCRIBE ~100 ms later writes 1, the supervisor reads 1 -> 1, runs neither `wireless_down`
-    /// nor `wireless_up`, and the new host is left subscribed against the DEAD session's airplayd —
+    /// nor `wireless_up`, and the new host is left subscribed against the DEAD session's carplayd —
     /// the teardown silently skipped. (A human relaunch is far too slow to hit this; a bench script
     /// hits it every time.)
     ///
@@ -1951,12 +1992,12 @@ impl Daemon {
         if let Some(fd) = self.eth.take() {
             unsafe { libc::close(fd) };
         }
-        // Drop the SETUP-relay seam: the departed host can no longer answer RS_REQs, and airplayd's
+        // Drop the SETUP-relay seam: the departed host can no longer answer RS_REQs, and carplayd's
         // reader turns our EOF into HostGone → sticky local fallback for any in-flight exchange.
         self.rtsp_sock = None;
-        // Drop the mic + input seams too (audit B3): they connect to the departed session's airplayd, and
+        // Drop the mic + input seams too (audit B3): they connect to the departed session's carplayd, and
         // `ensure_mic_seam` only reconnects when the socket is None — a stale seam would otherwise persist
-        // until the old airplayd EOFs, delaying the next session's uplink gate. Symmetric with rtsp_sock.
+        // until the old carplayd EOFs, delaying the next session's uplink gate. Symmetric with rtsp_sock.
         self.mic_sock = None;
         self.mic_rx.clear();
         self.mic_uplink_on = false; // the host that was gated ON is the one leaving
@@ -2092,7 +2133,7 @@ impl Daemon {
         }
         self.last_box_health_check = Some(now_t);
 
-        let procs = running_procs(&["iap2d", "airplayd", "carplay-wireless", "hostapd"]);
+        let procs = running_procs(&["iap2d", "carplayd", "btd", "hostapd"]);
         let (total_kb, free_kb) = rootfs_stats_kb();
         // 5% or 2 MB, whichever is larger. The box writes its ephemeral session YAML, its logs and
         // its hostapd.conf to rootfs; running it to zero fails a session in ways that look like
@@ -2141,12 +2182,12 @@ impl Daemon {
         }
     }
 
-    /// Mirror airplayd's `/tmp/phone_identity` to the host as `CT_PHONE_IDENT`.
+    /// Mirror carplayd's `/tmp/phone_identity` to the host as `CT_PHONE_IDENT`.
     ///
     /// The file is written once per session from the phone's own AirPlay SETUP plist, and carries the
     /// name the user gave the device plus its `deviceID` — the BR/EDR MAC, which is what lets the app
     /// say WHICH bonded phone from `MGMT_INFO` is the live one. Same discipline as the other mirrors:
-    /// changes only, throttled once latched, and never forwarded torn (airplayd renames it into
+    /// changes only, throttled once latched, and never forwarded torn (carplayd renames it into
     /// place, so a read either sees the whole document or the previous one).
     fn phone_ident_tick(&mut self, now_t: std::time::Instant) {
         if !self.subscribed {
@@ -2213,7 +2254,7 @@ impl Daemon {
         }
     }
 
-    /// Forward the host's `CT_PAIR_CONFIRM` answer to carplay-wireless's control port as one
+    /// Forward the host's `CT_PAIR_CONFIRM` answer to btd's control port as one
     /// newline-terminated JSON request. Body split out as [`pair_answer_request`] so the exact wire
     /// text is testable without a socket — the reader on the far side is a `read_line`, so the
     /// trailing newline is load-bearing.
@@ -2229,7 +2270,7 @@ impl Daemon {
         let verb = if accept { "PAIR" } else { "CANCEL" };
         let Some(mut s) = connect_seam(WIRELESS_CONTROL_ADDR, Duration::from_millis(250)) else {
             eprintln!(
-                "[ocbmd] pair confirm: {verb} — carplay-wireless control port {WIRELESS_CONTROL_ADDR} \
+                "[ocbmd] pair confirm: {verb} — btd control port {WIRELESS_CONTROL_ADDR} \
                  unreachable (answer dropped; the box will time the prompt out)"
             );
             return;
@@ -2237,7 +2278,7 @@ impl Daemon {
         let _ = s.set_nonblocking(false); // connect_seam hands back a non-blocking socket
         let _ = s.set_write_timeout(Some(Duration::from_millis(250)));
         match s.write_all(pair_answer_request(accept).as_bytes()) {
-            Ok(()) => eprintln!("[ocbmd] pair confirm: {verb} -> carplay-wireless"),
+            Ok(()) => eprintln!("[ocbmd] pair confirm: {verb} -> btd"),
             Err(e) => eprintln!("[ocbmd] pair confirm: {verb} — write failed: {e} (answer dropped)"),
         }
     }
@@ -2967,13 +3008,13 @@ impl Daemon {
         }
     }
 
-    /// Relay a CH_INPUT sub-frame (one HID event, e.g. INPUT_TOUCH) to airplayd's local ingest,
-    /// length-prefixed (`[len u16 LE][payload]`) so airplayd frames it back out of the TCP stream.
+    /// Relay a CH_INPUT sub-frame (one HID event, e.g. INPUT_TOUCH) to carplayd's local ingest,
+    /// length-prefixed (`[len u16 LE][payload]`) so carplayd frames it back out of the TCP stream.
     /// Lazy-connects; drops the socket on ANY failed/incomplete send so the next event reconnects with
     /// clean framing. The `:9110` seam has no magic and no resync, and `write_all` on a non-blocking
     /// socket can put a PARTIAL frame on the wire before surfacing WouldBlock (Linux `send()` accepts
     /// 1..N bytes when only a prefix fits) — keeping the socket after any error risks permanently
-    /// desyncing airplayd's framing. A dropped event is harmless (a lost MOVE; DOWN/UP are rare).
+    /// desyncing carplayd's framing. A dropped event is harmless (a lost MOVE; DOWN/UP are rare).
     fn forward_input(&mut self, pl: &[u8]) {
         if pl.is_empty() || pl.len() > u16::MAX as usize {
             self.input_dropped = self.input_dropped.wrapping_add(1);
@@ -2986,22 +3027,22 @@ impl Daemon {
         }
         if self.input_sock.is_none() {
             // Bounded, non-blocking connect (#834/#846): a plain blocking connect to a dead/slow
-            // airplayd would wedge the whole poll loop. connect_seam also sets the socket non-blocking,
+            // carplayd would wedge the whole poll loop. connect_seam also sets the socket non-blocking,
             // which is what the "non-blocking connect+write" contract above always ASSUMED but the old
             // `TcpStream::connect` never actually did.
             match connect_seam(INPUT_INGEST_ADDR, Duration::from_millis(500)) {
                 Some(s) => {
                     let _ = s.set_nodelay(true); // low-latency input: don't Nagle-coalesce tiny reports
                     self.input_sock = Some(s);
-                    eprintln!("[ocbmd] input: connected to airplayd {INPUT_INGEST_ADDR}");
+                    eprintln!("[ocbmd] input: connected to carplayd {INPUT_INGEST_ADDR}");
                 }
                 None => {
-                    // airplayd not listening (idle / no session) — drop the event. Log throttled
+                    // carplayd not listening (idle / no session) — drop the event. Log throttled
                     // (first + every 60th) so a session-less input burst can't flood the log.
                     self.input_dropped = self.input_dropped.wrapping_add(1);
                     if self.input_dropped == 1 || self.input_dropped.is_multiple_of(60) {
                         eprintln!(
-                            "[ocbmd] input: airplayd not listening — event dropped ({} dropped total)",
+                            "[ocbmd] input: carplayd not listening — event dropped ({} dropped total)",
                             self.input_dropped
                         );
                     }
@@ -3035,28 +3076,28 @@ impl Daemon {
         }
     }
 
-    /// Relay one CH_MIC payload (host mic PCM, S16LE) to airplayd's mic-uplink seam as a length-framed
+    /// Relay one CH_MIC payload (host mic PCM, S16LE) to carplayd's mic-uplink seam as a length-framed
     /// `mic <len>\n<pcm>` line. Lazy-connects (non-blocking + nodelay so the poll loop never stalls and
     /// tiny 20 ms chunks aren't Nagle-coalesced). A short/errored write drops the socket so the next
     /// chunk reconnects with clean framing — a dropped mic frame is an imperceptible glitch, and never
-    /// wedges the daemon. airplayd not listening (idle / no session) → nothing to do.
-    /// Ensure the mic seam to airplayd is connected (best-effort, idempotent). Established EAGERLY —
+    /// wedges the daemon. carplayd not listening (idle / no session) → nothing to do.
+    /// Ensure the mic seam to carplayd is connected (best-effort, idempotent). Established EAGERLY —
     /// not just when mic PCM flows — because the `uplink on/off` GATE travels back over this same seam,
     /// and the app only starts capturing (i.e. only produces mic PCM) AFTER it receives the gate. A
     /// data-triggered connect would therefore deadlock: no connection → gate never delivered → no capture
-    /// → no data → no connection. A refused connect (airplayd idle / no session) is cheap on localhost.
+    /// → no data → no connection. A refused connect (carplayd idle / no session) is cheap on localhost.
     fn ensure_mic_seam(&mut self) {
         if self.mic_sock.is_some() {
             return;
         }
-        // Bounded connect (#846): connect_seam sets a deadline AND non-blocking, so a dead/slow airplayd
+        // Bounded connect (#846): connect_seam sets a deadline AND non-blocking, so a dead/slow carplayd
         // can't stall the poll loop during bring-up (the old blocking connect could). Readable in the
         // poll loop; writes stay best-effort.
         if let Some(s) = connect_seam(MIC_INGEST_ADDR, Duration::from_millis(500)) {
             let _ = s.set_nodelay(true);
             self.mic_sock = Some(s);
             self.mic_rx.clear();
-            eprintln!("[ocbmd] mic: connected to airplayd {MIC_INGEST_ADDR} (back-channel armed)");
+            eprintln!("[ocbmd] mic: connected to carplayd {MIC_INGEST_ADDR} (back-channel armed)");
         }
     }
 
@@ -3066,7 +3107,7 @@ impl Daemon {
         }
         self.ensure_mic_seam();
         if self.mic_sock.is_none() {
-            return; // airplayd not listening (idle / no session) — nothing to do
+            return; // carplayd not listening (idle / no session) — nothing to do
         }
         let mut buf = Vec::with_capacity(16 + pl.len());
         buf.extend_from_slice(format!("mic {}\n", pl.len()).as_bytes());
@@ -3105,8 +3146,8 @@ impl Daemon {
     }
 
     /// Forget the mic seam socket (`ensure_mic_seam` reconnects on the next tick) and, if the host was
-    /// gated ON through this seam, gate it OFF now. The seam's owner (airplayd per session, or
-    /// carplay-wireless's SCO module for an HFP call) sends `uplink off` and closes; if our next PCM
+    /// gated ON through this seam, gate it OFF now. The seam's owner (carplayd per session, or
+    /// btd's SCO module for an HFP call) sends `uplink off` and closes; if our next PCM
     /// write to the closing peer fails first, that line is never drained — so the drop itself is the
     /// OFF edge. The box does not interpret the audio; it only closes the gate it opened.
     fn drop_mic_seam(&mut self, why: &str) {
@@ -3123,7 +3164,7 @@ impl Daemon {
     /// Drain the mic seam's readable back-channel (`uplink on <rate> <ch>` / `uplink off`, newline-framed)
     /// and re-emit each transition to the host as CH_CTRL CT_UPLINK so the app starts/stops mic capture on
     /// the real type-100 `input` SETUP edge. Called from the poll loop on a Mic POLLIN. A read EOF/error
-    /// drops the socket (airplayd is per-session; it reconnects on the next CH_MIC chunk).
+    /// drops the socket (carplayd is per-session; it reconnects on the next CH_MIC chunk).
     fn drain_mic_backchannel(&mut self) {
         let mut tmp = [0u8; 512];
         let n = match self.mic_sock.as_mut() {
@@ -3161,7 +3202,7 @@ impl Daemon {
         if let Some(rest) = line.strip_prefix("uplink on") {
             // `uplink on <rate> <ch> [codec]` — default 16 kHz mono if the fields are missing or
             // garbled. The fourth token is OPTIONAL and additive (added 2026-09-04 for HFP
-            // wideband): airplayd never sends it and CVSD/HFP does not either, so its absence must
+            // wideband): carplayd never sends it and CVSD/HFP does not either, so its absence must
             // keep meaning PCM rather than becoming a parse failure that gates the mic off.
             let mut it = rest.split_whitespace();
             let rate: u32 = it.next().and_then(|s| s.parse().ok()).unwrap_or(16000);
@@ -3187,12 +3228,12 @@ impl Daemon {
         }
     }
 
-    /// Ensure the SETUP-relay seam to airplayd is connected (best-effort, idempotent — the
+    /// Ensure the SETUP-relay seam to carplayd is connected (best-effort, idempotent — the
     /// `ensure_mic_seam` clone). Established EAGERLY while a host is subscribed, not on first byte:
-    /// airplayd's `RemoteSession` emits RS_OPEN at pair-verify — BEFORE any host→box bytes exist that
+    /// carplayd's `RemoteSession` emits RS_OPEN at pair-verify — BEFORE any host→box bytes exist that
     /// could lazily trigger a connect — and its per-connection delegate selection gates on
     /// `relay::seam_up()`, which is only true once we are attached. A data-triggered connect would
-    /// therefore permanently select the plain local session. A refused connect (airplayd restarting)
+    /// therefore permanently select the plain local session. A refused connect (carplayd restarting)
     /// is cheap on localhost; the ≤500 ms subscribed poll cadence throttles the retry.
     fn ensure_rtsp_seam(&mut self) {
         if self.rtsp_sock.is_some() {
@@ -3202,7 +3243,7 @@ impl Daemon {
             // connect_seam hands back a NON-blocking socket (its poll-loop contract). Flip it back to
             // blocking with a 250 ms SO_SNDTIMEO instead: forward_rtsp must deliver a WHOLE RS_RESP —
             // a partial nonblocking write would desync the byte stream mid-message — but the write
-            // must stay BOUNDED so a wedged airplayd can never starve the single-threaded poll loop
+            // must stay BOUNDED so a wedged carplayd can never starve the single-threaded poll loop
             // (and with it the host heartbeats: the MFi-bridge lesson — an unbounded box-side wait
             // once stalled dispatch past HEARTBEAT_GRACE and tore down a healthy session). The small
             // SO_RCVTIMEO bounds the read side against a spurious level-triggered POLLIN wake.
@@ -3211,13 +3252,13 @@ impl Daemon {
             let _ = s.set_read_timeout(Some(Duration::from_millis(50)));
             let _ = s.set_nodelay(true); // rpc frames are small and latency-critical
             self.rtsp_sock = Some(s);
-            eprintln!("[ocbmd] rtsp: connected to airplayd {RTSP_INGEST_ADDR} (SETUP relay armed)");
+            eprintln!("[ocbmd] rtsp: connected to carplayd {RTSP_INGEST_ADDR} (SETUP relay armed)");
         }
     }
 
-    /// Relay one CH_RTSP payload (host→box: RS_RESP / RS_ERR seam bytes) to airplayd's relay seam.
+    /// Relay one CH_RTSP payload (host→box: RS_RESP / RS_ERR seam bytes) to carplayd's relay seam.
     /// Any write failure — including the 250 ms SO_SNDTIMEO expiring — DROPS the socket: recovery is
-    /// by POLICY, not by retry. airplayd sees EOF on its reader, marks the seam down, fails every
+    /// by POLICY, not by retry. carplayd sees EOF on its reader, marks the seam down, fails every
     /// pending exchange fast (HostGone → sticky local fallback), and the next `ensure_rtsp_seam`
     /// tick reconnects fresh — so a wedged relay costs one bounded stall and one fallen-back
     /// exchange, never a starved heartbeat or a desynced half-written message.
@@ -3227,10 +3268,10 @@ impl Daemon {
         }
         self.ensure_rtsp_seam();
         let Some(s) = self.rtsp_sock.as_mut() else {
-            return; // airplayd not listening — the box side answers locally, nothing to do
+            return; // carplayd not listening — the box side answers locally, nothing to do
         };
         if let Err(e) = s.write_all(pl) {
-            eprintln!("[ocbmd] rtsp: relay write failed ({e}) — dropping socket (airplayd falls back local)");
+            eprintln!("[ocbmd] rtsp: relay write failed ({e}) — dropping socket (carplayd falls back local)");
             self.rtsp_sock = None;
         }
     }
@@ -3417,7 +3458,7 @@ impl Daemon {
     /// numbers, fixed daemon names) so hand-rolled JSON needs no escaping. Cheap AND non-blocking: a
     /// few file reads, one /proc scan, one statvfs, and two atomic loads for the Bluetooth state.
     fn box_info_json(&self) -> String {
-        let procs = running_procs(&["ocbmd", "iap2d", "airplayd", "carplay-wireless", "hostapd"]);
+        let procs = running_procs(&["ocbmd", "iap2d", "carplayd", "btd", "hostapd"]);
         let (rt_total, rt_free) = rootfs_stats_kb();
         // % used = 100 - free%. checked_div guards a zero total (statvfs failure) without a manual `if`.
         let rt_pct = (rt_free * 100)
@@ -3474,7 +3515,7 @@ impl Daemon {
                 if pl.first() == Some(&p::CT_HELLO) {
                     // Host instance nonce (trailing u32 LE, 0 = not supplied). A DIFFERENT nonce while
                     // we still think a host is present means the previous one died without CT_STOP:
-                    // its airplayd went with it, but presence never dropped, so nothing would re-ARM.
+                    // its carplayd went with it, but presence never dropped, so nothing would re-ARM.
                     // Flag it for the SUBSCRIBE that follows. Same nonce = the same host reattaching
                     // (USB blip, client rebuilt) over a session that never ended — nothing to re-arm.
                     // Carried out of the two parse blocks below only so the unconditional HELLO line
@@ -3688,7 +3729,7 @@ impl Daemon {
                     }
                 } else if pl.first() == Some(&p::CT_SUBSCRIBE) {
                     // A replaced host — one whose predecessor died WITHOUT CT_STOP — owes a clean
-                    // re-arm: its airplayd is gone (or bound to the dead host) and presence never
+                    // re-arm: its carplayd is gone (or bound to the dead host) and presence never
                     // dropped, so only a forced GONE->PRESENT edge makes the supervisor spawn a new
                     // one. A host that closed cleanly needs nothing here: CT_STOP already went idle,
                     // so `set_present(true)` below IS the edge.
@@ -3741,7 +3782,7 @@ impl Daemon {
                                            // to a box already owned by AA (or CarPlay) must learn
                                            // which engine to run without waiting for a re-arm.
                     self.cfg = pl[1..].to_vec();
-                    // Land the ephemeral YAML for airplayd to read per connection (task #5 / docs/carplay/04_CAPABILITIES_AND_CONFIG.md).
+                    // Land the ephemeral YAML for carplayd to read per connection (task #5 / docs/carplay/04_CAPABILITIES_AND_CONFIG.md).
                     write_cfg_file(&self.cfg);
                     // A fresh SUBSCRIBE's YAML is authoritative over any prior CT_RADIO inhibit.
                     //
@@ -3770,7 +3811,7 @@ impl Daemon {
                     );
                     if replaced {
                         // A REPLACEMENT host whose predecessor died without CT_STOP: presence never
-                        // dropped, so it owes the teardown+re-arm CT_STOP would have done. airplayd
+                        // dropped, so it owes the teardown+re-arm CT_STOP would have done. carplayd
                         // re-establishes on the GONE->PRESENT edge. Silently, though — see
                         // rearm_presence_silently.
                         self.rearm_presence_silently();
@@ -3806,7 +3847,7 @@ impl Daemon {
                         // the supervisor's L2 watchdog restarted ocbmd (`ocbmd wedged (alive mtime
                         // stale >=1min, gadget CONFIGURED, pid=71)`), the fresh daemon unlinked
                         // /tmp/carplay_cfg.yaml at startup, the app kept heartbeating into it with
-                        // `subscribed=true` on its side, and the still-running airplayd_wl served the
+                        // `subscribed=true` on its side, and the still-running carplayd_wl served the
                         // reconnecting phone compiled defaults (1920×720/H.264 against a pushed
                         // 2400×960/HEVC) for hours. The app's own RS_OPEN `cfg_crc==0` guard never
                         // ran because the no-config path also clears `appsetup` — no relay, no RS_OPEN.
@@ -3871,7 +3912,7 @@ impl Daemon {
                     }
                 } else if pl.first() == Some(&p::CT_PAIR_CONFIRM) {
                     // [CT_PAIR_CONFIRM][accept u8] — the user's answer to the CT_PAIRING_CODE prompt,
-                    // forwarded to carplay-wireless's control port. That daemon owns the radio and the
+                    // forwarded to btd's control port. That daemon owns the radio and the
                     // SSP agent; ocbmd only mirrors `/tmp/pairing_code` outward, so the answer has to
                     // cross back over a seam rather than a flag file: a flag would have to be RACE-free
                     // against the agent's own clear, and this direction is a single bounded request.
@@ -3919,9 +3960,9 @@ impl Daemon {
                     eth::send_frame(fd, pl); // send frame onto ncm0 (host -> iPhone)
                 }
             }
-            p::CH_INPUT => self.forward_input(pl), // HID input host -> airplayd -> iPhone (task #20)
-            p::CH_MIC => self.forward_mic(pl), // mic PCM host -> airplayd -> iPhone (type-100 uplink)
-            p::CH_RTSP => self.forward_rtsp(pl), // SETUP-relay bytes host -> airplayd (RS_RESP/RS_ERR)
+            p::CH_INPUT => self.forward_input(pl), // HID input host -> carplayd -> iPhone (task #20)
+            p::CH_MIC => self.forward_mic(pl), // mic PCM host -> carplayd -> iPhone (type-100 uplink)
+            p::CH_RTSP => self.forward_rtsp(pl), // SETUP-relay bytes host -> carplayd (RS_RESP/RS_ERR)
             p::CH_MGMT => self.handle_mgmt(pl), // box management (the app's "CCPA" tab)
             _ => {}
         }
@@ -4056,7 +4097,7 @@ fn main() {
     if let Some(ref m) = mfi {
         // Warm-up (DeviceVersion) under /tmp/carplay_mfi.lock, like every other chip access. ocbmd
         // respawns on every `ocbm-host` command, so this runs far more often than "once at boot" —
-        // unlocked it can land inside airplayd's HELD write-challenge/trigger/poll/read sequence and
+        // unlocked it can land inside carplayd's HELD write-challenge/trigger/poll/read sequence and
         // corrupt both transactions. Skipped, not forced, if the lock is unavailable: a warm-up read
         // is not worth stepping on a live handshake.
         if let Some(_lock) = MfiLock::acquire() {
@@ -4171,7 +4212,7 @@ fn main() {
     // Initialize the presence flag to "0" at startup: `present` starts false but set_present is
     // edge-guarded, so without this an ocbmd restart could leave a stale "1" from a prior crash.
     write_flag_atomic(HOST_PRESENT_FLAG, false);
-    // Drop any config left by a prior (crashed) session so airplayd never reads a stale one at idle.
+    // Drop any config left by a prior (crashed) session so carplayd never reads a stale one at idle.
     clear_cfg_file();
     // Same for a stale CT_RADIO inhibit from a crashed prior ocbmd (tmpfs, but a daemon respawn
     // without a reboot would otherwise inherit it).
@@ -4241,7 +4282,7 @@ fn main() {
             kinds.push(Kind::Mic);
         }
         if let Some(s) = d.rtsp_sock.as_ref() {
-            // SETUP-relay seam read side: box→host RS_OPEN/RS_REQ/RS_CLOSE bytes from airplayd. The
+            // SETUP-relay seam read side: box→host RS_OPEN/RS_REQ/RS_CLOSE bytes from carplayd. The
             // write side (host→box RS_RESP) is bounded-blocking in forward_rtsp, never polled.
             fds.push(libc::pollfd {
                 fd: s.as_raw_fd(),
@@ -4483,12 +4524,12 @@ fn main() {
                     d.drain_mic_backchannel();
                 }
                 Kind::Rtsp => {
-                    // box→host: chunk airplayd's relay-seam bytes onto CH_RTSP (≤64 KiB per OCBM
+                    // box→host: chunk carplayd's relay-seam bytes onto CH_RTSP (≤64 KiB per OCBM
                     // frame; the endpoint framing has its own magic, so chunk boundaries are free).
                     // `avbuf` (MAX_PAYLOAD) is reused — arms run sequentially within a pass.
                     let res = d.rtsp_sock.as_mut().map(|s| s.read(&mut avbuf));
                     match res {
-                        Some(Ok(0)) => d.rtsp_sock = None, // airplayd closed (restart) → reconnect on tick
+                        Some(Ok(0)) => d.rtsp_sock = None, // carplayd closed (restart) → reconnect on tick
                         Some(Ok(n)) => d.send(p::CH_RTSP, p::F_SOM | p::F_EOM, &avbuf[..n]),
                         // Spurious level-triggered wake bounded by the 50 ms SO_RCVTIMEO — not death.
                         Some(Err(ref e))
@@ -4562,13 +4603,13 @@ fn main() {
         // Watchdog AFTER the dispatch loop: any heartbeat that arrived in this wake has now refreshed
         // `last_hb`, so we never spuriously tear down a live session on a beat that already landed.
         d.presence_tick(Instant::now());
-        // Keep the mic back-channel to airplayd connected while a session is live, so the `uplink on`
+        // Keep the mic back-channel to carplayd connected while a session is live, so the `uplink on`
         // gate can reach the host the instant iOS opens a type-100 `input` SETUP (before any mic PCM
-        // exists). Cheap refused-connect while airplayd is down; the ≤500 ms subscribed poll cadence
+        // exists). Cheap refused-connect while carplayd is down; the ≤500 ms subscribed poll cadence
         // throttles the retry. See ensure_mic_seam for the deadlock this avoids.
         if d.subscribed {
             d.ensure_mic_seam();
-            // SETUP-relay seam, same eager discipline — and doubly so: airplayd's per-connection
+            // SETUP-relay seam, same eager discipline — and doubly so: carplayd's per-connection
             // delegate selection reads relay::seam_up() at the moment a phone connects, and its
             // RS_OPEN fires at pair-verify. Both happen before any host→box relay byte exists, so a
             // lazy (data-triggered) connect would permanently select the plain local session.
@@ -4719,7 +4760,7 @@ mod tests {
         assert_eq!(u32::from_le_bytes(pl[2..6].try_into().unwrap()), 8000);
         assert_eq!(pl[6], 1, "mono");
         assert_eq!(pl[7], 0, "no fourth token means PCM, not a guess");
-        // airplayd's own line, unchanged.
+        // carplayd's own line, unchanged.
         assert_eq!(uplink_payload("uplink on 16000 1")[7], 0);
     }
 
@@ -4886,18 +4927,18 @@ mod tests {
         // "Backfill" is not a separate opcode: the file is small by construction, so streaming from
         // offset 0 IS everything since boot. Then it must follow, not re-send.
         let (mut d, path) = td_log(p::LOG_SRC_AIRPLAYD, "backfill");
-        append(&path, "[airplayd] boot\n[airplayd] pair ok\n");
+        append(&path, "[carplayd] boot\n[carplayd] pair ok\n");
         log_tick_now(&mut d);
         let v = log_sent(&mut d);
-        assert_eq!(log_lines(&v), ["[airplayd] boot", "[airplayd] pair ok"]);
+        assert_eq!(log_lines(&v), ["[carplayd] boot", "[carplayd] pair ok"]);
         assert!(v.iter().all(|(s, _, _)| *s == p::LOG_SRC_AIRPLAYD), "entries carry their source id");
 
         log_tick_now(&mut d);
         assert!(log_sent(&mut d).is_empty(), "EOF with no new bytes must send nothing");
 
-        append(&path, "[airplayd] RECORD\n");
+        append(&path, "[carplayd] RECORD\n");
         log_tick_now(&mut d);
-        assert_eq!(log_lines(&log_sent(&mut d)), ["[airplayd] RECORD"]);
+        assert_eq!(log_lines(&log_sent(&mut d)), ["[carplayd] RECORD"]);
         let _ = std::fs::remove_file(&path);
     }
 
@@ -4908,7 +4949,7 @@ mod tests {
         // carry LOG_F_BACKFILL; anything appended after that, on the SAME pass or a later tick,
         // must not.
         let (mut d, path) = td_log(p::LOG_SRC_AIRPLAYD, "backfillflag");
-        append(&path, "[airplayd] boot\n[airplayd] pair ok\n");
+        append(&path, "[carplayd] boot\n[carplayd] pair ok\n");
         log_tick_now(&mut d);
         let v = log_sent(&mut d);
         let lines: Vec<&(u8, u8, Vec<u8>)> = v.iter().filter(|(s, _, _)| *s == p::LOG_SRC_AIRPLAYD).collect();
@@ -4918,11 +4959,11 @@ mod tests {
             "everything already on disk at open time is backfill"
         );
 
-        append(&path, "[airplayd] RECORD\n");
+        append(&path, "[carplayd] RECORD\n");
         log_tick_now(&mut d);
         let v2 = log_sent(&mut d);
         let (_, f, t) = &v2.iter().find(|(s, _, _)| *s == p::LOG_SRC_AIRPLAYD).unwrap();
-        assert_eq!(String::from_utf8_lossy(t), "[airplayd] RECORD");
+        assert_eq!(String::from_utf8_lossy(t), "[carplayd] RECORD");
         assert_eq!(f & p::LOG_F_BACKFILL, 0, "a line appended after open time is live");
         let _ = std::fs::remove_file(&path);
     }
@@ -5026,7 +5067,7 @@ mod tests {
         // their lifecycle. Truncating one from here would race a check the session depends on.
         let (mut d, path) = td_log(p::LOG_SRC_AIRPLAYD, "notrunc");
         d.log.cap = 16;
-        append(&path, &"[airplayd] line\n".repeat(20)); // 320 B, way over
+        append(&path, &"[carplayd] line\n".repeat(20)); // 320 B, way over
         log_tick_now(&mut d);
         assert_eq!(log_lines(&log_sent(&mut d)).len(), 20);
         assert_eq!(std::fs::metadata(&path).unwrap().len(), 320, "must be left alone");
@@ -5414,7 +5455,7 @@ mod tests {
         // THE REGRESSION THIS GUARDS: the supervisor samples /tmp/host_present at 1 Hz and acts on
         // EDGES. Now that CT_STOP tears down immediately, a scripted quit->relaunch writes 0 then 1
         // between two samples; the supervisor reads 1 -> 1, runs no teardown and no bring-up, and the
-        // new host ends up subscribed against the dead session's airplayd. So a raise that lands
+        // new host ends up subscribed against the dead session's carplayd. So a raise that lands
         // inside REARM_HOLD of the GONE edge must leave the flag at 0 and let presence_tick raise it.
         let mut d = td();
         d.handle(p::CH_CTRL, p::F_SOM | p::F_EOM, &[p::CT_SUBSCRIBE, b'x']);
@@ -5954,5 +5995,31 @@ mod tests {
         d.subscribed = false;
         d.health_tick(t1 + Duration::from_millis(1));
         assert_eq!(d.last_health_log, None);
+    }
+
+    /// The health bits are keyed on the name a daemon is INVOKED as, not the file it executes.
+    /// `/proc/<pid>/exe` resolves through symlinks to the real file, so under a multicall image
+    /// (or any rename) every daemon read as absent while projection worked — CT_BOX_HEALTH and
+    /// MGMT_INFO both go dark. `comm`/argv[0] follow the invoked path instead, which is also what
+    /// session_supervisor.sh's pgrep/pkill patterns match, so the two agree by construction.
+    #[test]
+    fn proc_name_matching_survives_comm_truncation_and_symlinks() {
+        // Short names: comm is exact.
+        assert!(proc_name_matches("ocbmd", "ocbmd", "ocbmd"));
+        assert!(proc_name_matches("iap2d", "iap2d", "iap2d"));
+
+        // "btd" is 16 bytes; the kernel gives back 15.
+        assert!(proc_name_matches("carplay-wireles", "btd", "btd"));
+
+        // argv[0] carries the full invoked path — match on its basename.
+        assert!(proc_name_matches("carplayd", "carplayd", "carplayd"));
+
+        // A multicall image invoked through /usr/sbin/<name>: comm is the symlink basename.
+        assert!(proc_name_matches("aa-bridge", "aa-bridge", "aa-bridge"));
+
+        // Negative cases: a different daemon, and the wrapper script that merely mentions the name.
+        assert!(!proc_name_matches("ocbmd", "ocbmd", "carplayd"));
+        assert!(!proc_name_matches("run_ocbmd.sh", "run_ocbmd.sh", "ocbmd"));
+        assert!(!proc_name_matches("", "", "ocbmd"));
     }
 }

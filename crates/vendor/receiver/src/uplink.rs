@@ -12,7 +12,7 @@
 //!     mic is sent as raw **big-endian** PCM, no encoder (mirrors the PCM downlink). This is the only
 //!     path the box builds (feature `mic-uplink`, no external codec).
 //!   - **Wireless:** AAC-ELD (eld-codec / libfdk-aac), behind feature `mic-uplink-eld` (fdk-aac is not
-//!     available on the box, so airplayd never enables it).
+//!     available on the box, so carplayd never enables it).
 //!
 //! Only ONE uplink is active at a time: the iPhone re-SETUPs MainAudio each Siri turn, and the newest
 //! instance's key/port/codec supersede the prior (same philosophy as the downlink sink).
@@ -273,7 +273,7 @@ pub fn clear() {
     }
 }
 
-/// Start the control-in listener once (process lifetime) on the caller-supplied `addr` — airplayd
+/// Start the control-in listener once (process lifetime) on the caller-supplied `addr` — carplayd
 /// passes `127.0.0.1:9112` (`MIC_INGEST_ADDR`); `:9110` is the SEPARATE HID input seam. Accepts carlink's connection and
 /// routes `mic` PCM to the active uplink; `touch`/`cmd` lines are consumed and ignored (HID is a
 /// separate subsystem). Safe to call once at startup.

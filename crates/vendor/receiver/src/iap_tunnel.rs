@@ -575,7 +575,7 @@ enum ExecOutcome {
 /// The AirPlay-tunnel iAP2 handshake needs two chip operations (`copy_certificate`,
 /// `create_signature`). It used to call [`mfi_i2c_local`] unconditionally — direct I2C on
 /// `/dev/i2c-1` behind a `flock` on `/tmp/carplay_mfi.lock`. That is correct ON THE BOX, where this
-/// crate runs inside `airplayd` alongside four other chip users.
+/// crate runs inside `carplayd` alongside four other chip users.
 ///
 /// It is wrong wherever the chip is NOT on the machine running this crate — and which machine that
 /// is varies by deployment, which is the whole reason this is a runtime choice rather than an
@@ -583,7 +583,7 @@ enum ExecOutcome {
 ///
 /// | Deployment | Runs this crate | Where the MFi chip is | Correct path |
 /// |---|---|---|---|
-/// | CCPA box, wired/wireless CarPlay (`airplayd`) | the box | same board, `/dev/i2c-1` | local — `local-mfi` |
+/// | CCPA box, wired/wireless CarPlay (`carplayd`) | the box | same board, `/dev/i2c-1` | local — `local-mfi` |
 /// | gm_ccpa: GM `gminfo37` head unit owns the SoftAP and the CarPlay session; the CCPA is **only** a BT radio + MFi coprocessor | the head-unit Android app | on the **box**, across USB | remote — OCBM `CH_MFI` |
 /// | Pi / NCM bring-up | the host | on the box, across USB-NCM | remote — `mfi-wire` to `mfid` |
 ///

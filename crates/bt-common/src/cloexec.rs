@@ -3,10 +3,10 @@
 //! and the `BTPROTO_*` values three times over; this at least stops that at three).
 //!
 //! **Why any of this matters.** `bt_driver` calls `av::ensure_av_layer()`, which fork+execs
-//! `airplayd` and `rx-connect` **setsid-detached to outlive this process** (`av.rs:13`). Every
+//! `carplayd` **setsid-detached to outlive this process** (`av.rs:13`). Every
 //! Bluetooth socket this crate holds is open at that moment. Without close-on-exec those daemons
 //! inherit them — including the L2CAP binding on PSM 0x0001, which is a well-known single-holder
-//! PSM. If `carplay-wireless` then dies without reaching `teardown_av_layer()` (SIGKILL, or a panic:
+//! PSM. If `btd` then dies without reaching `teardown_av_layer()` (SIGKILL, or a panic:
 //! the profile is `panic = "abort"`, so there is no unwinding and no `Drop`), the restarted instance
 //! cannot re-bind the PSM, `sdp_server::run` returns `Err`, and the box exhibits the exact failure
 //! `sdp_server.rs`'s own header documents as device-confirmed: the iPhone browses SDP, finds no iAP2

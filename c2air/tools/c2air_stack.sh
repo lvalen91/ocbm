@@ -3,7 +3,7 @@
 exec >/tmp/stack.log 2>&1
 
 # `pkill` has no symlink on this rootfs though busybox has the applet; av.rs shells out to a bare
-# `pkill` to reap airplayd/rx-connect, so without this shim every reap silently ENOENTs.
+# `pkill` to reap carplayd, so without this shim every reap silently ENOENTs.
 mkdir -p /tmp/bin
 [ -e /tmp/bin/pkill ] || ln -sf "$(command -v busybox || echo /bin/busybox)" /tmp/bin/pkill
 export PATH=/tmp/bin:$PATH
@@ -14,7 +14,7 @@ export PATH=/tmp/bin:$PATH
 # every process, which includes the invoking shell — e.g. an `adb shell "chmod 755 ... /tmp/c2air-btattach"`
 # wrapper, or this script's own launcher. pkill then kills the parent and this script dies with it,
 # silently, part-way through bring-up. And `pkill -x <name>` is equally unusable: Linux truncates
-# comm to 15 chars, so "carplay-wireless" can never match.
+# comm to 15 chars, so "btd" can never match.
 # Hence: match on the path via ps, and skip $$ / $PPID.
 kill_path() {
   for p in $(ps | grep "$1" | grep -v grep | awk '{print $1}'); do
@@ -64,8 +64,8 @@ kill_path /tmp/c2air_blackbox.sh
 setsid /tmp/c2air_blackbox.sh </dev/null >/tmp/bb.err 2>&1 &
 echo "[stack] blackbox -> /mnt/UDISK/blackbox.log"
 
-# 1. Wi-Fi AP. Must exist BEFORE carplay-wireless answers 0x5702, or the 0x5703 reply describes
-#    an AP that isn't there. CARPLAY_HOSTAPD_CONF below MUST point at the file this generates.
+# 1. Wi-Fi AP. Must exist BEFORE btd answers 0x5702, or the 0x5703 reply describes
+#    an AP that isn't there. BOX_HOSTAPD_CONF below MUST point at the file this generates.
 /tmp/c2air_ap_up.sh start
 echo "[stack] ap: $(/tmp/c2air_ap_up.sh status | tr '\n' ' ')"
 
@@ -76,22 +76,21 @@ i=0; while [ ! -e /sys/class/bluetooth/hci0 ] && [ $i -lt 50 ]; do i=$((i+1)); u
 echo "[stack] hci0: $([ -e /sys/class/bluetooth/hci0 ] && echo up || echo MISSING)"
 
 # 3. Wireless CarPlay.
-#    CARPLAY_STATE_DIR is on UDISK, not /tmp: BT link keys live there and /tmp is tmpfs, so a reboot
+#    BOX_STATE_DIR is on UDISK, not /tmp: BT link keys live there and /tmp is tmpfs, so a reboot
 #    would silently drop the bond while the PHONE still has it — the phone then reconnects with a key
 #    the box cannot answer. UDISK is nearly full (~316 KB) but a bond is a few hundred bytes.
-# 3. Session supervisor — it, NOT this script, starts carplay-wireless.
+# 3. Session supervisor — it, NOT this script, starts btd.
 #
 # THE ORDERING FIX. Starting the wireless plane here (as this script used to) let a bonded iPhone
-# reconnect and complete its whole AirPlay handshake BEFORE the host app subscribed. airplayd picks
-# relay-vs-local ONCE at control-connection accept (airplayd main.rs:1386-1401) and ocbmd only
+# reconnect and complete its whole AirPlay handshake BEFORE the host app subscribed. carplayd picks
+# relay-vs-local ONCE at control-connection accept (carplayd main.rs:1386-1401) and ocbmd only
 # attaches the RTSP seam while subscribed (ocbmd main.rs:2845-2851) — so that connection was locked
 # to plain-local for life and no A/V could ever flow, however healthy everything downstream looked.
 # The CCPA cannot hit this: `wireless_up` runs solely from the host-present 0->1 edge
 # (session_supervisor.sh:788-791). c2air_supervisor.sh restores that gate.
 kill_path /tmp/c2air_supervisor.sh; usleep 200000
-kill_path /tmp/carplay-wireless
-kill_path /tmp/airplayd
-kill_path /tmp/rx-connect
+kill_path /tmp/btd
+kill_path /tmp/carplayd
 setsid /tmp/c2air_supervisor.sh </dev/null >/tmp/sup.log 2>&1 &
 usleep 1500000
 echo "[stack] supervisor: $(ps | grep -c '[/]tmp/c2air_supervisor.sh') proc(s) — wireless starts on host_present 0->1"
@@ -101,10 +100,10 @@ echo "[stack] supervisor: $(ps | grep -c '[/]tmp/c2air_supervisor.sh') proc(s) �
 #    the only way in is to quit the app and reboot, which kills the session. This mirrors the tails
 #    onto UDISK so a post-mortem needs no live link. Hard byte caps: UDISK has ~308 KB free and holds
 #    the per-unit carplay.key, so this must never be allowed to fill it.
-#    NOTE the wireless airplayd logs to airplayd_wl.log (av.rs:417), NOT airplayd.log.
+#    NOTE the wireless carplayd logs to carplayd_wl.log (av.rs:417), NOT carplayd.log.
 mkdir -p /mnt/UDISK/snap
 setsid sh -c 'while true; do
-  for f in cw airplayd_wl rx-connect ocbmd stack ap_hostapd ap_dhcp; do
+  for f in cw carplayd_wl ocbmd stack ap_hostapd ap_dhcp; do
     [ -f /tmp/$f.log ] && tail -c 12000 /tmp/$f.log > /mnt/UDISK/snap/$f.log 2>/dev/null
   done
   cp /proc/net/arp /mnt/UDISK/snap/arp 2>/dev/null

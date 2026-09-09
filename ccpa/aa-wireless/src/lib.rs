@@ -9,7 +9,7 @@
 //! advertises CarPlay AND Android Auto from a single Bluetooth identity and tells them apart by
 //! which RFCOMM channel the phone opens (iAP2 = 1, AAP = 4).
 //!
-//! So wireless Android Auto is served BY `carplay-wireless`, which is device-proven and must not
+//! So wireless Android Auto is served BY `btd`, which is device-proven and must not
 //! regress. This crate supplies the parts that are purely Android Auto — the bootstrap protocol and
 //! the exchange that drives it — and owns no sockets, no radio and no lifecycle.
 //!
@@ -84,7 +84,7 @@ pub fn credentials_are_sendable(p: &wpp::ApParams) -> Result<(), &'static str> {
         return Err("AP BSSID is unset");
     }
     // Length bounds, so `wpp::encode_frame`'s u16-length assert is dead by construction rather than
-    // by luck: this crate is linked into `carplay-wireless` under `panic = "abort"`, where a panic
+    // by luck: this crate is linked into `btd` under `panic = "abort"`, where a panic
     // takes a live CarPlay session down with it (proto.rs's own rationale). These are the standard
     // limits — IEEE 802.11 SSID <= 32 bytes, WPA-PSK passphrase 8..=63 — so a config that violates
     // one describes an AP the phone could not have joined anyway.

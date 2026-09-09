@@ -170,7 +170,7 @@ object Ocbm {
 
     const val PM_NONE: Byte = 0x00 // idle — no projection session; either phone kind may claim the box
     const val PM_WIRED_CP: Byte = 0x01 // wired CarPlay (projection_up -> iap2d + airplayd)
-    const val PM_WIRELESS_CP: Byte = 0x02 // wireless CarPlay (carplay-wireless: BT + WiFi AP)
+    const val PM_WIRELESS_CP: Byte = 0x02 // wireless CarPlay (btd: BT + WiFi AP)
     const val PM_WIRED_AA: Byte = 0x03 // wired Android Auto (aa-bridge AOAP pump; app drives AA over CH_IP)
     const val PM_WIRELESS_AA: Byte = 0x04 // reserved — wireless Android Auto (unbuilt)
 
@@ -231,7 +231,7 @@ object Ocbm {
             if (f and BH_SSP != 0) add("SSP")
             if (f and BH_IAP2D != 0) add("iap2d")
             if (f and BH_AIRPLAYD != 0) add("airplayd")
-            if (f and BH_CARPLAY_WIRELESS != 0) add("carplay-wireless")
+            if (f and BH_CARPLAY_WIRELESS != 0) add("btd")
             if (f and BH_WLAN_AP != 0) add("hostapd")
             if (f and BH_ROOTFS_OK != 0) add("rootfs-ok")
         }

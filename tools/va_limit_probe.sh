@@ -1,9 +1,9 @@
 #!/bin/bash
-# View-area limit prober: arm a spec, capture the PHONE's airplayd log across the attempt,
+# View-area limit prober: arm a spec, capture the PHONE's carplayd log across the attempt,
 # classify, and extract the acceptance-check reason iOS gives when it refuses.
 #
 # The phone-side capture is the whole point: box logs say WHAT we declared, only the phone says WHY
-# it refused. `-pn airplayd` is what makes this tractable — an unfiltered capture of the same window
+# it refused. `-pn carplayd` is what makes this tractable — an unfiltered capture of the same window
 # ran 4.4 GB and still missed the line.
 # Requires WIRELESS CarPlay: the iPhone's USB port must be free to talk to this Mac.
 SPEC="$1"; LABEL="$2"; CM="${3:-false}"; FT="${4:-false}"
@@ -31,9 +31,9 @@ printf '%s' "$SPEC" > /tmp/va2spec
   || { echo "$LABEL  $SPEC => PUSH FAILED (box not on USB / app still holding it)"; exit 3; }
 
 : > "$OUT"
-# UNFILTERED capture, grep-narrowed on the way to disk. `-pn airplayd` was wrong: the
+# UNFILTERED capture, grep-narrowed on the way to disk. `-pn carplayd` was wrong: the
 # "unsupported resolution" banner is rendered by CarPlay's UI process on the phone, NOT by
-# airplayd, so a process filter hid the single most important signal. Filtering by CONTENT keeps
+# carplayd, so a process filter hid the single most important signal. Filtering by CONTENT keeps
 # every process in scope and still lands a small file.
 nohup sh -c "pymobiledevice3 syslog live 2>/dev/null | grep -aiE \
   'view ?area|checkCarPlayFeatureAcceptance|isViewAreaPixelSizeAcceptable|minAcceptableViewArea|ScaleInfo|kFigEndpointError|InvalidParameter|does not support this display resolution|unsupported resolution|resolution|CarPlay ViewAreas' \

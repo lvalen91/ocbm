@@ -1,6 +1,6 @@
 //! Process-local cells for the per-connection capability levers (`hevc`, `dpad`, `knob`,
 //! `telephony`, `altscreen` + alt dims, `viewareas`, `cornermasks`, `logtransfer`, `mainbuffered`,
-//! `appsetup`).
+//! `appsetup`, `view_area_anim_ms`).
 //!
 //! Each cell is SEEDED from the like-named `CARPLAY_*` env var once per process, then WRITTEN per
 //! control connection by `load_device_config` on all three of its paths (success / parse failure /
@@ -18,7 +18,7 @@
 //!     (docs/carplay/04_CAPABILITIES_AND_CONFIG.md B4). `CARPLAY_APP_SETUP` is the tri-state variant — a value, not a presence, so
 //!     `0` can force OFF.
 //!
-//! airplayd's `load_device_config` used to publish these via `std::env::set_var`/`remove_var` on the
+//! carplayd's `load_device_config` used to publish these via `std::env::set_var`/`remove_var` on the
 //! serve thread on EVERY control connection, while other live threads concurrently `getenv` the same
 //! names (the HID-ingest thread's `CARPLAY_ALTSCREEN` guard; `info.rs`/`session.rs` reads during a
 //! hijacking connection's setup). POSIX `setenv`/`getenv` are not mutually thread-safe — musl's
@@ -42,7 +42,7 @@ use std::sync::Once;
 /// live ONLY in the launcher scripts (`session_supervisor.sh`, wireless `av.rs`) with no in-binary
 /// floor. Only an explicit opt-out — `OCBM_FWD_ENC` = `0` / `false` / `off` / empty — selects the
 /// on-box decode dev/legacy fallback. Plain env read (spawn-scoped, never written at runtime), so no
-/// atomic mirror is needed. Both `session.rs` A/V spawns and airplayd's startup mode-log read via here.
+/// atomic mirror is needed. Both `session.rs` A/V spawns and carplayd's startup mode-log read via here.
 pub fn fwd_enc() -> bool {
     match std::env::var("OCBM_FWD_ENC") {
         Ok(v) => {
@@ -331,7 +331,7 @@ pub fn set_mainbuffered(on: bool) {
 
 /// App-driven-SETUP lever (`accessoryConfig.appDrivenSetup`, env override `CARPLAY_APP_SETUP=1/0`):
 /// selects `relay::RemoteSession` over the plain `AvSession` on BOTH transports when the host relay
-/// seam is up (airplayd's per-connection delegate selection — plan P1; wireless joined at the
+/// seam is up (carplayd's per-connection delegate selection — plan P1; wireless joined at the
 /// 2026-08-10 flip). The YAML arrives from the host at SUBSCRIBE, so this lever doubles as the
 /// host-capability flag: a host that can't answer RS_REQs simply never pushes it. The app defaults
 /// it ON; the box's local response stays the sticky fallback on any relay failure.
@@ -343,4 +343,70 @@ pub fn appsetup() -> bool {
 pub fn set_appsetup(on: bool) {
     seed();
     APPSETUP.store(on, Ordering::Relaxed);
+}
+
+/// View-area resize animation duration (ms) — the `animationDurationMillis` the box puts in its
+/// `updateViewArea` ANSWER (`events::send_update_view_area`), the one runtime parameter on that
+/// answer. Armed per connection from the pushed top-level `view_area_anim_ms` (OUR extension, the
+/// `wifi_ap`/`hot_handover` shape, not Apple schema); absent = 3000, the wire the box always sent.
+///
+/// No env form and no bench override — the #25 shape, not the cornerMasks one: the app owns the
+/// value, and a second source of truth here would just put the recompile-per-experiment loop this
+/// lever exists to kill back on in a different costume. So it clears to the CONSTANT on the
+/// no-config / parse-failure paths.
+///
+/// The cell can never hold an out-of-range value: [`set_view_area_anim_ms`] clamps to
+/// [`VIEW_AREA_ANIM_MS_RANGE`] and returns what it stored, so the arming site can log the clamp.
+/// iOS never acknowledges this field, so the `[events] updateViewArea -> … duration=` line (which
+/// prints the value read from THIS cell, i.e. post-clamp) is the only observability there is.
+pub const VIEW_AREA_ANIM_MS_DEFAULT: i64 = 3000;
+/// FLOOR RAISED TO 1000 ms (owner, 2026-09-09) after the bench sweep. Both bounds are device-proven
+/// on a 1920x1080 panel: 10 ms renders the switch as an instant flicker and 10000 ms runs the full
+/// 10 s envelope, so iOS honours the field literally with NO floor and NO cap of its own — this
+/// range is a PRODUCT decision about what to offer, not a protocol limit. 10 ms is deliberately no
+/// longer reachable from the app: it works, it was simply judged too abrupt to ship as an option.
+/// The DEFAULT stays 3000 (absent key), so no existing pushed document changes.
+pub const VIEW_AREA_ANIM_MS_RANGE: std::ops::RangeInclusive<i64> = 1_000..=10_000;
+static VIEW_AREA_ANIM_MS: AtomicI64 = AtomicI64::new(VIEW_AREA_ANIM_MS_DEFAULT);
+
+/// Clamp a requested duration to the nearest bound of [`VIEW_AREA_ANIM_MS_RANGE`]. Never a rejection:
+/// a cosmetic knob must not be able to take the whole pushed document off the air.
+pub fn clamp_view_area_anim_ms(ms: i64) -> i64 {
+    ms.clamp(*VIEW_AREA_ANIM_MS_RANGE.start(), *VIEW_AREA_ANIM_MS_RANGE.end())
+}
+
+pub fn view_area_anim_ms() -> i64 {
+    seed();
+    VIEW_AREA_ANIM_MS.load(Ordering::Relaxed)
+}
+
+/// Store the CLAMPED value and return it; a result `!= ms` means the request was out of range and
+/// the caller should say so.
+pub fn set_view_area_anim_ms(ms: i64) -> i64 {
+    seed();
+    let v = clamp_view_area_anim_ms(ms);
+    VIEW_AREA_ANIM_MS.store(v, Ordering::Relaxed);
+    v
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn view_area_anim_ms_clamps_to_nearest_bound_and_passes_in_range() {
+        assert_eq!(VIEW_AREA_ANIM_MS_DEFAULT, 3000, "absent-key wire must stay 3000");
+        assert_eq!(clamp_view_area_anim_ms(3000), 3000);
+        assert_eq!(clamp_view_area_anim_ms(0), 0);
+        assert_eq!(clamp_view_area_anim_ms(10_000), 10_000);
+        assert_eq!(clamp_view_area_anim_ms(-1), 0);
+        assert_eq!(clamp_view_area_anim_ms(i64::MIN), 0);
+        assert_eq!(clamp_view_area_anim_ms(10_001), 10_000);
+        assert_eq!(clamp_view_area_anim_ms(i64::MAX), 10_000);
+        // The setter reports what it stored, and the getter reads the same (clamped) cell.
+        assert_eq!(set_view_area_anim_ms(50_000), 10_000);
+        assert_eq!(view_area_anim_ms(), 10_000);
+        assert_eq!(set_view_area_anim_ms(VIEW_AREA_ANIM_MS_DEFAULT), 3000);
+        assert_eq!(view_area_anim_ms(), 3000);
+    }
 }

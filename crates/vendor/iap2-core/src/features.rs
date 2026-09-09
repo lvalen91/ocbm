@@ -106,7 +106,7 @@ impl Policy {
 /// `Policy::active()` and the skip list used to be re-read from `/tmp/carplay_metadata` at every call
 /// site — once when the Identify is built, again when the subscribes go out seconds later. An edit in
 /// that window silently desynced param 6 from the subscribes, which is the precise drift the feature
-/// table exists to make impossible. `airplayd` is spawned per session by the supervisor, so
+/// table exists to make impossible. `carplayd` is spawned per session by the supervisor, so
 /// process-lifetime caching is session-lifetime caching; `iap2d` is long-lived, and pinning its policy
 /// at first use is the behaviour we want there too — a link's declaration must not change under it.
 struct Resolved {
@@ -115,7 +115,7 @@ struct Resolved {
 }
 
 /// The app-pushed policy (docs/carplay/04_CAPABILITIES_AND_CONFIG.md B3), armed once per process from the host's YAML before the first
-/// declaration is built. Set by the consuming daemon — iap2d for the wired arm, airplayd for the
+/// declaration is built. Set by the consuming daemon — iap2d for the wired arm, carplayd for the
 /// AirPlayTunnel arm — via [`arm_pushed_policy`]; unset means no app config reached this process.
 static PUSHED: std::sync::OnceLock<Resolved> = std::sync::OnceLock::new();
 
@@ -148,7 +148,7 @@ pub fn arm_pushed_policy(word: &str, skip: &[String]) -> bool {
             true
         }
         Err(rejected) => {
-            // Re-arming with the SAME tier is the NORMAL path (airplayd calls this per control
+            // Re-arming with the SAME tier is the NORMAL path (carplayd calls this per control
             // connection, several per session), so only speak up when the request actually differs
             // from what is pinned — otherwise this would out-log the once-per-process resolution
             // line it sits beside. A differing request is worth a loud line: it means a config

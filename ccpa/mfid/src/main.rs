@@ -19,7 +19,7 @@
 //!
 //! 1. **The chip lock is shared and structural.** Every operation goes through
 //!    `mfi_i2c_local::try_cert` / `try_sign`, which take the same `flock` on
-//!    `/tmp/carplay_mfi.lock` that `airplayd`, `iap2d`, `wireless/src/mfi_local.rs` and — the one
+//!    `/tmp/carplay_mfi.lock` that `carplayd`, `iap2d`, `wireless/src/mfi_local.rs` and — the one
 //!    that actually matters here — **`ocbmd`'s own `CH_MFI` server** take. All five use
 //!    `flock(LOCK_EX|LOCK_NB)` in a 20 ms poll loop under a 10 s deadline on the identical path,
 //!    so this process is serialized against every existing chip user by the same mechanism they

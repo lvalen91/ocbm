@@ -5,7 +5,7 @@ edition = "2021"
 license = "Unlicense"
 
 # Protocol-AGNOSTIC box-side foundation. The overlap between the CarPlay/AirPlay set
-# (iap2d, airplayd, carplay-wireless, rx-connect) and the Android Auto set (aa-bridge,
+# (iap2d, carplayd, btd, rx-connect) and the Android Auto set (aa-bridge,
 # future wireless AA) lives here; each set keeps only its unique protocol logic.
 #
 #   box-common

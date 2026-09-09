@@ -1,6 +1,6 @@
 # CarlinkAndroid — the AAOS host app (OCBM)
 
-The head-unit counterpart to `host/CarPlayHost/`: an Android app for a GM **gminfo3.7** unit (2024
+The head-unit counterpart to `host/MacHost/`: an Android app for a GM **gminfo3.7** unit (2024
 Silverado, Intel, AAOS 12L / API 32) that claims the CPC200-CCPA over **OCBM** and runs **full**
 wireless CarPlay — the adapter's own WiFi and Bluetooth, the adapter as the AirPlay endpoint, all
 media crossing the USB bulk pipe.
@@ -29,7 +29,7 @@ UPX-packed and about half the size; do NOT pack with the host toolchain, see the
 |---|---|---|
 | `/usr/sbin/ocbmd` | 453200 | host instance nonce, `CT_PHONE_IDENT` mirror, silent presence re-arm, forget clears the AirPlay peer store |
 | `/usr/sbin/airplayd` | 1793056 | two-finger HID descriptor + contact coalescing, phase-1 SETUP identity publisher |
-| `/usr/sbin/carplay-wireless` | 495976 | independent `/tmp/setup_dump` gate |
+| `/usr/sbin/btd` | 495976 | independent `/tmp/setup_dump` gate |
 | `/script/run_ocbmd.sh` | — | opt-in deploy dead-man, armed with `/script/ocbm_deadman_on` (currently DISARMED) |
 
 Backups: `/mnt/UPAN/ccpa_backups/` on the box's USB stick, plus local copies of `bt_link_keys` and

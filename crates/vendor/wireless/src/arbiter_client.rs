@@ -1,5 +1,5 @@
 //! Client for `carplayd`'s wired/wireless session arbiter (`docs/wireless/00_WIRELESS_CARPLAY.md` §2.5 "Reconnection & transport arbitration" and §3) --
-//! connects to `/run/carplay/arbiter.sock`, attempts to claim the `wireless` transport, and (once
+//! connects to `/run/proj/arbiter.sock`, attempts to claim the `wireless` transport, and (once
 //! granted) watches for an unprompted `"preempt\n"` push if a wired session claims later.
 
 use std::io::{BufRead, BufReader, Write};

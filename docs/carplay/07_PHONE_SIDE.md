@@ -26,9 +26,9 @@ mode (`05ac:12a8`), `iap2d` is not running, until a **host app** acts. The host 
 
 - Host app **SUBSCRIBEs** over the CH_CTRL session-control channel → ocbmd sets `/tmp/host_present=1`.
 - On the 0→1 edge the supervisor runs **`projection_up.sh`** — the IDLE→projection bring-up (the cold
-  start below, idempotent: it no-ops if already Identified) — **then** ARMs airplayd + rx_connect, so
+  start below, idempotent: it no-ops if already Identified) — **then** ARMs carplayd + rx-connect, so
   the iPhone opens its session.
-- Host STOP / crash → ocbmd sets `/tmp/host_present=0` → supervisor tears down airplayd + rx_connect;
+- Host STOP / crash → ocbmd sets `/tmp/host_present=0` → supervisor tears down carplayd + rx-connect;
   **iap2d / the iAP2 link stay up** (holding pattern), so the next SUBSCRIBE re-arms instantly.
 
 ocbmd tracks presence and mirrors it to `/tmp/host_present`; `projection_up.sh` and
@@ -57,7 +57,7 @@ that tree is archived at `~/Documents/carlink/old/ncm_carplayd`, docs/carplay/00
    "release phone-side ncm0 owner"), and the old `ncm_carplayd` Pi topology this sequence came from,
    whose ACTIVITY_LOG and `tools/cold_start2.sh:62` both say `ncm1`. On the OCBM path the host-facing
    gadget presents `accessory` only, so the phone-facing link is `ncm0` — `tools/cold_start_airplay.sh`,
-   `docs/ops/captures/2026-07-09_airplayd_pairverify.log`, and §"Where CarPlay A/V goes" below.)
+   `docs/ops/captures/2026-07-09_carplayd_pairverify.log`, and §"Where CarPlay A/V goes" below.)
 6. Run **`iap2d /dev/android_iap2`** — the iAP2 accessory L3 daemon.
 
 Each fresh cold-start needs a **physical replug** (steps 4–5 must fire while the iPhone is a device);
@@ -101,7 +101,7 @@ See repo `README.md` §Architecture. Split by stability:
   the box; the app never relays an MFi op — the private key never leaves the chip.
 - **App (evolving):** claims the accessory over USB, decrypts with the handed-over key, **drives the
   post-pairing SETUP** (codecs/HEVC, resolution, screens — target), decodes HEVC (VideoToolbox), renders
-  (the shipping macOS app now lives in THIS repo at `host/CarPlayHost/carlink_macOS`; it began as
+  (the shipping macOS app now lives in THIS repo at `host/MacHost/carlink_macOS`; it began as
   `old/ncm_carplayd/macos` carplay-app), and sends input back.
 
 So: **box = iAP2/pairing *mechanics* + MFi + encrypted-A/V forward + key handoff; app = every
@@ -120,7 +120,7 @@ the encrypted A/V + hands the per-stream key over OCBM** (`CH_VIDEO`/`CH_MEDIA_A
 receiver (`ocbm-host avdec`) decrypted hundreds of video frames + thousands of audio packets host-side,
 **0 failures**, driven by the host-app-driven projection lifecycle above. Pairing persists (disk-backed
 PeerStore) so a known device reconnects with pair-verify only. The host app that was "remaining" here is **done and
-hardware-validated** (`host/CarPlayHost/carlink_macOS` — VideoToolbox decode/render, audio, touch
+hardware-validated** (`host/MacHost/carlink_macOS` — VideoToolbox decode/render, audio, touch
 uplink). Open work: `../ops/04_OPEN_ITEMS.md`. See also `README.md` §Architecture and
 `../carplay/02_SESSION_LIFECYCLE.md`.
 

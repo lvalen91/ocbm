@@ -215,7 +215,7 @@ stands unchanged.
 `/tmp/bt_phase` was found to be a latch: nothing ever wrote an idle value back, so it meant "the
 deepest handshake phase reached since boot", and `ocbmd` re-emitted it to every fresh subscriber —
 producing "phone detected" windows of 47 s, 78 s, 133 s and 5 m 47 s with no phone anywhere. The latch
-itself is fixed at its source (`carplay-wireless` now publishes `BTP_IDLE` on every session-end path
+itself is fixed at its source (`btd` now publishes `BTP_IDLE` on every session-end path
 and at process start; the supervisor unlinks the file on `wireless_down`).
 
 **Follow-up 2026-08-28 (found by test, `bt_driver::tests::session_end_publishes_the_idle_phase_so_the_mirror_cannot_latch`):**
@@ -255,8 +255,8 @@ now taken to the owned NCM base by `tools/ncm_base_install.sh` (preflight → fu
 owned boot path → cold test → strip → audit → cold test again), and OCBM is installed onto that
 base by `tools/ocbm_install.sh` (place → verify → reboot → reversible `trial` behind a dead-man
 timer → `finalize`). `ocbm_install.sh`'s `manifest()` is the authoritative file set: minimal is
-`ocbmd` + `ocbm_boot.sh` + `run_ocbmd.sh`, and `--full` adds `iap2d`, `airplayd`, `rx-connect`,
-`carplay-wireless`, `session_supervisor.sh`, `projection_up.sh`, `phone_reset.sh`,
+`ocbmd` + `ocbm_boot.sh` + `run_ocbmd.sh`, and `--full` adds `iap2d`, `carplayd`, `rx-connect`,
+`btd`, `session_supervisor.sh`, `projection_up.sh`, `phone_reset.sh`,
 `run_supervisor.sh` and the radio seam (`radio_detect.sh` / `radio_hal.sh` / `radio_ap_up.sh`,
 see docs/wireless/01_BT_AND_RADIO.md). It installs the boot hook from **`ccpa/rootfs/script/ocbm_boot.sh`** — the copy
 under `tools/` is a stale 34-line duplicate with no `/script/ocbm_trial` dead-man, and `finalize`
@@ -275,7 +275,7 @@ quick live-overlay refresh of an already-commissioned box.
 helpers that lived in the sibling `ncm_carplayd/ccpa/probes/` tree; **none of them was ever written for
 this repo.** Every box daemon is Rust (`find ccpa -name '*.c'` returns nothing; the only C *binary* we
 ship is the 45-line `accessory_init/iap_role_switch.c`, and the only other C in a shipped artifact is
-`crates/vendor/eld-codec/csrc/eld_shim.c`, the libfdk-aac FFI shim compiled into `airplayd` — see
+`crates/vendor/eld-codec/csrc/eld_shim.c`, the libfdk-aac FFI shim compiled into `carplayd` — see
 `../carplay/00_ARCHITECTURE.md` §Vendored assets). Real measured sizes are in the MEASURED / UPDATE blocks below;
 read those, not this table.
 
@@ -290,10 +290,10 @@ recommendations below did not survive contact with the build. (1) **"Keep the lo
 was NOT taken:** no C MFi bridge, no C iAP2/radio glue and no C L3-NCM bridge was ever written for
 this repo — the box daemons are all Rust; the only C *binary* we ship is the 45-line
 `accessory_init/iap_role_switch.c`, and the only other C inside a shipped artifact is
-`crates/vendor/eld-codec/csrc/eld_shim.c`, compiled into `airplayd` (see `../carplay/00_ARCHITECTURE.md`
+`crates/vendor/eld-codec/csrc/eld_shim.c`, compiled into `carplayd` (see `../carplay/00_ARCHITECTURE.md`
 §Vendored assets). (2) The "hard measured number… is the first thing to produce" **was produced** —
 on 2026-07-10 and re-measured 2026-08-16, in the MEASURED / UPDATE blocks earlier in this file:
-`receiver_core`'s pairing/session path cross-compiles clean and `airplayd` is ~1.71 MiB unpacked,
+`receiver_core`'s pairing/session path cross-compiles clean and `carplayd` is ~1.71 MiB unpacked,
 not the feared 4–8 MB. What DID hold: the Rust size profile, UPX packing, and the box scope of
 pairing + key-derivation + RTSP relay with no decode.
 
@@ -332,8 +332,8 @@ wired CCPA path as shipped: `iap2d` drives the local chip and speaks no NCM at a
 carries its own MFi-over-NCM bridge for the Raspberry-Pi / NCM bring-up boxes, which have neither a
 local chip nor `CH_MFI`: `ccpa/mfid` (box-side service, default bind `0.0.0.0:7789`), `crates/mfi-wire`
 (the `MFI1` framing), `host/mfi-probe` (the client), the remote backend in
-`crates/vendor/wireless/src/mfi_local.rs`, and a client hook in `airplayd` itself
-(`ccpa/airplayd/src/main.rs`, `mfi_wire::client::{cert,sign}`). All of it is opt-in behind
+`crates/vendor/wireless/src/mfi_local.rs`, and a client hook in `carplayd` itself
+(`ccpa/carplayd/src/main.rs`, `mfi_wire::client::{cert,sign}`). All of it is opt-in behind
 `CARPLAY_MFI_ADDR` (e.g. `192.168.50.2:7789`) — unset, which is the CCPA's own case, leaves the local
 i2c path byte-for-byte unchanged. It is a bring-up instrument, not a production path, and no key
 material crosses it: the genuine coprocessor signs, the socket only relays request/response frames.
@@ -345,7 +345,7 @@ material crosses it: the genuine coprocessor signs, the socket only relays reque
 - **Scope:** §"Status" — the "Remaining" clause
 
 **SUPERSEDED 2026-08-16 — the "Remaining" clause above is stale; retained for history.** The macOS
-host app is DONE and hardware-validated: `host/CarPlayHost/carlink_macOS` (VideoToolbox decode,
+host app is DONE and hardware-validated: `host/MacHost/carlink_macOS` (VideoToolbox decode,
 audio, touch/media-key uplink, mic, Settings/YAML config push over OCBM) — README.md §Architecture,
 docs/carplay/00_ARCHITECTURE.md §"The host app owns the EVOLVING session". What remains is tracked in the current
 `docs/SESSION_HANDOFF_*.md`, not here.
@@ -414,14 +414,14 @@ This section read as a live priority list and was entirely stale. Verified again
 1. `/command` handling — `modesChanged` is parsed and drives MainScreen focus state
    (`events.rs:213-226`); `disableBluetooth` is received and logged with **no action taken,
    deliberately** (`events.rs:227-242`).
-2. Touch/HID input uplink — `airplayd` HID ingest on `127.0.0.1:9110`, `ocbmd INPUT_INGEST_ADDR`,
+2. Touch/HID input uplink — `carplayd` HID ingest on `127.0.0.1:9110`, `ocbmd INPUT_INGEST_ADDR`,
    `receiver::uplink`. Box-side arrival hardware-confirmed.
 3. Voice/nav/Siri audio — the :9003 voice sink HAS an OCBM channel (`CH_ALT_AUDIO`: the
    `(9003u16, p::CH_ALT_AUDIO)` entry of `ocbmd/src/main.rs`'s `av_listeners` table, `:2388`);
    routing by `audioType` in `session.rs::setup_phase2` (`:871-879`); per-AU rate/channel tagging in
    `forward.rs::tag_voice` (`:84`). (Anchors re-verified 2026-08-16 — the original `ocbmd:2194` and
    `session.rs:794` line numbers had rotted.)
-4. Mic uplink — `airplayd MIC_INGEST_ADDR 127.0.0.1:9112`, host `MicCapture.swift`, a REAL
+4. Mic uplink — `carplayd MIC_INGEST_ADDR 127.0.0.1:9112`, host `MicCapture.swift`, a REAL
    libfdk-aac AAC-ELD encoder in `eld-codec` (not the stub this doc implies).
    **Owner-confirmed on hardware 2026-08-10: Siri speech and two-way phone calls both work.**
 5. Resolution control — app-authored via the pushed `VehicleConfig`; 1920x720 survives only as the
@@ -438,7 +438,7 @@ generated metadata declaration + subscribe plane (`features.rs`).
 
 **CORRECTION (2026-07-10, see docs/carplay/06_AV_PIPELINE.md):** this section's conclusion is WRONG. The 800×480 was NOT an
 iOS-side cache pin — the box was literally advertising 800×480 via a hardcoded override in
-`ccpa/airplayd/src/main.rs` (was lines 342-343), overriding the 1920×720 struct default this section
+`ccpa/carplayd/src/main.rs` (was lines 342-343), overriding the 1920×720 struct default this section
 reasoned from. Changing it to 1920×720 was honored by the iPhone on the next connection with NO forget
 (proven on hardware). The "forget" exercise below was chasing a wrong hypothesis. Kept for history;
 superseded by docs/carplay/06_AV_PIPELINE.md (diagnosis) + docs/carplay/03_SDK_GROUND_TRUTH.md (CarPlay SDK ground truth).
@@ -458,11 +458,11 @@ counters that deliberately survive `teardown()`, the L1/L2/L3 ladder (L1 and L2 
 `/script/phone_reset.sh` = `tools/phone_reset.sh`), the persistent L3 reboot budget in
 `/etc/ccpa_reboot_count`, idle-gated peer-store mutation (`apply_pending` + `/tmp/peer_pending`), the
 `/tmp/carplay_state` verdict, the count-bounded transition ring `/tmp/lifecycle.ndjson`, and a health
-check over `airplayd` + `rx-connect` + `iap2d`. Elsewhere: `::respawn:` entries for BOTH `ocbmd` and
+check over `carplayd` + `rx-connect` + `iap2d`. Elsewhere: `::respawn:` entries for BOTH `ocbmd` and
 the supervisor (`ccpa/rootfs/etc/inittab`), Apple's 3 s/3 s/3 TCP keepalive on the iPhone-facing
-control socket (`airplayd/src/main.rs::arm_keepalive`), and the host-side delegate wiring +
+control socket (`carplayd/src/main.rs::arm_keepalive`), and the host-side delegate wiring +
 A/V-progress watchdog (`OCBMSessionCoordinator`, task #29). **One deviation from §1 as written:** the
-supervisor, not airplayd, writes `/tmp/session_healthy` — it latches airplayd's own `RECORD done` log
+supervisor, not carplayd, writes `/tmp/session_healthy` — it latches carplayd's own `RECORD done` log
 line. **Still open INSIDE P1 (do not read the phasing list as fully closed):** the host-side *bounded*
 resubscribe with an atomic `OCBMAVDecrypt.reset()` — `OCBMAVDecrypt` has no `reset()`, and the
 resubscribe is the unbounded heartbeat / `SEV_HOST_GONE` retry in `OCBMClient`; and the ~12 s
@@ -482,14 +482,14 @@ original plan record plus that open list, not as queued work.
 - **Scope:** §"Ruled out (EVIDENCED)" — the last bullet
 
 **CORRECTED 2026-08-16 — the "later RESOLVED" note (added 2026-08-09, commit `89b90a5`) was wrong
-when written.** It read: "`uplink.rs::set_display` exists and is applied; airplayd propagates dims."
+when written.** It read: "`uplink.rs::set_display` exists and is applied; carplayd propagates dims."
 `set_display` exists (`crates/vendor/receiver/src/uplink.rs:86`) but has **no caller anywhere in the
-repo** — and had none at `89b90a5` either. What actually tracks the resolution is airplayd's OWN
+repo** — and had none at `89b90a5` either. What actually tracks the resolution is carplayd's OWN
 `DISPLAY_WH` static, set from the resolved `DeviceConfig` at the end of `load_device_config()` and
-used to scale the `:9110` HID ingest (`ccpa/airplayd/src/main.rs` — by symbol, because that file is
+used to scale the `:9110` HID ingest (`ccpa/carplayd/src/main.rs` — by symbol, because that file is
 churning; as of 2026-08-16 `:539`, `:825`, `:1162`). That is the live touch path and it is correct.
 The receiver's own control-in handler — `uplink::read_control` → `handle_touch` (`:292`/`:354`,
-scaling at `:362`), which airplayd starts on `MIC_INGEST_ADDR` `127.0.0.1:9112` (the `:9110` in
+scaling at `:362`), which carplayd starts on `MIC_INGEST_ADDR` `127.0.0.1:9112` (the `:9110` in
 `uplink.rs:266`'s doc comment is itself stale) — still scales against the never-updated 1920×720
 default, so a non-1920×720 config would desync touch on THAT path. Latent as wired today (the host
 app's touch goes to the `:9110` seam); flagged, not fixed.
@@ -501,12 +501,12 @@ app's touch goes to the `:9110` seam); flagged, not fixed.
 - **Scope:** §"Follow-ups" — both bullets
 
 **SUPERSEDED 2026-08-16 — the YAML/VehicleConfig path LANDED; 1920×720 is no longer a hardcode.**
-`airplayd::load_device_config()` reads the host-pushed `/tmp/carplay_cfg.yaml`
+`carplayd::load_device_config()` reads the host-pushed `/tmp/carplay_cfg.yaml`
 (`CARPLAY_CFG_FILE_DEFAULT`, overridable by `CARPLAY_CFG_FILE`) and overlays `VehicleConfig::from_yaml`
 onto `base_device_config()` **per control connection**, exactly the reconnect-consumed model
 §"Why no forget is needed" predicts; the 1920×720 inside `base_device_config()` survives only as the
-app-less fallback, and the resolved dims are published to airplayd's `DISPLAY_WH` at the end of
-`load_device_config()`. (Cited by symbol on purpose — `ccpa/airplayd/src/main.rs` is actively churning;
+app-less fallback, and the resolved dims are published to carplayd's `DISPLAY_WH` at the end of
+`load_device_config()`. (Cited by symbol on purpose — `ccpa/carplayd/src/main.rs` is actively churning;
 as of 2026-08-16 those are `:663`, `:514`/`:530`, `:577`, `:582-583`, `:825`.) Note the
 `uplink::set_display(w,h)` half of the bullet below was NOT what shipped — see the correction in
 §"Ruled out". Retained for history.
@@ -590,11 +590,11 @@ stamps a per-frame `seq` and the host resyncs from it, with no implicit incremen
 **STATUS UPDATE 2026-08-16 — SHIPPED. This is a plan record, not a work queue.** Phase 1
 (single-touch), Phase 3 (buttons/commands, task #35) and the Phase-4 microphone all landed; Phase 2
 multi-touch landed box-side and is driven by the **Android** host (hardware-verified 2026-08-15).
-`CH_INPUT` + `INPUT_TOUCH` live in `crates/ocbm-proto`, ocbmd relays to `127.0.0.1:9110`, airplayd owns
+`CH_INPUT` + `INPUT_TOUCH` live in `crates/ocbm-proto`, ocbmd relays to `127.0.0.1:9110`, carplayd owns
 that listener and drives `hid::touch_report_normalized` → `events::send_hid_report`, and the macOS host
 sends via `OCBMClient.sendTouch`. **The one real remaining gap:** the macOS host's two-finger delegate
 `AppDelegate.carPlayView(_:didMultiTouchTwo:)` is an empty stub, so the box's two-finger descriptor is
-exercised from `CarlinkAndroid` but never from macOS. §2's claim that airplayd builds without
+exercised from `CarlinkAndroid` but never from macOS. §2's claim that carplayd builds without
 `mic-uplink` was true when written and is FALSE today — see the correction there.
 
 ## docs/host/00_MACOS_HOST_APP.md — Host-app CarPlay-SDK adherence audit + plan (12-agent)
@@ -714,7 +714,7 @@ anywhere. `hci_uart` is a loadable module on this box; without the seam nothing 
 `ocbm_install.sh --full` ships the seam and §"The file set" already warns that a box getting
 `session_supervisor.sh` without it "has no radio bring-up at all ... a total failure, not a degraded
 one". This unit had the supervisor and not the seam — the exact state that comment predicts, reached
-by targeted pushes (`ocbm_push.sh` defaults to `ocbmd` + `carplay-wireless` and nothing else) rather
+by targeted pushes (`ocbm_push.sh` defaults to `ocbmd` + `btd` and nothing else) rather
 than an install.
 
 **Why the doc mattered.** §1.4 presents `bt_on.sh -> attach_bluetooth.sh -> insmod hci_uart.ko` as
@@ -751,8 +751,8 @@ misdirection at exactly the moment someone is debugging.
 **Device-verified:** Phase 0 (radios + kernel gate), A1 (BT pair/SDP), A2 (iAP2/MFi/identify), and
 **A3 handoff** — the iPhone prompts for CarPlay, sends `0x5702`, we answer `0x5703`, and it joins the
 `wlan0` AP + gets DHCP (`192.168.43.100`). **Code-complete, not yet run to video:** A3 A/V —
-`rx-connect` (mDNS `_airplay._tcp` + connect-out on `wlan0`) + `airplayd` (RTSP `:5000`),
-auto-orchestrated from `carplay-wireless` after `0x5703`. The §3 design is what was built; the §4 gap
+`rx-connect` (mDNS `_airplay._tcp` + connect-out on `wlan0`) + `carplayd` (RTSP `:5000`),
+auto-orchestrated from `btd` after `0x5703`. The §3 design is what was built; the §4 gap
 analysis is largely closed. The §7 `carlink_linux` C reference drove the implementation, and a
 12-agent code study (2026-07-13) pinned the identify fix that unlocked the handoff. **For the current
 state, deployed-vs-pending binaries, remaining work, gotchas, and the exact test procedure, see
@@ -790,7 +790,7 @@ shipped.** Retained as the original scoping. Everything named below is in `crate
 unless stated otherwise: 1 radio bring-up -> `bt_bringup.rs`; 2 wireless iAP2 messages -> `bt_driver.rs`
 + `crates/vendor/iap2-core/src/message.rs`; 3 credential handoff -> `wifi_handoff.rs`; 4 iAP2-over-BT ->
 `crates/bt-common/src/{rfcomm,sdp_server,ssp_agent}.rs` (moved out of `vendor/wireless` 2026-09-03); 5 discovery -> the `rx-connect` crate (`RX_IFACE=wlan0`);
-6 airplayd on the WiFi link -> `av.rs`; 7 supervisor orchestration -> the dual-transport
+6 carplayd on the WiFi link -> `av.rs`; 7 supervisor orchestration -> the dual-transport
 `tools/session_supervisor.sh` + `reconnect.rs`.
 
 Also superseded in this document: the "no hostapd/wpa_supplicant, zero wireless references in
@@ -824,15 +824,15 @@ names. As of 2026-08-01 that set was:
 
 **⚠️ corrected 2026-08-10, EXTENDED 2026-08-16 — that set is only as good as its last edit.** On
 2026-08-10 it still had `enablesCornerMasks`, `knobSupport` and `telephonyButtonsSupport` marked inert
-although airplayd ARMS all three; fixed the same day. **Five more entries listed above are ALSO armed
+although carplayd ARMS all three; fixed the same day. **Five more entries listed above are ALSO armed
 today and must not be read as inert:** `enablesMainBufferedAudio`, `enablesLogTransfer`,
 `enablesUIAppearance`, `enablesMapAppearance`, `enablesFocusTransfer`. All eight are armed per config
-push from `ccpa/airplayd/src/main.rs`'s config-apply block, via `levers::set_mainbuffered`,
+push from `ccpa/carplayd/src/main.rs`'s config-apply block, via `levers::set_mainbuffered`,
 `levers::set_cornermasks`, `levers::set_logtransfer`, `levers::set_ui_appearance`,
 `levers::set_map_appearance`, `levers::set_focus_transfer`, `events::set_knob_advertised` and
 `events::set_telephony_advertised`. *(The old `main.rs:624/626/641` line anchors are dead — name the
 setter, not the line.)* GROUND TRUTH is `vehicle_config.rs`'s accessors plus the `levers::`/`events::`
-calls in `ccpa/airplayd/src/main.rs` — not this list, and not the app's.
+calls in `ccpa/carplayd/src/main.rs` — not this list, and not the app's.
 
 (This is the generic `inertMarker` set; a few other dead fields — e.g. `rightHandDrive`, `nightMode` —
 carry their own inline "not implemented" note in their entry below instead of appearing in this list.
@@ -1352,9 +1352,9 @@ inside `POST /command`. Message-shape and link-layer content here remains valid.
 
 **STATUS UPDATE 2026-08-16 — Part 1 is FIXED; the status line below is the 2026-07-23 original.**
 Part 1's findings (1.1–1.4) shipped via docs/wireless/00_WIRELESS_CARPLAY.md Phase 1/2 + Phase 5.0 and are live in source today:
-`ensure_av_layer` verifies the resident `airplayd`'s `/proc/<pid>/environ` and claims
+`ensure_av_layer` verifies the resident `carplayd`'s `/proc/<pid>/environ` and claims
 `/tmp/carplay_transport` at spawn time (`crates/vendor/wireless/src/av.rs`); `wireless_down` removes
-that flag value-scoped and the health-milestone scanner reads `/tmp/airplayd_wl.log` for wireless
+that flag value-scoped and the health-milestone scanner reads `/tmp/carplayd_wl.log` for wireless
 sessions (`tools/session_supervisor.sh`); the wireless Identify declares param 30, closing 1.2
 (docs/wireless/00_WIRELESS_CARPLAY.md Phase 5.0); and 1.3/1.4's inbound gaps closed too — control-connection frames now route
 through `iap_tunnel::handle_inbound` / `dispatch_iap_tunnel_message`
@@ -1442,7 +1442,7 @@ proven rule about params 6/7 (docs/carplay/04_CAPABILITIES_AND_CONFIG.md). When 
 and were confirmed holding across repeated live BT `0x5702` retries — docs/wireless/00_WIRELESS_CARPLAY.md §Final shipped
 configuration. Still live in `crates/vendor/wireless/src/av.rs`: `wait_visible` polls 60 × 100 ms, and
 the `AV_LAYER_UP` latch short-circuits `ensure_av_layer` (extended 2026-07-31 with a `pid_alive`
-re-check, so a crashed `airplayd` no longer stays latched-up forever). The `pgrep` fix was also
+re-check, so a crashed `carplayd` no longer stays latched-up forever). The `pgrep` fix was also
 generalised beyond the full path: `running()` now tries the full path **and** the basename, because the
 two userlands this daemon runs on match different things.
 
@@ -1553,12 +1553,12 @@ inside `POST /command`. Message-shape and link-layer content here remains valid.
 kept as the record of what this fix deployed. The file changed the very next day — docs/wireless/01_BT_AND_RADIO.md removed
 the trailing raw `HCI_Reset` and added the `down`/`up` after the MAC-programming `reset` (shipped in
 `6425a7a`, the only commit to touch it since) — so a box still matching `642b9a27…` is running the
-**pre-docs/wireless/01_BT_AND_RADIO.md** script. That box is not necessarily unable to pair: `carplay-wireless`'s
+**pre-docs/wireless/01_BT_AND_RADIO.md** script. That box is not necessarily unable to pair: `btd`'s
 `bt_bringup::bring_up` now forces its own DOWN→UP, which is the one operation that re-runs the
 kernel's init-time `Set_Event_Mask` and restores the SSP events the stray reset wiped, and the
 supervisor starts it immediately after BT attach. What the stale script still costs is the vendor
 commands the reset undoes (`scomtu`, SCO routing, BLE power) and any attach path that is *not*
-followed by `carplay-wireless` coming up behind it. Push the current file rather than reason about
+followed by `btd` coming up behind it. Push the current file rather than reason about
 which. `bt_on.sh`'s md5 is still current at HEAD.
 
 ## docs/wireless/01_BT_AND_RADIO.md — The "Pairing Unsuccessful" regression: a raw HCI_Reset wiping the SSP event mask, 2026-07-25
@@ -1590,11 +1590,11 @@ The `attach_bluetooth.sh` half remains reviewed-not-retested on IW416.
 
 - **Verdict:** CORRECTED — doctrine
 - **Landed:** `feat: app-driven doctrine (docs/carplay/04_CAPABILITIES_AND_CONFIG.md) + workstreams A-E` (`f3fa61d`, 2026-08-10)
-- **Scope:** the env-var endorsement in §4 and §8 ("Functionally equivalent given one `airplayd` per transport")
+- **Scope:** the env-var endorsement in §4 and §8 ("Functionally equivalent given one `carplayd` per transport")
 
 **CORRECTED 2026-08-10 — app-driven doctrine (docs/carplay/04_CAPABILITIES_AND_CONFIG.md).** This doc's endorsement of the
 `CARPLAY_WIRELESS_METADATA` env var as the stand-in for Apple's transport-type gate —
-"Functionally equivalent given one `airplayd` per transport" — is superseded as a design position:
+"Functionally equivalent given one `carplayd` per transport" — is superseded as a design position:
 per docs/carplay/04_CAPABILITIES_AND_CONFIG.md, env/`/tmp` levers are interim, subordinate mechanics and the app-pushed config is the
 control. The SDK-conformance corrections themselves stand. The historical record below is
 unchanged.
@@ -1684,7 +1684,7 @@ committed in that form. See §8 before trusting any claim here about what curren
 - **Landed:** `Docs QC: three more dead greps, and six status-ledger items that shipped` (`28f9fdd`, 2026-08-16)
 - **Scope:** "The discriminator" section — the `ctrl=0x40` / `ctrl=0xc0` greps; also referenced by pre-flight gate 2 and the decision tree
 
-**⚠️ CORRECTED 2026-08-16 — the three greps below are DEAD.** `[datastream] RX … ctrl=…` (`session.rs`, the per-frame RX log) and `TX(RCS,'cmnd')` (`datastream.rs`) are both inside `if crate::events::events_log()`, gated by `a46098c` (2026-07-31) *after* this plan was written, and `CARPLAY_EVENTS_LOG` is set by **no spawn site** — it is only ever read. So every one of them reads 0 on a HEALTHY box, and a 0 on the `ctrl=0xc0` line reads as *better* than "accepted". Use the ungated line instead: `grep -c 'outbound sink registered' $L` ≥ 1 proves the RCS sink was installed (`datastream.rs`), and `grep -c 'SETUP phase2 DataStream(130)' $L` proves the phone asked. To revive the byte-level greps, set `CARPLAY_EVENTS_LOG=1` in the airplayd spawn env first.
+**⚠️ CORRECTED 2026-08-16 — the three greps below are DEAD.** `[datastream] RX … ctrl=…` (`session.rs`, the per-frame RX log) and `TX(RCS,'cmnd')` (`datastream.rs`) are both inside `if crate::events::events_log()`, gated by `a46098c` (2026-07-31) *after* this plan was written, and `CARPLAY_EVENTS_LOG` is set by **no spawn site** — it is only ever read. So every one of them reads 0 on a HEALTHY box, and a 0 on the `ctrl=0xc0` line reads as *better* than "accepted". Use the ungated line instead: `grep -c 'outbound sink registered' $L` ≥ 1 proves the RCS sink was installed (`datastream.rs`), and `grep -c 'SETUP phase2 DataStream(130)' $L` proves the phone asked. To revive the byte-level greps, set `CARPLAY_EVENTS_LOG=1` in the carplayd spawn env first.
 
 ### R-46-2 · The decision tree's `grep -c "SETUP stream type=130"` can never match
 
@@ -1822,7 +1822,7 @@ historical record in the document is unchanged.
 - `ClusterContent` — None / Instruction Card / Map / Navigation App (`ControlsWindow.swift`,
   the `ClusterContent` enum), each selecting a `maps:/car/instrumentcluster/...` URL;
 - `showSpeedLimit` / `showCompass` / `showETA` (+ `maneuverLayout`) carried as query flags on
-  that URL — `NAV_APPEARANCE_*` in `ocbm-proto`, built in `ccpa/airplayd/src/main.rs`, whose own
+  that URL — `NAV_APPEARANCE_*` in `ocbm-proto`, built in `ccpa/carplayd/src/main.rs`, whose own
   comment calls them "literally 'the elements inside the navigation video'";
 - and the three advertised cluster URLs (map + instructioncard + base) that let iOS composite
   the maneuver card at all — advertising only `/map` had previously told iOS the cluster was
@@ -1871,7 +1871,7 @@ What changed:
 
 - `AccessoryConfig` (`crates/vendor/receiver/src/vehicle_config.rs`, `struct AccessoryConfig`)
   now parses **NINE** keys — the six named plus `enablesUIAppearance`, `enablesMapAppearance`,
-  `enablesFocusTransfer` — all nine armed per control connection in `ccpa/airplayd/src/main.rs`,
+  `enablesFocusTransfer` — all nine armed per control connection in `ccpa/carplayd/src/main.rs`,
   `fn load_device_config` (called per connection).
 - `/info` no longer emits the appearance keys unconditionally:
   `crates/vendor/receiver/src/info.rs`, `fn add_appearance_keys`, gates each pair on
@@ -1895,9 +1895,9 @@ What changed:
   knowingly deferred to C-7/C-8. Second residue: `enablesFocusTransfer` reaches `/info`
   (`info.rs`) but `"focusTransfer"` is absent from the SETUP `enabledFeatures` echo on BOTH
   authoring paths (`crates/vendor/receiver/src/session.rs`; host
-  `host/CarPlayHost/carlink_macOS/App/VehicleConfig.swift`, `func enabledFeatures()`), so it can never be negotiated —
+  `host/MacHost/carlink_macOS/App/VehicleConfig.swift`, `func enabledFeatures()`), so it can never be negotiated —
   advertise-half-armed.
-- **Live app bug this created:** `host/CarPlayHost/carlink_macOS/App/SettingsWindow.swift`,
+- **Live app bug this created:** `host/MacHost/carlink_macOS/App/SettingsWindow.swift`,
   `inertKeys`, still
   lists `enablesUIAppearance` and `enablesMapAppearance` in `inertKeys`, so their tooltips still
   say the setting "has no effect on the wire". Added 2026-08-10, never removed when `a35d743`
@@ -1921,7 +1921,7 @@ doctrine problem is the unconditional box-side emission, not silent deception.
 
 The mitigating note originally read "the app marks nine of the ten discarded keys inert". With
 the discarded set corrected to seven, the true count is **SIX of the SEVEN** — verified against
-`inertKeys` in `host/CarPlayHost/carlink_macOS/App/SettingsWindow.swift`. `R-49-4` above carries
+`inertKeys` in `host/MacHost/carlink_macOS/App/SettingsWindow.swift`. `R-49-4` above carries
 the corrected wording.
 
 ### R-49-6 · `enablesEnhancedSiri` DOES ship a warning — `R-49-5` overstated the gap
@@ -2075,7 +2075,7 @@ stay authoritative — do not re-derive them. The historical record below is unc
 
 **Re-gating status (2026-08-10, workstream A):** code landed in-repo (CT_RADIO kill switch,
 hci0-down teardown, supervisor startup reconciliation; the repo boot chain was found to already
-gate bring-up on app presence — this doc's paging mechanics run unchanged inside carplay-wireless,
+gate bring-up on app presence — this doc's paging mechanics run unchanged inside btd,
 whose spawn trigger IS the app-presence edge). Deploy + hardware validation pending (plan_A §5).
 The deployed box was audited live 2026-08-10 (read-only, OCBM console): supervisor md5 matches
 repo HEAD (zero drift) and radios are fully down at idle — the deployed box already exhibits
@@ -2097,7 +2097,7 @@ choke point, the teardown and the supervisor's startup reconciliation — all in
 `/script/session_supervisor.sh` deployed and matching HEAD **as of 2026-08-11**; that file has
 changed since (the radio seam moved its four radio call sites on 2026-08-15), so re-check drift
 before assuming the box is current. §3 records the suppression observed live (`SUPPRESSED=1`,
-`hostapd=0`, `carplay-wireless=0`, `hci0` reporting "No such device"). **Read that §3 before
+`hostapd=0`, `btd=0`, `hci0` reporting "No such device"). **Read that §3 before
 touching the gating**: gating on `wired_iphone_on_usb` was tried and made it worse (that predicate
 goes false at the `08e4` role switch, so the guard became a self-cancelling oscillator), and
 guarding the four call sites individually cannot hold. Residual tracked in §5 (#28):
@@ -2152,7 +2152,7 @@ landings stale.** `AccessoryConfig` moved to `vehicle_config.rs:351-408` and par
 app's sixteen keys: the three named plus `enablesLogTransfer` (2026-08-07), `enablesMainBufferedAudio`,
 `appDrivenSetup`, and the docs/carplay/04_CAPABILITIES_AND_CONFIG.md #25 trio `enablesUIAppearance`/`enablesMapAppearance`/
 `enablesFocusTransfer` (`a35d743`, 2026-08-11). All nine are armed per control connection at
-`airplayd/src/main.rs:676-728`. **Still dropped (7):** `enablesVideoPlayback`, `enablesEnhancedSiri`,
+`carplayd/src/main.rs:676-728`. **Still dropped (7):** `enablesVideoPlayback`, `enablesEnhancedSiri`,
 `enablesUIContext`, `enablesUISync`, `enablesFileTransfer`, `enablesVehicleDataProtocol`,
 `enablesDCX` — each names a capability with **no box implementation behind it**, so "extend the serde
 gate" is no longer the unblocking change described here: the parse is a one-line formality and the
@@ -2226,11 +2226,11 @@ not a status audit; the two need to be run as different passes with different qu
 caller reads that file" was wrong on the day it was written.** `radio_hal.sh` and `radio_ap_up.sh`
 are its only readers. Three other derivations run beside them and none consults it:
 
-* **`carplay-wireless` overwrites the advertised BT name every session.** `main.rs` computes
+* **`btd` overwrites the advertised BT name every session.** `main.rs` computes
   `carplay_iap2_core::message::accessory_name(ACCESSORY_BRAND)` (`main.rs:88`, `ACCESSORY_BRAND =
   "CarLink"` at `:49`) and `bt_bringup::bring_up` (`main.rs:89`) writes it after its own DOWN→UP.
   **Which mechanism depends on the platform** *(corrected twice — see below)*: `bt_bringup` branches on
-  `hci::native_selected()`, which is true only when `CARPLAY_HCI_BACKEND=native`. That variable is set
+  `hci::native_selected()`, which is true only when `BT_HCI_BACKEND=native`. That variable is set
   by **`pi/tools/start_stack.sh` alone**, so the **Raspberry Pi** takes the raw-HCI path
   (`hci::write_local_name` + `hci::write_eir`) while the **CCPA takes the `hciconfig <dev> name` path**
   — the default, since the env is unset there.
@@ -2239,7 +2239,7 @@ are its only readers. Three other derivations run beside them and none consults 
   > `hciconfig`, which is right for the CCPA. On 2026-08-16 an audit "corrected" it to raw-HCI on the
   > strength of reading `bt_bringup.rs:133-134` without the `native_selected()` branch above it — the
   > Pi-only path. It was corrected back the same day once `hci.rs:81-89` and `pi/tools/start_stack.sh`
-  > were actually read. If you change this line again, check which branch the platform you mean takes.* The supervisor execs `carplay-wireless` *after*
+  > were actually read. If you change this line again, check which branch the platform you mean takes.* The supervisor execs `btd` *after*
   `radio_hal.sh bt_on` inside the same detached wrapper (`session_supervisor.sh`, `wireless_up`),
   so the last writer wins and the controller advertises `CarLink-<suffix>`, not the seam's
   `ccpa-<4hex>`. The seam's name is not wholly inert — `bt_set_name()`'s writes to

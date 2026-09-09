@@ -11,7 +11,7 @@ pointer to the doc that now owns the result — do not leave a stale plan beside
 ## T1. Settings redesign — projection-aware, vehicle-centric (raised 2026-09-04; IMPLEMENTED 2026-09-04)
 
 > **State (2026-09-04):** built the same day under the design contract
-> `host/CarPlayHost/carlink_macOS/App/Settings/DESIGN.md`; the result is described in
+> `host/MacHost/carlink_macOS/App/Settings/DESIGN.md`; the result is described in
 > `../host/00_MACOS_HOST_APP.md` §"Settings window" and the AA side in
 > `../androidauto/00_ARCHITECTURE.md` §4. The shape that landed differs from the plan below in two
 > ways worth knowing: (1) the tabs are **Vehicle / Adapter / Diagnostics**, not Vehicle / CarPlay /
@@ -23,7 +23,7 @@ pointer to the doc that now owns the result — do not leave a stale plan beside
 
 **Why.** The app supports two projection protocols, Apple CarPlay and Android Auto, each wired and
 wireless. The Settings window does not reflect that: its Configuration tab is one long list built
-around the CarPlay `VehicleConfig` YAML (`host/CarPlayHost/carlink_macOS/App/SettingsWindow.swift`,
+around the CarPlay `VehicleConfig` YAML (`host/MacHost/carlink_macOS/App/SettingsWindow.swift`,
 three tabs: Configuration, CCPA, Diagnostics), and everything Android Auto specific is an
 environment lever read at launch (`AA_FORCE_RES`, `AA_NO_TOUCH`, `AA_DRIVER_POSITION`,
 `AA_TELEPHONY_SINK`, `AA_LEGACY_VIDEO`, `AA_SKIP_AUDIO_ACK`, `AA_TRACE_UNHANDLED`, `AA_P12`,

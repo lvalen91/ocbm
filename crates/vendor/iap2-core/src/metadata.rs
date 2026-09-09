@@ -10,7 +10,7 @@
 //!
 //! WHY iAP2 AND NOT AIRPLAY: wired CarPlay splits its control planes. Media text/artwork, route
 //! guidance and call state ride **iAP2** (this file); the AirPlay `/command` channel carries only
-//! UI/session state (airplayd forwards those separately). See docs/carplay/05_METADATA_AND_CONTROLS.md.
+//! UI/session state (carplayd forwards those separately). See docs/carplay/05_METADATA_AND_CONTROLS.md.
 //!
 //! FOUR LOAD-BEARING PREREQS for any of this to arrive (learned the hard way, docs/carplay/05_METADATA_AND_CONTROLS.md):
 //!   1. iAP2 auth + identify complete;
@@ -115,7 +115,7 @@ pub fn emit_json(json: &str) {
 /// Routed through the SAME `SINK` as the JSON and artwork records, deliberately. `receiver`'s
 /// `session.rs` used to open its own second TCP connection to `127.0.0.1:9004` for these, and ocbmd
 /// keeps exactly one producer per channel (`av_conns.retain(|(_, c)| *c != ch)`), so the two
-/// connections inside the same `airplayd` process mutually EVICTED each other: every command plist
+/// connections inside the same `carplayd` process mutually EVICTED each other: every command plist
 /// killed the JSON sink and vice versa. Observed on 2026-07-29 as three
 /// `[meta] seam write failed — reconnecting` cycles, each exactly three `modesChanged` forwards after
 /// the previous reconnect. The JSON side at least logged its losses; the command side discarded
@@ -1688,7 +1688,7 @@ mod tests {
 
     /// Every JSON key the metadata plane emits, with the message that produces it.
     ///
-    /// This is a CONTRACT with `host/CarPlayHost/carlink_macOS/App/MetadataWindow.swift`. The box can
+    /// This is a CONTRACT with `host/MacHost/carlink_macOS/App/MetadataWindow.swift`. The box can
     /// parse a message perfectly and the host still shows an empty pane if one side renames a key,
     /// and nothing in either build fails — that cost a full hardware session on 2026-07-25 with
     /// CommunicationsUpdate, PowerUpdate and the device updates all arriving and three panes blank.
@@ -1741,7 +1741,7 @@ mod tests {
     fn host_app_reads_every_emitted_key() {
         let swift = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../host/CarPlayHost/carlink_macOS/App/MetadataWindow.swift"
+            "/../../../host/MacHost/carlink_macOS/App/MetadataWindow.swift"
         );
         let Ok(src) = std::fs::read_to_string(swift) else {
             // The host app is not part of every checkout; skip rather than fail spuriously.

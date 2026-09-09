@@ -46,7 +46,7 @@ contradicting the hypothesis. Only replacing that with a level measurement settl
 that looks like it should cause a symptom is not evidence that it did**; the same mistake as reading
 HAL symbols as the active audio route (`os-corrections-2026-08-16.md`).
 
-The mic uplink chain is now verified end to end: capture → `airplayd:9112` → AAC-ELD → RTP to the
+The mic uplink chain is now verified end to end: capture → `carplayd:9112` → AAC-ELD → RTP to the
 phone, with the box logging `mic PCM rx` and `sent N packets`.
 
 **The input device is the USB EarPods**, established independently: `/proc/asound/card3/pcm0c/sub0/status`

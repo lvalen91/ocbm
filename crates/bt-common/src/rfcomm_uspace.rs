@@ -39,7 +39,7 @@ const BTPROTO_L2CAP: libc::c_int = 0;
 /// RFCOMM's well-known L2CAP PSM.
 const RFCOMM_PSM: u16 = 0x0003;
 
-/// Is the userspace implementation selected? `CARPLAY_RFCOMM_BACKEND=userspace` opts in.
+/// Is the userspace implementation selected? `BT_RFCOMM_BACKEND=userspace` opts in.
 ///
 /// Default is the KERNEL path, which is the proven one on the CCPA. The Raspberry Pi opts in
 /// because its kernel is built without `CONFIG_BT_RFCOMM` and the kernel path cannot work there —
@@ -47,7 +47,7 @@ const RFCOMM_PSM: u16 = 0x0003;
 pub fn selected() -> bool {
     static SEL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *SEL.get_or_init(|| {
-        let on = std::env::var("CARPLAY_RFCOMM_BACKEND")
+        let on = crate::lever("BT_RFCOMM_BACKEND", "CARPLAY_RFCOMM_BACKEND")
             .map(|v| v.trim().eq_ignore_ascii_case("userspace"))
             .unwrap_or(false);
         if on {
@@ -901,7 +901,7 @@ fn flag_fresh(path: &str, since: std::time::SystemTime) -> bool {
 /// [`PAIRING_HOLD_SECS`] while a numeric-comparison prompt is outstanding for this attempt, and cut
 /// short with `PermissionDenied` once `ssp_agent` reports the phone rejected the re-pair. The socket
 /// is returned to blocking mode on success. The kernel RFCOMM backend is what the CCPA supervisor
-/// runs (`CARPLAY_RFCOMM_BACKEND` unset), so this MUST be called from `rfcomm::connect_to` too —
+/// runs (`BT_RFCOMM_BACKEND` unset), so this MUST be called from `rfcomm::connect_to` too —
 /// the first cut of the hold lived only in the userspace path and never ran on the box (2026-09-03).
 pub(crate) fn pairing_aware_connect(
     fd: libc::c_int,

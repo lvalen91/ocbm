@@ -12,10 +12,10 @@ rtsp = { path = "../rtsp" }
 mfi = { path = "../mfi" }
 # Direct local-I2C MFi cert/sign for the AirPlay-tunnel iAP2 handshake (iap_tunnel.rs) — a separate
 # crate (not a module here) because this crate is `#![forbid(unsafe_code)]` and i2c/ioctl access
-# unavoidably isn't. Distinct from this binary's own LocalMfiSigner (ccpa/airplayd/src/main.rs), which
+# unavoidably isn't. Distinct from this binary's own LocalMfiSigner (ccpa/carplayd/src/main.rs), which
 # serves the one-time AirPlay MFi-SAP pair-verify step — iap_tunnel's cert/sign can run concurrently
 # (different process, potentially overlapping now that BT stays up until disableBluetooth) with
-# carplay-wireless's own chip access, so it shares the same /tmp/carplay_mfi.lock discipline via this
+# btd's own chip access, so it shares the same /tmp/carplay_mfi.lock discipline via this
 # crate. CORRECTED 2026-07-25: this used to say LocalMfiSigner "is unlocked" — that was true and was
 # the bug. It now takes the same lock (bounded 10s rather than blocking); all four chip users agree on
 # the path. See its own doc comment.
@@ -49,16 +49,16 @@ serde_yaml = "0.9"
 # on everywhere.
 #
 # CORRECTED 2026-08-16: this used to say "host/wireless only; the box never enables it (fdk-aac
-# isn't available there)". That is no longer true. The Raspberry Pi / AAOS port builds airplayd WITH
+# isn't available there)". That is no longer true. The Raspberry Pi / AAOS port builds carplayd WITH
 # this feature against a cross-built libfdk-aac (pi/tools/build_fdk_aac_arm64.sh), because without
 # it iOS negotiates the AAC-ELD mic uplink and receives silence — Siri hears nothing and calls are
-# one-way. CORRECTED 2026-09-01: the armv7-musl CCPA build carries it too — `ccpa/airplayd` has it
+# one-way. CORRECTED 2026-09-01: the armv7-musl CCPA build carries it too — `ccpa/carplayd` has it
 # default-on and `build.sh` cross-builds armv7 with FDK_AAC_PREFIX defaulted; the gate is for builds
-# with no fdk-aac prefix available at all (build.sh's "skip airplayd" branch).
+# with no fdk-aac prefix available at all (build.sh's "skip carplayd" branch).
 default = ["mic-uplink", "local-mfi"]
 mic-uplink = []
 # Direct MFi chip access over /dev/i2c-1. ON for box targets, OFF for the Android app. Consumers that
-# set `default-features = false` must opt back in explicitly — `ccpa/airplayd` does.
+# set `default-features = false` must opt back in explicitly — `ccpa/carplayd` does.
 local-mfi = ["dep:mfi-i2c-local"]
 mic-uplink-eld = ["mic-uplink", "dep:eld-codec"]
 

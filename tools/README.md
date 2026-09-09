@@ -13,7 +13,7 @@ Reusable helpers for working on the adapter (not part of the shipped userspace).
 | `winshot.swift` / `winshot.sh` | capture a macOS window by OWNER PID via `screencapture -o -l<CGWindowID>` (the window's own content, even under another window — never a screen region), plus `stats`/`diff` luminance numbers over a `--rect` in panel coordinates. `winshot.sh list <pid> \| shot <pid> out.png \| stats png --rect WxH@X,Y --src WxH [--top 96]`. Builds into /tmp on first use. |
 
 Deploy pattern for the box binaries: cross-build with **`../build.sh`** (never a bare `cargo
-zigbuild` — Homebrew's `rustc` shadows rustup's and has no armv7-musl std, and airplayd's eld-codec
+zigbuild` — Homebrew's `rustc` shadows rustup's and has no armv7-musl std, and carplayd's eld-codec
 needs the `CC`/`AR` zig pair `build.sh` sets) → UPX **3.96** pack in the Lima
 `ccpa-build` VM (host UPX 5.x segfaults the box's 3.14 kernel), `upx -t` verify → push with
 `uart_push.sh` (or OCBM `ocbm-host push` when the app is OPEN) → install to `/usr/sbin` by `mv` over

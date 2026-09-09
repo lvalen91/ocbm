@@ -80,7 +80,7 @@ down is still what ships:
 The rootfs is **jffs2 (rw)**, so the open userspace persists across reboots. `tools/install_fhs.sh`
 lays it out FHS-style (not binaries-in-`/script`) and repoints the boot hook:
 
-- **daemons → `/usr/sbin/`** — `ocbmd`, `iap2d`, `airplayd`, `rx-connect`;
+- **daemons → `/usr/sbin/`** — `ocbmd`, `iap2d`, `carplayd`, `rx-connect`;
 - **tools → `/usr/bin/`** — `iap_role_switch`;
 - **scripts → `/script/`** — `ocbm_boot.sh` (boot hook, launches ocbmd + `session_supervisor.sh`),
   `session_supervisor.sh` (the lifecycle actor), `projection_up.sh` (IDLE→projection bring-up),
@@ -104,7 +104,7 @@ independently of that launch: `/etc/inittab` carries `::respawn:/script/run_ocbm
 crash or OOM costs a restart, not a reboot. `tools/ocbm_install.sh finalize` is what appends them, and
 it refuses to touch `inittab` unless `/script/run_ocbmd.sh` is present and executable.
 On-demand pieces (iap2d cold-start
-via `projection_up.sh`, airplayd/rx-connect via the supervisor) are **not** started at boot — the box
+via `projection_up.sh`, carplayd via the supervisor) are **not** started at boot — the box
 boots to IDLE and only projects when a host app SUBSCRIBEs (see [`../carplay/02_SESSION_LIFECYCLE.md`](../carplay/02_SESSION_LIFECYCLE.md)
 and [`../carplay/07_PHONE_SIDE.md`](../carplay/07_PHONE_SIDE.md)).
 

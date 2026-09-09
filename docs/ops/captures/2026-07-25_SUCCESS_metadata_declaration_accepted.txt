@@ -1,15 +1,15 @@
 # 2026-07-25 — wireless Identify ACCEPTED with the full metadata declaration
 #
-# Box:     airplayd 0be62b8cde2a89cd12f54a7542c4ef22
+# Box:     carplayd 0be62b8cde2a89cd12f54a7542c4ef22
 #          iap2d 735078dd4cb54a39179787cabcb6d639
-#          carplay-wireless 353c7fb3d3e1937f7fdbf8ba9e6e64e4
+#          btd 353c7fb3d3e1937f7fdbf8ba9e6e64e4
 # Policy:  /tmp/carplay_metadata = extended
 # Context: docs/carplay/05_METADATA_AND_CONTROLS.md §6.6. The three prior sessions were rejected; the cause was the missing
 #          Stop ids, which the phone named itself (§6.3).
 #
 # PROVENANCE: transcribed from the live UART console during the session. /tmp on the box is
 # tmpfs and the adapter was detached before the log could be copied off, so this is the console
-# read-back rather than a byte copy of /tmp/airplayd_wl.log. The iapreject evidence for the
+# read-back rather than a byte copy of /tmp/carplayd_wl.log. The iapreject evidence for the
 # preceding rejection IS a byte copy — see
 # 2026-07-25_iphone_iapreject_requiredinfomissing.txt.
 

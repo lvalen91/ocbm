@@ -238,7 +238,7 @@ pub fn now_ms() -> u64 {
 /// Where the phone's identity is published for ocbmd to mirror to the host app.
 ///
 /// A FILE, deliberately: it is the same mechanism `/tmp/pairing_code`, `/tmp/bt_phase` and
-/// `/tmp/phone_present` already use to cross the airplayd -> ocbmd boundary, and ocbmd already runs a
+/// `/tmp/phone_present` already use to cross the carplayd -> ocbmd boundary, and ocbmd already runs a
 /// change-detecting tick over each. Adding a socket seam for one small once-per-session fact would be
 /// a new failure mode for no gain.
 pub const PHONE_IDENT_FILE: &str = "/tmp/phone_identity";
@@ -571,7 +571,7 @@ impl AvSession {
         // (also accepts IPv4-mapped peers), so this is correct for both wired-IPv6 and wireless-IPv4.
         // Timing: bind a UDP socket and run the NTP-like responder. Bind failures are handled, NOT
         // `.expect()`-panicked (#139): the whole workspace builds with `panic="abort"`, so a panic on
-        // this single thread would take DOWN THE ENTIRE airplayd — every other connection with it — over
+        // this single thread would take DOWN THE ENTIRE carplayd — every other connection with it — over
         // a transient port-exhaustion. Instead fail just this SETUP (return an empty response; the iPhone
         // tears the one session down) and keep the daemon serving.
         if !reuse {
@@ -782,7 +782,7 @@ impl AvSession {
                 // anywhere. Skipping is strictly better than proceeding into guaranteed corruption, and
                 // it turns an otherwise silent failure into one line. Never observed on hardware for
                 // A/V: our own capture carries a real non-zero scid
-                // (docs/ops/captures/2026-07-24_airplayd_phase12_session.log:31).
+                // (docs/ops/captures/2026-07-24_carplayd_phase12_session.log:31).
                 //
                 // THIS IS AN ALLOWLIST, AND IT MUST STAY ONE. The condition it encodes is "scid is
                 // this stream's HKDF salt", which is true of the A/V types and nothing else, so it may
@@ -820,7 +820,7 @@ impl AvSession {
                 //      R14G17 is not an answer).
                 //   3. scid is NOT this stream's salt. Type 130 keys off `DataStream-Salt<seed>` taken
                 //      from its own SETUP request. Device-proven at
-                //      `docs/ops/captures/2026-07-25_SUCCESS_airplayd_wl_handshake.txt:25` (the request key
+                //      `docs/ops/captures/2026-07-25_SUCCESS_carplayd_wl_handshake.txt:25` (the request key
                 //      list carries no `streamConnectionID`) and `:36` (`key schedule SOLVED:
                 //      DataStream-Salt839141951896294626 (seed)`). Corroborated in the current receiver
                 //      side: `_DataStreamSessionSetup` (CarPlaySDK.framework) reads `seed` and feeds
@@ -1963,7 +1963,7 @@ impl SessionDelegate for AvSession {
         //
         // docs/wireless/00_WIRELESS_CARPLAY.md #2.6: gate on the env var ALONE, not also a peer-IP heuristic. `CARPLAY_WIRELESS_METADATA`
         // is process-scoped and set only at the wireless spawn site (`crates/vendor/wireless/src/av.rs`);
-        // the architecture runs exactly one `airplayd` at a time (the wired supervisor's launch line never
+        // the architecture runs exactly one `carplayd` at a time (the wired supervisor's launch line never
         // sets this var), so the env check alone is a reliable proxy for "this is a wireless session" — and
         // unlike the removed `peer_addr()`-contains-`"192.168.43."` check, it can't be defeated by a
         // `peer_addr()` error or an IPv6 peer silently disabling the whole feature.

@@ -60,13 +60,13 @@ Jul 25 11:29:52.858206 accessoryd[243] <Notice>: LOG; 2.578596; AA73960C-3FB1-4A
 Jul 25 11:29:52.858678 accessoryd[243] <Debug>: Calling iAP2PacketParseBuffer, dataLength: 53, numBytesRemaining: 53, byteIndex: 0
 Jul 25 11:29:52.858704 accessoryd[243] <Debug>: iAP2PacketParseBuffer finished, numBytesRead: 53, numBytesRemaining: 0, byteIndex: 53
 Jul 25 11:29:52.858786 accessoryd[243] <Notice>: LOG; 2.590879; AA73960C-3FB1-4A91-8BB3-4B9E3418528C_1CA1B560-6C28-4E9E-87A9-3F8230827C96; Bluetooth Classic; Acc; len=0x0035; control=0x40; seq=0x05; ack=0xcc; session=0x01; hdrChk=0x0060; payload(len=43 chk=0x00e2)=<40 40 00 2B 57 03 00 0E 00 01 63 63 70 61 2D 62 30 64 66 00 00 0D 00 02 31 32 33 34 35 36 37 38 00 00 05 00 03 02 00 05 00 04 24 >
-Jul 25 11:29:53.318764 airplayd(CoreUtils)[672] <Notice>: Fetching Session FeatureKey list for a vehicle: [
-Jul 25 11:29:53.319511 airplayd(CoreUtils)[672] <Notice>: [0x06F6] FeatureKey list proposed:[
+Jul 25 11:29:53.318764 carplayd(CoreUtils)[672] <Notice>: Fetching Session FeatureKey list for a vehicle: [
+Jul 25 11:29:53.319511 carplayd(CoreUtils)[672] <Notice>: [0x06F6] FeatureKey list proposed:[
 Jul 25 11:29:54.861268 accessoryd[243] <Notice>: LOG; 4.594286; AA73960C-3FB1-4A91-8BB3-4B9E3418528C_1CA1B560-6C28-4E9E-87A9-3F8230827C96; Bluetooth Classic; iPod; len=0x0009; control=0x40; seq=0xcc; ack=0x05; session=0x00; hdrChk=0x008d; payload(len=0 chk=0x0000)=<>
-Jul 25 11:29:55.255709 airplayd(CoreUtils)[672] <Notice>: [0x06F6] FeatureKey list negotiated:[
-Jul 25 11:29:55.291521 airplayd(CoreUtils)[672] <Notice>: [0xA5B3] RCS 5E:F7:F7:A9:CB:CD-RCS-1 created (wds=1, sendMessageWithoutReply=1, sendMessageAsIs=1, clientUUID=716FAABD-9E14-4873-A107-359B8CE7437B, clientTypeUUID=(-), streamSendSocketBufferSize=NULL, streamQoS=0, streamThreadPriority=0, messagingLogLevel=30).
-Jul 25 11:29:55.291686 airplayd(CoreUtils)[672] <Notice>: New RCS [0xA5B3] with ID [5E:F7:F7:A9:CB:CD-RCS-1] created for Endpoint [0x06F6]
-Jul 25 11:29:55.298844 airplayd(CoreUtils)[672] <Error>: [0xA5B3] Failed to obtain transport token from SETUP response: -6727/0xFFFFE5B9 kNotFoundErr
+Jul 25 11:29:55.255709 carplayd(CoreUtils)[672] <Notice>: [0x06F6] FeatureKey list negotiated:[
+Jul 25 11:29:55.291521 carplayd(CoreUtils)[672] <Notice>: [0xA5B3] RCS 5E:F7:F7:A9:CB:CD-RCS-1 created (wds=1, sendMessageWithoutReply=1, sendMessageAsIs=1, clientUUID=716FAABD-9E14-4873-A107-359B8CE7437B, clientTypeUUID=(-), streamSendSocketBufferSize=NULL, streamQoS=0, streamThreadPriority=0, messagingLogLevel=30).
+Jul 25 11:29:55.291686 carplayd(CoreUtils)[672] <Notice>: New RCS [0xA5B3] with ID [5E:F7:F7:A9:CB:CD-RCS-1] created for Endpoint [0x06F6]
+Jul 25 11:29:55.298844 carplayd(CoreUtils)[672] <Error>: [0xA5B3] Failed to obtain transport token from SETUP response: -6727/0xFFFFE5B9 kNotFoundErr
 Jul 25 11:29:55.397992 accessoryd[243] <Notice>: LOG; 5.120670; 16AFF20D-A0FB-4551-99A3-B4341A9B01FF_5434C581-A295-455B-83C0-D072EADF06D4; AirPlay; Event; ATTACH; iAP2 accessory attached!
 Jul 25 11:29:55.398150 accessoryd[243] <Debug>: Calling iAP2PacketParseBuffer, dataLength: 6, numBytesRemaining: 6, byteIndex: 0
 Jul 25 11:29:55.398164 accessoryd[243] <Debug>: iAP2PacketParseBuffer finished, numBytesRead: 6, numBytesRemaining: 0, byteIndex: 6
@@ -90,28 +90,28 @@ Jul 25 11:29:55.432528 accessoryd[243] <Notice>: LOG; 5.147288; 16AFF20D-A0FB-45
 Jul 25 11:29:55.432572 accessoryd[243] <Notice>: Link state changed! (Connected: 0)
 Jul 25 11:29:55.432800 accessoryd[243] <Info>: iAP2LinkCheckNegotiation:6390 Older protocol Version detected on the accessory (3->1)
 Jul 25 11:29:55.433119 accessoryd[243] <Notice>: LOG; 5.147660; 16AFF20D-A0FB-4551-99A3-B4341A9B01FF_5434C581-A295-455B-83C0-D072EADF06D4; AirPlay; iPod; len=0x001a; control=0xc0; seq=0xd7; ack=0x00; session=0x00; hdrChk=0x00f6; payload(len=16 chk=0x00db)=<01 20 FF FF 00 00 00 00 00 00 01 00 01 02 01 01 >
-Jul 25 11:29:55.495359 airplayd(CoreUtils)[672] <Error>: [0xA5B3] Failed to obtain transport token from SETUP response: -6727/0xFFFFE5B9 kNotFoundErr
-Jul 25 11:29:55.499223 airplayd(CoreUtils)[672] <Error>: [0xA5B3] Failed to obtain transport token from SETUP response: -6727/0xFFFFE5B9 kNotFoundErr
-Jul 25 11:29:55.505479 airplayd(CoreUtils)[672] <Error>: [0xA5B3] Failed to obtain transport token from SETUP response: -6727/0xFFFFE5B9 kNotFoundErr
-Jul 25 11:29:55.507884 airplayd(CoreUtils)[672] <Error>: [0xA5B3] Failed to obtain transport token from SETUP response: -6727/0xFFFFE5B9 kNotFoundErr
+Jul 25 11:29:55.495359 carplayd(CoreUtils)[672] <Error>: [0xA5B3] Failed to obtain transport token from SETUP response: -6727/0xFFFFE5B9 kNotFoundErr
+Jul 25 11:29:55.499223 carplayd(CoreUtils)[672] <Error>: [0xA5B3] Failed to obtain transport token from SETUP response: -6727/0xFFFFE5B9 kNotFoundErr
+Jul 25 11:29:55.505479 carplayd(CoreUtils)[672] <Error>: [0xA5B3] Failed to obtain transport token from SETUP response: -6727/0xFFFFE5B9 kNotFoundErr
+Jul 25 11:29:55.507884 carplayd(CoreUtils)[672] <Error>: [0xA5B3] Failed to obtain transport token from SETUP response: -6727/0xFFFFE5B9 kNotFoundErr
 Jul 25 11:29:57.670693 accessoryd[243] <Notice>: LOG; 7.195244; 16AFF20D-A0FB-4551-99A3-B4341A9B01FF_5434C581-A295-455B-83C0-D072EADF06D4; AirPlay; iPod; len=0x001a; control=0xc0; seq=0xd7; ack=0x00; session=0x00; hdrChk=0x00f6; payload(len=16 chk=0x00db)=<01 20 FF FF 00 00 00 00 00 00 01 00 01 02 01 01 >
 Jul 25 11:29:59.682483 accessoryd[243] <Notice>: LOG; 9.413251; 16AFF20D-A0FB-4551-99A3-B4341A9B01FF_5434C581-A295-455B-83C0-D072EADF06D4; AirPlay; iPod; len=0x001a; control=0xc0; seq=0xd7; ack=0x00; session=0x00; hdrChk=0x00f6; payload(len=16 chk=0x00db)=<01 20 FF FF 00 00 00 00 00 00 01 00 01 02 01 01 >
-Jul 25 11:29:59.747189 airplayd(CoreUtils)[672] <Error>: [0xA5B3] Failed to obtain transport token from SETUP response: -6727/0xFFFFE5B9 kNotFoundErr
+Jul 25 11:29:59.747189 carplayd(CoreUtils)[672] <Error>: [0xA5B3] Failed to obtain transport token from SETUP response: -6727/0xFFFFE5B9 kNotFoundErr
 Jul 25 11:30:00.900323 accessoryd[243] <Notice>: LOG; 10.471633; 16AFF20D-A0FB-4551-99A3-B4341A9B01FF_5434C581-A295-455B-83C0-D072EADF06D4; AirPlay; iPod; len=0x001a; control=0xc0; seq=0xd7; ack=0x00; session=0x00; hdrChk=0x00f6; payload(len=16 chk=0x00db)=<01 20 FF FF 00 00 00 00 00 00 01 00 01 02 01 01 >
-Jul 25 11:30:00.920091 airplayd(CoreUtils)[672] <Error>: [0xA5B3] Failed to obtain transport token from SETUP response: -6727/0xFFFFE5B9 kNotFoundErr
+Jul 25 11:30:00.920091 carplayd(CoreUtils)[672] <Error>: [0xA5B3] Failed to obtain transport token from SETUP response: -6727/0xFFFFE5B9 kNotFoundErr
 Jul 25 11:30:03.768975 accessoryd[243] <Notice>: LOG; 13.489198; 16AFF20D-A0FB-4551-99A3-B4341A9B01FF_5434C581-A295-455B-83C0-D072EADF06D4; AirPlay; iPod; len=0x001a; control=0xc0; seq=0xd7; ack=0x00; session=0x00; hdrChk=0x00f6; payload(len=16 chk=0x00db)=<01 20 FF FF 00 00 00 00 00 00 01 00 01 02 01 01 >
-Jul 25 11:30:03.777407 airplayd(CoreUtils)[672] <Error>: [0xA5B3] Failed to obtain transport token from SETUP response: -6727/0xFFFFE5B9 kNotFoundErr
+Jul 25 11:30:03.777407 carplayd(CoreUtils)[672] <Error>: [0xA5B3] Failed to obtain transport token from SETUP response: -6727/0xFFFFE5B9 kNotFoundErr
 Jul 25 11:30:04.763999 accessoryd[243] <Notice>: LOG; 14.490993; 16AFF20D-A0FB-4551-99A3-B4341A9B01FF_5434C581-A295-455B-83C0-D072EADF06D4; AirPlay; iPod; len=0x001a; control=0xc0; seq=0xd7; ack=0x00; session=0x00; hdrChk=0x00f6; payload(len=16 chk=0x00db)=<01 20 FF FF 00 00 00 00 00 00 01 00 01 02 01 01 >
-Jul 25 11:30:04.780826 airplayd(CoreUtils)[672] <Error>: [0xA5B3] Failed to obtain transport token from SETUP response: -6727/0xFFFFE5B9 kNotFoundErr
-Jul 25 11:30:06.416207 airplayd(CoreUtils)[672] <Error>: [0xA5B3] Failed to obtain transport token from SETUP response: -6727/0xFFFFE5B9 kNotFoundErr
+Jul 25 11:30:04.780826 carplayd(CoreUtils)[672] <Error>: [0xA5B3] Failed to obtain transport token from SETUP response: -6727/0xFFFFE5B9 kNotFoundErr
+Jul 25 11:30:06.416207 carplayd(CoreUtils)[672] <Error>: [0xA5B3] Failed to obtain transport token from SETUP response: -6727/0xFFFFE5B9 kNotFoundErr
 Jul 25 11:30:07.824351 accessoryd[243] <Notice>: LOG; 17.532193; 16AFF20D-A0FB-4551-99A3-B4341A9B01FF_5434C581-A295-455B-83C0-D072EADF06D4; AirPlay; iPod; len=0x001a; control=0xc0; seq=0xd7; ack=0x00; session=0x00; hdrChk=0x00f6; payload(len=16 chk=0x00db)=<01 20 FF FF 00 00 00 00 00 00 01 00 01 02 01 01 >
-Jul 25 11:30:07.829990 airplayd(CoreUtils)[672] <Error>: [0xA5B3] Failed to obtain transport token from SETUP response: -6727/0xFFFFE5B9 kNotFoundErr
+Jul 25 11:30:07.829990 carplayd(CoreUtils)[672] <Error>: [0xA5B3] Failed to obtain transport token from SETUP response: -6727/0xFFFFE5B9 kNotFoundErr
 Jul 25 11:30:09.046798 accessoryd[243] <Notice>: LOG; 18.537779; 16AFF20D-A0FB-4551-99A3-B4341A9B01FF_5434C581-A295-455B-83C0-D072EADF06D4; AirPlay; iPod; len=0x001a; control=0xc0; seq=0xd7; ack=0x00; session=0x00; hdrChk=0x00f6; payload(len=16 chk=0x00db)=<01 20 FF FF 00 00 00 00 00 00 01 00 01 02 01 01 >
 Jul 25 11:30:10.856579 accessoryd[243] <Notice>: LOG; 20.563015; 16AFF20D-A0FB-4551-99A3-B4341A9B01FF_5434C581-A295-455B-83C0-D072EADF06D4; AirPlay; iPod; len=0x001a; control=0xc0; seq=0xd7; ack=0x00; session=0x00; hdrChk=0x00f6; payload(len=16 chk=0x00db)=<01 20 FF FF 00 00 00 00 00 00 01 00 01 02 01 01 >
-Jul 25 11:30:10.873569 airplayd(CoreUtils)[672] <Error>: [0xA5B3] Failed to obtain transport token from SETUP response: -6727/0xFFFFE5B9 kNotFoundErr
+Jul 25 11:30:10.873569 carplayd(CoreUtils)[672] <Error>: [0xA5B3] Failed to obtain transport token from SETUP response: -6727/0xFFFFE5B9 kNotFoundErr
 Jul 25 11:30:11.858272 accessoryd[243] <Notice>: LOG; 21.565046; 16AFF20D-A0FB-4551-99A3-B4341A9B01FF_5434C581-A295-455B-83C0-D072EADF06D4; AirPlay; iPod; len=0x001a; control=0xc0; seq=0xd7; ack=0x00; session=0x00; hdrChk=0x00f6; payload(len=16 chk=0x00db)=<01 20 FF FF 00 00 00 00 00 00 01 00 01 02 01 01 >
-Jul 25 11:30:11.859783 airplayd(CoreUtils)[672] <Error>: [0xA5B3] Failed to obtain transport token from SETUP response: -6727/0xFFFFE5B9 kNotFoundErr
+Jul 25 11:30:11.859783 carplayd(CoreUtils)[672] <Error>: [0xA5B3] Failed to obtain transport token from SETUP response: -6727/0xFFFFE5B9 kNotFoundErr
 Jul 25 11:30:12.836981 accessoryd[243] <Notice>: LOG; 22.569625; 16AFF20D-A0FB-4551-99A3-B4341A9B01FF_5434C581-A295-455B-83C0-D072EADF06D4; AirPlay; iPod; len=0x001a; control=0xc0; seq=0xd7; ack=0x00; session=0x00; hdrChk=0x00f6; payload(len=16 chk=0x00db)=<01 20 FF FF 00 00 00 00 00 00 01 00 01 02 01 01 >
-Jul 25 11:30:12.890033 airplayd(CoreUtils)[672] <Error>: [0xA5B3] Failed to obtain transport token from SETUP response: -6727/0xFFFFE5B9 kNotFoundErr
+Jul 25 11:30:12.890033 carplayd(CoreUtils)[672] <Error>: [0xA5B3] Failed to obtain transport token from SETUP response: -6727/0xFFFFE5B9 kNotFoundErr
 Jul 25 11:30:13.851545 accessoryd[243] <Notice>: LOG; 23.574897; 16AFF20D-A0FB-4551-99A3-B4341A9B01FF_5434C581-A295-455B-83C0-D072EADF06D4; AirPlay; iPod; len=0x001a; control=0xc0; seq=0xd7; ack=0x00; session=0x00; hdrChk=0x00f6; payload(len=16 chk=0x00db)=<01 20 FF FF 00 00 00 00 00 00 01 00 01 02 01 01 >
-Jul 25 11:30:13.916569 airplayd(CoreUtils)[672] <Error>: [0xA5B3] Failed to obtain transport token from SETUP response: -6727/0xFFFFE5B9 kNotFoundErr
+Jul 25 11:30:13.916569 carplayd(CoreUtils)[672] <Error>: [0xA5B3] Failed to obtain transport token from SETUP response: -6727/0xFFFFE5B9 kNotFoundErr

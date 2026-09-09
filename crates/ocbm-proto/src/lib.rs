@@ -43,14 +43,14 @@ pub const CH_ALT_VIDEO: u16 = 0x0024; // box->host: the ALT / navigation (instru
 // CH_METADATA seam markers (wire values; producers declare their own local consts — iap2d does not
 // link this crate). Payloads are PLAINTEXT (the box decrypts the control connection; the host is
 // the trusted consumer over the app-owned USB link).
-//   0x01 META_CMD     — payload = the raw binary plist of an inbound iPhone POST /command ({type, params}) — from airplayd
+//   0x01 META_CMD     — payload = the raw binary plist of an inbound iPhone POST /command ({type, params}) — from carplayd
 //   0x02 META_JSON    — payload = one JSON object {"kind":…} of iAP2 metadata (nowPlaying/routeGuidance/maneuver/callState/communications/recentCall/favorite/artworkReady) — from iap2d
 //   0x03 META_ARTWORK — payload = [artwork id u8][JPEG bytes] — album art via the iAP2 File-Transfer session
-//   0x04 META_CORNERMASK — payload = [u32 BE display_width_px][PNG bytes] — iOS's exact per-resolution topLeftCornerMask (docs/carplay/06_AV_PIPELINE.md); host renders the corner curve from it — from airplayd (receiver)
+//   0x04 META_CORNERMASK — payload = [u32 BE display_width_px][PNG bytes] — iOS's exact per-resolution topLeftCornerMask (docs/carplay/06_AV_PIPELINE.md); host renders the corner curve from it — from carplayd (receiver)
 pub const CH_MGMT: u16 = 0x0040; // box management (the app's "CCPA" tab). Request/response, see MGMT_* below.
 // CH_RTSP — the app-driven-SETUP relay seam (plan: app-driven SETUP, phase P1). ocbmd is a DUMB BYTE
-// PIPE on this channel: it chunks the box seam's bytes (airplayd relay listener, 127.0.0.1:9106) into
-// ≤64 KiB OCBM frames both ways; ALL message framing is endpoint-to-endpoint (airplayd ↔ host app),
+// PIPE on this channel: it chunks the box seam's bytes (carplayd relay listener, 127.0.0.1:9106) into
+// ≤64 KiB OCBM frames both ways; ALL message framing is endpoint-to-endpoint (carplayd ↔ host app),
 // which sidesteps MAX_PAYLOAD 64 KiB < RTSP MAX_BODY 256 KiB. Rides out_hi (latency-sensitive,
 // reliable — the pair/SETUP/RECORD phase is timing-critical).
 //
@@ -66,16 +66,16 @@ pub const CH_MGMT: u16 = 0x0040; // box management (the app's "CCPA" tab). Reque
 //   0x03 RS_RESP   host→box  [status u16][response body] — non-200 = host-reject → local fallback (v1).
 //   0x04 RS_CLOSE  box→host  [reason u8: 0=eof 1=hijack 2=error 3=reset]
 //   0x05 RS_ERR    host→box  [code u8] — box falls back to its local response.
-// `conn` is monotonic per airplayd process (hijack ⇒ new conn; the single FIFO guarantees
+// `conn` is monotonic per carplayd process (hijack ⇒ new conn; the single FIFO guarantees
 // RS_CLOSE(old) precedes RS_OPEN(new)); the host drops messages for a non-current conn.
 // The RS_*/magic constants are defined authoritatively in `receiver::relay` and MIRRORED here (and in
 // the Swift/harness consumers) rather than imported — the same pattern as the META_* markers below:
 // the box's receiver crates do not link ocbm-proto, so each endpoint declares its own local consts and
 // this comment block is the cross-checked contract.
 pub const CH_RTSP: u16 = 0x0041; // box↔host: app-driven SETUP relay (RS_* over the "RTSP"-magic seam; box seam :9106)
-pub const CH_INPUT: u16 = 0x0030; // host->box: HID input (touch/buttons); ocbmd relays to airplayd -> iPhone
+pub const CH_INPUT: u16 = 0x0030; // host->box: HID input (touch/buttons); ocbmd relays to carplayd -> iPhone
 pub const CH_MIC: u16 = 0x0031; // host->box: mic uplink PCM (S16LE, negotiated rate/ch). ocbmd relays each
-                                // payload to airplayd's mic-ingest seam; airplayd RTP-uplinks it to the iPhone
+                                // payload to carplayd's mic-ingest seam; carplayd RTP-uplinks it to the iPhone
                                 // on the active type-100 `input=true` MainAudio SETUP (Siri/telephony).
 pub const CH_LOG: u16 = 0x0042; // box->host ONLY: the box's universal log (/tmp/box.log), streamed live.
                                 // Payload = one or more back-to-back entries, each
@@ -111,7 +111,7 @@ pub const CT_HELLO: u8 = 0x01; // host->box [CT_HELLO][ver][instance u32 LE] —
                                // from another. A host killed without CT_STOP leaves the box `present`, and a
                                // relaunch inside the heartbeat grace keeps `last_hb` fresh from the NEW
                                // process — so the box sees an unbroken host, never re-arms projection, and
-                               // the session survives with no A/V (airplayd is only spawned on the
+                               // the session survives with no A/V (carplayd is only spawned on the
                                // GONE->PRESENT edge of /tmp/host_present). Comparing nonces separates that
                                // from a genuine reattach by the SAME host, which can still warm-reuse.
 pub const CT_HELLO_ACK: u8 = 0x02;
@@ -200,7 +200,7 @@ pub const CT_BOX_HEALTH: u8 = 0x1A; // box->host [CT_BOX_HEALTH][flags u8] -> th
                                     // about the box's health was to ASK — MGMT_GET_INFO, a JSON snapshot
                                     // returned on request and nothing else. In practice hosts asked once at
                                     // bring-up and never again, so a box whose hci went down, or whose
-                                    // carplay-wireless died mid-session, looked exactly like a healthy one.
+                                    // btd died mid-session, looked exactly like a healthy one.
                                     // A host cannot decide "am I green AND is the box green" against a
                                     // snapshot it took minutes ago.
                                     //
@@ -223,8 +223,8 @@ pub const BH_HCI_PRESENT: u8 = 0x01; // hci0 exists AND is UP (HCI_UP in /sys/cl
                                      // "does nothing".
 pub const BH_SSP: u8 = 0x02; // Secure Simple Pairing enabled on hci0
 pub const BH_IAP2D: u8 = 0x04; // iap2d running (wired CarPlay identify path)
-pub const BH_AIRPLAYD: u8 = 0x08; // airplayd running
-pub const BH_CARPLAY_WIRELESS: u8 = 0x10; // carplay-wireless running (BT + AP bring-up supervisor)
+pub const BH_AIRPLAYD: u8 = 0x08; // carplayd running
+pub const BH_CARPLAY_WIRELESS: u8 = 0x10; // btd running (BT + AP bring-up supervisor)
 pub const BH_WLAN_AP: u8 = 0x20; // hostapd running — the box is raising its OWN AP (NOT the GM bridge role)
 pub const BH_ROOTFS_OK: u8 = 0x40; // rootfs has headroom; clear means the box is close to full and may
                                    // fail to write logs, configs or the ephemeral session YAML
@@ -250,20 +250,22 @@ pub const CT_LOG_CTL: u8 = 0x1B; // host->box [CT_LOG_CTL][enabled u8][cap_kb u1
 //   255      the tailer itself.
 /// Entry `source`: a line read from the box's universal log, `/tmp/box.log` (staged; rotated at cap).
 pub const LOG_SRC_BOX: u8 = 0;
-pub const LOG_SRC_AIRPLAYD: u8 = 1; // /tmp/airplayd.log (wired session)
-pub const LOG_SRC_AIRPLAYD_WL: u8 = 2; // /tmp/airplayd_wl.log (wireless session — a DIFFERENT file)
+pub const LOG_SRC_AIRPLAYD: u8 = 1; // /tmp/carplayd.log (wired session)
+pub const LOG_SRC_AIRPLAYD_WL: u8 = 2; // /tmp/carplayd_wl.log (wireless session — a DIFFERENT file)
 pub const LOG_SRC_IAP2D: u8 = 3; // /tmp/iap2d.log
 pub const LOG_SRC_AA_BRIDGE: u8 = 4; // /tmp/aa-bridge.log
-pub const LOG_SRC_RX_CONNECT: u8 = 5; // /tmp/rx-connect.log (wired)
+pub const LOG_SRC_RX_CONNECT: u8 = 5; // RETIRED 2026-09-08 — rx-connect merged into carplayd
+                                      // (its output is now /tmp/carplayd.log, LOG_SRC_AIRPLAYD).
+                                      // The id stays reserved: wire ids are never reused.
 pub const LOG_SRC_BT: u8 = 6; // /tmp/bt.log (per-attempt BT bring-up status)
 pub const LOG_SRC_RADIO_AP_DHCP: u8 = 7; // /tmp/radio_ap_dhcp.log
 pub const LOG_SRC_RADIO_BT_ATTACH: u8 = 8; // /tmp/radio_bt_attach.log
-pub const LOG_SRC_RX_CONNECT_WL: u8 = 9; // /tmp/rx-connect_wl.log — its OWN id, not folded into 5:
+pub const LOG_SRC_RX_CONNECT_WL: u8 = 9; // RETIRED 2026-09-08 — see LOG_SRC_RX_CONNECT; wireless
                                          // the supervisor keeps a separate wireless connect log for
-                                         // the same reason airplayd_wl is separate from airplayd,
+                                         // the same reason carplayd_wl is separate from carplayd,
                                          // and merging them would make a wired and a wireless
                                          // session's lines indistinguishable to the host.
-pub const LOG_SRC_CARPLAY_WIRELESS: u8 = 10; // /tmp/wl.log (carplay-wireless stdout)
+pub const LOG_SRC_CARPLAY_WIRELESS: u8 = 10; // /tmp/wl.log (btd stdout)
 /// Entry `source`: generated by the tailer itself (rotation / restart / drop reports), not read
 /// from any file. A drop report carries the id of the source whose lines were lost, not this one.
 pub const LOG_SRC_INTERNAL: u8 = 255;
@@ -274,6 +276,9 @@ pub const LOG_SRC_INTERNAL: u8 = 255;
 pub fn log_source_name(id: u8) -> &'static str {
     match id {
         LOG_SRC_BOX => "box",
+        // PINNED host-facing strings: the macOS app tags box log lines `[box/airplayd]`
+        // (BoxLogWindow.swift:170). The daemon was renamed airplayd -> carplayd on
+        // 2026-09-08; these display names stay until the app changes with them.
         LOG_SRC_AIRPLAYD => "airplayd",
         LOG_SRC_AIRPLAYD_WL => "airplayd-wl",
         LOG_SRC_IAP2D => "iap2d",
@@ -310,8 +315,8 @@ pub const LOG_CAP_DEFAULT_KB: u16 = 256;
 pub const LOG_ENTRY_HDR: usize = 14;
 
 pub const PM_NONE: u8 = 0x00; // idle — no projection session; either phone kind may claim the box
-pub const PM_WIRED_CP: u8 = 0x01; // wired CarPlay (projection_up -> iap2d + airplayd)
-pub const PM_WIRELESS_CP: u8 = 0x02; // wireless CarPlay (carplay-wireless: BT + WiFi AP)
+pub const PM_WIRED_CP: u8 = 0x01; // wired CarPlay (projection_up -> iap2d + carplayd)
+pub const PM_WIRELESS_CP: u8 = 0x02; // wireless CarPlay (btd: BT + WiFi AP)
 pub const PM_WIRED_AA: u8 = 0x03; // wired Android Auto (aa-bridge AOAP pump; app drives AA over CH_IP)
 pub const PM_WIRELESS_AA: u8 = 0x04; // reserved — wireless Android Auto (docs/androidauto/03_WIRELESS.md, Phase 3, unbuilt)
 
@@ -330,7 +335,7 @@ pub const MGMT_GET_INFO: u8 = 0x01; // [MGMT_GET_INFO] -> box replies MGMT_INFO 
 pub const MGMT_REBOOT: u8 = 0x02; // [MGMT_REBOOT] -> box ACKs then reboots (fork+delay so the ack flushes)
 pub const MGMT_FORGET_ALL: u8 = 0x03; // [MGMT_FORGET_ALL] -> clear all BR/EDR bonds + restart wireless
 pub const MGMT_FORGET_DEVICE: u8 = 0x04; // [MGMT_FORGET_DEVICE][ascii MAC "AA:BB:.."] -> drop that one bond
-pub const MGMT_RESTART_WIRELESS: u8 = 0x05; // [MGMT_RESTART_WIRELESS] -> bounce carplay-wireless (re-advertise)
+pub const MGMT_RESTART_WIRELESS: u8 = 0x05; // [MGMT_RESTART_WIRELESS] -> bounce btd (re-advertise)
 /// [MGMT_ENTER_NCM] -> box ACKs, arms the persistent `/script/ncm_only` flag (and drops any pending
 /// first-boot trial dead-man), then reboots into NCM maintenance mode (ssh/telnet over USB-NCM; no
 /// OCBM). Sticky by design: whoever asked for NCM works on the box over ssh and returns it with
@@ -385,7 +390,7 @@ pub const FILE_ERR_NOFILE: u8 = 3;
 pub const FILE_ERR_WRITE: u8 = 4;
 
 // OCBM_CH_INPUT sub-frame types (task #20). Payload = [type u8][...]. Coordinates are NORMALIZED
-// (u16 LE, 0..=65535 across the display); airplayd scales them to absolute HID coords using the SAME
+// (u16 LE, 0..=65535 across the display); carplayd scales them to absolute HID coords using the SAME
 // resolution it advertised in /info (task #5), so the box stays the single resolution authority.
 pub const INPUT_TOUCH: u8 = 0x01; // [INPUT_TOUCH][phase u8][nx u16 LE][ny u16 LE][finger u8]
 pub const INPUT_KEYFRAME: u8 = 0x02; // [INPUT_KEYFRAME] -> host asks the box to request an iOS keyframe (task #33)
@@ -394,9 +399,9 @@ pub const INPUT_KEYFRAME_ALT: u8 = 0x06; // [INPUT_KEYFRAME_ALT] -> host asks th
                                      // console (events::send_force_key_frame_stream(None)), so after a cluster view switch (Nav Card/Map/
                                      // Nav App requestUI) the nav feed gaps and stays frozen without addressing its own stream uuid.
                                      // Command/key surface (task #35): the host's media keys + Home/Siri ride CH_INPUT too, so ocbmd's
-                                     // opaque relay to airplayd needs no change. Media buttons are HID device uid 2 (the advertised
+                                     // opaque relay to carplayd needs no change. Media buttons are HID device uid 2 (the advertised
                                      // "CarLink Media Buttons" Consumer-Control device, uid 2); its 1-byte report is an ARRAY INDEX into
-                                     // the descriptor's usage list, and airplayd completes the tap (press index, then release 0). Home /
+                                     // the descriptor's usage list, and carplayd completes the tap (press index, then release 0). Home /
                                      // Back / D-pad ride a SEPARATE uid-3 D-Pad HID device (Apple's HIDDPadCreateDescriptor), gated behind
                                      // CARPLAY_DPAD and driven by INPUT_NAV — advertising it once broke session reconnect in the sibling
                                      // carplayd project (info.rs INCIDENT 2026-07-06), so it is flag-gated. Siri is an AirPlay `/command`
@@ -414,10 +419,10 @@ pub const INPUT_KNOB: u8 = 0x07; // [INPUT_KNOB][flags u8][nudge_x i8][nudge_y i
                                 // INPUT_MEDIA_BTN indices — the Consumer-array index into the uid-2 media-buttons HID descriptor
                                 // (receiver info.rs::media_buttons_descriptor); MEDIA-TRANSPORT ONLY (Home/Back/nav are the uid-3
                                 // D-Pad, INPUT_NAV). 0 = release; the box completes press+release. Wire indices (the contract with
-                                // the descriptor's usage order; airplayd forwards the raw index, the host names them in Swift):
+                                // the descriptor's usage order; carplayd forwards the raw index, the host names them in Swift):
                                 //   1 play, 2 pause, 3 play/pause, 4 next, 5 prev
 
-// INPUT_NAV actions — the CarPlay D-Pad (HID uid 3, Apple's exact HIDDPadCreateDescriptor). airplayd
+// INPUT_NAV actions — the CarPlay D-Pad (HID uid 3, Apple's exact HIDDPadCreateDescriptor). carplayd
 // builds the 2-byte variable-bitfield report (byte0 Home/Back, byte1 Menu Select/Up/Down/Left/Right)
 // and taps it (press then release). Distinct from the rotary Knob (a separate wheel device).
 pub const NAV_UP: u8 = 1;
@@ -481,7 +486,7 @@ pub const CMD_MAP_APPEARANCE: u8 = 0x0F;
 pub const CMD_NIGHT_MODE: u8 = 0x10;
 // View-area switch (2026-09-07): the host COMMANDS a main-display view-area transition instead of
 // pressing the CarPlay Dock resize button and hoping. `[INPUT_COMMAND][CMD_VIEW_AREA][index u8]` →
-// airplayd answers `updateViewArea{uuid: DISPLAY_UUID, viewAreaIndex, animationDurationMillis: 3000,
+// carplayd answers `updateViewArea{uuid: DISPLAY_UUID, viewAreaIndex, animationDurationMillis: 3000,
 // adjacentViewAreas}` through the SAME refuse-undeclared policy as the inbound `requestViewArea`
 // answer path (`receiver::events::switch_view_area`). Device-proven 2026-09-05: iOS's own request is
 // advisory and the accessory is the authority, so this is the deterministic way to drive a resize.
@@ -531,7 +536,7 @@ pub const APPEARANCE_MODE_DARK: u8 = 0x01;
 /// "look up the scid's key and decrypt" — the host would either fail the AEAD or, worse, feed
 /// garbage to the decoder. A distinct marker makes the difference explicit on the wire.
 ///
-/// Producer today: `carplay-wireless`'s `sco_audio`, on the voice seam (`:9003` → [`CH_ALT_AUDIO`]),
+/// Producer today: `btd`'s `sco_audio`, on the voice seam (`:9003` → [`CH_ALT_AUDIO`]),
 /// preceded by one `SEAM_FORMAT` declaring `codec=0 PCM, rate=8000, ch=1, bits=16, audio_type=1
 /// telephony`. Payload is one 20 ms frame: 320 bytes of 8 kHz mono S16LE (host byte order is
 /// LITTLE-endian here — this is not the AirPlay PCM downlink, which is big-endian). When the AG
@@ -1074,7 +1079,7 @@ mod tests {
 
     #[test]
     fn input_command_ids_are_distinct() {
-        // The CMD_* space is dispatched by a `match` in airplayd; a duplicate id would silently shadow
+        // The CMD_* space is dispatched by a `match` in carplayd; a duplicate id would silently shadow
         // the later arm. Pinned so a new command cannot reuse one.
         let ids = [
             CMD_REQUEST_UI, CMD_REQUEST_SIRI, CMD_SIRI_DOWN, CMD_SIRI_UP, CMD_NAV_START, CMD_NAV_STOP,

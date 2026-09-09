@@ -32,8 +32,8 @@ Rollback: `/script/session_supervisor.sh.p0bak` (3485 B, the pre-P0 supervisor).
 | 124 | `/usr/sbin/ocbmd` | 432 kB | ocbm_boot.sh (boot) |
 | 125 | `session_supervisor.sh` | (shell) | ocbm_boot.sh (boot) |
 | 508 | `iap2d /dev/android_iap2` | 188 kB | projection_up.sh (on ARM) |
-| 556 | `airplayd` | 544 kB | supervisor arm() |
-| 557 | `rx_connect` | 844 kB | supervisor arm() |
+| 556 | `carplayd` | 544 kB | supervisor arm() |
+| 557 | `rx-connect` | 844 kB | supervisor arm() |
 Total daemon RSS ≈ 2 MB.
 
 ## 4. Lifecycle state (P0 signals)
@@ -65,14 +65,14 @@ host_present=1   session_healthy=1
 [sup] host PRESENT -> go projection-ready + ARM
 [proj] iPhone at /dev/bus/usb/001/002 — iAP2 handshake → projection
 [proj] IDENTIFIED — projection-ready; bringing ncm0 up
-[sup] ARMED (airplayd + rx_connect) — awaiting pair-verify -> RECORD
+[sup] ARMED (carplayd + rx-connect) — awaiting pair-verify -> RECORD
 [sup] milestone: pair-verify OK — control encrypted (RECORD grace 30s)
 [sup] milestone: RECORD — session ESTABLISHED (health=1)
 ```
 **ocbmd.log:** `SUBSCRIBE (64 B config)` → `host PRESENT`.
 **iap2d.log:** `SYN-ACK — link up` → `AuthSuccess` → `RX 0x1D02 Identified` → `RX 0x4E0A/0x4E0B Identified` (stable; no "host gone").
-**airplayd.log (milestones):** pair established → `SETUP phase2 screen(110)` + `SETUP phase2 audio(100) fmt=0x8000 48000Hz 2ch Pcm audioType="media"` → `fwd-enc: handed video/media key` → `forwarding ENCRYPTED frames/RTP`. `/command` channel receiving `disableBluetooth` (115 B) + `modesChanged` (287 B) — logged, not yet handled (task #19).
-**rx_connect.log:** `resolved _carplay-ctrl … -> fe80::… , 169.254.208.240 scope=ncm0(3)`; the trailing IPv4
+**carplayd.log (milestones):** pair established → `SETUP phase2 screen(110)` + `SETUP phase2 audio(100) fmt=0x8000 48000Hz 2ch Pcm audioType="media"` → `fwd-enc: handed video/media key` → `forwarding ENCRYPTED frames/RTP`. `/command` channel receiving `disableBluetooth` (115 B) + `modesChanged` (287 B) — logged, not yet handled (task #19).
+**rx-connect.log:** `resolved _carplay-ctrl … -> fe80::… , 169.254.208.240 scope=ncm0(3)`; the trailing IPv4
 `169.254…` `connect-out failed: Network unreachable (os error 101)` — **harmless** (IPv6 link-local path
 already carries the control connection; documented behavior).
 

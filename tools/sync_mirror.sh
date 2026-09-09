@@ -57,10 +57,10 @@ rsync -a --delete \
 ( cd "$DST" && find . -name '.DS_Store' -not -path './.git/*' -delete )
 ( cd "$DST" && rm -rf build scratchpad reference old .serena target .claude \
     host/gm_ccpa/apk host/gm_ccpa/evidence host/gm_ccpa/logs \
-    host/CarPlayHost/build host/CarlinkAndroid/.gradle host/CarlinkAndroid/local.properties \
+    host/MacHost/build host/CarlinkAndroid/.gradle host/CarlinkAndroid/local.properties \
     host/aa-headunit/certs \
-    host/CarPlayHost/carlink_macOS.xcodeproj/xcuserdata \
-    host/CarPlayHost/carlink_macOS.xcodeproj/project.xcworkspace/xcuserdata )
+    host/MacHost/carlink_macOS.xcodeproj/xcuserdata \
+    host/MacHost/carlink_macOS.xcodeproj/project.xcworkspace/xcuserdata )
 
 cd "$DST"
 if [ -z "$(git status --porcelain)" ]; then

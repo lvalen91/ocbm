@@ -86,7 +86,7 @@ trap 'rm -rf "$LOCK"; trap - EXIT; exit 143' INT TERM HUP
 # written by the supervisor's apply_host_wifi_creds(), and it is what the box hands the phone in
 # the iAP2 0x5703 handoff. Clobbering it there would point the phone at an AP that is never
 # raised — a documented, session-killing failure that also poisons the next attempt.
-# We are safe only because session_supervisor skips wifi_ap_on entirely when CARPLAY_WIFI_AP=0.
+# We are safe only because session_supervisor skips wifi_ap_on entirely when BOX_WIFI_AP=0.
 # So: do NOT make radio_hal call this verb unconditionally, and do NOT "fix" the supervisor's
 # wifi_ap:false branch to fall through to here.
 # The seam resolves the identity once and passes it in, so the SSID and the Bluetooth name come

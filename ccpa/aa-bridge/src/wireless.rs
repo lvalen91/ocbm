@@ -1,15 +1,15 @@
 //! The WIRELESS transport half of the bridge: a TCP listener on the box's own SoftAP address that
-//! answers the endpoint `carplay-wireless` advertised to the phone over Bluetooth.
+//! answers the endpoint `btd` advertised to the phone over Bluetooth.
 //!
 //! What happens before this module runs (`docs/androidauto/03_WIRELESS.md` §2f): the phone opens
-//! RFCOMM channel 4, `carplay-wireless` speaks the seven-message bootstrap and hands it
+//! RFCOMM channel 4, `btd` speaks the seven-message bootstrap and hands it
 //! `WifiStartRequest{ ip_address = box_common::net::AP_IP, port = aa_wireless::DEFAULT_PORT }` plus
 //! the credentials of the AP that is actually running. The phone associates and dials that
 //! endpoint. From its FIRST BYTE the socket carries the ordinary Android Auto stream — the same
 //! bytes the wired AOAP endpoints carry — so the box's job is identical to the wired one: be a dumb
 //! full-duplex pipe between the phone and the macOS app's AA engine.
 //!
-//! It therefore lives in `aa-bridge` and not in `carplay-wireless`, which is the answer to
+//! It therefore lives in `aa-bridge` and not in `btd`, which is the answer to
 //! §5's "one bridge or two": the AOAP-specific setup (control transfers, re-enumeration, interface
 //! claim, bulk endpoints) is exactly the part that does NOT generalise, and it is untouched here.
 //! Everything downstream of "I have two byte streams" is shared — the arbitration, the app-side
@@ -170,13 +170,13 @@ fn serve_one(app: &Arc<AppPort>, phone: TcpStream) {
 ///
 /// The flag is released whenever it still reads `wireless-aa`, including the case where the
 /// Bluetooth bootstrap set it and we merely ADOPTED it. That is deliberate: this session ending IS
-/// the wireless projection ending, and `carplay-wireless` holds the token past its own bootstrap
+/// the wireless projection ending, and `btd` holds the token past its own bootstrap
 /// only so that nothing takes the box while the phone associates. Leaving it set would keep the box
 /// "busy" for the whole remaining Bluetooth session with nothing projecting.
 ///
 /// KNOWN LIMIT, worth stating rather than hiding: `release_owner_if_ours` is ours-only by TOKEN, and
-/// this process and `carplay-wireless` write the SAME token. Neither can tell its own claim from the
-/// other's. The consequence is bounded and one-directional — `carplay-wireless`'s session teardown
+/// this process and `btd` write the SAME token. Neither can tell its own claim from the
+/// other's. The consequence is bounded and one-directional — `btd`'s session teardown
 /// (`run_active_session`'s exit) can clear the flag under a live TCP session here — but that teardown
 /// means the radio itself is going away, so the session is over regardless. Distinguishing them
 /// would need a pid or a lock in the flag file, which is a change to a format three daemons and the

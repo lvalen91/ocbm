@@ -17,7 +17,7 @@ hardware with every OCBM channel working:
 |---|---|
 | `ocbmd` | **none** — builds byte-for-byte from the shared source |
 | `iap2d` | **none** — only the shared `portable-atomic` fix (see below) |
-| `airplayd` | **none** — shared fix + `--no-default-features` to drop the fdk-aac ELD uplink |
+| `carplayd` | **none** — shared fix + `--no-default-features` to drop the fdk-aac ELD uplink |
 
 Verified live on hardware 2026-08-17 with `ocbm-host … 1f3a ace2`:
 
@@ -52,13 +52,13 @@ Both are **riscv32 fixes, not C2Air fixes**, so putting them in this folder woul
 benefit any 32-bit target and must not be forked:
 
 1. **`portable-atomic`** — rv32 has no 64-bit LR/SC, so `core` provides no `AtomicU64`/`AtomicI64`.
-   8 files, ~26 references (`receiver/session.rs` 10, `receiver/levers.rs` 3, `mfid` 3, `airplayd` 3,
+   8 files, ~26 references (`receiver/session.rs` 10, `receiver/levers.rs` 3, `mfid` 3, `carplayd` 3,
    `receiver/uplink.rs` 2, `receiver/datastream.rs` 2, `iap2-core/metadata.rs` 2, `receiver/relay.rs`
    1). `portable_atomic::AtomicU64` is a drop-in with a `const` constructor, so the `static` uses keep
    working. **Deliberately NOT narrowed to `AtomicU32`**: some sites are throwaway counters where that
    would be harmless, but `receiver/session.rs` holds timestamps and sequence numbers where
    truncation is a real bug. **Verified no armv7 regression** — all 9 `build.sh` artifacts still build,
-   `airplayd` included.
+   `carplayd` included.
 2. **`musl32_time64` — the one that actually mattered.** See the next section; it is a build-config
    change, not a code change, and without it the box crashes.
 
@@ -130,7 +130,7 @@ Under the hood, and the parts that are not obvious:
 - No C dependencies in `ocbmd`/`btattach`, so the vendor GCC is not needed for them. For anything
   **with** C in it, prefer the vendor GCC 10.4.0 — per `build-rv32.sh`, a zig-built busybox passed
   every applet-presence check and then segfaulted in `awk`.
-- `airplayd` with its default features needs a **riscv32 `libfdk-aac`** for `FDK_AAC_PREFIX`; only
+- `carplayd` with its default features needs a **riscv32 `libfdk-aac`** for `FDK_AAC_PREFIX`; only
   armv7 and android-x86_64 prefixes exist today. Until one is cross-built, use
   `--no-default-features`, which costs the wireless AAC-ELD mic uplink.
 
@@ -147,7 +147,7 @@ Everything that followed was one symptom of that single mismatch:
 
 | Symptom | Real cause |
 |---|---|
-| `carplay-wireless` SIGSEGV at startup (`sepc: 0`, null jump) | first daemon to spawn a *sleeping* thread |
+| `btd` SIGSEGV at startup (`sepc: 0`, null jump) | first daemon to spawn a *sleeping* thread |
 | `std::thread::sleep` panics | `nanosleep` returns EINVAL; std asserts the errno can only be EINTR |
 | `ocbmd` CT_SETTIME rejected | `settimeofday`/`clock_settime` get a mis-sized struct → EINVAL |
 | wireless socket timeouts wrong | every `SO_RCVTIMEO`/`SO_SNDTIMEO` passed a mis-sized `timeval` |
@@ -184,14 +184,14 @@ read back real wall time.
 
 ## Wireless CarPlay — no `hciconfig` needed, and no new binary
 
-The C2Air has **no BlueZ userspace**, so the obvious worry is that `carplay-wireless` shells out to
+The C2Air has **no BlueZ userspace**, so the obvious worry is that `btd` shells out to
 `hciconfig` for class/name/EIR/scan. It does — but only on the BlueZ path. `crates/vendor/wireless/
 src/hci.rs` already implements every one of those operations natively with ioctls + raw HCI command
 packets (written for the Android/Pi port, where BlueZ is equally absent). Selecting it is one env
 var:
 
 ```sh
-CARPLAY_HCI_BACKEND=native
+BT_HCI_BACKEND=native
 ```
 
 So nothing needs to be written or cross-compiled to control Bluetooth here. Device-verified
@@ -214,7 +214,7 @@ applets. `/usr/bin/true` is absent but only used in a `#[cfg(test)]` unit test.
 
 ## macOS app
 
-`host/CarPlayHost/carlink_macOS/USB/USBDeviceManager.swift` matches against a hardcoded
+`host/MacHost/carlink_macOS/USB/USBDeviceManager.swift` matches against a hardcoded
 `kSupportedDevices` table, so the app would never claim this box until `1f3a:ace2` was added — done.
 The C2Air deliberately keeps its own ids rather than borrowing the CCPA's `1314:2d00`: nothing in
 OCBM requires a particular VID/PID (`ocbm-host` takes them as positional arguments), and reusing the

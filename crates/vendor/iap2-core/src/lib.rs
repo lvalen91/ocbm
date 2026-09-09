@@ -1,6 +1,6 @@
 //! carplay-iap2-core — the transport-agnostic half of the iAP2 accessory protocol stack, extracted
 //! from `carplayd`'s original `src/iap2/` so both the wired driver (`carplayd`'s own
-//! `src/iap2/driver.rs`, FunctionFS-bound) and the wireless driver (`carplay-wireless`'s
+//! `src/iap2/driver.rs`, FunctionFS-bound) and the wireless driver (`btd`'s
 //! `bt_driver.rs`, RFCOMM-bound) can share it without duplication.
 //!
 //! What moved here (pure protocol logic, zero I/O, zero USB references — confirmed by direct
@@ -22,7 +22,7 @@ pub mod message;
 /// iAP2 metadata plane: NowPlaying / route-guidance / maneuver / call-state / communications / list
 /// subscribe-builders + inbound parsers, plus the `127.0.0.1:9004 → CH_METADATA` seam forwarder and
 /// the session-2 artwork reassembler. Std-only, zero new deps. Shared by the wired driver (`iap2d`)
-/// and the wireless driver (`carplay-wireless`'s `bt_driver`) so both flow identical metadata frames.
+/// and the wireless driver (`btd`'s `bt_driver`) so both flow identical metadata frames.
 pub mod metadata;
 /// CarPlay session-start handshake: `CarPlayStartSession` (0x4301) builder + `CarPlayAvailability`
 /// (0x4300) parser. Additive over `message`; see the module header for the wired-path constraint.

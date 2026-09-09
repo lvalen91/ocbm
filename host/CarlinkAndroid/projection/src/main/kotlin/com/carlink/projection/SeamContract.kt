@@ -4,7 +4,7 @@ package com.carlink.projection
  * The localhost IPC contract between the accessory stack and this app.
  *
  * On the Pi every one of these is a loopback socket. The accessory stack (`airplayd` /
- * `carplay-wireless`) is a set of native processes; this app is the only consumer of their A/V
+ * `btd`) is a set of native processes; this app is the only consumer of their A/V
  * output and the only producer of their input.
  *
  * ## Direction matters and is easy to get backwards
@@ -56,7 +56,7 @@ object SeamContract {
     const val PORT_MIC_INGEST = 9112
 
     /**
-     * Device management and connection policy, served by `carplay-wireless`. We connect.
+     * Device management and connection policy, served by `btd`. We connect.
      * Newline-delimited JSON; see [WirelessControlClient].
      *
      * Not part of the original box design — the CCPA had no such surface because the macOS app

@@ -97,7 +97,7 @@ check_supervisor_deps "$@" || true   # warn loudly; do not block a deliberate pa
 if [ $# -ge 2 ]; then
     push_one "$@"
 else
-    push_one /tmp/boxbins/carplay-wireless /usr/sbin/carplay-wireless 755
+    push_one /tmp/boxbins/btd /usr/sbin/btd 755
     push_one /tmp/boxbins/ocbmd           /usr/sbin/ocbmd           755
-    echo "[ocbm-push] both landed. Restart on the box:  killall ocbmd carplay-wireless"
+    echo "[ocbm-push] both landed. Restart on the box:  killall ocbmd btd"
 fi

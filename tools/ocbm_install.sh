@@ -45,8 +45,8 @@
 #
 # Options:
 #   --host IP     adapter address (default 192.168.50.2 — .100 is usually YOUR lease)
-#   --full        also install the projection stack (iap2d, airplayd, rx-connect,
-#                 carplay-wireless, session_supervisor.sh, projection_up.sh). Default is the
+#   --full        also install the projection stack (iap2d, carplayd,
+#                 btd, session_supervisor.sh, projection_up.sh). Default is the
 #                 minimal set: ocbmd + ocbm_boot.sh, which is all CONSOLE/FILE management needs
 #   --ttl N       trial dead-man timeout in seconds (default 600)
 #   --run-dir DIR where reports land
@@ -161,9 +161,8 @@ manifest() {
     echo "$REPO/ccpa/rootfs/script/radio_hal.sh|/script/radio_hal.sh|755"
     echo "$REPO/ccpa/rootfs/script/radio_ap_up.sh|/script/radio_ap_up.sh|755"
     echo "$ARM/iap2d|/usr/sbin/iap2d|755"
-    echo "$ARM/airplayd|/usr/sbin/airplayd|755"
-    echo "$ARM/rx-connect|/usr/sbin/rx-connect|755"
-    echo "$ARM/carplay-wireless|/usr/sbin/carplay-wireless|755"
+    echo "$ARM/carplayd|/usr/sbin/carplayd|755"
+    echo "$ARM/btd|/usr/sbin/btd|755"
     echo "$ARM/aa-bridge|/usr/sbin/aa-bridge|755"  # Android Auto byte pump: AOAP over USB (arm_aa) AND, with --wireless, the SoftAP TCP endpoint the BT bootstrap advertises (arm_aa_wireless)
     # WIRED CARPLAY CANNOT START WITHOUT THIS. projection_up.sh calls `iap_role_switch` by bare
     # name (PATH), and docs/ops/01_RECOVERY.md puts it in /usr/bin. Absent, the 0x51 host-role switch never runs, so

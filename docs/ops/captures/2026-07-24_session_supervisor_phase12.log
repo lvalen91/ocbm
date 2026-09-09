@@ -9,6 +9,6 @@
 [sup] host PRESENT -> go projection-ready + ARM
 [proj] iPhone at /dev/bus/usb/001/002 — iAP2 handshake → projection
 [proj] IDENTIFIED — projection-ready; bringing ncm0 up
-[sup] ARMED (airplayd + rx-connect) — awaiting pair-verify -> RECORD
+[sup] ARMED (carplayd) — awaiting pair-verify -> RECORD
 [sup] milestone: pair-verify OK — control encrypted (RECORD grace 30s)
 [sup] milestone: RECORD — session ESTABLISHED (health=1)

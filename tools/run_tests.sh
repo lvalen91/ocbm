@@ -4,7 +4,7 @@
 # `cargo test` and `cargo test --workspace` at the repo root do NOT run most of this project's tests:
 # `crates/vendor/{iap2-core,receiver,rtsp,pairing,mfi,mfi-i2c-local,metadata,eld-codec}` are all in
 # the root Cargo.toml `exclude` list, so they build as path dependencies only. The root workspace also
-# fails to compile on macOS (`airplayd` uses `libc::TCP_KEEPIDLE`, Linux-only). Both facts together
+# fails to compile on macOS (`carplayd` uses `libc::TCP_KEEPIDLE`, Linux-only). Both facts together
 # meant ~130 tests could be added, or silently broken, without anything noticing.
 #
 # `receiver` is run with --no-default-features: the default set pulls `eld-codec`, whose build script
@@ -32,11 +32,11 @@ run "ocbm-proto" cargo test -p ocbm-proto --quiet
 run "ocbmd"      cargo test -p ocbmd --quiet
 run "iap2d"      cargo test -p iap2d --quiet
 # These are excluded from the workspace too, and were missing from this script until 2026-07-29 —
-# 103 further passing tests, including `carplay-wireless`, which is one of the four SHIPPED box
+# 103 further passing tests, including `btd`, which is one of the four SHIPPED box
 # binaries, and `carplay-metadata`, a direct dependency of iap2-core.
 run "metadata"   cargo test --manifest-path crates/vendor/metadata/Cargo.toml --quiet
-run "wireless"   cargo test -p carplay-wireless --quiet
-# bt-common holds the Bluetooth primitives extracted from carplay-wireless on 2026-09-01. Its
+run "wireless"   cargo test -p btd --quiet
+# bt-common holds the Bluetooth primitives extracted from btd on 2026-09-01. Its
 # 29 tests used to run under the "wireless" line above; without this one they would silently
 # stop running, which is the failure mode an extraction is most likely to cause.
 run "bt-common"  cargo test -p bt-common --quiet
@@ -53,13 +53,13 @@ run "rtsp"       cargo test --manifest-path crates/vendor/rtsp/Cargo.toml --quie
 run "mfi"        cargo test --manifest-path crates/vendor/mfi/Cargo.toml --quiet
 run "ocbm-host"  cargo test -p ocbm-host --quiet
 
-# host/CarPlayHost's own hardware-free Swift harness (tests/run_tests.sh) — no Xcode project, no
+# host/MacHost's own hardware-free Swift harness (tests/run_tests.sh) — no Xcode project, no
 # dongle. Skipped (not a failure) when the Swift toolchain isn't on this machine, since the rest of
 # this script is Rust-only and must still be runnable without Xcode installed.
 if command -v xcrun >/dev/null 2>&1 && xcrun --find swiftc >/dev/null 2>&1; then
-  run "host/CarPlayHost (Swift)" bash host/CarPlayHost/tests/run_tests.sh
+  run "host/MacHost (Swift)" bash host/MacHost/tests/run_tests.sh
 else
-  echo "=== host/CarPlayHost (Swift) — SKIPPED (xcrun/swiftc not found)"
+  echo "=== host/MacHost (Swift) — SKIPPED (xcrun/swiftc not found)"
 fi
 
 [ "$fail" -eq 0 ] || { echo "FAILURES"; exit 1; }

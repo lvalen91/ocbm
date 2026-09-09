@@ -39,7 +39,7 @@ The omission is not an oversight upstream: Android's own Bluetooth stack impleme
 userspace over L2CAP, so AOSP has no reason to enable the module. It costs us because we bypass that
 stack (§1.2 below explains why).
 
-**After the change:** delete the `CARPLAY_RFCOMM_BACKEND=userspace` gate and the whole file. The
+**After the change:** delete the `BT_RFCOMM_BACKEND=userspace` gate and the whole file. The
 kernel path is already implemented in `rfcomm.rs` and was the original code.
 
 ### 1.2 Wi-Fi vendor HAL: `IWifiApIface.setCountryCode` must not return `NOT_SUPPORTED` — *verified earlier in this project*
@@ -55,7 +55,7 @@ what blocks the framework's 5 GHz SoftAP, and it forced two workarounds:
 
 With the HAL fixed, `CarProjectionManager.startProjectionAccessPoint()` (LocalOnlyHotspot) becomes
 usable. The device already reports `Stable local-only hotspot configuration: true`. That deletes
-`hostapd`, `apdhcpd`, and the `CARPLAY_HOSTAPD_CONF` gate, and inherits SSID/PSK handling from the
+`hostapd`, `apdhcpd`, and the `BOX_HOSTAPD_CONF` gate, and inherits SSID/PSK handling from the
 platform.
 
 **Caveat, *inferred*:** LocalOnlyHotspot is a different `WifiManager` path from the tethered SoftAP
@@ -171,9 +171,9 @@ None of this is a defect; it is the difference between a demo and a head unit.
   (in `pi/tools/`) baked into `/system/etc/permissions`. Without it `addKeyEventHandler` is denied
   and **steering-wheel voice and call keys do not reach CarPlay** — the one user-visible feature
   still gated on this. `pi/tools/install_projection_app.sh --system` does it by hand today.
-* **Init `.rc` services** for `carplay-wireless`, `hostapd`, `apdhcpd` and the app, with the binaries
+* **Init `.rc` services** for `btd`, `hostapd`, `apdhcpd` and the app, with the binaries
   somewhere other than `/data/local/tmp`. Today a reboot means a full manual restart, and nothing
-  respawns `carplay-wireless` if it dies (the CCPA has `session_supervisor.sh`; the Pi has nothing).
+  respawns `btd` if it dies (the CCPA has `session_supervisor.sh`; the Pi has nothing).
 * **SELinux policy** for those domains, needed before enforcing regardless of §2.4.
 * **The `from all lookup main` ip rule.** Android deletes it, so the connected route for the AP
   subnet sits in `main` the whole time and nothing consults it — any process outside the framework
@@ -215,7 +215,7 @@ None of this is a defect; it is the difference between a demo and a head unit.
 ## Uncertain, and worth someone checking
 
 **Could Android's Bluetooth stack stay enabled?** We disable it (`settings put global bluetooth_on 0`)
-so `carplay-wireless` can own `hci0` through raw HCI, because **mgmt synthesises the EIR itself and
+so `btd` can own `hci0` through raw HCI, because **mgmt synthesises the EIR itself and
 cannot express the CarPlay marker UUID**. That is a stack limitation rather than a config one as far
 as I know — but I have not checked whether Fluoride's configuration can inject a custom EIR, and if
 it can, the raw-HCI layer (`crates/vendor/wireless/src/hci.rs`) could go too. Note this is

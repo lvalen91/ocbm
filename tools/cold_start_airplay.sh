@@ -1,14 +1,14 @@
 #!/bin/sh
 # cold_start_airplay.sh — cold start to Identified, bring up ncm0, then run the AirPlay pairing stack:
-#   airplayd  (RTSP/pair-setup/pair-verify on :5000, local MFi chip)  +  rx_connect (mDNS _airplay._tcp)
+#   carplayd  (RTSP/pair-setup/pair-verify on :5000, local MFi chip; mDNS _airplay._tcp advertised in-process since 2026-09-08)
 # so the iPhone discovers the receiver, opens the AirPlay session, and we complete PAIR-VERIFY.
-# Watch /tmp/airplayd.log for "PAIR-VERIFY COMPLETE". Needs /tmp/{iap2d,iap_role_switch,airplayd,rx_connect}.
+# Watch /tmp/carplayd.log for "PAIR-VERIFY COMPLETE". Needs /tmp/{iap2d,iap_role_switch,carplayd}.
 set -u
 A=/sys/class/android_usb/android0
 I=/sys/bus/platform/devices/ci_hdrc.0/inputs
-L=/tmp/iap2d.log; AL=/tmp/airplayd.log; RL=/tmp/rx_connect.log
-pkill -f airplayd 2>/dev/null; pkill -f rx_connect 2>/dev/null; pkill -f iap2d 2>/dev/null
-: > "$AL"; : > "$RL"
+L=/tmp/iap2d.log; AL=/tmp/carplayd.log
+pkill -f carplayd 2>/dev/null; pkill -f iap2d 2>/dev/null
+: > "$AL"
 echo "[csa] start; waiting for iPhone replug (90s)" > "$L"
 
 if lsusb | grep -q 05ac; then
@@ -49,14 +49,13 @@ if ! grep -q 'Identified' "$L"; then
   echo "[csa] did NOT reach Identified: $(tail -1 "$L")" >> "$AL"
   exit 1
 fi
-echo "[csa] IDENTIFIED — bringing up ncm0, starting airplayd + rx_connect" >> "$AL"
+echo "[csa] IDENTIFIED — bringing up ncm0, starting carplayd" >> "$AL"
 
 echo 0 > /proc/sys/net/ipv6/conf/ncm0/disable_ipv6 2>/dev/null
 ifconfig ncm0 up
 sleep 1
-setsid /tmp/airplayd   >> "$AL" 2>&1 &   # RTSP/pairing on :5000 (all ifaces incl ncm0), local MFi
-setsid /tmp/rx_connect >> "$RL" 2>&1 &   # mDNS advertise _airplay._tcp + browse _carplay-ctrl + connect-out
+setsid /tmp/carplayd   >> "$AL" 2>&1 &   # RTSP/pairing on :5000 (all ifaces incl ncm0), local MFi
 sleep 1
-echo "[csa] airplayd=$(pgrep -f airplayd) rx_connect=$(pgrep -f rx_connect) iap2d_holding=$(ps|grep -c '[i]ap2d')" >> "$AL"
+echo "[csa] carplayd=$(pgrep -f carplayd) iap2d_holding=$(ps|grep -c '[i]ap2d')" >> "$AL"
 echo "[csa] ncm0 $(ifconfig ncm0 2>/dev/null | grep -o 'inet6 addr: fe80[^ ]*')" >> "$AL"
-echo "[csa] armed — waiting for the iPhone to open AirPlay. tail -f /tmp/airplayd.log for PAIR-VERIFY." >> "$AL"
+echo "[csa] armed — waiting for the iPhone to open AirPlay. tail -f /tmp/carplayd.log for PAIR-VERIFY." >> "$AL"

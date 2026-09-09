@@ -110,10 +110,10 @@ fn i2c_wr(reg: u8, data: &[u8]) -> bool {
 }
 /// Cross-process advisory lock serializing MFi I2C access (#109). The one `/dev/i2c-1` chip now has
 /// FOUR users that must all agree on this path (corrected 2026-07-25 — this used to say "both
-/// daemons"): wired `iap2d` (here), `carplay-wireless` (`mfi_local::MFI_LOCK_PATH`), `airplayd`'s
+/// daemons"): wired `iap2d` (here), `btd` (`mfi_local::MFI_LOCK_PATH`), `carplayd`'s
 /// `LocalMfiSigner`, and `receiver`'s tunnel handshake via `mfi-i2c-local`. The cert/sign sequences are
 /// stateful, so any interleaving corrupts both transactions. RAII: LOCK_EX on acquire, LOCK_UN + close
-/// on drop. Bounded at 10s (LOCK_NB + deadline), matching `airplayd`'s `MfiLock` for this same file.
+/// on drop. Bounded at 10s (LOCK_NB + deadline), matching `carplayd`'s `MfiLock` for this same file.
 struct MfiLock(i32);
 impl MfiLock {
     fn acquire() -> Option<MfiLock> {
@@ -133,8 +133,8 @@ impl MfiLock {
         // BOUNDED acquire (review fix 2026-07-31; was a bare blocking `flock(LOCK_EX)`): this runs
         // inside the single-threaded handshake loop, so an unbounded wait on a wedged sibling holder
         // hung the whole daemon — the loop never regained control, and even its own 120s handshake
-        // budget could not fire. 10s matches airplayd's bound for this same lock; the worst-case
-        // legitimate hold (airplayd's sign path, ~2.1s poll × 3 MFi retries ≈ 6.3s) cannot trip it
+        // budget could not fire. 10s matches carplayd's bound for this same lock; the worst-case
+        // legitimate hold (carplayd's sign path, ~2.1s poll × 3 MFi retries ≈ 6.3s) cannot trip it
         // spuriously. On timeout, `execute()` maps the resulting None to NoCommit (state held; the
         // phone re-asks) — a recoverable stall where the blocking wait was a permanent one.
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -162,7 +162,7 @@ impl Drop for MfiLock {
 
 /// CopyCertificate: reg 0x30 len (2 BE), reg 0x31 cert.
 fn mfi_cert() -> Option<Vec<u8>> {
-    let _lock = MfiLock::acquire()?; // serialize vs carplay-wireless (#109)
+    let _lock = MfiLock::acquire()?; // serialize vs btd (#109)
     let mut lb = [0u8; 2];
     if !i2c_rd(0x30, &mut lb) {
         return None;
@@ -192,7 +192,15 @@ fn mfi_sign(chal: &[u8]) -> Option<Vec<u8>> {
     }
     unsafe { libc::usleep(100_000) };
     let mut done = false;
-    for _ in 0..200 {
+    // Bounded by WALL CLOCK, not iteration count — the same defect audit #8 fixed in
+    // `mfi-i2c-local`. `for _ in 0..200` with a 10 ms sleep looks like ~2.1 s, and is, but only
+    // while every status read succeeds. The status read is itself `for _ in 0..5` with a 5 ms
+    // sleep, so under chip NAK each iteration costs ~35 ms and the loop runs ~7.1 s — and with
+    // the caller's retries that is ~21 s holding /tmp/carplay_mfi.lock, blowing through every
+    // other chip user's 10 s acquire deadline.
+    const SIGN_POLL_DEADLINE: std::time::Duration = std::time::Duration::from_millis(2500);
+    let poll_start = std::time::Instant::now();
+    while poll_start.elapsed() < SIGN_POLL_DEADLINE {
         let mut st = [0u8; 1];
         if i2c_rd(0x10, &mut st) && (st[0] & 0x10) != 0 {
             if st[0] != 0x10 {
@@ -614,7 +622,7 @@ fn main() {
     // Advisory only: a NAK here must not kill the daemon — the real reads retry per-transaction.
     // But it is still a chip transaction, so it takes the same cross-process lock as cert/sign: the
     // one thing worse than a failed warm-up is one that lands inside another chip user's
-    // write→trigger→poll→read window (airplayd's sign path) and corrupts THAT transaction.
+    // write→trigger→poll→read window (carplayd's sign path) and corrupts THAT transaction.
     let mut v = [0u8; 1];
     let warm = match MfiLock::acquire() {
         Some(_lock) => i2c_rd(0x00, &mut v),

@@ -163,7 +163,7 @@ the app.
 > under a host-app-driven lifecycle (see [`../carplay/02_SESSION_LIFECYCLE.md`](../carplay/02_SESSION_LIFECYCLE.md)) and a
 > hardening pass that confirmed the crypto/protocol byte-for-byte against Apple's `CarPlaySDK`. The
 > **host app** column (decrypt + decode/render + input uplink) is now IMPLEMENTED — the macOS app
-> `host/CarPlayHost/carlink_macOS` (per-lane ChaCha20-Poly1305 decrypt, dual-lane decode/render, input
+> `host/MacHost/carlink_macOS` (per-lane ChaCha20-Poly1305 decrypt, dual-lane decode/render, input
 > uplink). The Rust `ocbm-host avdec` receiver is now a validation/debug tool, not the stand-in. See
 > `../ops/04_OPEN_ITEMS.md`.
 
@@ -174,15 +174,15 @@ The former sibling `ncm_carplayd/receiver_core` is now **vendored in-repo** as
 `crates/vendor/{receiver, pairing, rtsp, mfi, mfi-i2c-local, iap2-core, metadata, wireless,
 eld-codec, rx-connect}`; the original tree is archived at `../old/ncm_carplayd`. "Vendored" covers two
 different things there: eight are path-dependency-only (`Cargo.toml` `exclude`), while `wireless` and
-`rx-connect` are full workspace members producing the shipped `carplay-wireless` and `rx-connect`
+`rx-connect` are full workspace members producing the shipped `btd` and `rx-connect`
 binaries. The first-party crates outside that set are `crates/ocbm-proto` (the OCBM wire protocol,
 shared by every daemon) and `crates/mfi-wire`.
 
-The box daemons in `ccpa/{ocbmd, airplayd, iap2d, mfid}` are **all Rust** — the earlier "keep the
+The box daemons in `ccpa/{ocbmd, carplayd, iap2d, mfid}` are **all Rust** — the earlier "keep the
 low-level glue in C" plan (`../ops/00_BUILD_AND_DEPLOY.md` §Recommendation) was NOT taken: no C MFi bridge,
 no C iAP2/radio glue and no C L3/NCM bridge was ever written, and `find ccpa -name '*.c'` still
 returns nothing. The shipped box set is five Rust binaries (`ocbm_install.sh --full`: `ocbmd`,
-`iap2d`, `airplayd`, `rx-connect`, `carplay-wireless`; `mfid` is a bring-up instrument, staged to
+`iap2d`, `carplayd`, `rx-connect`, `btd`; `mfid` is a bring-up instrument, staged to
 `/tmp` and never installed) plus one small C helper.
 
 **CORRECTED 2026-08-16 — the previous text claimed `eld_shim.c` was "the only C remaining in-tree".
@@ -191,20 +191,20 @@ peripheral to the daemons (note `git ls-files '*.c'` alone misses the fourth):
 
 - `crates/vendor/eld-codec/csrc/eld_shim.c` (75) — the libfdk-aac AAC-ELD FFI shim, deliberately
   isolated so `receiver` can stay `#![forbid(unsafe_code)]` (`receiver/src/lib.rs:10`). Compiled by
-  `eld-codec/build.rs` into `airplayd`.
+  `eld-codec/build.rs` into `carplayd`.
 - `accessory_init/iap_role_switch.c` (45) — a raw-usbfs `USBDEVFS_CONTROL` issuing Apple's `0x51`
   host-role switch and exiting; libusb-free so it runs on the stripped appliance. **The one C binary
   we ship**: built by `build.sh:46` (`zig cc`, static armv7), installed to `/usr/bin` by
   `install_fhs.sh:20`, and invoked on every wired bring-up by `projection_up.sh:36` (which
   `session_supervisor.sh:199` runs on each SUBSCRIBE). ⚠ `ocbm_install.sh --full` ships
   `projection_up.sh` but **not** this binary — a box provisioned that way fails wired bring-up.
-- `host/CarPlayHost/carlink_macOS/USB/USBBridge.h` (115) — the macOS app's Swift bridging header:
+- `host/MacHost/carlink_macOS/USB/USBBridge.h` (115) — the macOS app's Swift bridging header:
   inline C wrappers for IOKit CFUUID macros that Swift's ClangImporter cannot bridge. Compiled by
   Xcode into the shipped app.
 - `host/accbench.c` (83) — host-side libusb throughput benchmark, source of the transport numbers in
   `../carplay/00_ARCHITECTURE.md`. Hand-built per `host/README.md:18`; `build.sh` never touches it.
 
-Not in-tree but linked in: `airplayd`'s default `mic-uplink-eld` feature statically links a
+Not in-tree but linked in: `carplayd`'s default `mic-uplink-eld` feature statically links a
 cross-built **fdk-aac 2.0.3** (~840 C/C++ files) from `$FDK_AAC_PREFIX`, gitignored under
 `scratchpad/fdk/`. The gitignored `reference/` and `scratchpad/` trees are third-party and not
 counted here.

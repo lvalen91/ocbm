@@ -30,10 +30,10 @@ fi
 # docs/wireless/01_BT_AND_RADIO.md: wait for attach_bluetooth.sh to actually CONVERGE (its own bt_responsive() retry loop
 # reaching success or giving up after 20 attempts), not just for hci0 to exist. hci0 can appear
 # within ~100ms of hciattach even when the chip's firmware never loaded and every subsequent
-# command times out -- waiting on mere existence let wireless_up() launch carplay-wireless (which
+# command times out -- waiting on mere existence let wireless_up() launch btd (which
 # does its OWN redundant killall+hciconfig Bluetooth bring-up) WHILE attach_bluetooth.sh's retry
 # loop was still mid-flight; the two uncoordinated bring-up attempts fought each other indefinitely
-# (observed live: 7+ minutes, never converging -- carplay-wireless's periodic killall bluetoothDaemon
+# (observed live: 7+ minutes, never converging -- btd's periodic killall bluetoothDaemon
 # kept interrupting attach_bluetooth.sh's in-progress reset/reattach). attach_bluetooth.sh touches
 # /tmp/.hciattach_done as its LAST statement, after the retry loop concludes either way; bt_off.sh
 # clears it, so a stale flag from a prior session is never mistaken for this attempt's completion.

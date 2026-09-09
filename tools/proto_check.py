@@ -25,7 +25,7 @@ REPO = Path(__file__).resolve().parent.parent
 CANON = REPO / "crates/ocbm-proto/src/lib.rs"
 CLIENTS = {
     "kotlin (CarlinkAndroid)": REPO / "host/CarlinkAndroid/app/src/main/kotlin/com/carlink/ocbm/OcbmProto.kt",
-    "swift (carlink_macOS)": REPO / "host/CarPlayHost/carlink_macOS/OCBM/OCBMFraming.swift",
+    "swift (carlink_macOS)": REPO / "host/MacHost/carlink_macOS/OCBM/OCBMFraming.swift",
 }
 GM_CLIENT = "netprobe_app/app/src/main/java/zeno/gmccpa/ocbm/OcbmProto.kt"
 

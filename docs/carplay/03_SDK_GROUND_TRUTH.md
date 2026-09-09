@@ -22,7 +22,7 @@ or **[I]** inferred. Every fact links to its discovery location.
 - **YAML VehicleConfig templates (10):** `<plugin>/Contents/Resources/VehicleConfigs/Configs/*.yaml` → copied to `reference/carplay_sdk/apple_vehicleconfigs/`.
 - **VDC (nav telemetry) schema:** `<plugin>/Contents/Frameworks/CarPlaySDK.framework/Versions/A/Resources/VDCSchema-External.json` + instance `<plugin>/Contents/Resources/VehicleConfigs/VehicleDataConfigs/Navigation/Navigation.vdc.json` → `reference/carplay_sdk/apple_vdc/`.
 - **Retained reference notes (scratchpad):** `sdk_strings.txt`, `sim_strings.txt`, `all.txt`, `hidparse.py`, `cfstr.py`.
-- **Project mapping targets:** `ncm_carplayd/receiver_core/crates/receiver/src/info.rs` (`build_info`), `.../session.rs`, `.../events.rs`, `.../hid.rs`, `.../uplink.rs`; `ccpa_custom/ccpa/airplayd/src/main.rs`.
+- **Project mapping targets:** `ncm_carplayd/receiver_core/crates/receiver/src/info.rs` (`build_info`), `.../session.rs`, `.../events.rs`, `.../hid.rs`, `.../uplink.rs`; `ccpa_custom/ccpa/carplayd/src/main.rs`.
 
 ### 1. Two layers: authoring (YAML) vs wire (`/info`)
 Apple's simulator loads a **`VehicleConfig` YAML** (authoring) and *translates* it into the on-wire AirPlay
@@ -70,7 +70,7 @@ Served by `_requestProcessInfo` (GET /info, binary plist; may carry a `qualifier
 **`viewAreas[]` entry:** `originXPixels/originYPixels/widthPixels/heightPixels`, `viewAreaTransitionControl`, `viewAreaStatusBarEdge`, `safeArea{originXPixels…, drawUIOutsideSafeArea}`. Runtime: `AirPlayReceiverSessionViewAreaUpdate`, `ScreenStreamSetViewArea`.
 **Cutout = corner masks** (NOT notch/radius): advertise `cornerMasks` support (`AirPlayScreenDictSetCornerMasksSupport`), then stream an opaque per-corner bitmap at runtime (`ScreenStreamSetCornerMask`, `cornerMaskBuffer`/`cornerMaskLength`, `handleCornerMaskDataReceived:`). No `cornerRadius`/`notch`/`insetRect` keys exist.
 **Multi-display:** extra `displays[]` entries (`AirPlayAltScreenDictCreate` vs `MainScreenDictCreate`); a cluster = an `altDisplayPanel{showsInstruments}` + an `altVideoStream` (with sub-rect `viewAreas`) routed via `altScreenURLs`/`initialURL: maps:/car/instrumentcluster/map`.
-**Our status (CORRECTED 2026-08-16 — this line previously read "single main panel only; no cluster/altScreen, no corner masks, single flat viewArea", which §10's own table in this same file already contradicted).** cluster/altScreen ✅ (`vehicle_config.rs:1018 alt_screen()` → `airplayd/src/main.rs:694` → the type-111 `displays[]` entry with `altScreenURLs`/`altScreenSuggestUIURLs`, `info.rs:611-655`, echoed at `session.rs:622-624`); corner masks ✅ (`vehicle_config.rs:914` → `main.rs:706` → display-level flag `info.rs:600` with the mandatory safeArea omission at `:388,414-419`, echoed at `session.rs:638-640`); viewAreas ✅ with a real inset `safeArea` + `drawUIOutsideSafeArea` + `viewAreaTransitionControl` + `viewAreaStatusBarEdge` + `viewAreaSupportsFocusTransfer`, type-110-gated (`info.rs:375-433`). **Real remaining gap:** `/info` still carries only the legacy flat `displays[]`, never the modern `displayPanels[]` array — the app authors `altDisplayPanels[]` and the box parses it (`vehicle_config.rs:711`) but nothing emits it.
+**Our status (CORRECTED 2026-08-16 — this line previously read "single main panel only; no cluster/altScreen, no corner masks, single flat viewArea", which §10's own table in this same file already contradicted).** cluster/altScreen ✅ (`vehicle_config.rs:1018 alt_screen()` → `carplayd/src/main.rs:694` → the type-111 `displays[]` entry with `altScreenURLs`/`altScreenSuggestUIURLs`, `info.rs:611-655`, echoed at `session.rs:622-624`); corner masks ✅ (`vehicle_config.rs:914` → `main.rs:706` → display-level flag `info.rs:600` with the mandatory safeArea omission at `:388,414-419`, echoed at `session.rs:638-640`); viewAreas ✅ with a real inset `safeArea` + `drawUIOutsideSafeArea` + `viewAreaTransitionControl` + `viewAreaStatusBarEdge` + `viewAreaSupportsFocusTransfer`, type-110-gated (`info.rs:375-433`). **Real remaining gap:** `/info` still carries only the legacy flat `displays[]`, never the modern `displayPanels[]` array — the app authors `altDisplayPanels[]` and the box parses it (`vehicle_config.rs:711`) but nothing emits it.
 
 ### 5. Video codecs — H.264 + HEVC [E]
 Codec is selected **in-band by the sample-description FourCC** in the screen-stream handler (~0x282240):
@@ -113,7 +113,7 @@ Transport: `POST /command` (`_requestProcessCommand`), binary plist `{type, para
 ### 10. Mapping to ccpa_custom + prioritized gaps
 | capability | Apple mechanism | ccpa_custom status |
 |---|---|---|
-| Resolution | `displays[].widthPixels/heightPixels` (Class A) | ✅ app-pushed per control connection (`airplayd::load_device_config`); 1920×720 survives only as the app-less fallback in `base_device_config()` |
+| Resolution | `displays[].widthPixels/heightPixels` (Class A) | ✅ app-pushed per control connection (`carplayd::load_device_config`); 1920×720 survives only as the app-less fallback in `base_device_config()` |
 | Config framework | `VehicleConfig` YAML → `/info` | ✅ host-authoritative YAML → `vehicle_config.rs` → `/info`; regression-covered by `receiver/tests/r4_c2_schema.rs` |
 | Live resolution/layout | `updateDisplayPanels` (Class B) | ❌ not implemented — zero hits for `updateDisplayPanels`/`updateViewArea` repo-wide |
 | HEVC | `hevcInfo` + SETUP `hevc` + `hvc1` in-band | ✅ `info.rs` publishes `hevcInfo` gated on `enablesHEVC`; `hevc` echoed at SETUP; `hvc1`/`hvcC` decoded host-side (`VideoDecoder.swift`) |
@@ -540,7 +540,7 @@ maxCumAck=0 — more conservative than our fallback to `SYN_PARAMS`. Our fresh-`
 Apple's seq/ack reset.
 - **`kAirPlayProperty_TransportType`** (`AirPlayCommon.h:2196`) is never read in our codebase; we use
   the `CARPLAY_WIRELESS_METADATA` env var as a wireless proxy. Functionally equivalent given one
-  `airplayd` per transport, but it is a divergence worth knowing about.
+  `carplayd` per transport, but it is a divergence worth knowing about.
 - **The exact wire choreography** of the iAP2 handshake on this transport remains AISpec-side and
   therefore inherited from our BT driver. It is reasonable, but it is not reference-backed — treat it
   as the most likely remaining source of error after the fixes above.
@@ -683,7 +683,7 @@ Box `/info` emission + parser + app re-emit are landing 2026-09-05, unverified o
 - Alt-display `maxFPS 60` vs capture `30`, physical dims `0/0` vs `304/76` — inert extra keys.
 - ~~Rust receiver `AudioCodec` enum lacks OPUS (bit 28-30 misdecodes to AAC-ELD)~~ — **FIXED; noted 2026-08-16.** `session.rs`'s `AudioCodec` has an `Opus` variant and `decode_audio_format` maps bits 28/29/30 to Opus 16k/24k/48k mono; `info.rs` carries the matching `opus_16k_mono`/`opus_24k_mono`/`opus_48k_mono` tokens (docs/carplay/06_AV_PIPELINE.md). Still only reachable on wireless; PCM-only on the wired path remains correct.
 - ~~`send_request_siri_action` … the code sends 1/2 … do not change the working values~~ — **INVERTED,
-  CORRECTED 2026-08-16. Do not act on the struck text.** The code now sends **2/3** (`ccpa/airplayd/src/main.rs`, the `CMD_SIRI_DOWN`/`CMD_SIRI_UP` arms),
+  CORRECTED 2026-08-16. Do not act on the struck text.** The code now sends **2/3** (`ccpa/carplayd/src/main.rs`, the `CMD_SIRI_DOWN`/`CMD_SIRI_UP` arms),
   changed deliberately on 2026-07-31: R14G17 `AirPlayCommon.h:1366-1369` gives 0 n/a · 1 prewarm ·
   2 buttondown · 3 buttonup, and a device log records `Siri Action - 2` then `- 3` on a real
   press/release. 1/2 was off by one (1 = prewarm). The "confirmed working on-device" evidence covered
@@ -979,7 +979,7 @@ Comments and docs (no behaviour change):
 - `vehicle_config.rs` — `HidConfig` doc: Apple has 21 fields, we parse 2 and act on 1;
   `knob_support` marked as parsed-but-not-wired with the descriptor provenance.
 
-Artifacts: `scratchpad/packed_new/` was **stale** — `ocbmd` and `carplay-wireless` were
+Artifacts: `scratchpad/packed_new/` was **stale** — `ocbmd` and `btd` were
 byte-identical to the older `packed/` set and predated the 2026-07-29 CLOEXEC and `ssp_enabled()`
 work. All four repacked with UPX 3.96 from the current build.
 
@@ -1006,7 +1006,7 @@ work. All four repacked with UPX 3.96 from the current build.
 5. **`displays[].features` value** — we advertise `0x10` Touchpad with no touchpad device. Correcting
    it is a wire change; the current value is hardware-validated, so it needs a session.
 6. ~~**`knob_support`** is parsed and read nowhere; wiring it means adding the knob HID device (4).~~
-   **STALE — corrected 2026-08-10.** `knob_support` IS wired end to end: `airplayd/src/main.rs`
+   **STALE — corrected 2026-08-10.** `knob_support` IS wired end to end: `carplayd/src/main.rs`
    `events::set_knob_advertised(vc.knob_support())` publishes the uid-4 `hidDevices[]` entry, and the host
    has `HIDKnobView`/`HIDComplexKnobControlView` in `ControlsWindow.swift`. Item 4's descriptor
    port is also DONE and byte-verified: `info.rs::knob_descriptor()` is all 70 bytes of R14G17
@@ -1036,7 +1036,7 @@ verification and did not survive it:
 
 ### 10. Outcome of the fixes — one refuted on hardware
 
-Deployed and retested the same day (`airplayd ea865488f8b55acf1c463193652dc1f5`):
+Deployed and retested the same day (`carplayd ea865488f8b55acf1c463193652dc1f5`):
 
 **`limitedUI` — the 2026-07-30 "REFUTED" verdict was WRONG, and is corrected here (2026-09-08).**
 

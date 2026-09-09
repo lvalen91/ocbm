@@ -13,7 +13,7 @@
 # project already paid for once (2026-08-01: a plain `pkill -f` SIGKILLed the teardown subshell
 # before it reached wlan_off, orphaning hostapd, which kept beaconing). So the name of this
 # script and every verb MUST avoid the substrings the supervisor pattern-matches on:
-# airplayd, rx-connect, carplay-wireless, ocbmd, hostapd. Do not rename a verb without
+# carplayd, btd, ocbmd, hostapd. Do not rename a verb without
 # re-checking every pgrep/pkill pattern in session_supervisor.sh.
 #
 # THREE CONTRACT CLAUSES, each bought with a real failure:
@@ -34,7 +34,7 @@
 #      from inside a radio bring-up; that would bypass session_supervisor's escalation ladder
 #      and its persistent reboot budget. A backend that believes only a reboot can recover says
 #      so with an exit code and lets the layer that owns reboot policy decide. Likewise this
-#      script never signals airplayd / rx-connect / carplay-wireless / ocbmd: it cannot know
+#      script never signals carplayd / btd / ocbmd: it cannot know
 #      whether a live session is wired-owned, and the supervisor's conditional-reap logic
 #      (docs/wireless/00_WIRELESS_CARPLAY.md #1.4) exists exactly to make that distinction.
 #
@@ -300,7 +300,7 @@ wlan_driver_up() {
 # ---------------------------------------------------------------------------------------------
 # SCO (HFP call audio). Re-apply THIS UNIT'S OWN post-attach SCO setup.
 #
-# WHY A SEPARATE VERB. `carplay-wireless`'s `bt_bringup::bring_up` forces a DOWN->UP cycle on the
+# WHY A SEPARATE VERB. `btd`'s `bt_bringup::bring_up` forces a DOWN->UP cycle on the
 # controller (it is the only way the kernel re-sends its Set_Event_Mask, without which SSP pairing
 # silently never reaches the host). This controller is hciattach'd over UART, so it carries
 # HCI_QUIRK_RESET_ON_CLOSE and that `down` issues a real HCI_Reset -- discarding everything

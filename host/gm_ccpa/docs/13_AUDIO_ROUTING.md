@@ -401,5 +401,5 @@ if it fails. Media, Siri, call and nav routing are owner-confirmed on the truck 
 `carlink_native_personal/app/src/main/kotlin/com/carlink/audio/` (DualStreamAudioManager,
 AudioRingBuffer, MicrophoneCaptureManager) ·
 `ccpa_custom/crates/vendor/receiver/src/{session,forward,uplink,info,stream}.rs` ·
-`ccpa_custom/host/CarPlayHost/carlink_macOS/Audio/` · `ccpa_custom/docs/carplay/06_AV_PIPELINE.md` (audio formats), `docs/50`
+`ccpa_custom/host/MacHost/carlink_macOS/Audio/` · `ccpa_custom/docs/carplay/06_AV_PIPELINE.md` (audio formats), `docs/50`
 (ELD ASC) · this app's `av/{AacPlayer,VoiceRouter,MicUplink,CarPlayActivity}.kt`, `assets/info.bplist`.

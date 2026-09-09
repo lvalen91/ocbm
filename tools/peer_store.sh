@@ -2,11 +2,11 @@
 # peer_store.sh — the SANCTIONED, idle-gated mediator for the persistent pairing store
 # /etc/carplay_peers.bin. Task #25 / docs/carplay/02_SESSION_LIFECYCLE.md.
 #
-# The docs/carplay/02_SESSION_LIFECYCLE.md stall was triggered by deleting this file WHILE A SESSION WAS LIVE: airplayd reads the
+# The docs/carplay/02_SESSION_LIFECYCLE.md stall was triggered by deleting this file WHILE A SESSION WAS LIVE: carplayd reads the
 # store only once at startup, so a live `rm` silently diverges disk from the in-memory map and detonates
 # at an arbitrary supervisor-chosen restart. This tool refuses to mutate the store while a host is
 # present (present==1). Pairing changes therefore only ever happen at an idle boundary followed by a
-# clean airplayd (re)start — never live. Use --defer to queue a mutation the supervisor applies at the
+# clean carplayd (re)start — never live. Use --defer to queue a mutation the supervisor applies at the
 # next idle (host-GONE) edge.
 #
 #   peer_store.sh list                 # show the store (read-only, always allowed)

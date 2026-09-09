@@ -1,8 +1,8 @@
 //! Per-box accessory identity (#636). Fleet-fixed DEVICE_ID / pairing-identity / Ed25519-seed constants
 //! meant every CCPA box advertised the SAME identity, so multiple boxes collapsed into ONE iOS "car"
 //! record (adding a second box inherited the first's name/pairing). This derives a STABLE, PER-BOX
-//! identity from a hardware-unique value and hands it to airplayd + rx-connect via env, so each box is
-//! a distinct car while airplayd and rx-connect stay in lockstep (they read the same env).
+//! identity from a hardware-unique value and hands it to carplayd via env, so each box is
+//! a distinct car while carplayd and rx-connect stay in lockstep (they read the same env).
 
 use sha2::{Digest, Sha256};
 
@@ -44,7 +44,7 @@ fn digest(hwid: &str, tag: &str) -> [u8; 32] {
     d.finalize().into()
 }
 
-/// The derived per-box identity, in the exact string forms airplayd/rx-connect consume via env.
+/// The derived per-box identity, in the exact string forms carplayd consume via env.
 pub struct BoxIdentity {
     /// AirPlay device id / MAC string, e.g. "A2:B4:…" — a valid unicast locally-administered address.
     pub device_id: String,

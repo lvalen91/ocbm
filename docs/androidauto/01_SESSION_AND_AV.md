@@ -267,14 +267,14 @@ Two findings forced it, and the second is the one that made it urgent:
   channel and no new lane: this is the voice sink CarPlay already uses.
   See [`../carplay/01_OCBM_PROTOCOL.md`](../carplay/01_OCBM_PROTOCOL.md) for the marker.
 * **Uplink** (app → phone): the existing `CH_MIC` relay, unchanged. ocbmd already connects to
-  airplayd's mic seam `127.0.0.1:9112` whenever a host is subscribed; during an AA session airplayd
-  is not running, so `carplay-wireless` LISTENS there itself, speaks the identical protocol
+  carplayd's mic seam `127.0.0.1:9112` whenever a host is subscribed; during an AA session carplayd
+  is not running, so `btd` LISTENS there itself, speaks the identical protocol
   (`mic <len>\n<pcm>` in, `uplink on 8000 1` / `uplink off` out), and feeds what arrives straight
   into the SCO socket. One write per read, so the controller's own SCO clock paces the uplink.
 * **CVSD narrowband by default; mSBC wideband behind a lever — IMPLEMENTED 2026-09-04, UNTESTED ON
   HARDWARE.** Default is unchanged and byte-identical: `AT+BRSF=63` leaves HF bit 7 (codec
   negotiation — *not* bit 5, as this bullet used to say) clear, so the AG never sends `+BCS` and
-  always opens CVSD / `Voice: 0x0060`. With `CARPLAY_HFP_WBS=1`, `/tmp/hfp_wbs` or `/script/hfp_wbs`
+  always opens CVSD / `Voice: 0x0060`. With `BT_HFP_WBS=1`, `/tmp/hfp_wbs` or `/script/hfp_wbs`
   present, the SLC sends `AT+BRSF=191` and — only if the AG's `+BRSF` has bit 9 (this Pixel answers
   879) — `AT+BAC=1,2` between `AT+BRSF` and `AT+CIND=?`, where HFP 1.6 §4.2 requires it. The AG then
   drives everything with `+BCS: <id>`: we set the SCO listener's `BT_VOICE` to transparent (`0x0003`)
@@ -308,7 +308,7 @@ Two findings forced it, and the second is the one that made it urgent:
   spare. **Proven on device 2026-09-04:** the Pixel picks mSBC (`+BCS: 2`) and the CVSD fallback
   (`AT+BAC=1` → `+BCS: 1` → call OK) works. **Still open:** a transparent channel carrying
   intelligible audio both ways.
-  **App side landed the same day** (`host/CarPlayHost/carlink_macOS/Audio/MSBCCodec.swift` +
+  **App side landed the same day** (`host/MacHost/carlink_macOS/Audio/MSBCCodec.swift` +
   `MSBCFramer.swift`): a from-the-spec mSBC encoder/decoder — macOS has no SBC codec — plus the H2
   resync, cross-read reassembly and sequence-driven concealment, wired into the telephony lane and the
   `CT_UPLINK` codec byte. Harness-tested (round trip, CRC, framer, a decode check against an
@@ -319,7 +319,7 @@ Two findings forced it, and the second is the one that made it urgent:
   `+CIEV: <n>,<v>` through the `AT+CIND=?` names (`call`, `callsetup`, `callheld`) and `+BVRA`, and
   logs named transitions. `RING` alone cannot distinguish a missed call from an answered one.
 * **We never answer.** Answer/hang-up stay on the phone and the AA screen. The single exception is
-  the bench lever `CARPLAY_HFP_AUTOANSWER=1` (or `/tmp/hfp_autoanswer`), which sends `ATA` on the
+  the bench lever `BT_HFP_AUTOANSWER=1` (or `/tmp/hfp_autoanswer`), which sends `ATA` on the
   ringing edge so one person with one phone can exercise the audio path.
 * The controller's SCO setup, which `bt_bringup`'s DOWN→UP cycle resets away, is restored through
   the radio seam's new `sco_on` verb — see

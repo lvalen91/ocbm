@@ -144,27 +144,28 @@ EOF
   export CC_riscv32gc_unknown_linux_musl="$wrap"
 
   # The whole box-side set builds for riscv32 from the SHARED sources. ocbmd needed no changes at
-  # all; iap2d/airplayd needed only the shared `portable-atomic` fix (rv32 has no 64-bit atomics, so
+  # all; iap2d/carplayd needed only the shared `portable-atomic` fix (rv32 has no 64-bit atomics, so
   # core provides no AtomicU64/AtomicI64) — that fix lives in the vendored crates, NOT here, because
   # it is an arch fix rather than a C2Air one and armv7 must keep working. See c2air/README.md.
   #
-  # airplayd is built --no-default-features: `mic-uplink-eld` statically links a cross-built
+  # carplayd is built --no-default-features: `mic-uplink-eld` statically links a cross-built
   # libfdk-aac and needs FDK_AAC_PREFIX for the SAME ABI, and no riscv32 prefix exists yet. The cost
   # is the wireless AAC-ELD mic uplink.
-  # carplay-wireless + rx-connect are the WIRELESS CarPlay pair (BT bring-up/SSP/SDP/RFCOMM + WiFi
-  # handoff, and the mDNS advertiser). They build for riscv32 unchanged. Note that carplay-wireless
-  # needs CARPLAY_HCI_BACKEND=native at RUNTIME on this box — see `docs`.
+  # btd is the WIRELESS CarPlay BT half (bring-up/SSP/SDP/RFCOMM + WiFi handoff); the mDNS
+  # advertiser is a thread inside carplayd since 2026-09-08, so there is no separate binary for it.
+  # Both build for riscv32 unchanged. Note that btd needs BT_HCI_BACKEND=native at RUNTIME on this
+  # box — see `docs`.
   say "building the riscv32 set (compiles std from source — ~20 s warm, minutes cold)"
   local p
-  for p in ocbmd iap2d carplay-wireless rx-connect c2air-btattach; do
+  for p in ocbmd iap2d btd c2air-btattach; do
     rustup run nightly cargo build -p "$p" --release --target "$TARGET" \
       -Z build-std=std,panic_abort || die "build failed: $p"
   done
-  rustup run nightly cargo build -p airplayd --release --target "$TARGET" \
-    -Z build-std=std,panic_abort --no-default-features || die "build failed: airplayd"
+  rustup run nightly cargo build -p carplayd --release --target "$TARGET" \
+    -Z build-std=std,panic_abort --no-default-features || die "build failed: carplayd"
 
   local total=0 b sz
-  for p in ocbmd iap2d airplayd carplay-wireless rx-connect c2air-btattach; do
+  for p in ocbmd iap2d carplayd btd c2air-btattach; do
     b="$REPO/target/$TARGET/release/$p"
     [ -f "$b" ] || die "missing artifact $b"
     file "$b" | grep -q 'UCB RISC-V' || die "wrong arch for $p: $(file "$b")"
@@ -444,12 +445,12 @@ Until then /tmp staging + `trial` is the whole story, and it is enough to prove 
 
 BLOCKER FOR THE FULL STACK: rv32 HAS NO 64-BIT ATOMICS
 ======================================================
-ocbmd builds clean (deps: ocbm-proto + libc only). iap2d and airplayd do not:
+ocbmd builds clean (deps: ocbm-proto + libc only). iap2d and carplayd do not:
 `std::sync::atomic::AtomicU64` does not exist on riscv32 — the ISA has no 64-bit LR/SC — and it is
 used in 8 files / ~26 references:
 
     10  crates/vendor/receiver/src/session.rs      3  ccpa/mfid/src/main.rs
-     3  crates/vendor/receiver/src/levers.rs       3  ccpa/airplayd/src/main.rs
+     3  crates/vendor/receiver/src/levers.rs       3  ccpa/carplayd/src/main.rs
      2  crates/vendor/receiver/src/uplink.rs       2  crates/vendor/receiver/src/datastream.rs
      2  crates/vendor/iap2-core/src/metadata.rs    1  crates/vendor/receiver/src/relay.rs
 
@@ -459,7 +460,7 @@ lock-based AtomicU64 fallback on targets without native 64-bit atomics. It is a 
 where that is harmless, but receiver/session.rs uses 64-bit values for timestamps and sequence
 numbers, where truncation is a real bug.
 
-airplayd has a SECOND blocker beyond atomics: `mic-uplink-eld` statically links a cross-built
+carplayd has a SECOND blocker beyond atomics: `mic-uplink-eld` statically links a cross-built
 libfdk-aac and needs FDK_AAC_PREFIX for the SAME ABI. Only armv7 and android-x86_64 prefixes exist,
 so a riscv32 fdk-aac must be cross-built or the feature dropped (--no-default-features).
 EOF

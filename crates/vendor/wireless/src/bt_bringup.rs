@@ -81,7 +81,7 @@ fn run(args: &[&str]) -> std::io::Result<()> {
     let out = Command::new("hciconfig").args(args).output()?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
-        eprintln!("[carplay-wireless] hciconfig {args:?} failed: status={} stderr={stderr:?}", out.status);
+        eprintln!("[btd] hciconfig {args:?} failed: status={} stderr={stderr:?}", out.status);
         return Err(std::io::Error::other(format!(
             "hciconfig {args:?} failed: {}", out.status
         )));
@@ -96,7 +96,13 @@ fn run(args: &[&str]) -> std::io::Result<()> {
 /// respawn-protected, so this is enough. This is the ccpa_custom analog of the PoC masking
 /// `bluetoothd` via systemd.
 fn stop_conflicting_daemons() {
-    for d in ["hcid", "bluetoothDaemon", "sdpd"] {
+    // `hfpd` is in this list because `bluetoothDaemon` starts it: it is the vendor's HFP/HSP
+    // implementation, and left running it is a SECOND owner of the profile this stack drives
+    // itself (hfp_hf.rs) and of the single SCO listener (sco_audio.rs `owns_path`). Two AT clients
+    // on one AG, or two claimants on one SCO path, fail as garbled or missing call audio rather
+    // than as an error anyone can see. It was already in `bt_off.sh` and the installer kill list;
+    // omitting it here was the gap.
+    for d in ["hcid", "bluetoothDaemon", "sdpd", "hfpd"] {
         let _ = Command::new("killall").arg(d).status();
     }
 }
@@ -242,7 +248,7 @@ pub fn bring_up(hci_dev: &str, name: &str) -> std::io::Result<()> {
         crate::hci::write_eir(dev, &eir_bytes(name))?;
         crate::hci::set_scan(dev, crate::hci::SCAN_PAGE_AND_INQUIRY)?;
         restore_sco_setup();
-        eprintln!("[carplay-wireless] HCI bring-up OK dev={hci_dev} name={name}");
+        eprintln!("[btd] HCI bring-up OK dev={hci_dev} name={name}");
         return Ok(());
     }
 
@@ -259,7 +265,7 @@ pub fn bring_up(hci_dev: &str, name: &str) -> std::io::Result<()> {
     run(&[hci_dev, "inqdata", &eir_hex(name)])?;
     run(&[hci_dev, "piscan"])?;
     restore_sco_setup();
-    eprintln!("[carplay-wireless] HCI bring-up OK dev={hci_dev} name={name}");
+    eprintln!("[btd] HCI bring-up OK dev={hci_dev} name={name}");
     Ok(())
 }
 

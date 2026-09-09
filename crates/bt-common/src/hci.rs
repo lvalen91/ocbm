@@ -23,7 +23,7 @@
 //!
 //! # Backend selection
 //!
-//! Chosen by `CARPLAY_HCI_BACKEND`:
+//! Chosen by `BT_HCI_BACKEND`:
 //!   * `hciconfig` (**default**) — the original shell-out. Keeps the proven CCPA path byte-for-byte.
 //!   * `native` — this module. What the Raspberry Pi port uses.
 //!
@@ -80,7 +80,7 @@ struct SockaddrHci {
 pub fn native_selected() -> bool {
     static SEL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *SEL.get_or_init(|| {
-        let native = std::env::var("CARPLAY_HCI_BACKEND")
+        let native = crate::lever("BT_HCI_BACKEND", "CARPLAY_HCI_BACKEND")
             .map(|v| v.trim().eq_ignore_ascii_case("native"))
             .unwrap_or(false);
         if native {

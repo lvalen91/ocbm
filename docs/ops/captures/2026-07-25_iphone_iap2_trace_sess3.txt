@@ -44,12 +44,12 @@ Jul 25 12:39:24.729010 accessoryd[239] <Notice>: LOG; 2.825455; D987E8A0-05A7-45
 Jul 25 12:39:24.729167 accessoryd[239] <Debug>: Calling iAP2PacketParseBuffer, dataLength: 53, numBytesRemaining: 53, byteIndex: 0
 Jul 25 12:39:24.729181 accessoryd[239] <Debug>: iAP2PacketParseBuffer finished, numBytesRead: 53, numBytesRemaining: 0, byteIndex: 53
 Jul 25 12:39:24.729230 accessoryd[239] <Notice>: LOG; 2.826551; D987E8A0-05A7-454E-85EB-0CCAE96BFDDF_0F755C29-32E1-4E45-9939-4E4FF6BFE9E2; Bluetooth Classic; Acc; len=0x0035; control=0x40; seq=0x05; ack=0x38; session=0x01; hdrChk=0x00f4; payload(len=43 chk=0x00e2)=<40 40 00 2B 57 03 00 0E 00 01 63 63 70 61 2D 62 30 64 66 00 00 0D 00 02 31 32 33 34 35 36 37 38 00 00 05 00 03 02 00 05 00 04 24 >
-Jul 25 12:39:25.548446 airplayd(CoreUtils)[646] <Notice>: Fetching Session FeatureKey list for a vehicle: [
-Jul 25 12:39:25.548574 airplayd(CoreUtils)[646] <Notice>: [0xFB5C] FeatureKey list proposed:[
+Jul 25 12:39:25.548446 carplayd(CoreUtils)[646] <Notice>: Fetching Session FeatureKey list for a vehicle: [
+Jul 25 12:39:25.548574 carplayd(CoreUtils)[646] <Notice>: [0xFB5C] FeatureKey list proposed:[
 Jul 25 12:39:26.722674 accessoryd[239] <Notice>: LOG; 4.827567; D987E8A0-05A7-454E-85EB-0CCAE96BFDDF_0F755C29-32E1-4E45-9939-4E4FF6BFE9E2; Bluetooth Classic; iPod; len=0x0009; control=0x40; seq=0x38; ack=0x05; session=0x00; hdrChk=0x0021; payload(len=0 chk=0x0000)=<>
-Jul 25 12:39:27.592722 airplayd(CoreUtils)[646] <Notice>: [0xFB5C] FeatureKey list negotiated:[
-Jul 25 12:39:27.639505 airplayd(CoreUtils)[646] <Notice>: [0x949B] RCS 5E:F7:F7:A9:CB:CD-RCS-1 created (wds=1, sendMessageWithoutReply=1, sendMessageAsIs=1, clientUUID=A6AFBA97-9ED6-4EB7-B3A4-E6DDB682EFD3, clientTypeUUID=(-), streamSendSocketBufferSize=NULL, streamQoS=0, streamThreadPriority=0, messagingLogLevel=30).
-Jul 25 12:39:27.639513 airplayd(CoreUtils)[646] <Notice>: New RCS [0x949B] with ID [5E:F7:F7:A9:CB:CD-RCS-1] created for Endpoint [0xFB5C]
+Jul 25 12:39:27.592722 carplayd(CoreUtils)[646] <Notice>: [0xFB5C] FeatureKey list negotiated:[
+Jul 25 12:39:27.639505 carplayd(CoreUtils)[646] <Notice>: [0x949B] RCS 5E:F7:F7:A9:CB:CD-RCS-1 created (wds=1, sendMessageWithoutReply=1, sendMessageAsIs=1, clientUUID=A6AFBA97-9ED6-4EB7-B3A4-E6DDB682EFD3, clientTypeUUID=(-), streamSendSocketBufferSize=NULL, streamQoS=0, streamThreadPriority=0, messagingLogLevel=30).
+Jul 25 12:39:27.639513 carplayd(CoreUtils)[646] <Notice>: New RCS [0x949B] with ID [5E:F7:F7:A9:CB:CD-RCS-1] created for Endpoint [0xFB5C]
 Jul 25 12:39:27.821811 accessoryd[239] <Notice>: LOG; 5.846745; A1504110-C439-41A4-BC3E-4B93764C438E_CAEE15C3-6706-4C8A-B3C6-B1E6E93DBFAD; AirPlay; Event; ATTACH; iAP2 accessory attached!
 Jul 25 12:39:27.822744 accessoryd[239] <Debug>: Calling iAP2PacketParseBuffer, dataLength: 6, numBytesRemaining: 6, byteIndex: 0
 Jul 25 12:39:27.822937 accessoryd[239] <Debug>: iAP2PacketParseBuffer finished, numBytesRead: 6, numBytesRemaining: 0, byteIndex: 6

@@ -69,8 +69,8 @@ say "NDK: $NDK_ROOT (API $API)"
 
 # ---- build -------------------------------------------------------------------------------------
 
-say "building carplay-wireless"
-cargo build --release --target "$TARGET" -p carplay-wireless
+say "building btd"
+cargo build --release --target "$TARGET" -p btd
 
 # mic-uplink-eld needs a cross-built libfdk-aac. WITHOUT it iOS negotiates the AAC-ELD mic uplink
 # and gets SILENCE — Siri hears nothing and a call is one-way — while every log line still looks
@@ -103,31 +103,31 @@ if [ -f "$FDK_PREFIX/lib/libfdk-aac.a" ]; then
         say "no host fdk-aac — SKIPPING the ELD encoder tests (brew install fdk-aac to enable)"
     fi
 
-    say "building airplayd WITH mic-uplink-eld (fdk-aac: $FDK_PREFIX)"
-    cargo build --release --target "$TARGET" -p airplayd
-    if strings "target/$TARGET/release/airplayd" | grep -q 'mic-uplink-eld` not built'; then
-        echo "airplayd still reports mic-uplink-eld not built — the feature did NOT compile in" >&2
+    say "building carplayd WITH mic-uplink-eld (fdk-aac: $FDK_PREFIX)"
+    cargo build --release --target "$TARGET" -p carplayd
+    if strings "target/$TARGET/release/carplayd" | grep -q 'mic-uplink-eld` not built'; then
+        echo "carplayd still reports mic-uplink-eld not built — the feature did NOT compile in" >&2
         exit 1
     fi
 else
-    say "building airplayd WITHOUT mic-uplink-eld — no libfdk-aac at $FDK_PREFIX"
+    say "building carplayd WITHOUT mic-uplink-eld — no libfdk-aac at $FDK_PREFIX"
     say "  MIC UPLINK WILL BE SILENT. Build it with pi/tools/build_fdk_aac_arm64.sh"
-    cargo build --release --target "$TARGET" -p airplayd --no-default-features
+    cargo build --release --target "$TARGET" -p carplayd --no-default-features
 fi
 
 OUT="target/$TARGET/release"
-for b in carplay-wireless airplayd; do
+for b in btd carplayd; do
     file "$OUT/$b" | grep -q "ARM aarch64" || { echo "$b is not aarch64!" >&2; exit 1; }
 done
 say "built:"
-ls -l "$OUT/carplay-wireless" "$OUT/airplayd"
+ls -l "$OUT/btd" "$OUT/carplayd"
 
 [ "$PUSH" -eq 1 ] || { say "--no-push: stopping here"; exit 0; }
 
 # ---- push --------------------------------------------------------------------------------------
 
 say "pushing (rename-aside, so a live session is undisturbed)"
-for b in carplay-wireless airplayd; do
+for b in btd carplayd; do
     "${adb[@]}" push "$OUT/$b" "$TMP/$b.new" >/dev/null
     "${adb[@]}" shell "chmod 755 $TMP/$b.new"
     # Rename rather than overwrite: overwriting a running executable is ETXTBSY, renaming is fine
@@ -137,10 +137,10 @@ for b in carplay-wireless airplayd; do
 done
 
 say "verifying the new binaries carry the new code"
-"${adb[@]}" shell "strings $TMP/carplay-wireless | grep -c 'device management on'" | tr -d '\r' | \
-    { read -r n; [ "$n" -ge 1 ] && say "  carplay-wireless: control socket present" || say "  WARNING: control socket string NOT found"; }
-"${adb[@]}" shell "strings $TMP/airplayd | grep -c 'CARPLAY_CFG_FILE'" | tr -d '\r' | \
-    { read -r n; [ "$n" -ge 1 ] && say "  airplayd: CARPLAY_CFG_FILE override present" || say "  WARNING: CARPLAY_CFG_FILE NOT found"; }
+"${adb[@]}" shell "strings $TMP/btd | grep -c 'device management on'" | tr -d '\r' | \
+    { read -r n; [ "$n" -ge 1 ] && say "  btd: control socket present" || say "  WARNING: control socket string NOT found"; }
+"${adb[@]}" shell "strings $TMP/carplayd | grep -c 'CARPLAY_CFG_FILE'" | tr -d '\r' | \
+    { read -r n; [ "$n" -ge 1 ] && say "  carplayd: CARPLAY_CFG_FILE override present" || say "  WARNING: CARPLAY_CFG_FILE NOT found"; }
 
 cat <<EOF
 
@@ -151,5 +151,5 @@ To adopt them (this DROPS any live CarPlay session):
 
 Then confirm the new pieces:
   adb shell 'ss -ltn | grep 9115'                 # device-management control socket
-  adb shell 'grep -m1 "^\[airplayd\] pairing" $TMP/wireless.log'   # logs its config path
+  adb shell 'grep -m1 "^\[carplayd\] pairing" $TMP/wireless.log'   # logs its config path
 EOF

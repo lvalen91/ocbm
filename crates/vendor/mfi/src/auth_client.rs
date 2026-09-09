@@ -1,5 +1,5 @@
 //! MFi signer abstraction — the [`MfiSigner`] trait the MFi-SAP server calls to fetch the accessory
-//! certificate and sign challenge digests. The production impl is airplayd's `LocalMfiSigner` over the
+//! certificate and sign challenge digests. The production impl is carplayd's `LocalMfiSigner` over the
 //! local i2c MFi chip; tests use a mock. (audit Fix #19 removed the dead `MfiAuthClient` TCP client to
 //! the ncm_carplayd auth service — all production MFi is the local coprocessor.)
 

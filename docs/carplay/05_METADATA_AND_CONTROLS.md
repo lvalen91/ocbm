@@ -173,7 +173,7 @@ The Identify declaration bounds what those subscribes can return, and it did not
 
 ### 4. What arrived under that declaration, measured
 
-Box log `/tmp/airplayd_wl.log`, wireless session of 2026-07-25, before §5:
+Box log `/tmp/carplayd_wl.log`, wireless session of 2026-07-25, before §5:
 
 | Message | Count | Where it surfaces |
 |---|---|---|
@@ -296,14 +296,14 @@ reboot** with `echo extended > /tmp/carplay_metadata`.
 **MIGRATED 2026-08-10 (docs/carplay/04_CAPABILITIES_AND_CONFIG.md B3) — these levers are now the APP-LESS BENCH PATH ONLY.** Tier
 selection rides the app-pushed `metadata: {tier, skip}` section: the app emits it in every config
 push (shipping `proven`, byte-equivalent to the compiled floor) and each daemon arms it once per
-process before its Identify — iap2d at startup and again at SendIdentify, airplayd per control
+process before its Identify — iap2d at startup and again at SendIdentify, carplayd per control
 connection, via `iap2_core::config::Iap2Config::arm_metadata_policy` →
 `features::arm_pushed_policy` (first-arm-wins, so one link's declaration and its subscribes always
 come from one snapshot). Precedence is **pushed > env > file > compiled `proven`**, so with an app
 connected the re-arm instruction above has no effect — raise the tier in the app. The app-pushed
 path REFUSES `rx-only` outright, and the app re-pushes on every SUBSCRIBE, which retires the re-arm
 wart. **When a CHANGED tier takes effect differs per arm** (arming is first-arm-wins per process):
-airplayd is spawned per session, so the AirPlayTunnel arm picks up a new tier on the next session;
+carplayd is spawned per session, so the AirPlayTunnel arm picks up a new tier on the next session;
 iap2d is long-lived and survives app teardown, so the WIRED arm changes only when iap2d restarts —
 a phone unplug/replug (the gadget goes un-CONFIGURED, iap2d exits, `projection_up.sh` respawns it),
 NOT an app reconnect. A differing push against an already-armed process logs
@@ -527,7 +527,7 @@ NowPlaying, RouteGuidance, CallState and album artwork all operate over this cha
 > and the code that produced the 07-25 result was never committed in that form. Read §8 before
 > trusting any claim about what currently runs. [../ops/06_CORRECTIONS_LEDGER.md](../ops/06_CORRECTIONS_LEDGER.md) `R-45-1`.
 
-Evidence: `captures/2026-07-25_SUCCESS_airplayd_wl_handshake.txt`,
+Evidence: `captures/2026-07-25_SUCCESS_carplayd_wl_handshake.txt`,
 `captures/2026-07-25_SUCCESS_artwork_session2.txt`,
 `captures/2026-07-25_iphone_iap2_trace_sess{2,3}.txt`.
 
@@ -819,7 +819,7 @@ reaches the declared size. A short buffer is reported as `[art] INCOMPLETE id=�
 the image nor a Success reply is emitted: a truncated JPEG the phone believes was delivered is worse
 than a missing one.
 
-Verified 2026-07-25 with `airplayd c1db72bea1c8aa0756d9a44d7f33a612`: two transfers, 94,376 B and
+Verified 2026-07-25 with `carplayd c1db72bea1c8aa0756d9a44d7f33a612`: two transfers, 94,376 B and
 102,411 B, both byte-exact against their declared sizes, and visually confirmed in the host app.
 
 A superseded comment in `metadata.rs` claimed the phone would not offer artwork until the accessory
@@ -838,7 +838,7 @@ and no declaration was needed.
 - `receiver/src/iap_tunnel.rs` — link state machine, `link_up` gating, session-2 artwork routing.
 - `iap2-core/src/link.rs` — `SYN_PARAMS_ZERO_ACK_TUNNEL`, `SYN_PARAMS_TUNNEL_RETRANSMIT`.
 
-Deployed and verified: `airplayd c1db72bea1c8aa0756d9a44d7f33a612`.
+Deployed and verified: `carplayd c1db72bea1c8aa0756d9a44d7f33a612`.
 
 ---
 
@@ -878,7 +878,7 @@ Deployed and verified: `airplayd c1db72bea1c8aa0756d9a44d7f33a612`.
   Plug in an MFi accessory for ten seconds and grep for `LOG;`.
 - `grep " accessoryd"` without a word boundary also matches `audioaccessoryd` (AirPods proximity
   pairing). This produced one incorrect conclusion.
-- `/tmp` on the box is tmpfs. Copy `/tmp/airplayd_wl.log` off before any reboot.
+- `/tmp` on the box is tmpfs. Copy `/tmp/carplayd_wl.log` off before any reboot.
 - Artwork transfers occur after NowPlaying settles. Sampling the box log immediately after session start
   will show no session-2 activity even when it later succeeds.
 
@@ -975,7 +975,7 @@ must yield a response entry with a non-zero `streamID`; a type-110 with scid 0 m
 
 **Evidence.** `docs/ops/captures/2026-08-10_REGRESSION_datastream130_scid_rejected.txt` — 33 rejections in
 one session, the SYN → reject → resent-SYN causal sequence, and the before/after contrast against
-`2026-07-25_SUCCESS_airplayd_wl_handshake.txt:25,36` (same `scid=0`, accepted, `seed` salt solved).
+`2026-07-25_SUCCESS_carplayd_wl_handshake.txt:25,36` (same `scid=0`, accepted, `seed` salt solved).
 
 **⚠️ The fix is not hardware-validated, and the arm behind it has ZERO hardware hours.** At the last
 07-25 commit (`c1c5901`) `session.rs` had no 130 arm, no scid guard and no key probe, and
@@ -1004,7 +1004,7 @@ Claims are **[E]** evidenced (string / exported symbol / extracted const bytes /
 - **iAP2 spec crate** (machine-generated from the plugin): `~/Downloads/github/carplayd/rust/carplayd/crates/iap2-core/src/spec.rs` — message IDs + Apple's own param-ID names.
 - **Wire captures** (stock CCPA, byte-decoded): `ncm_carplayd/research/WIRED_METADATA_PLANE.md`, `WIRED_ALBUM_ART.md`, `WIRED_NAV_METADATA.md`.
 - **ios27 HID inventory:** `ncm_carplayd/research/ios27_sdk_inventory/11_hid_input.md`.
-- **Live code:** `ccpa/airplayd/src/main.rs`, `ccpa/iap2d/src/main.rs`; `ncm_carplayd/receiver_core/crates/receiver/src/{session.rs,events.rs,hid.rs,info.rs}`; sibling `carplayd/vendor/ncm_carplayd/.../src/{hid.rs,info.rs}`.
+- **Live code:** `ccpa/carplayd/src/main.rs`, `ccpa/iap2d/src/main.rs`; `ncm_carplayd/receiver_core/crates/receiver/src/{session.rs,events.rs,hid.rs,info.rs}`; sibling `carplayd/vendor/ncm_carplayd/.../src/{hid.rs,info.rs}`.
 
 ---
 
@@ -1016,7 +1016,7 @@ across both** [E — `WIRED_METADATA_PLANE.md` §"The load-bearing fact"; docs/c
 
 | Plane | Transport | Terminated today by | Carries |
 |---|---|---|---|
-| **AirPlay/IP session** | RTSP `/command` (binary-plist, encrypted "Events" channel) + A/V/HID streams | ccpa `airplayd` + ncm `receiver_core` (the "box"/Mac) | UI/session control: modes, ducking, night-mode, appearance, limitedUI, focus, view-area, vehicle-info, HID reports, Siri trigger. **NO now-playing/nav/call text.** |
+| **AirPlay/IP session** | RTSP `/command` (binary-plist, encrypted "Events" channel) + A/V/HID streams | ccpa `carplayd` + ncm `receiver_core` (the "box"/Mac) | UI/session control: modes, ducking, night-mode, appearance, limitedUI, focus, view-area, vehicle-info, HID reports, Siri trigger. **NO now-playing/nav/call text.** |
 | **iAP2 control session** | iAP2 TLV messages over the MFi link (msgId + nested param TLVs) | ccpa `iap2d` (MFi auth + Identify **+ the generated declare/subscribe metadata plane**, corrected 2026-08-16) | NowPlaying (artist/title/album/artwork), CallState, RouteGuidance/turn-by-turn, MediaLibrary, Location, Vehicle. |
 
 **Consequence for the Metadata window:** artist/title/nav/call text is an **iAP2** feed that the box's
@@ -1067,7 +1067,7 @@ else is display-only. [E — cited symbols]
 
 **Inbound `requestUI` / `suggestUI` are logging-only BY DESIGN (owner decision 2026-09-05) — do not
 "fix" this.** Measured in a wired, iPhone-only session on 2026-09-05: the phone sent `POST /command`
-`type='requestUI'` 17×, `type='suggestUI'` 20× and `type='modesChanged'` 345×. `airplayd` logs each via
+`type='requestUI'` 17×, `type='suggestUI'` 20× and `type='modesChanged'` 345×. `carplayd` logs each via
 the `[command] ← iPhone POST /command type=…` line above and forwards the raw plist over the `:9004`
 seam; `suggestUI` appears nowhere in the box's Rust source (`rg suggestUI crates ccpa` → nothing), and
 neither reaches the app as a structured event — the app's metadata stream that session carried only
@@ -1321,18 +1321,18 @@ transition. Two idioms [E — `HIDMediaButtonsFillReport` shape + sibling `hid.r
 
 - **Single-press / "tap"** (array-index devices: MediaButtons, TelephonyButtons): send the press report
   `[index]` **immediately followed by** the release report `[0]` (index 0 = the descriptor's unassigned
-  usage). This is exactly what ccpa does: the `INPUT_MEDIA_BTN` arm of airplayd's `handle_input_frame`
+  usage). This is exactly what ccpa does: the `INPUT_MEDIA_BTN` arm of carplayd's `handle_input_frame`
   (~`main.rs:907-918`) sends `hid::media_button_report(index)` then
   `hid::media_button_report(hid::media_button::NONE)`. `HIDMediaButtonsFillReport` implies release because
   the report is an Array whose value 0 = "no usage asserted" — you MUST send a following 0 or the button
-  stays logically held. [E — `hid::media_button_report`, airplayd `handle_input_frame`'s `INPUT_MEDIA_BTN`
+  stays logically held. [E — `hid::media_button_report`, carplayd `handle_input_frame`'s `INPUT_MEDIA_BTN`
   arm; anchors corrected 2026-08-16]
 - **Press-and-hold** (Var-bitfield devices: DPad, Knob buttons, SteeringWheel, TouchpadButtons, and touch):
   emit the **down** report (bit set / tip=1) on mouse-down and the **up** report (bit cleared / tip=0) on
-  mouse-up. Touch already does this: airplayd `handle_input_frame` (`main.rs:882`, touch arm ~`:1160-1197`)
+  mouse-up. Touch already does this: carplayd `handle_input_frame` (`main.rs:882`, touch arm ~`:1160-1197`)
   DOWN/MOVE → tip=1, UP → tip=0, and `hid::touch_report(0, …)` keeps coords but clears the contact bit on
   release. For a Controls window button, a click = down-then-up back to back (a tap); a held button = down
-  on press, up on release. [E — `hid::touch_report` / `hid::touch_report_multi`, airplayd
+  on press, up on release. [E — `hid::touch_report` / `hid::touch_report_multi`, carplayd
   `handle_input_frame`; the old `hid.rs:172-180` anchor and its `touch_report_len_and_release` test never
   existed in this file — corrected 2026-08-16]
 - **Knob rotation** is a **relative** i8 delta (`+CW/−CCW`), sent per detent; there is no "release" — send
@@ -1495,7 +1495,7 @@ undeclared accessory is [I] — untested — but the SDK send-path imposes no su
 #### VERDICT — is our buttondown/buttonup `requestSiri` correct + complete?
 **NO — one concrete bug: `siriAction` must be an INTEGER, not a string.** Our
 `events.rs:send_request_siri_action(action:&str)` sends `params:{siriAction:"buttondown"}` (a CFString);
-airplayd `main.rs:507‑508` wires `CMD_SIRI_DOWN→"buttondown"`, `CMD_SIRI_UP→"buttonup"`. The SDK ground truth
+carplayd `main.rs:507‑508` wires `CMD_SIRI_DOWN→"buttondown"`, `CMD_SIRI_UP→"buttonup"`. The SDK ground truth
 (`CFDictionarySetInt64` + simulator passing `rawValue:Int32`) is that the wire value is an **integer enum**:
 - press → `params:{siriAction: 2}` (buttondown) (corrected 2026-08-01: was `siriAction: 1`)
 - release → `params:{siriAction: 3}` (buttonup) (corrected 2026-08-01: was `siriAction: 2`)
@@ -1511,7 +1511,7 @@ Everything else in our approach is **correct/complete**:
 
 **Fix = change the value type from string to int** — **2 on press / 3 on release, NOT 1/2** (corrected
 2026-07-31: 1 is prewarm, so 1/2 was off by one; the values eight lines above are the right ones).
-**LANDED 2026-07-30** — `events.rs:1023` now takes `action: i64` and `airplayd/src/main.rs:985-986`
+**LANDED 2026-07-30** — `events.rs:1023` now takes `action: i64` and `carplayd/src/main.rs:985-986`
 passes 2 and 3. The bare `{type:"requestSiri"}` shape
 (`send_request_siri`, `CMD_REQUEST_SIRI`) is under-specified (no `siriAction`) and already validated-negative
 — keep only the integer down/up pair. The prior string-valued attempt was never SDK-conformant; the string
@@ -1539,7 +1539,7 @@ devices. The knob code (`knob_descriptor`/`HID_UID_KNOB`/`hid::knob`) is kept bu
 **⇒ SUPERSEDED 2026-08-16 — the descriptor set today is FIVE uids, two unconditional and three app-gated**
 (`info.rs` `build_info`'s `hids` vec, ~`:766-811`): touchscreen **uid 1** and media buttons **uid 2** always;
 **uid 3 D-Pad**, **uid 4 Knob** and **uid 5 Telephony** each emitted only when the app-pushed `hidConfig`
-arms the matching lever (`airplayd/src/main.rs:682/684/686` → `events::set_dpad_advertised` /
+arms the matching lever (`carplayd/src/main.rs:682/684/686` → `events::set_dpad_advertised` /
 `set_knob_advertised` / `set_telephony_advertised`). Host defaults: `dPadSupport` **true**, `knobSupport`
 and `telephonyButtonsSupport` **false**. The 2026-07-06 incident no longer gates advertising — a
 five-entry `hidDevices[]` has run on hardware. The original two-device conclusion follows.
@@ -1561,13 +1561,13 @@ until the incident is resolved — not a box-owned constant.
 |---|---|---|---|
 | Touch (tap / drag) | HID `hidSendReport` uid 1 | 5 B `[tip][X u16 LE][Y u16 LE]` abs; tip=1 down / 0 up | **YES** — `hid.rs` + ccpa `main.rs` ingest `:9110` |
 | Media buttons (play/pause/next/prev) | HID `hidSendReport` uid 2 | 1 B Consumer array index; tap = `[i]` then `[0]` | **YES** — ccpa `main.rs:459-467` |
-| Home / Back | HID uid 3 D-Pad, byte0 bit0 AC Home / bit1 AC Back | 2 B Var bitfield, press then all-zero release | **WIRED** — `AppDelegate.swift:746-749` → `airplayd:914-915`; D-Pad advertised by default. `requestUI` is NOT Home and is no longer sent by the host |
-| Siri | AirPlay `/command requestSiri` | `{siriAction:<int>}` — **2** on press, **3** on release (HOLD); timestamp/zone omitted | **WIRED** — `ControlsWindow.swift:102-127` → `airplayd:985-986` → `events.rs:1023`. Bare `{type:requestSiri}` retained deprecated, A/B only |
-| Map zoom | AirPlay `/command changeMapZoomLevel` | `{uuid:<ALT_DISPLAY_UUID>, zoomDirection: 0 in / 1 out}` | **WIRED (cluster only)** — `VideoChromeOverlay.swift:334-337` → `events.rs:704`; dropped unless the alt screen is advertised (`airplayd:1012-1029`) |
-| Knob (rotate / select / nudge) | HID **uid 4** | 4 B `[flags][nudge_x i8][nudge_y i8][rotation i8]`, press then all-zero release | **WIRED, arming-gated** — `ControlsWindow.swift:635-681` → `airplayd:936-948`; needs app-pushed `hidConfig.knobSupport` (default off) |
-| D-Pad | HID **uid 3** (Apple's `HIDDPadCreateDescriptor`) | 2 B Var bitfield (Home/Back/Select/Up/Down/Left/Right) | **WIRED** — `AppDelegate.swift:750-754` → `airplayd:913-927`; advertised by default (`dPadSupport` defaults true) |
+| Home / Back | HID uid 3 D-Pad, byte0 bit0 AC Home / bit1 AC Back | 2 B Var bitfield, press then all-zero release | **WIRED** — `AppDelegate.swift:746-749` → `carplayd:914-915`; D-Pad advertised by default. `requestUI` is NOT Home and is no longer sent by the host |
+| Siri | AirPlay `/command requestSiri` | `{siriAction:<int>}` — **2** on press, **3** on release (HOLD); timestamp/zone omitted | **WIRED** — `ControlsWindow.swift:102-127` → `carplayd:985-986` → `events.rs:1023`. Bare `{type:requestSiri}` retained deprecated, A/B only |
+| Map zoom | AirPlay `/command changeMapZoomLevel` | `{uuid:<ALT_DISPLAY_UUID>, zoomDirection: 0 in / 1 out}` | **WIRED (cluster only)** — `VideoChromeOverlay.swift:334-337` → `events.rs:704`; dropped unless the alt screen is advertised (`carplayd:1012-1029`) |
+| Knob (rotate / select / nudge) | HID **uid 4** | 4 B `[flags][nudge_x i8][nudge_y i8][rotation i8]`, press then all-zero release | **WIRED, arming-gated** — `ControlsWindow.swift:635-681` → `carplayd:936-948`; needs app-pushed `hidConfig.knobSupport` (default off) |
+| D-Pad | HID **uid 3** (Apple's `HIDDPadCreateDescriptor`) | 2 B Var bitfield (Home/Back/Select/Up/Down/Left/Right) | **WIRED** — `AppDelegate.swift:750-754` → `carplayd:913-927`; advertised by default (`dPadSupport` defaults true) |
 | Steering wheel / touchpad | HID (2-3 B Var bitfields) | — | **ABSENT** — no descriptor entry, no OCBM opcode; `steeringWheelSupport` is **parse-only in our code** — nothing consumes it (`vehicle_config.rs`, under the "Nothing consumes these yet, deliberately" block). *(Corrected 2026-08-16 — this said it "only sets the display features bit 0x20", which is true of Apple's `HIDConfig.displayFeatures` but false of ours: the word we emit is the constant `if levers::dpad() { 0x1A } else { 0x0A }` in `info.rs`, so `dPadSupport` is its only input.)* |
-| Telephony (answer/end/flash/mute/DTMF) | HID **uid 5** + iAP2 `0x4155` for state | 1 B Telephony array index, then `[0]` | **WIRED, arming-gated** — `ControlsWindow.swift:733-771` → `airplayd:952-961`; needs pushed `telephonyButtonsSupport` (default off). **Call state IS declared + subscribed** at the default *proven* tier (`features.rs:440-452`, `iap2d/src/main.rs:604-613`) |
+| Telephony (answer/end/flash/mute/DTMF) | HID **uid 5** + iAP2 `0x4155` for state | 1 B Telephony array index, then `[0]` | **WIRED, arming-gated** — `ControlsWindow.swift:733-771` → `carplayd:952-961`; needs pushed `telephonyButtonsSupport` (default off). **Call state IS declared + subscribed** at the default *proven* tier (`features.rs:440-452`, `iap2d/src/main.rs:604-613`) |
 | Appearance / limitedUI outbound | AirPlay `/command` | `uiAppearanceUpdate` / `mapAppearanceUpdate` / `setNightMode` / `setLimitedUI` | **WIRED** — `ControlsWindow.swift:181-259` → `events.rs:899/937/945/978`; alt-display appearance is alt-screen gated |
 | Focus / haptic outbound | AirPlay `/command` | `changeModes` / `performHapticFeedback` | **NO host-driven** — take-screen `changeModes` fires automatically at RECORD (`events.rs:732`, `session.rs:1802`); no outbound haptic exists (inbound decode label only) |
 
@@ -1618,7 +1618,7 @@ until the incident is resolved — not a box-owned constant.
   it is a logging helper, not a wire parser, so the string form was never accepted on any iOS.)
   `siriTriggerTimestamp`/`siriTriggerZone` are deliberately **omitted** — the plain-button path passes NULL
   for both and the zone is written only when `siriAction == 4`. Live path: `events.rs:1023`,
-  `airplayd/src/main.rs:985-986`, host `ControlsWindow.swift:102-127` / `AppDelegate.swift:755-767`.
+  `carplayd/src/main.rs:985-986`, host `ControlsWindow.swift:102-127` / `AppDelegate.swift:755-767`.
   **Still not device-proven as a trigger:** the 2026-08-10 hardware confirmation covers Siri *audio* (mic
   uplink), not that our `/command` initiated the session.
 - **~~Do NOT advertise a third `hidDevices[]` entry~~ — RETIRED 2026-08-16.** uid 3/4/5 all ship under

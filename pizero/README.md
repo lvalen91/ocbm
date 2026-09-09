@@ -58,7 +58,7 @@ Four of those are real work; two are free. Taking them in order of how much they
    | Dual-transport arbitration (`docs/wireless/00_WIRELESS_CARPLAY.md` §3 design intent) | 2 | no |
 
    **Wireless-only is therefore the role this board can actually fill**, and it is not a degenerate
-   one — it is the transport the whole `crates/vendor/wireless` + `airplayd` stack was built for.
+   one — it is the transport the whole `crates/vendor/wireless` + `carplayd` stack was built for.
 
    The *endpoint* budget on that one controller is not a second constraint, though it looks like one.
    `dwc2 3f980000.usb: EPs: 8, dedicated fifos, 4080 entries in SPRAM` reads like a pool of eight,

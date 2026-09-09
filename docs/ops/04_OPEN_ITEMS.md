@@ -48,7 +48,7 @@ canonical control, box-autonomous page-on-boot) are **not** open items and are n
 
 ---
 
-### Box daemons — `ocbmd` / `airplayd` / `iap2d` / the supervisor
+### Box daemons — `ocbmd` / `carplayd` / `iap2d` / the supervisor
 
 > **Also see [../ops/04_OPEN_ITEMS.md](../ops/04_OPEN_ITEMS.md) Phase 4**
 > for the ten catalogued code defects (the CT_HELLO `out_console` resync, `custom_init.sh`'s
@@ -120,7 +120,7 @@ canonical control, box-autonomous page-on-boot) are **not** open items and are n
   `grep -n "fn box_info_json" -A45 ccpa/ocbmd/src/main.rs` → neither counter is in the emitted JSON.
 
 - **`wireless_down` orphans the bring-up's forked children.** Both teardown branches `pkill` only
-  `carplay-wireless`, `airplayd` and `rx-connect`; `wlan_on.sh`, `bt_on.sh` and
+  `btd`, `carplayd` and `rx-connect`; `wlan_on.sh`, `bt_on.sh` and
   `attach_bluetooth.sh` survive. The obvious `pkill` fix is the IW416 wedge the file warns about
   elsewhere, so a lock is probably the right shape.
   Source: `../ops/04_OPEN_ITEMS.md` §5 (#28). Verified open 2026-08-16:
@@ -149,7 +149,7 @@ canonical control, box-autonomous page-on-boot) are **not** open items and are n
   `grep -n "session_started" crates/vendor/receiver/src/events.rs` → checked only inside
   `modes_changed_tunnel_nudge()`; `pub fn send_command` has no check.
 
-- **The `airplayd → :9001 → ocbmd` forward path is still local TCP loopback.** The copy elimination
+- **The `carplayd → :9001 → ocbmd` forward path is still local TCP loopback.** The copy elimination
   (unix socket / `splice`) that the 4K@60 track lists as "next" has not started.
   Source: `docs/host/00_MACOS_HOST_APP.md` §"4K@60 optimization track" item 4. Verified open 2026-08-16:
   `grep -n "TcpListener\|UnixListener" ccpa/ocbmd/src/main.rs` → all five A/V seams are
@@ -331,8 +331,8 @@ canonical control, box-autonomous page-on-boot) are **not** open items and are n
   `grep -rn "0xFFFB\|MSG_LOCATION_INFORMATION" --include="*.rs" crates ccpa` → the spec table and
   `crates/vendor/metadata/src/location.rs` (a parser); no emitter.
 
-- **App-owned CarPlay pairing peer store.** Today `airplayd`'s `DiskPeers`
-  (`ccpa/airplayd/src/main.rs` ~:342-439) persists `id → Ed25519 LTPK` on box flash, and
+- **App-owned CarPlay pairing peer store.** Today `carplayd`'s `DiskPeers`
+  (`ccpa/carplayd/src/main.rs` ~:342-439) persists `id → Ed25519 LTPK` on box flash, and
   `PeerSaver::save_peer` (`crates/vendor/pairing/src/setup.rs` ~:29-30) is infallible because
   pairing is already cryptographically complete when it runs. Owner decision (2026-09-02): the
   host app owns the store, per app install (macOS `UserDefaults`-class storage; Android app
@@ -340,10 +340,10 @@ canonical control, box-autonomous page-on-boot) are **not** open items and are n
   fallback, so an app-less bench boot re-pairs; the app supports removing a peer, and the box
   refuses pair-verify for any peer not in the last pushed list. Mechanism: a `peers:` list in the
   `CT_SUBSCRIBE` YAML the app already re-pushes on every SUBSCRIBE (`crates/ocbm-proto/src/lib.rs`
-  `CT_SUBSCRIBE`), staged by `ocbmd` next to the existing config file and read by airplayd's
+  `CT_SUBSCRIBE`), staged by `ocbmd` next to the existing config file and read by carplayd's
   `load_device_config`; a new box→host `SEV_PEER_ADDED{id, ltpk}` on `CT_SESSION_EVENT` when
   pair-setup completes; `DiskPeers` → `MemPeers` (trait shape unchanged). Touch list: `ocbm-proto`,
-  `ocbmd`, `airplayd`, `host/CarPlayHost` (VehicleConfig/Settings push + event handling),
+  `ocbmd`, `carplayd`, `host/MacHost` (VehicleConfig/Settings push + event handling),
   `host/CarlinkAndroid`. Status: planned, not started.
 
 ---
@@ -401,7 +401,7 @@ canonical control, box-autonomous page-on-boot) are **not** open items and are n
   `faceTimeVideoEnabled`. The raw-record fallback renders the payload, so this is a pane-mapping gap,
   not data loss.
   Source: `docs/ops/05_AUDITS.md` §1 ("Live gap"). Verified open 2026-08-16:
-  `grep -rn "cellularSupported\|faceTimeAudioEnabled\|initiateCallAvailable" host/CarPlayHost/` →
+  `grep -rn "cellularSupported\|faceTimeAudioEnabled\|initiateCallAvailable" host/MacHost/` →
   zero hits; the same grep over `--include="*.rs"` hits `iap2-core/src/metadata.rs`.
 
 - **W9 — the accessory BT MAC in the byte-pinned Identify is a hardcoded constant.** Param 17 is
@@ -444,11 +444,11 @@ canonical control, box-autonomous page-on-boot) are **not** open items and are n
   `events.rs::handle_inbound_event`'s RTSP-body path; no equivalent in `datastream.rs`.
 
 - **`/tmp/carplay_transport` is still claimed at `ensure_av_layer` entry rather than in the
-  `airplayd_up` success branch.** The flag is written before the spawn is confirmed, with a rollback
+  `carplayd_up` success branch.** The flag is written before the spawn is confirmed, with a rollback
   on failure instead.
   Source: `docs/ops/05_AUDITS.md` §"2026-08-01" Finding B. Verified open 2026-08-16:
   `grep -n "carplay_transport" crates/vendor/wireless/src/av.rs` → written at the top of
-  `ensure_av_layer`, rolled back only in the `else` of `if airplayd_up`.
+  `ensure_av_layer`, rolled back only in the `else` of `if carplayd_up`.
 
 - **An absent `clientTypeUUID` is treated as iAP, diverging from Apple's teardown path.** Apple's
   `_DataStreamSessionSetup` sends an absent UUID to `-6735` teardown identically to an unrecognised
@@ -461,7 +461,7 @@ canonical control, box-autonomous page-on-boot) are **not** open items and are n
   still env-gated box-only SETUP tokens with no config key, and the host's phase-1 authoring must
   UNION them back in from the box's own response or silently kill the wireless iAP2 tunnel.
   Source: `docs/ops/04_OPEN_ITEMS.md` §Building blocks step 8 (workstream C/D debt). Verified open 2026-08-16:
-  `grep -n "hostAuthorableFeatures" -A4 host/CarPlayHost/carlink_macOS/OCBM/AirPlaySetupSession.swift`
+  `grep -n "hostAuthorableFeatures" -A4 host/MacHost/carlink_macOS/OCBM/AirPlaySetupSession.swift`
   → six tokens, neither of the two present.
 
 - **Pair-RESUME is absent.** Only pair-setup and pair-verify exist; there is no persisted-session-id
@@ -507,8 +507,8 @@ canonical control, box-autonomous page-on-boot) are **not** open items and are n
   `radio_detect.sh`.
 
 - **"One box, one name" is not achieved — the Rust side never reads `/etc/carplay_ident` and still
-  hardcodes `wlan0`.** `carplay-wireless`, `bt_on.sh` and `ocbmd`'s `bt_name_from()` each derive a
-  name independently, and because the supervisor execs `carplay-wireless` after `radio_hal.sh bt_on`
+  hardcodes `wlan0`.** `btd`, `bt_on.sh` and `ocbmd`'s `bt_name_from()` each derive a
+  name independently, and because the supervisor execs `btd` after `radio_hal.sh bt_on`
   the controller advertises `CarLink-<suffix>` rather than the seam's `ccpa-<4hex>`. The suffixes can
   diverge too, not just the prefixes.
   Source: `docs/wireless/01_BT_AND_RADIO.md` §6c/§7, `R-57-1`. Verified open 2026-08-16:
@@ -580,7 +580,7 @@ canonical control, box-autonomous page-on-boot) are **not** open items and are n
   it with `{}`. **Its stated cause in docs/host/00_MACOS_HOST_APP.md is WRONG:** the box ships Apple's two-finger descriptor
   with a unit test against Apple's fill order, so this is host-side work, not box work.
   Source: `docs/carplay/06_AV_PIPELINE.md` §5 Phase 2, `docs/host/00_MACOS_HOST_APP.md` Tier 1 #5, `R-15-1`, `R-17-1`. Verified open 2026-08-16:
-  `grep -rn "didMultiTouchTwo" host/CarPlayHost/carlink_macOS/App/*.swift` → nine emit sites in
+  `grep -rn "didMultiTouchTwo" host/MacHost/carlink_macOS/App/*.swift` → nine emit sites in
   `CarPlayView.swift`, one implementation in `AppDelegate.swift` with an empty body.
 
 - **The macOS app pushes no `hidConfig.touchScreenSupportsMultiTouch`, so the box's two-finger
@@ -589,20 +589,20 @@ canonical control, box-autonomous page-on-boot) are **not** open items and are n
   The Android host does emit the key.
   Source: `docs/carplay/06_AV_PIPELINE.md` §2. Verified open 2026-08-16:
   `grep -rn "touchScreenSupportsMultiTouch" --include="*.swift" --include="*.kt" host/` → the two
-  Android emitters and zero hits anywhere under `host/CarPlayHost/`.
+  Android emitters and zero hits anywhere under `host/MacHost/`.
 
 - **Touch aspect is still derived from the advertised/persisted resolution, not from the decoded
   frame.** `CarPlayView.videoAspect` — which defines `videoRect` and therefore every normalized touch
   coordinate — is seeded and updated only from `VehicleConfigModel.persistedMainResolution()`.
   Source: `docs/host/00_MACOS_HOST_APP.md` Tier 2 #8. Verified open 2026-08-16:
-  `grep -rn "updateVideoAspect" host/CarPlayHost/carlink_macOS --include="*.swift"` → one caller,
+  `grep -rn "updateVideoAspect" host/MacHost/carlink_macOS --include="*.swift"` → one caller,
   `MainWindowController.applyResolution`, itself driven by `persistedMainResolution()`.
 
 - **The USB read loop calls `ClearPipeStallBothEnds` on every transaction timeout and has no retry
   backoff.** The audit asked for the clear only on a real `kIOReturnPipeStall`. The other half of the
   item — an idle timeout wrongly counting toward the 5-error disconnect streak — is fixed.
   Source: `docs/host/00_MACOS_HOST_APP.md` Tier 2 #10, `R-17-1`. Verified open 2026-08-16:
-  `grep -n "ClearPipeStallBothEnds\|kIOReturnPipeStall" host/CarPlayHost/carlink_macOS/USB/USBTransport.swift`
+  `grep -n "ClearPipeStallBothEnds\|kIOReturnPipeStall" host/MacHost/carlink_macOS/USB/USBTransport.swift`
   → three unconditional clears (including inside the `kr == Self.kUSBTransactionTimeout` arm) and zero
   `kIOReturnPipeStall` discrimination; both arms `continue` with no sleep.
 
@@ -610,32 +610,32 @@ canonical control, box-autonomous page-on-boot) are **not** open items and are n
   no `reset()` at all, so a resubscribe cannot re-lockstep the ChaCha counter; the retry rides the
   1 Hz heartbeat and is bounded only by session lifetime.
   Source: `docs/carplay/02_SESSION_LIFECYCLE.md` §"Supporting layers" (P1 residue), `R-11-1`. Verified open 2026-08-16:
-  `grep -n "func reset" host/CarPlayHost/carlink_macOS/OCBM/OCBMAVDecrypt.swift` → zero hits.
+  `grep -n "func reset" host/MacHost/carlink_macOS/OCBM/OCBMAVDecrypt.swift` → zero hits.
 
 - **The session log still carries no build stamp — only `Version: 1.0`.** docs/ops/05_AUDITS.md's own conclusion
   called this "the cheapest fix here" after three sessions were lost to a stale binary; it never
   landed.
   Source: `docs/ops/05_AUDITS.md` §1. Verified open 2026-08-16:
-  `grep -rn "CFBundleVersion\|buildStamp\|buildDate" host/CarPlayHost/carlink_macOS/App/` → nothing;
+  `grep -rn "CFBundleVersion\|buildStamp\|buildDate" host/MacHost/carlink_macOS/App/` → nothing;
   `FileLogger.preamble()` prints `CFBundleShortVersionString` only.
 
 - **`CT_RADIO` (0x16) is complete box-side but has no app-side caller.** Until the Settings-toggle
   wiring lands, the app's only radio controls are quit, `wireless: false` at next connect, and the
   automatic off-on-app-loss.
   Source: `docs/carplay/04_CAPABILITIES_AND_CONFIG.md` §3. Verified open 2026-08-16:
-  `grep -rn "sendRadio" host/CarPlayHost host/CarlinkAndroid tools` → exactly one hit, the definition
+  `grep -rn "sendRadio" host/MacHost host/CarlinkAndroid tools` → exactly one hit, the definition
   in `OCBMClient.swift`.
 
 - **`FileLogger` has no in-session size or rotation cap.** Only an age-based sweep exists (delete
   files older than 14 days at startup), so one long session can grow a file unbounded.
   Source: `docs/ops/05_AUDITS.md` §"FIXES APPLIED — DEFERRED". Verified open 2026-08-16:
-  `grep -n "prune\|fileSize\|truncate\|maxFile" host/CarPlayHost/carlink_macOS/App/FileLogger.swift`
+  `grep -n "prune\|fileSize\|truncate\|maxFile" host/MacHost/carlink_macOS/App/FileLogger.swift`
   → only `pruneOldLogs()`.
 
 - **Metadata seam deltas hop to main on a fresh unstructured `Task` per chunk.** Two chunks completing
   concurrently have no ordering guarantee, so deltas can apply out of order.
   Source: `docs/ops/05_AUDITS.md` §LOW. Verified open 2026-08-16:
-  `grep -n "Task { @MainActor" host/CarPlayHost/carlink_macOS/App/MetadataWindow.swift` → one
+  `grep -n "Task { @MainActor" host/MacHost/carlink_macOS/App/MetadataWindow.swift` → one
   unstructured task, spawned per parse pass after `seamLock.unlock()` with no ordering primitive.
 
 - **Media-port coordination — the app still cannot choose the media ports.** The box pre-binds and its
@@ -644,7 +644,7 @@ canonical control, box-autonomous page-on-boot) are **not** open items and are n
   "Open design items".
   Source: `docs/ops/04_OPEN_ITEMS.md` §"Open design items", `docs/carplay/01_OCBM_PROTOCOL.md` §"RTSP channel". Verified open 2026-08-16:
   `grep -n "Pre-bind + oracle" -A4 crates/vendor/receiver/src/relay.rs`;
-  `grep -n "copyPort" host/CarPlayHost/carlink_macOS/OCBM/AirPlaySetupSession.swift`.
+  `grep -n "copyPort" host/MacHost/carlink_macOS/OCBM/AirPlaySetupSession.swift`.
 
 - **No NACK retransmit.** Recovery is keyframe-request-on-seq-gap only; there is no bidirectional NACK
   channel on either end.
@@ -655,20 +655,20 @@ canonical control, box-autonomous page-on-boot) are **not** open items and are n
 - **Decoder color attachments (709 / 601-4 / sRGB) are not set.** Color is left to VideoToolbox
   inference; the only attachment touched is the per-sample NotSync flag.
   Source: `docs/host/00_MACOS_HOST_APP.md` Tier 4 ("cheap insurance"). Verified open 2026-08-16:
-  `grep -rn "ColorPrimaries\|TransferFunction\|YCbCrMatrix" host/CarPlayHost/carlink_macOS --include="*.swift"`
+  `grep -rn "ColorPrimaries\|TransferFunction\|YCbCrMatrix" host/MacHost/carlink_macOS --include="*.swift"`
   → zero hits.
 
 - **No rate-matched ring buffer for long-session A/V clock drift; the behaviour on drift is to DROP.**
   The audit said "add one if it appears"; the audio player's own comment names clock drift as the
   reason it caps and drops.
   Source: `docs/host/00_MACOS_HOST_APP.md` Tier 4 (conditional). Verified open 2026-08-16:
-  `grep -rni "drift\|ringBuffer\|rateMatch" host/CarPlayHost/carlink_macOS --include="*.swift"` → one
+  `grep -rni "drift\|ringBuffer\|rateMatch" host/MacHost/carlink_macOS --include="*.swift"` → one
   hit, `AudioPlayer.swift`'s drop comment.
 
 - **`OCBMAudioStreamFormat.bits` is still a write-only field.** Parsed from `SEAM_FORMAT` and stored,
   never read. (Its siblings `videoCounter`/`altVideoCounter` from the same audit bullet are gone.)
   Source: `docs/ops/05_AUDITS.md` §"FIXES APPLIED — DEFERRED". Verified open 2026-08-16:
-  `grep -rn "\.bits\b" host/CarPlayHost/` → no hits outside markdown.
+  `grep -rn "\.bits\b" host/MacHost/` → no hits outside markdown.
 
 - **The OCBM frame header's `seq` (offset 12, u32) is written by every endpoint and read by none.**
   Distinct from the `SEAM_MAGIC` per-video-frame `u64` seq, which *is* read. Still the dead-field
@@ -681,7 +681,7 @@ canonical control, box-autonomous page-on-boot) are **not** open items and are n
   `OCBMReassembler` surfaces `flags` on `OCBMFrame` and validates nothing; no consumer reads the
   field, so a fragmented frame would be delivered silently truncated.
   Source: `docs/host/00_MACOS_HOST_APP.md` Tier 4 OCBM cleanup. Verified open 2026-08-16:
-  `grep -rn "\.flags" host/CarPlayHost/carlink_macOS --include="*.swift"` → zero consumers.
+  `grep -rn "\.flags" host/MacHost/carlink_macOS --include="*.swift"` → zero consumers.
 
 ---
 
@@ -697,15 +697,15 @@ canonical control, box-autonomous page-on-boot) are **not** open items and are n
   highest-value open item on workstream C. A built, mutation-verified proof of concept is preserved
   in `scratchpad/`, but its golden string is stale.
   Source: `docs/carplay/04_CAPABILITIES_AND_CONFIG.md` §3 row C. Verified open 2026-08-16:
-  `grep -n "VehicleConfig.swift\|SettingsWindow" host/CarPlayHost/tests/run_tests.sh` → one hit;
-  `grep -n "iapConfigYAML" host/CarPlayHost/carlink_macOS/App/SettingsWindow.swift` → the emitter is
+  `grep -n "VehicleConfig.swift\|SettingsWindow" host/MacHost/tests/run_tests.sh` → one hit;
+  `grep -n "iapConfigYAML" host/MacHost/carlink_macOS/App/SettingsWindow.swift` → the emitter is
   in the uncompiled file.
 
 - **`EMITTED_KEYS` is an allowlist, not a contract — 36 keys pinned against 76 the host reads.**
   Renaming any of the 40 unpinned keys blanks a pane with the suite green.
   Source: `docs/ops/05_AUDITS.md` §6. Verified open 2026-08-16: the `const EMITTED_KEYS` table in
   `crates/vendor/iap2-core/src/metadata.rs` has **36** `("kind", "key")` rows, against
-  `grep -oE '(str|int|dbl|num|bool)\("[a-zA-Z]+"\)' host/CarPlayHost/carlink_macOS/App/MetadataWindow.swift | grep -oE '"[a-zA-Z]+"' | sort -u | wc -l`
+  `grep -oE '(str|int|dbl|num|bool)\("[a-zA-Z]+"\)' host/MacHost/carlink_macOS/App/MetadataWindow.swift | grep -oE '"[a-zA-Z]+"' | sort -u | wc -l`
   → **76**.
 
 - **`host_app_reads_every_emitted_key` still scans the whole Swift file unscoped.** The key half of
@@ -733,7 +733,7 @@ canonical control, box-autonomous page-on-boot) are **not** open items and are n
   planned OCBM suite shipped; the KAT that would pin the Swift decrypt against the Rust encrypt
   exists on neither side.
   Source: `docs/ops/05_AUDITS.md` §"Desk-side prep". Verified open 2026-08-16:
-  `grep -rn -i "known_answer\|chacha" host/CarPlayHost/tests/main.swift` → no matches.
+  `grep -rn -i "known_answer\|chacha" host/MacHost/tests/main.swift` → no matches.
 
 - **`ocbmd` is still built at `opt-level = "z"`; the "measure first" decision was never taken.**
   `chacha20`, `poly1305`, `chacha20poly1305`, `ocbm-proto` and `receiver` are speed-tuned; the daemon
@@ -753,10 +753,10 @@ canonical control, box-autonomous page-on-boot) are **not** open items and are n
   `grep -rn "diff a live Simulator" docs/*.md` → only docs/carplay/03_SDK_GROUND_TRUTH.md's own lines; no follow-up doc or capture.
 
 - **`CARPLAY_EVENTS_LOG` is set by no spawn site, so docs/ops/02_TESTING.md's byte-level discriminator greps read 0
-  on a healthy box.** Reviving them means setting it in the `airplayd` spawn env first.
+  on a healthy box.** Reviving them means setting it in the `carplayd` spawn env first.
   Source: `docs/ops/02_TESTING.md` §"The discriminator", `R-46-1`. Verified open 2026-08-16:
   `grep -rn "CARPLAY_EVENTS_LOG" --include="*.rs" --include="*.sh" . | grep -v docs/` → four hits,
-  all readers; `grep -n "airplayd" tools/session_supervisor.sh` → the spawn env is
+  all readers; `grep -n "carplayd" tools/session_supervisor.sh` → the spawn env is
   `OCBM_FWD_ENC=1 $CM $LT $MB`.
 
 - **`tools/ocbm_boot.sh` is 76 lines behind `ccpa/rootfs/script/ocbm_boot.sh`.** The rootfs copy
@@ -811,7 +811,7 @@ Recorded so a future session does not mistake an owner decision for unfinished w
   after measurement (2026-09-04).** iOS refuses to hold a box-initiated numeric-comparison request
   open for a human to answer on the accessory (`pairingComplete result:162` instantly). The box
   confirms its own side immediately by default; the interactive wait lives on only behind
-  `CARPLAY_SSP_INTERACTIVE=1` / `pairing: numeric_comparison_interactive` as a bench lever. Full
+  `BT_SSP_INTERACTIVE=1` / `pairing: numeric_comparison_interactive` as a bench lever. Full
   measurement: [`../wireless/01_BT_AND_RADIO.md`](../wireless/01_BT_AND_RADIO.md).
 
 ---
@@ -832,7 +832,7 @@ claim this index exists to remove.
 
 - **MicCapture re-wired, not retired.** `AppDelegate` instantiates it and pipes `onPCMData` to
   `client.sendMicPCM`, started and stopped from `onUplinkGate`.
-  Verified 2026-08-16: `grep -rn "MicCapture\|onPCMData" host/CarPlayHost/carlink_macOS`.
+  Verified 2026-08-16: `grep -rn "MicCapture\|onPCMData" host/MacHost/carlink_macOS`.
 - **NowPlayingManager and CallManager retired by deletion** (which also closes M-h).
   Verified: `find host -name 'NowPlayingManager*' -o -name 'CallManager*'` → no matches.
 - **The legacy `AdapterProtocol` subsystem is gone**, with `TouchAction`/`CommandID`/the LE helpers
@@ -865,16 +865,16 @@ claim this index exists to remove.
 - **The desk-side batch shipped verbatim** — `frame_into`/`try_frame_into`, the `OutQueue` cursor,
   `enum SendOutcome { sent, droppedNotSubscribed, writeFailed }`, and the
   `OCBMSessionCoordinator.swift` split. Verified: `grep -n "fn frame_into" crates/ocbm-proto/src/lib.rs`;
-  `grep -rn "SendOutcome\|onSubscriptionState" host/CarPlayHost`.
+  `grep -rn "SendOutcome\|onSubscriptionState" host/MacHost`.
 - **C1 timeout shrink + C4 blind-retry removal landed**, tagged in-source by audit id.
-  Verified: `grep -n "C1\|C4" host/CarPlayHost/carlink_macOS/USB/USBTransport.swift`.
+  Verified: `grep -n "C1\|C4" host/MacHost/carlink_macOS/USB/USBTransport.swift`.
 - **V1 AVCC fast path + V4 backpressure landed** as `Video/AVCCFastPath.swift`.
-  Verified: `grep -rn "V1\|V4" host/CarPlayHost/carlink_macOS/Video/`.
+  Verified: `grep -rn "V1\|V4" host/MacHost/carlink_macOS/Video/`.
 - **W1 RFCOMM reassembly landed** — a persistent accumulator with a bounded desync drop.
   Verified: `grep -n "reassembl" crates/vendor/wireless/src/bt_driver.rs`.
 - **The W-set landed** — ordered thread joins before A/V teardown, and the AV latch vouches for
   rx-connect by tracked pid. Verified: `grep -n "AV_RX_CONNECT_PID" crates/vendor/wireless/src/av.rs`.
-- **The TSan scheme is enabled.** Verified: `grep -rn "enableThreadSanitizer" host/CarPlayHost/` → two
+- **The TSan scheme is enabled.** Verified: `grep -rn "enableThreadSanitizer" host/MacHost/` → two
   `YES` entries in the shared xcscheme.
 - **Finding B's direction 3 landed** (reap `rx-connect` by both name forms) — docs/ops/05_AUDITS.md's own inline
   note says "only fix direction 3 is unlanded", which is off by one; direction 2 is the open one.
@@ -890,8 +890,8 @@ claim this index exists to remove.
   the ledger records it either way. Verified: `grep -rn "av_idle_ms" --include="*.rs" .`.
 - **The 24 kHz mic rate SHIPPED on both ends** — the box negotiates AAC-ELD and OPUS 24 k mono and the
   host takes the box-negotiated rate rather than hardcoding 16 k.
-  Verified: `grep -rn "24000" --include="*.rs" crates/vendor/receiver ccpa/airplayd`;
-  `grep -rn "startCapture(" host/CarPlayHost/carlink_macOS --include="*.swift"`.
+  Verified: `grep -rn "24000" --include="*.rs" crates/vendor/receiver ccpa/carplayd`;
+  `grep -rn "startCapture(" host/MacHost/carlink_macOS --include="*.swift"`.
 - **Backpressure-not-drop is in the tree**, not "BUILT … staged" — per-stream out-queues, video gated
   on its own backlog, audio never gated. Verified: `grep -n -i "backpressure\|never gated" ccpa/ocbmd/src/main.rs`.
 - **The knob/telephony descriptors, `lane_guidance` and param 30 all shipped**, so `R-06-1`'s
@@ -901,7 +901,7 @@ claim this index exists to remove.
   `grep -n "ident_info_wireless_transport_declares_route_guidance_param30" crates/vendor/iap2-core/src/message.rs`.
 - **AltVideo shipped in full** — `CH_ALT_VIDEO 0x24`, seam `:9005`, dedicated host decoder and window
   — although `docs/host/00_MACOS_HOST_APP.md` Tier 4 still bundles it into one open bullet with VDC and NMEA GPS.
-  Verified: `grep -rn "CH_ALT_VIDEO" crates/ ccpa/ host/CarPlayHost`.
+  Verified: `grep -rn "CH_ALT_VIDEO" crates/ ccpa/ host/MacHost`.
 - **docs/ops/04_OPEN_ITEMS.md's other two "Open design items" are genuinely resolved** — the `receiver_core` rootfs
   footprint (≈3.8 MiB measured) and the SETUP-relay latency (p99 2.36 ms, GO). Neither carries a
   surviving "Still open" clause; only media-port coordination does.
@@ -928,7 +928,7 @@ claim this index exists to remove.
   `grep -n "extendedFeatures" crates/vendor/receiver/src/info.rs`.
 - **docs/carplay/04_CAPABILITIES_AND_CONFIG.md's "a real fix would have the app retry HELLO until HELLO_ACK" shipped**, as did the
   "durable hardening" loss-tolerant decrypt counter (the box now stamps a per-frame `seq`).
-  Verified: `grep -n "helloAcked\|HELLO_ACK" host/CarPlayHost/carlink_macOS/OCBM/OCBMClient.swift`.
+  Verified: `grep -n "helloAcked\|HELLO_ACK" host/MacHost/carlink_macOS/OCBM/OCBMClient.swift`.
 - **The wireless research's "Still open" items 1 and 3 are closed** — the Bonjour responder on `wlan0`
   ships in `rx-connect`, and the link-key store reuses `carplay_peers.bin`. Verified:
   `grep -n "_airplay._tcp" crates/vendor/rx-connect/src/main.rs`;
@@ -999,7 +999,7 @@ Listed with exactly what was tried. None of these can be settled by reading the 
   wanted changed. Tried: `grep -n "flock\|MfiLock::acquire" crates/vendor/wireless/src/mfi_local.rs`;
   the in-code "audit R2" tag is in `events.rs` and is a different finding.
 - **`U9` / `U13b` input changes** (`docs/ops/05_AUDITS.md` §"Hardware session 3"). Named only by tag, with no
-  description anywhere in the tree. Tried: `grep -rn "U9\|U13" host/CarPlayHost/ ../ops/05_AUDITS.md`
+  description anywhere in the tree. Tried: `grep -rn "U9\|U13" host/MacHost/ ../ops/05_AUDITS.md`
   → one hit, docs/ops/05_AUDITS.md's own line. Contrast V1/V4 and C1/C4, which ARE tagged in-source.
 - **Hardware-observation gaps that no grep can settle.** The ACL-drop outcome (plan_A test 3), the
   remaining app/phone checklist steps (plan_A §5 tests 2–8 and 10), the app-pushed metadata tier
@@ -1043,15 +1043,15 @@ Listed with exactly what was tried. None of these can be settled by reading the 
   (daemons in `/usr/sbin`, tools in `/usr/bin`, scripts in `/script`) + turnkey boot: a cold boot comes
   up with a live OCBM link, zero bootstrapping (reboot-proven). **CORRECTED 2026-08-16 — the installer:**
   the current path is `tools/ncm_base_install.sh` then `tools/ocbm_install.sh --full` (reversible trial
-  before finalize; `--full` also places `carplay-wireless` and the `radio_detect.sh`/`radio_hal.sh`/
+  before finalize; `--full` also places `btd` and the `radio_detect.sh`/`radio_hal.sh`/
   `radio_ap_up.sh` seam). `tools/install_fhs.sh` still works but is the older OCBM-era subset —
-  `ocbmd`/`iap2d`/`airplayd`/`rx-connect` + `iap_role_switch` only, no wireless stack and no radio seam.
+  `ocbmd`/`iap2d`/`carplayd`/`rx-connect` + `iap_role_switch` only, no wireless stack and no radio seam.
   See [`../ops/01_RECOVERY.md`](../ops/01_RECOVERY.md).
 - **MFi** — genuine 2.0C coprocessor at `/dev/i2c-1 @0x11`, driven from userspace (`iap2d`).
 - **Phone-side iAP2 handshake — reaches Identified** against a real iPhone (SYN-ACK → cert/0xAA01 →
   sign/0xAA03 → 0xAA05 → 0x1D01 → 0x1D02), and holds the link. Unblocked by the `link.rs::parse`
   coalesced-read fix.
-- **Adapter pairing + key derivation** — `ccpa/airplayd` on `ncm0` completes pair-setup/pair-verify +
+- **Adapter pairing + key derivation** — `ccpa/carplayd` on `ncm0` completes pair-setup/pair-verify +
   MFi-SAP (local chip) and derives the ChaCha20 session key against a real iPhone. **Disk-backed
   PeerStore** (`/etc/carplay_peers.bin`) persists pairing — a known device reconnects pair-verify-only.
 - **Forward-encrypted A/V** — the box forwards the **encrypted** video + audio + hands the per-stream
@@ -1070,7 +1070,7 @@ Listed with exactly what was tried. None of these can be settled by reading the 
 
 1. ~~OCBM v1 framed multiplexer + channels~~ **DONE.**
 2. ~~Phone-side iAP2 handshake to Identified~~ **DONE.**
-3. ~~**Adapter pairing path.**~~ **DONE.** `ccpa/airplayd` reuses receiver_core's `ControlServer`
+3. ~~**Adapter pairing path.**~~ **DONE.** `ccpa/carplayd` reuses receiver_core's `ControlServer`
    (pair-setup/verify + `/info`) + `pairing`/`rtsp`/`mfi`, backed by a `LocalMfiSigner` on the local i2c
    chip. Full pair-setup → pair-verify → MFi-SAP → ChaCha20 session key ran end-to-end against a real
    iPhone; mDNS `_airplay._tcp` on `ncm0` via `rx-connect`. **Disk-backed PeerStore**
@@ -1081,7 +1081,7 @@ Listed with exactly what was tried. None of these can be settled by reading the 
 9. ~~**Session lifecycle & host-presence management.**~~ **DONE.** (**NOTE 2026-08-16** — this item and
    "Metadata" below are both numbered `9.` in the original list; the duplicate is left as written. Where
    the banner above says "item 9" it means **Metadata**.) Host-app-driven: SUBSCRIBE (CH_CTRL)
-   → IDLE→projection (`projection_up.sh`) → ARM (`session_supervisor.sh` starts airplayd + rx-connect);
+   → IDLE→projection (`projection_up.sh`) → ARM (`session_supervisor.sh` starts carplayd);
    STOP/crash → TEARDOWN → holding pattern (iap2d stays up). Live-UI = backpressure, not drop (per-stream queues,
    gated seam reads; see docs/carplay/02_SESSION_LIFECYCLE.md); ocbmd tracks presence via `/tmp/host_present`. Hardware-validated across a reboot.
    Full spec: [`../carplay/02_SESSION_LIFECYCLE.md`](../carplay/02_SESSION_LIFECYCLE.md).
@@ -1101,7 +1101,7 @@ still open is §4 of this file, not this list.
    `crates/vendor/receiver/src/session.rs` routes **by `audioType`, not stream type** — media → media
    sink (:9002), everything else (telephony/speechRecognition/alert/default) → the voice sink (:9003)
    (search `Route by audioType`; ~`:871`/`:880` as of 2026-08-16). The mic
-   uplink exists too: host `MicCapture.swift` → OCBM → airplayd's `MIC_INGEST_ADDR 127.0.0.1:9112`.
+   uplink exists too: host `MicCapture.swift` → OCBM → carplayd's `MIC_INGEST_ADDR 127.0.0.1:9112`.
    **Owner-confirmed on hardware 2026-08-10: nav prompts audible, Siri invocable and spoken to, phone
    calls working BOTH ways.**
    ~~Nav voice on `:9003` has no OCBM channel yet; plus the mic uplink for Siri.~~
@@ -1113,7 +1113,7 @@ still open is §4 of this file, not this list.
 7. **YAML config consumption.** ✅ **DONE — marked 2026-08-10** (it was already shipped; this line
    simply never got its marker, which made the doc contradict its own "items 1-10 complete" note).
    App-side truth (`VehicleConfig.swift` + `SettingsWindow`), pushed subset consumed by
-   `vehicle_config.rs` and applied per control connection by `airplayd::load_device_config` — runtime
+   `vehicle_config.rs` and applied per control connection by `carplayd::load_device_config` — runtime
    feature flip, no recompile; `base_device_config()` is the app-less fallback template.
 8. **Move SETUP app-side.** ✅ DONE 2026-08-08 (wired, hardware-validated; the
    `accessoryConfig.appDrivenSetup` toggle default was flipped **ON** 2026-08-09) — commits `84d2b80` (P0 RTT harness + P1 box CH_RTSP relay
@@ -1159,8 +1159,8 @@ still open is §4 of this file, not this list.
 - ~~`receiver_core` footprint on the 6 MB rootfs (crypto crates; run-from-tmp; size-opt/UPX) — measure
   the armv7-musl build (see [`../ops/00_BUILD_AND_DEPLOY.md`](../ops/00_BUILD_AND_DEPLOY.md)).~~ **RESOLVED** — measured
   2026-07-10 and re-measured 2026-08-16: the pairing/session path cross-compiles clean, and the whole
-  shipped set is ≈**3.8 MiB unpacked** (`airplayd` ~1.71 MiB, `rx-connect` ~574 KiB, `iap2d` ~551 KiB,
-  `carplay-wireless` ~537 KiB, `ocbmd` ~443 KiB), roughly half that UPX-3.96-packed — comfortably inside
+  shipped set is ≈**3.8 MiB unpacked** (`carplayd` ~1.71 MiB, `rx-connect` ~574 KiB, `iap2d` ~551 KiB,
+  `btd` ~537 KiB, `ocbmd` ~443 KiB), roughly half that UPX-3.96-packed — comfortably inside
   the ~6 MB free, and run-from-`/tmp` was never needed. Numbers and method:
   [`../ops/00_BUILD_AND_DEPLOY.md`](../ops/00_BUILD_AND_DEPLOY.md).
 - ~~**SETUP relay latency** — driving SETUP app-side relays the control connection box↔app over USB;
@@ -1203,7 +1203,7 @@ still open is §4 of this file, not this list.
   2026-08-10; it also cited the wrong step — app-driven SETUP is step **8**, step 6 is nav voice/mic).
   When `appsetup() && seam_up()` is false the box drives SETUP locally from the app-pushed config
   (the `else` arm of the `levers::appsetup() && receiver::relay::seam_up()` gate in
-  `ccpa/airplayd/src/main.rs` — grep the condition, not a line number; that file moves often);
+  `ccpa/carplayd/src/main.rs` — grep the condition, not a line number; that file moves often);
   `CARPLAY_APP_SETUP=0` forces it. Historical note: if app-driven SETUP (step 8) had added too much
   latency and risk session stability, fall back to having the **adapter drive the SETUP negotiation
   locally from the on-box YAML** (the config pushed down). The fallback stays bounded to rendering the
@@ -1317,8 +1317,8 @@ pixels. The matrix now runs unattended end to end, with no human in the actuatio
   REFUSED-LOCALLY. Uses `:initial` so the session STARTS in the area — **no button press, no
   screenshots, fully unattended.** Requires WIRELESS CarPlay (the iPhone's USB must be free).
 - `tools/va_limit_sweep.sh` — drives panel AND area together, floor-to-4K, both orientations.
-- Two traps already fixed in these, do not reintroduce: the capture must NOT be `-pn airplayd`
-  (the lockout is logged by CarPlay's UI process, not airplayd), and the app-restart dwell must be
+- Two traps already fixed in these, do not reintroduce: the capture must NOT be `-pn carplayd`
+  (the lockout is logged by CarPlay's UI process, not carplayd), and the app-restart dwell must be
   **12s** — the supervisor's wireless teardown SIGTERM lands ~6s late and will kill the bring-up
   that follows it.
 - **2026-09-07, WIRED arm:** `tools/va_wired_sweep.sh` — same matrix and even-centring arithmetic,
@@ -1403,12 +1403,12 @@ suspected, that is the run to complete.
    accepts STARTING in an area; it does not prove iOS animates INTO one on request. Owner-confirmed
    twice by eye — `600x400` on a 1080x1920 panel, and `800x480` inside 3840x2160. The clean fix
    landed: `viewarea request <index>` on the ControlServer → `CMD_VIEW_AREA 0x11` →
-   airplayd → `events::switch_view_area`, the same policy function that answers the phone's own
+   carplayd → `events::switch_view_area`, the same policy function that answers the phone's own
    `requestViewArea` (docs/host/00_MACOS_HOST_APP.md, "Bench control surface"). Two companions for
    the WIRED arm, where there is no phone log: `viewarea arm <WxH@X,Y>` writes the rect through the
    model's own fields (replacing `defaults write` against a stopped app and the `/tmp/carplay_viewarea2`
    lever), and `shot [path]` dumps the decoded frame as PNG — the only LOCKOUT detector this side owns.
-   **The rebuilt airplayd IS pushed** (2026-09-07, `tools/ocbm_push.sh … /usr/sbin/airplayd 755`,
+   **The rebuilt carplayd IS pushed** (2026-09-07, `tools/ocbm_push.sh … /usr/sbin/carplayd 755`,
    md5 verified against the local cross-build; ocbmd unchanged). Device-proven the same evening:
    `viewarea request 1` → `[events] host viewArea index=1 accepted` → `updateViewArea -> index=1
    duration=3000ms` → the rect settles at the armed area; `request 0` returns; `request 5` is
@@ -1416,7 +1416,7 @@ suspected, that is the run to complete.
    on this path.
    **This also proves the accessory can drive a transition UNILATERALLY** — nothing asked. The
    earlier finding was that the phone's `requestViewArea` is advisory and the accessory is the
-   authority (events.rs); this extends it: no request need exist at all. An old airplayd logs
+   authority (events.rs); this extends it: no request need exist at all. An old carplayd logs
    `unknown INPUT_COMMAND 0x11 — dropped`, so a box that has not been updated needs
    `TRIGGER_MODE=tap` in the sweep, or the trigger silently looks accepted while nothing moves.
 3. **Supervisor teardown/bring-up is not serialised** and reports success for a stack that is dead
@@ -1426,9 +1426,21 @@ suspected, that is the run to complete.
    does not round-trip them. Deferred because the profile schema is shared with the Settings view
    work in another session.
 5. `initial` is parsed box-side but not authored by the app model.
-6. **`animationDurationMillis` limits are unmeasured, and it is not yet a variable.** The value is
-   hardcoded 3000 at `crates/vendor/receiver/src/events.rs` (`request_view_area`'s answer), so nothing
-   can currently drive it. What the sources give: `CarPlaySDK.framework` carries the key name only;
+6. **CLOSED 2026-09-09 — `animationDurationMillis` is fully characterised; there is no iOS floor or cap.** Swept on hardware (CPC200-CCPA, wired, 1920x1080, second view area): **10 ms renders the switch as an instant flicker; 10000 ms runs the full 10 s.** Honoured literally at both extremes. One nuance worth keeping: at 10000 ms the UI reaches the target geometry at roughly 5 s and then idles showing CarPlay's transition blur until the envelope expires — the duration is the ANIMATION window, not the geometry change, so the accessory gets its settled geometry earlier than the declared duration. Untested: whether a larger area delta occupies more of the envelope instead of finishing early. The shipped range is now **1000–10000** by owner decision — a product limit (sub-second reads as abrupt in a car), NOT a protocol one; 10 ms works and is simply not offered. The original text of this item follows for the record.
+
+   ~~**`animationDurationMillis` limits are unmeasured; its FLOOR is the open question.**~~ (Corrected
+   2026-09-09 — it was "hardcoded 3000, not yet a variable"; both halves are now false.) On the bench
+   that night 3000 → 1000 was DEVICE-PROVEN to visibly speed up the Dock resize, the first time anyone
+   varied it on hardware, and it is now a pushed value: top-level `view_area_anim_ms` in the vehicle
+   config (our extension, `wifi_ap`-shaped; absent = 3000, the app emits it only when it differs),
+   parsed by `receiver::vehicle_config`, armed per connection into `levers::view_area_anim_ms`, and
+   consumed by `events::switch_view_area` for BOTH the inbound `requestViewArea` answer and the
+   `viewarea request <index>` door. Out of range CLAMPS to 0..=10000 (logged by carplayd, never a
+   rejection), so the ladder below past 10000 — 30000, 60000, `INT32_MAX`, a negative — is NOT
+   reachable from the app without widening that clamp deliberately; 0, 1, 100, 250, 1000, 3000, 10000
+   are. iOS never acknowledges the field, so the `[events] updateViewArea -> … duration=Nms` line
+   (post-clamp value) plus a stopwatch on the geometry stream is the whole measurement. What the
+   sources give: `CarPlaySDK.framework` carries the key name only;
    CarKit has an explicit clamp message for the INDEX (`Resetting to first view area … out of range`)
    but **no duration-validation string anywhere in the iOS 27 CarKit or AirPlaySender extracts**;
    R14G17 predates view areas entirely; CINEMO logs it as `duration: %ums`, unsigned, so a negative
@@ -1436,8 +1448,9 @@ suspected, that is the run to complete.
    Since iOS honours the value literally (measured above), the ladder worth running is 0, 1, 100, 250,
    1000, 3000 (known good), 10000, 30000, 60000, plus `INT32_MAX` and a negative — watching for
    whether 0 snaps or is refused, whether a long duration blocks a second `requestViewArea` mid-flight,
-   and whether anything tears the session down. Needs the duration exposed as an argument on
-   `viewarea request <index> [ms]`, which is a small extension of the door built in item 2.
+   and whether anything tears the session down. The per-value recompile that ladder needed is gone
+   (push a config with `view_area_anim_ms: N` and reconnect); a per-request `[ms]` argument on the
+   `viewarea request` door would only matter for sweeping values within one session.
 7. **The sweep's LOCKOUT detector is WRONG and currently scores a lockout as ACCEPTED.** Device-proven
    2026-09-07 on `480x800@840,1520` in a 2160x3840 panel: `BLACK_MEAN=12` / `BLACK_DARK=0.85` never
    fired because **the lockout card is sized to FILL the view area** — the armed rect reads mean luma

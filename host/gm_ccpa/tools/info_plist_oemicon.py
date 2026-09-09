@@ -10,7 +10,7 @@ and this app never runs airplayd (see native/carplay-jni/Cargo.toml, "LEVERS"). 
 turn the OEM icon off here — only this file can.
 
 And OMITTING the keys is NOT the same as turning the icon off. From the macOS host's model
-(`ccpa_custom/host/CarPlayHost/carlink_macOS/App/Settings/VehicleProfile.swift:299-303`):
+(`ccpa_custom/host/MacHost/carlink_macOS/App/Settings/VehicleProfile.swift:299-303`):
 
     `visible`: Apple's `oemIconVisible` -- sending `visible: false` WITH the icon present is the
     active hide signal iOS honours; omitting the block leaves the cached icon on screen.

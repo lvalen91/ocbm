@@ -675,7 +675,7 @@ fn serve_client(
 fn open_l2cap_listener() -> std::io::Result<std::fs::File> {
     // SOCK_CLOEXEC — this is the highest-stakes one in the tree. PSM 0x0001 is a well-known,
     // single-holder PSM, and this socket is open when bt_driver drives av::ensure_av_layer(), which
-    // fork+execs airplayd/rx-connect SETSID-DETACHED TO OUTLIVE THIS PROCESS (av.rs:13). Without
+    // fork+execs carplayd SETSID-DETACHED TO OUTLIVE THIS PROCESS (av.rs:13). Without
     // CLOEXEC they inherit the PSM-1 binding; if this process then dies without reaching
     // teardown_av_layer() (SIGKILL/panic — `panic = "abort"`, so no unwinding), the restarted
     // instance's bind() finds the PSM still held by a daemon it cannot see, `run` returns Err, and

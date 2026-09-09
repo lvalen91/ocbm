@@ -141,16 +141,20 @@ fn hex(b: &[u8]) -> String {
 /// forcing a manual "forget + re-pair". `/var/lib` (the BlueZ default) can be a tmpfs symlink on this
 /// box and would defeat the purpose. One 25-byte record per bond: `[bdaddr 6][addr_type 1][key_type 1]
 /// [value 16][pin_length 1]` — the exact mgmt Load-Link-Keys key layout.
-/// Directory holding persistent Bluetooth state. Overridable via `CARPLAY_STATE_DIR`: on the
+/// Directory holding persistent Bluetooth state. Overridable via `BOX_STATE_DIR`: on the
 /// Raspberry Pi port `/etc` is a symlink into the read-mostly `/system` partition, so bonds belong
 /// under `/data`. Unset keeps the CCPA's `/etc/carplay` exactly as before.
-// `pub` rather than `pub(crate)` since the extraction into bt-common: carplay-wireless's
+// `pub` rather than `pub(crate)` since the extraction into bt-common: btd's
 // control.rs sites its `projection_policy.json` alongside the link-key store, and that call
 // now crosses a crate boundary.
 pub fn state_dir() -> &'static str {
     static D: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     D.get_or_init(|| {
-        std::env::var("CARPLAY_STATE_DIR").unwrap_or_else(|_| "/etc/carplay".to_string())
+        // NOTE: the env var is renamed, the DEFAULT PATH is not. `/etc/carplay/bt_link_keys`
+        // holds live Bluetooth bonds on every deployed box; moving it would silently drop every
+        // pairing on the next boot. A path migration is its own change, with a read-old/write-new
+        // step — not a side effect of renaming a lever.
+        crate::lever("BOX_STATE_DIR", "CARPLAY_STATE_DIR").unwrap_or_else(|| "/etc/carplay".to_string())
     })
 }
 
@@ -178,7 +182,7 @@ static STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// The temp name carries the pid because `persist` and `forget` previously used the SAME
 /// `<store>.tmp`: two writers could interleave bytes into one temp file and then rename THAT into
 /// place, publishing a store that is half one write and half the other. The lock covers this
-/// process; the pid covers a second `carplay-wireless` overlapping during a restart.
+/// process; the pid covers a second `btd` overlapping during a restart.
 fn write_store(bytes: &[u8]) -> bool {
     use std::io::Write;
     if std::fs::create_dir_all(state_dir()).is_err() {
@@ -308,11 +312,11 @@ const IO_CAP_DISPLAY_YES_NO: u8 = 0x01;
 /// area for the user to match against the iPhone (same file-flag → ocbmd → CT_* pattern as host_present).
 const PAIRING_CODE_FLAG: &str = "/tmp/pairing_code";
 
-/// Select the SSP IO capability from `CARPLAY_PAIRING_MODE` (set per-config by the supervisor from the
+/// Select the SSP IO capability from `BT_PAIRING_MODE` (set per-config by the supervisor from the
 /// host YAML `pairing:` field). Returns `(io_cap, is_numeric)`. Default = Just-Works (the proven default).
 fn pairing_mode_io_cap() -> (u8, bool) {
-    match std::env::var("CARPLAY_PAIRING_MODE").as_deref() {
-        Ok("numeric") | Ok("numeric_comparison") => (IO_CAP_DISPLAY_YES_NO, true),
+    match crate::lever("BT_PAIRING_MODE", "CARPLAY_PAIRING_MODE").as_deref() {
+        Some("numeric") | Some("numeric_comparison") => (IO_CAP_DISPLAY_YES_NO, true),
         _ => (IO_CAP_NO_INPUT_NO_OUTPUT, false),
     }
 }
@@ -679,7 +683,7 @@ fn refuse_pairing(bdaddr: &[u8; 6]) {
 ///
 /// `pair_answer` is the head unit's yes/no for Numeric Comparison (see [`PairAnswer`]). With it,
 /// numeric mode WAITS for a real answer instead of auto-accepting. `None` — or the
-/// `CARPLAY_SSP_INTERACTIVE=1` lever — wait for the head unit's yes/no instead of confirming at once.
+/// `BT_SSP_INTERACTIVE=1` lever — wait for the head unit's yes/no instead of confirming at once.
 pub fn run(
     controller_index: u16,
     shutdown: &AtomicBool,
@@ -754,19 +758,19 @@ pub fn run(
     // head unit's yes/no, iOS fails the exchange 0.3 ms after its own confirm request and never shows
     // a sheet; and a phone-initiated pairing from Settings runs as Just-Works because iOS offers
     // NoInputNoOutput). The spec-literal "both humans answer" flow is therefore unreachable with iOS
-    // as the peer. It stays available for other peers / bench work behind CARPLAY_SSP_INTERACTIVE=1
+    // as the peer. It stays available for other peers / bench work behind BT_SSP_INTERACTIVE=1
     // (the supervisor sets it from the host YAML `pairing: numeric_comparison_interactive`).
-    let interactive_lever = std::env::var("CARPLAY_SSP_INTERACTIVE").as_deref() == Ok("1");
+    let interactive_lever = crate::lever("BT_SSP_INTERACTIVE", "CARPLAY_SSP_INTERACTIVE").as_deref() == Some("1");
     let interactive = numeric && pair_answer.is_some() && interactive_lever;
     if numeric {
         log("pairing mode: NUMERIC COMPARISON (DisplayYesNo) — a 6-digit code will be shown to match");
         if interactive {
             log(&format!(
-                "CARPLAY_SSP_INTERACTIVE=1 — the head unit must answer the code within \
+                "BT_SSP_INTERACTIVE=1 — the head unit must answer the code within \
                  {PAIR_CONFIRM_WAIT_SECS}s or the box replies NO (not reachable with iOS as the peer)"
             ));
         } else if interactive_lever {
-            log("CARPLAY_SSP_INTERACTIVE=1 but no pair-answer channel wired — confirming our side immediately");
+            log("BT_SSP_INTERACTIVE=1 but no pair-answer channel wired — confirming our side immediately");
         } else {
             log("numeric confirms: our side is confirmed immediately; the user compares and confirms on the phone");
         }

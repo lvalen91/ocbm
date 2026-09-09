@@ -39,7 +39,7 @@
 //! incidental. `AT+BRSF=63` does not set HF bit 7 (codec negotiation), so the AG never sends `+BCS`,
 //! never expects `AT+BAC`, and always opens a plain CVSD narrowband channel. 63 is the stock CCPA's
 //! own value against this same phone and is the ONLY dialogue proven on this hardware, so it stays
-//! the default. [`wbs_enabled`] (`CARPLAY_HFP_WBS=1`, `/tmp/hfp_wbs`, `/script/hfp_wbs`) swaps it for
+//! the default. [`wbs_enabled`] (`BT_HFP_WBS=1`, `/tmp/hfp_wbs`, `/script/hfp_wbs`) swaps it for
 //! [`HF_SUPPORTED_FEATURES_WBS`] = 191 and adds ONE step to the dialogue — `AT+BAC=1,2` between
 //! `AT+BRSF` and `AT+CIND=?`, where HFP 1.6 §4.2 requires it — after which the AG drives everything
 //! else with unsolicited `+BCS: <id>` ([`choose_codec`]). Nothing else about the dialogue moves, and
@@ -76,7 +76,7 @@ pub const AG_FEATURE_CODEC_NEGOTIATION: u32 = 1 << 9;
 pub const CODEC_CVSD: u8 = 1;
 pub const CODEC_MSBC: u8 = 2;
 
-/// Operator lever for wideband speech: `CARPLAY_HFP_WBS=1`, or the presence of `/tmp/hfp_wbs` or
+/// Operator lever for wideband speech: `BT_HFP_WBS=1`, or the presence of `/tmp/hfp_wbs` or
 /// `/script/hfp_wbs`. Default OFF.
 ///
 /// THREE sources and not one, for the same reason [`forced_path`] has two: this daemon is `exec`d
@@ -94,7 +94,7 @@ pub fn wbs_enabled() -> bool {
     {
         return true;
     }
-    let raw = std::env::var("CARPLAY_HFP_WBS").ok();
+    let raw = box_common::lever("BT_HFP_WBS", "CARPLAY_HFP_WBS");
     matches!(raw.as_deref().map(str::trim), Some("1") | Some("on") | Some("yes"))
 }
 
@@ -130,7 +130,7 @@ impl Path {
     }
 }
 
-/// Operator override for which route to take: `CARPLAY_AA_HEADSET_PATH=hfp|hsp`, or the on-box file
+/// Operator override for which route to take: `BT_AA_HEADSET_PATH=hfp|hsp`, or the on-box file
 /// `/tmp/aa_headset_path` (this daemon is `exec`d from inside the supervisor's `setsid sh -c`, where
 /// setting an environment variable means editing a shipped script — the same reason
 /// `reconnect::acl_hold_secs` reads a file). Anything else, including absent, means AUTO: HFP first,
@@ -139,8 +139,8 @@ impl Path {
 /// Resolved on every call rather than cached in a `OnceLock`, because it is a bench lever whose
 /// whole point is being flipped between reconnect cycles without restarting the daemon.
 pub fn forced_path() -> Option<Path> {
-    let raw = std::env::var("CARPLAY_AA_HEADSET_PATH")
-        .ok()
+    // Was CARPLAY_AA_HEADSET_PATH — a CarPlay-prefixed lever whose only purpose is Android Auto.
+    let raw = box_common::lever("BT_AA_HEADSET_PATH", "CARPLAY_AA_HEADSET_PATH")
         .or_else(|| std::fs::read_to_string("/tmp/aa_headset_path").ok())?;
     parse_forced_path(&raw)
 }
@@ -797,8 +797,7 @@ pub fn choose_codec(id: u8, wbs: bool, narrowed: bool) -> CodecChoice {
 /// phone, and it is resolved on every call (not cached) for the same reason [`forced_path`] is: the
 /// whole point of a bench lever is flipping it without restarting the daemon.
 pub fn autoanswer() -> bool {
-    let raw = std::env::var("CARPLAY_HFP_AUTOANSWER")
-        .ok()
+    let raw = box_common::lever("BT_HFP_AUTOANSWER", "CARPLAY_HFP_AUTOANSWER")
         .or_else(|| std::fs::read_to_string("/tmp/hfp_autoanswer").ok());
     matches!(raw.as_deref().map(str::trim), Some("1") | Some("on") | Some("yes"))
 }

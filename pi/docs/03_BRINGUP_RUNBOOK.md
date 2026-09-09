@@ -16,10 +16,10 @@ after a power cycle. Making it survive a reboot is the top item in §5.
 | The **CCPA is attached over USB-NCM** and reachable at `192.168.50.2:7789` | `mfid` on the CCPA | The Pi has no MFi coprocessor. Every cert/sign goes here. No MFi, no session. |
 | `hostapd` running on 5 GHz | `/data/local/tmp/hostapd_5g.conf` | The framework SoftAP path is blocked by the Wi-Fi HAL (`pi/docs/02`). |
 | `apdhcpd` on `wlan0` | `pi/apdhcpd` | Android's bundled dnsmasq is a 2009 vestige that silently disables itself. |
-| Android's Bluetooth stack **off** | `settings put global bluetooth_on 0` | `carplay-wireless` owns `hci0` directly; two owners fail confusingly. |
+| Android's Bluetooth stack **off** | `settings put global bluetooth_on 0` | `btd` owns `hci0` directly; two owners fail confusingly. |
 | The **projection app installed** | `pi/tools/install_projection_app.sh` | It generates the config and is the only consumer of the A/V seams. |
 
-Order matters in one place only: **the app must have written its config before `airplayd` starts**,
+Order matters in one place only: **the app must have written its config before `carplayd` starts**,
 because arming is first-arm-wins per process. `start_stack.sh` checks for the file and warns.
 
 ## 2. Cold start, in order
@@ -39,7 +39,7 @@ pi/tools/start_stack.sh --serial <serial> --restart
 
 `start_stack.sh` carries the environment; the copy captured from the running process is in
 `pi/evidence/stack_launch_env.txt`. The one that is easy to miss is **`CARPLAY_CFG_FILE`** — without
-it `airplayd` reads its compiled default, negotiates H.264, and the HEVC-only decoder renders
+it `carplayd` reads its compiled default, negotiates H.264, and the HEVC-only decoder renders
 nothing while every counter reads healthy.
 
 ## 3. Confirming it actually works — per plane, not overall
@@ -55,7 +55,7 @@ adb logcat -s NETPROBE | grep "frames rendered"
 adb logcat -s NETPROBE | grep "FIRST AUDIO FRAME PLAYED"
 
 # Siri uplink — the ASC MUST be the 4-byte f8f03000. f8f0312c00bc00 is LD-SBR, which iOS discards.
-adb shell 'grep "uplink] mic" /tmp/airplayd_wl.log'
+adb shell 'grep "uplink] mic" /tmp/carplayd_wl.log'
 adb logcat -s NETPROBE | grep -E "uplink ARMED|CHOPPED|INAUDIBLE"
 
 # Metadata — the AAOS now-playing card
@@ -70,7 +70,7 @@ adb shell 'ss -ltn | grep -E "9001|9002|9003|9004"'
 
 ## 4. Traps that have already cost time — do not rediscover these
 
-* **`pgrep -x carplay-wireless` matches nothing.** `TASK_COMM_LEN` truncates `comm` to 15 chars, so
+* **`pgrep -x btd` matches nothing.** `TASK_COMM_LEN` truncates `comm` to 15 chars, so
   it reads `carplay-wireles`. Match `-f` on the command line. This let two instances run at once.
 * **`adb shell "... &" &` does not detach** — adb holds the remote stdout, so the script hangs while
   the stack runs perfectly. Use `nohup` plus closing all three fds.
@@ -86,7 +86,7 @@ adb shell 'ss -ltn | grep -E "9001|9002|9003|9004"'
 
 ## 5. What is NOT done, in priority order
 
-1. **Persistence.** Init `.rc` services for `carplay-wireless`, `hostapd`, `apdhcpd`, and the app,
+1. **Persistence.** Init `.rc` services for `btd`, `hostapd`, `apdhcpd`, and the app,
    plus binaries somewhere other than `/data/local/tmp`. Today a reboot means a full manual restart.
 2. **`--system` install.** `pi/tools/install_projection_app.sh --system` installs to `priv-app` with
    the permission allowlist. Without it `addKeyEventHandler` is denied and **steering-wheel voice

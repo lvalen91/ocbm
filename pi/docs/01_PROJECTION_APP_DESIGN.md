@@ -27,11 +27,11 @@ carries adb, and is deliberately out of scope.
 
 ## 2. The constraint everything follows from
 
-`carplay-wireless` drives `hci0` **directly** and Android's Bluetooth stack is disabled
+`btd` drives `hci0` **directly** and Android's Bluetooth stack is disabled
 (`svc bluetooth disable`) so it can. There is one controller and one owner.
 
 **Therefore the stock Settings ▸ Bluetooth pane cannot pair the phone.** It has no stack behind it.
-Any device list we show must be *our* list, backed by `carplay-wireless`, regardless of where it is
+Any device list we show must be *our* list, backed by `btd`, regardless of where it is
 rendered.
 
 This is not a workaround forced on us — it is what the OEM does too (§3). Returning to Android's BT
@@ -176,7 +176,7 @@ is the **source of their values** — nothing currently reads them from AAOS.
 | Touch / multi-touch | `hidConfig.touchScreenMode` · `multi_touch` in `receiver/src/{events,info,levers}.rs` | Config only — **but see §5.3** |
 | Steering wheel | `hidConfig.telephonyButtonsSupport` / `mediaButtonsSupport` / `knobSupport` / `dPadSupport` **+** `CarProjectionManager.addKeyEventHandler` | Join the two halves |
 | oemIcon | `OemIconConfig` · `OemIconImage` | Supply the asset |
-| Drive mode / limitedUI | `LimitedUiConfig` · `limited_ui` in `airplayd` **+** `CarUxRestrictions` | Bridge them |
+| Drive mode / limitedUI | `LimitedUiConfig` · `limited_ui` in `carplayd` **+** `CarUxRestrictions` | Bridge them |
 | Focus transfer | `borrow` in `iap2-core/src/message.rs`, `receiver/src/events.rs` | Already the protocol's own model (§5.6) |
 | Metadata → media source | iAP2 DataStream(130) — **observed open** in the proven session | Build the AAOS `MediaBrowserService` side |
 | Auto-connect / first-to-connect | `reconnect.rs` · `KnownDeviceStore` | Policy + ordering (§5.8) |
@@ -194,7 +194,7 @@ This fits the existing design rather than fighting it: **`docs/carplay/04_CAPABI
 pushed to the box rather than compiled into it. The generator is a new *producer* for a channel that
 exists.
 
-One ordering constraint must be respected. Arming is **first-arm-wins per process**: `airplayd` is
+One ordering constraint must be respected. Arming is **first-arm-wins per process**: `carplayd` is
 spawned per session so it picks up a regenerated config on the next session, but a long-lived process
 will not. Generating before anything arms — as specified — is what keeps that from biting.
 
@@ -300,7 +300,7 @@ honour it rather than treating every transfer as a permanent takeover.
 
 `LimitedUiConfig` (Apple side) ↔ `CarUxRestrictions` (AAOS side). `DriveStateMonitor` in
 CarlinkAndroid already watches the AAOS half. The work is propagating it into `requestUI` /
-`limited_ui`, which `airplayd` and `ocbm-proto` already carry.
+`limited_ui`, which `carplayd` and `ocbm-proto` already carry.
 
 ### 5.8 Connection policy
 
@@ -368,7 +368,7 @@ either way it must not be the default handler.
   └──────────────────────────────────────────────────────────────┘
            │ :9001 (video, encrypted)   :9002 (audio, ADTS)
            ▼
-      airplayd  ──►  the accessory stack (00_PI_AAOS_PORT.md)
+      carplayd  ──►  the accessory stack (00_PI_AAOS_PORT.md)
 ```
 
 ### 7.1 `CarPlayService` — the owner
@@ -398,7 +398,7 @@ A `SurfaceView`/`TextureView` and input forwarding, nothing else. Cheap to creat
 Attaches to the running service; never starts a session itself.
 
 ### 7.3 Settings injection — the device list
-A Projection screen in AAOS Settings, backed by `carplay-wireless` (§2), showing paired phones,
+A Projection screen in AAOS Settings, backed by `btd` (§2), showing paired phones,
 which is active, and pair/forget/allow-projection controls.
 
 Two candidate mechanisms, to be decided when we build it:

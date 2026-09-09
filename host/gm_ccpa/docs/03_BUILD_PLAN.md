@@ -163,7 +163,7 @@ only genuinely un-wired part, and this design doesn't need it.
 
 | Layer | Source / plan |
 |---|---|
-| USB claim + OCBM client | Port the macOS `OCBM/OCBMClient.swift` + `OCBMFraming.swift` (`host/CarPlayHost`) to Kotlin; claim `0x1314:0x2d00` via `UsbManager` host mode. Reuse `carlink_native_personal`'s existing USB-claim/permission plumbing. |
+| USB claim + OCBM client | Port the macOS `OCBM/OCBMClient.swift` + `OCBMFraming.swift` (`host/MacHost`) to Kotlin; claim `0x1314:0x2d00` via `UsbManager` host mode. Reuse `carlink_native_personal`'s existing USB-claim/permission plumbing. |
 | WiFi sockets | `ServerSocket`/`DatagramSocket` bound on br0, fed into the JNI'd `ControlServer`. |
 | AirPlay/CarPlay core | JNI'd Rust `receiver`/`pairing`/`rtsp` (§4), with `RemoteMfiSigner` over OCBM. |
 | Video | Android `MediaCodec` (HW `OMX.Intel.hw_vd.h264` and `.h265`) → `Surface`. Negotiate HEVC (`CARPLAY_HEVC`/`extendedFeatures`) to cut 5 GHz bitrate. Renderer salvage from carlink_native — §7. |
@@ -174,7 +174,7 @@ only genuinely un-wired part, and this design doesn't need it.
 | UI | Salvage `carlink_native_personal`'s projection view + design (§7). |
 
 ### macOS host app = the closest template
-`host/CarPlayHost` already claims `0x1314:0x2d00`, speaks OCBM (`OCBMClient`/`OCBMFraming`), decrypts
+`host/MacHost` already claims `0x1314:0x2d00`, speaks OCBM (`OCBMClient`/`OCBMFraming`), decrypts
 A/V seams (`OCBMAVDecrypt`), decodes H.264 (`H264Decoder` via VideoToolbox), plays audio, sends input.
 The Android app is its OCBM-client + render + input halves, plus the receiver core the macOS app
 delegated to the CCPA (because now the app — not the CCPA — is the WiFi endpoint), minus the OCBM A/V
@@ -318,7 +318,7 @@ right posture for protocol bring-up where most failures are silent (§8 of `05_S
 nine that produce no diagnostic at all).
 
 **Keep the prober permanently.** This mirrors how `ccpa_custom` itself worked: `host/ocbm-host` (a CLI
-instrument with `hello`/`mfi`/`console`/`avdec`/`session`/`pull` subcommands) and `host/CarPlayHost` (the
+instrument with `hello`/`mfi`/`console`/`avdec`/`session`/`pull` subcommands) and `host/MacHost` (the
 product) both still exist, and the CLI is what gets reached for when the product misbehaves. Graduate a
 clean app out of the foundation once it holds; don't throw the instrument away.
 

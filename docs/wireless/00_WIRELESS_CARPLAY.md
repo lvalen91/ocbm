@@ -28,7 +28,7 @@ IW416 WiFi+BT combo). The radios, drivers, firmware, AP config, BT stack, and on
 scripts all exist and were deliberately preserved when the stock projection code was stripped. What
 does **not** exist is the **orchestration + protocol glue**: the iAP2 wireless-CarPlay message
 exchange (WiFi-credential handoff), discovery on `wlan0`, and pointing the (transport-transparent)
-`airplayd`/`receiver` stack at the WiFi link instead of `ncm0`.
+`carplayd`/`receiver` stack at the WiFi link instead of `ncm0`.
 
 Because AirPlay is transport-transparent and the **first-time pairing can bootstrap over the USB link
 we already run**, the cheapest path to a working wireless session reuses almost the entire existing
@@ -100,10 +100,10 @@ wired stack.
 - **Neither flag is set** → box is in the default appliance mode: `start_main_service.sh` says *"all
   projection/vendor launches removed. Radios are on-demand (wlan_on/bt_on); NCM always-on … radios
   OFF at boot."*
-- Runtime confirms it: only `ocbmd`, `iap2d` (`/dev/android_iap2`, **USB** iAP2), `airplayd` (over
+- Runtime confirms it: only `ocbmd`, `iap2d` (`/dev/android_iap2`, **USB** iAP2), `carplayd` (over
   `ncm0`) run. **No `bluetoothDaemon`, `hostapd`, or `wpa_supplicant`.**
 - `session_supervisor.sh` orchestrated only the wired path at the time of this survey
-  (`host present → projection_up.sh (iAP2 → Identified) → airplayd + rx_connect`) with zero wireless
+  (`host present → projection_up.sh (iAP2 → Identified) → carplayd + rx-connect`) with zero wireless
   references. **It is dual-transport today** — that survey line is the historical starting point, not
   the current shape.
 
@@ -118,7 +118,7 @@ them into a CarPlay session.
 CarPlaySDK protocol reference notes (mempalace): `NetworkTransportType` is a bitmask — `Enet/WiFi/WFD/AWDL/USB/Direct/
 BTLE/NAN/IPsecBT/IPSecWiFi`. *"CarPlay live = USB (NCM) + WiFi. TRANSPARENT to callers (same
 machinery, only label differs)."* → The pairing, `/info`, SETUP, RTP/screen streams are **identical**
-over WiFi; only the IP transport underneath changes. **`airplayd`/`receiver` are reusable as-is,
+over WiFi; only the IP transport underneath changes. **`carplayd`/`receiver` are reusable as-is,
 bound to `wlan0` instead of `ncm0`.**
 
 #### 2.2 Bluetooth is the bootstrap channel
@@ -234,15 +234,15 @@ for any iPhone; nothing ever stalls.
   `ncm0`) vs **Wireless** (iPhone over BT-bootstrapped WiFi → `wlan0`). The box executes the
   arbitration *mechanics*; the arbitration *policy* (preference, tiebreak) is app-pushed config
   (docs/carplay/04_CAPABILITIES_AND_CONFIG.md).
-- Downstream of `airplayd` the pipeline is identical for both — `airplayd (receiver) → OCBM → Mac`.
+- Downstream of `carplayd` the pipeline is identical for both — `carplayd (receiver) → OCBM → Mac`.
   **Wireless adds a second phone-side ingress, not a new renderer.** (This resolves the rendering-
   topology question: the Mac stays USB/OCBM-connected; only the iPhone↔box leg differs.)
 
 #### 3.2 Two always-listening ingress agents (idle = both armed, never stalling)
 - **Wired agent** (today's path): waits for a 05ac iPhone to enumerate on the phone-facing USB bus
-  (`SEV_PHONE_PRESENT`) → USB iAP2 (`iap2d`) → identify → `airplayd` on `ncm0`.
+  (`SEV_PHONE_PRESENT`) → USB iAP2 (`iap2d`) → identify → `carplayd` on `ncm0`.
 - **Wireless agent**: BT advertising + WiFi AP armed → waits for an iPhone to BT-connect and run the
-  iAP2 wireless-CarPlay handshake → WiFi hand-off → `airplayd` on `wlan0`.
+  iAP2 wireless-CarPlay handshake → WiFi hand-off → `carplayd` on `wlan0`.
 - Both agents advertise/listen **concurrently** whenever the session is IDLE; neither blocks the
   other while idle.
 
@@ -296,7 +296,7 @@ for any iPhone; nothing ever stalls.
   - **WiFi hand-off** (serve creds from `hostapd.conf` — interim mechanics: per docs/carplay/04_CAPABILITIES_AND_CONFIG.md the
     credentials are app-pushed at init, and `hostapd.conf` is written from the pushed config) +
     **discovery** (IP:port over the iAP2 channel, or a small mDNS responder on `wlan0`);
-  - **`airplayd` gains a `wlan0` bind** alongside `ncm0` (the receiver is already transport-transparent).
+  - **`carplayd` gains a `wlan0` bind** alongside `ncm0` (the receiver is already transport-transparent).
 - **BT stack decision:** prefer a **Rust `btd`** (raw HCI socket + RFCOMM) to stay self-contained,
   rather than depending on the closed stock `bluetoothDaemon` — which remains a Phase-1
   speed/reference fallback.
@@ -321,8 +321,8 @@ loser is blocked only while a session is live, and teardown returns cleanly to d
 | 3 | **WiFi credential hand-off** | AP creds live in `hostapd.conf` (interim) | serve them in `AccessoryWiFiConfigurationInformation` so the phone auto-joins — creds app-pushed at init per docs/carplay/04_CAPABILITIES_AND_CONFIG.md |
 | 4 | **iAP2-over-Bluetooth transport** | only USB (`/dev/android_iap2`) | BT RFCOMM/L2CAP iAP2 for BT-first pairing + reconnect (reuse stock `bluetoothDaemon`, or new Rust `btd`) |
 | 5 | **Discovery on `wlan0`** | none | mDNS `_airplay._tcp` on `wlan0` **or** IP:port over the iAP2 channel (2023+ path) |
-| 6 | **`airplayd` on `wlan0`** | binds/receives over `ncm0` | bind the AirPlay receiver on `192.168.43.1`; transport-transparent, mostly a bind/discovery change |
-| 7 | **Supervisor orchestration** | wired-only | new wireless lifecycle: BT connect → raise AP → hand off → `airplayd` on `wlan0`; persist `carplay_peers.bin` for auto-reconnect |
+| 6 | **`carplayd` on `wlan0`** | binds/receives over `ncm0` | bind the AirPlay receiver on `192.168.43.1`; transport-transparent, mostly a bind/discovery change |
+| 7 | **Supervisor orchestration** | wired-only | new wireless lifecycle: BT connect → raise AP → hand off → `carplayd` on `wlan0`; persist `carplay_peers.bin` for auto-reconnect |
 
 Nothing here requires new hardware or firmware; items 2–7 are software the project must author.
 
@@ -340,9 +340,9 @@ path (`ncm0`) stays live and unchanged throughout — each phase only *adds* the
 - **Phase 1 — Method A (USB out-of-band handover).** Reuse the existing `iap2d` USB link: add the
   wireless-CarPlay message set (§2.2) + a **link-key/peer store** (`carplay_peers.bin`), so plugging
   in over USB yields the *"Enable wireless CarPlay"* prompt and stores the phone. Bring up the WiFi AP,
-  add discovery on `wlan0`, and give `airplayd` a `wlan0` bind. Goal: after the USB pairing +
+  add discovery on `wlan0`, and give `carplayd` a `wlan0` bind. Goal: after the USB pairing +
   ignition-cycle, the phone re-associates and the A/V session comes up **over WiFi** — feeding the
-  same `airplayd → OCBM → Mac` pipeline. Highest value / lowest cost (no BT transport yet).
+  same `carplayd → OCBM → Mac` pipeline. Highest value / lowest cost (no BT transport yet).
 
 - **Phase 2 — Method B (BT-first) + the arbiter.** Add the Rust **iAP2-over-Bluetooth** transport
   (RFCOMM/L2CAP reusing `iap2d`'s core), **CarPlay EIR advertising**, BT SSP pairing, and the WiFi
@@ -370,14 +370,14 @@ path (`ncm0`) stays live and unchanged throughout — each phase only *adds* the
   closed stock `bluetoothDaemon` (kept only as a Phase-1 reference/fallback). Keeps the project
   self-contained.
 - **Rendering topology:** the **Mac stays the HU head over USB/OCBM**; wireless only changes the
-  *phone-side* ingress (`ncm0`→`wlan0`). `airplayd → OCBM → Mac` is unchanged (§3.1).
+  *phone-side* ingress (`ncm0`→`wlan0`). `carplayd → OCBM → Mac` is unchanged (§3.1).
 - **Arbitration:** first-to-connect wins, no preemption, dual-idle on teardown — **matches Apple's
   own reconnection rules** (§2.5), so this is spec-correct, not a project convention.
 
 **Still open:**
 1. **Discovery path:** ship a small **Bonjour responder on `wlan0`** (older-iOS, matches WWDC 2017
    flow) vs. the **2023 IP:port-over-iAP2** path (no mDNS, WPA3-clean). Likely both, feature-flagged.
-2. **`airplayd` multi-transport shape:** one instance that binds both `ncm0` + `wlan0` and lets the
+2. **`carplayd` multi-transport shape:** one instance that binds both `ncm0` + `wlan0` and lets the
    arbiter gate which is live, vs. a second instance for the WiFi leg. (Leaning single-instance +
    arbiter gate, to keep one A/V pipeline. Whichever shape, the gate's *policy* is app-pushed
    config — docs/carplay/04_CAPABILITIES_AND_CONFIG.md.)
@@ -399,10 +399,10 @@ proven one** to IW416 + OCBM." Reuse map:
 | **AirPlay/RTSP receiver** (pairing, `/info`, SETUP, A/V, HID) | transport-agnostic, same code | **already vendored** (`crates/vendor/receiver`); just bind `wlan0` |
 | **iAP2 core** + **wireless session-start + WiFi-cred codecs** (`CarPlayStartSession 0x4301`, `WirelessAttributes` SSID/passphrase/channel/security, `TransportComponent::Wireless`) | built + unit-tested | **already vendored** (`crates/vendor/iap2-core/src/session.rs`) |
 | **BT bring-up + SDP + SSP + RFCOMM iAP2** (`rust/carplayd/crates/wireless`, ~1.8k LoC — path corrected 2026-08-16, there is no top-level `crates/` in the PoC; **libc-only Linux Bluetooth sockets (HCI/L2CAP/RFCOMM)**, no BlueZ D-Bus) | Phase A1+A2 DONE, iPhone-verified (discoverable, Just-Works pair, SDP, RFCOMM iAP2, **live NowPlaying over BT**) | **to port** |
-| **Session arbiter** (`rust/carplayd/src/arbiter.rs` + `/run/carplay/arbiter.sock`: claim/deny/**preempt**) | DONE, unit + Pi-verified — *exactly* the §3 model | **to port** into the box supervisor |
-| **mDNS discovery** (`rx_connect`, private `mdns-sd`, `_airplay._tcp`/`_carplay-ctrl._tcp`) | proven wired | retarget `ncm0`→`wlan0` |
+| **Session arbiter** (`rust/carplayd/src/arbiter.rs` + `/run/proj/arbiter.sock`: claim/deny/**preempt**) | DONE, unit + Pi-verified — *exactly* the §3 model | **to port** into the box supervisor |
+| **mDNS discovery** (`rx-connect`, private `mdns-sd`, `_airplay._tcp`/`_carplay-ctrl._tcp`) | proven wired | retarget `ncm0`→`wlan0` |
 | **WiFi AP** | hostapd + dnsmasq (Pi) | box has `hostapd` + `udhcpd` + `wlan_on.sh` |
-| **MFi auth** | needed to forward sign requests to a real CCPA's MFi chip (the Pi had no chip) | **simpler here — box has the genuine local MFi chip** (`airplayd` `LocalMfiSigner`); no external signer |
+| **MFi auth** | needed to forward sign requests to a real CCPA's MFi chip (the Pi had no chip) | **simpler here — box has the genuine local MFi chip** (`carplayd` `LocalMfiSigner`); no external signer |
 
 **Box-specific adaptations (the "not tailored to IW416/OCBM" gap):**
 - **BT bring-up:** the PoC shells `hciconfig` on Pi BlueZ; the IW416 attaches over UART
@@ -415,8 +415,8 @@ proven one** to IW416 + OCBM." Reuse map:
   crate port is feasible** — every socket family it needs is present. Caveat: `hcid` runs an SDP
   server that must be stopped/masked for the raw approach (the PoC's documented `bluetoothd` conflict).
 - **OCBM integration:** the PoC pointed the receiver at the Pi's own display; here the
-  wireless-established session feeds the **same `airplayd → OCBM → Mac`** pipeline (§3.1). The wireless
-  daemon's job ends at "phone joined WiFi + receiver discovering"; `airplayd` on `wlan0` takes over.
+  wireless-established session feeds the **same `carplayd → OCBM → Mac`** pipeline (§3.1). The wireless
+  daemon's job ends at "phone joined WiFi + receiver discovering"; `carplayd` on `wlan0` takes over.
 - **`bluetoothd`/`bluetoothDaemon` conflict:** the PoC masks `bluetoothd` (it would answer SDP with no
   iAP2 record and handle the CoD/EIR fields). The box has no `bluetoothd`, but the proprietary
   `bluetoothDaemon` may do the same — decide whether to run it at all in wireless mode.
@@ -526,14 +526,14 @@ was iAP2-meaningless traffic that the AirPlay layer 200-OK'd and silently droppe
 - `cargo test` in `iap2-core`: 63/63 pass (62 pre-existing + the new byte-pin test).
 - `cargo build`/`test` in `mfi-i2c-local`: clean.
 - `cargo check` in `receiver`: clean.
-- `cargo check -p carplay-wireless` + its 26 tests: clean, unaffected (untouched files).
-- `cargo zigbuild --target armv7-unknown-linux-musleabihf --release -p airplayd`: clean release build.
+- `cargo check -p btd` + its 26 tests: clean, unaffected (untouched files).
+- `cargo zigbuild --target armv7-unknown-linux-musleabihf --release -p carplayd`: clean release build.
 
 ### Next step
 
-Deploy to hardware (close host app → reboot → build/UPX-pack/OCBM-push `airplayd` with checksum
+Deploy to hardware (close host app → reboot → build/UPX-pack/OCBM-push `carplayd` with checksum
 verification → reboot → open host app) and test a live wireless connection, watching
-`/tmp/airplayd_wl.log` for the handshake reaching `IdentifyAccept` and, for the first time, real
+`/tmp/carplayd_wl.log` for the handshake reaching `IdentifyAccept` and, for the first time, real
 NowPlaying/RouteGuidance/CallState metadata replies flowing over the AirPlay tunnel.
 
 ---
@@ -587,7 +587,7 @@ at the wireless spawn site, and the wired ARM line never carries it.
   `start_now_playing()` / `start_route_guidance()` / `start_call_state()` (the SAME subscribe bodies
   `iap2d` sends wired) over the tunnel, spaced 50ms apart on a background thread. Fires once per
   session, only when `setup()` (event channel wiring, post-RECORD) sees a peer IP on the `192.168.43.0/24`
-  AP subnet (same wireless-detection check `airplayd/src/main.rs::write_transport_flag` already uses)
+  AP subnet (same wireless-detection check `carplayd/src/main.rs::write_transport_flag` already uses)
   AND the env var `CARPLAY_WIRELESS_METADATA` is set. **Off by default — zero effect on the proven
   wired/wireless baseline unless explicitly enabled.**
 - `dispatch_iap_tunnel_message(data)` — routes an inbound tunneled iAP2 message to the SAME
@@ -614,17 +614,17 @@ evidence (SDK strings, not a byte-exact capture).
 
 ### Deployed state (this session)
 
-- `airplayd` cross-built (`armv7-unknown-linux-musleabihf`, release, 1,471,804 B,
+- `carplayd` cross-built (`armv7-unknown-linux-musleabihf`, release, 1,471,804 B,
   md5 `3ae92319b92e2e6a207bf49fbe6fae7f`) and pushed to the box via OCBM (`ocbm-host push`, app closed) →
-  `/usr/sbin/airplayd`. Prior binary backed up as `/usr/sbin/airplayd.bak.1784765459`.
+  `/usr/sbin/carplayd`. Prior binary backed up as `/usr/sbin/carplayd.bak.1784765459`.
 - `tools/session_supervisor.sh` line 162's ARM launch now reads `OCBM_FWD_ENC=1
-  CARPLAY_WIRELESS_METADATA=1 setsid airplayd …` (was `OCBM_FWD_ENC=1 setsid airplayd …`) — pushed to
+  CARPLAY_WIRELESS_METADATA=1 setsid carplayd …` (was `OCBM_FWD_ENC=1 setsid carplayd …`) — pushed to
   `/script/session_supervisor.sh`, and the running supervisor was killed so the inittab respawn wrapper
   (`run_supervisor.sh`) relaunched it fresh with the new script (confirmed via md5 + `ps`, new PID).
   **This means the box is CURRENTLY armed to run the experiment on the next wireless session.** Remove
   the `CARPLAY_WIRELESS_METADATA=1` clause (see the comment left in place at that line) to fall back to
   the exact prior launch once the experiment is evaluated.
-- `/tmp/carplay_event_capture.bin`, `/tmp/carplay_cmd_capture.bin`, `/tmp/airplayd.log` cleared so the
+- `/tmp/carplay_event_capture.bin`, `/tmp/carplay_cmd_capture.bin`, `/tmp/carplayd.log` cleared so the
   next session's capture starts from zero.
 - `host/uart_cmd.sh` and `tools/uart_push.sh` PORT updated from the stale `/dev/cu.usbserial-B0010KMC`
   to the current adapter's `/dev/cu.usbserial-0001` (115200 baud) — confirmed live (`uname -a` round
@@ -634,7 +634,7 @@ evidence (SDK strings, not a byte-exact capture).
 
 1. Connect the phone wirelessly (BT pair if not already, WiFi handoff, AirPlay session up) and exercise
    Apple Music (NowPlaying), a call (CallState), and if possible a Maps route (RouteGuidance).
-2. Pull `/tmp/carplay_event_capture.bin` (and `/tmp/airplayd.log` for the `[events]` TX/RX log lines)
+2. Pull `/tmp/carplay_event_capture.bin` (and `/tmp/carplayd.log` for the `[events]` TX/RX log lines)
    over OCBM (app closed) or UART, and run `scratchpad/decode_cmd_capture.py
    /tmp/carplay_event_capture.bin` — same decoder, same framing.
 3. Three possible outcomes, and what each means:
@@ -722,7 +722,7 @@ livelock (iPhone reconnects, rejects again, repeat), not a bricked accessory.
 Reverted: the two `extend_from_slice` calls removed from `message.rs`, the byte-pin test
 (`ident_info_wireless_message_lists_are_byte_pinned`) reverted to the pre-5.1 lists, a stale
 `bt_driver.rs` comment (which had briefly been made accurate for 5.1's declared state) reverted back.
-62/62 iap2-core tests + 26/26 carplay-wireless tests pass on the reverted source. Redeployed via the
+62/62 iap2-core tests + 26/26 btd tests pass on the reverted source. Redeployed via the
 retained pre-5.1 UPX-packed binary (instant redeploy, no rebuild) — checksums verified byte-exact.
 Confirmed via a fresh from-scratch reconnect: clean `STREAMING`, no reject.
 
@@ -851,9 +851,9 @@ stream type 130), which was never answered — see `../carplay/05_METADATA_AND_C
 (transport flag cleared)` and fell back to the wired "no iPhone attached" loop — while the real
 session was streaming and its TCP connections were `ESTABLISHED` throughout.
 
-**Root cause:** `carplay-wireless` spawned airplayd, then polled `pgrep -x airplayd` for up to 1 s to
+**Root cause:** `btd` spawned carplayd, then polled `pgrep -x carplayd` for up to 1 s to
 confirm it started. BusyBox `pgrep -x` matches the **full invoked path**, not the basename, so the
-check never matched, `[av] airplayd failed to start — releasing the transport flag` fired, and each
+check never matched, `[av] carplayd failed to start — releasing the transport flag` fired, and each
 `0x5702 RequestAccessoryWiFiConfig` retry re-entered the same loop.
 
 **Fix:** stop probing for liveness. The spawn call site keeps the child handle it already has instead

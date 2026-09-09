@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Cross-build libfdk-aac for aarch64-linux-android, so airplayd can be built WITH `mic-uplink-eld`.
+# Cross-build libfdk-aac for aarch64-linux-android, so carplayd can be built WITH `mic-uplink-eld`.
 #
 #   pi/tools/build_fdk_aac_arm64.sh
 #
 # WHY THIS MATTERS MORE THAN IT LOOKS
 #
-# Without it, airplayd is built --no-default-features and reports:
+# Without it, carplayd is built --no-default-features and reports:
 #
 #     [uplink] ... negotiated but `mic-uplink-eld` not built
 #
@@ -152,7 +152,7 @@ fi
 ls -l "$PREFIX/lib/libfdk-aac.a"
 cat <<EOF
 
-Done. Build airplayd WITH mic uplink by exporting:
+Done. Build carplayd WITH mic uplink by exporting:
 
   export FDK_AAC_PREFIX=$PREFIX
   export CPPFLAGS=-I$STUB
@@ -160,5 +160,5 @@ Done. Build airplayd WITH mic uplink by exporting:
 pi/tools/build_pi_binaries.sh picks both up automatically when the prefix exists.
 
 Verify the feature landed (this string must be ABSENT):
-  strings target/aarch64-linux-android/release/airplayd | grep 'mic-uplink-eld\` not built'
+  strings target/aarch64-linux-android/release/carplayd | grep 'mic-uplink-eld\` not built'
 EOF

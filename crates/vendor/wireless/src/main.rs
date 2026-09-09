@@ -1,9 +1,9 @@
-//! carplay-wireless — wireless CarPlay bring-up (ported from the carplayd PoC, iPhone-verified
+//! btd — wireless CarPlay bring-up (ported from the carplayd PoC, iPhone-verified
 //! Phase A1+A2). See `docs/wireless/00_WIRELESS_CARPLAY.md`.
 //!
 //! A separate process/binary, matching the project's strict-modularity rule -- a wireless-stack bug
 //! must never destabilize the proven wired OCBM path. Coordinates with the wired session owner via
-//! the session arbiter (`/run/carplay/arbiter.sock`) so only one transport is ever an active
+//! the session arbiter (`/run/proj/arbiter.sock`) so only one transport is ever an active
 //! connection target: claims `wireless`, brings Bluetooth up while held, and goes quiet (not powers
 //! off) the moment a wired session preempts it.
 //!
@@ -60,12 +60,30 @@ const HSP_HS_RFCOMM_CHANNEL: u8 = bt_common::sdp_record::HSP_HS_RFCOMM_CHANNEL;
 // `carplay_iap2_core::message::accessory_name` — the SAME suffix as the Wi-Fi SSID + wired iAP2 identity,
 // so a box shows one distinct name on every transport (multiple boxes stop collapsing into one iOS car).
 const ACCESSORY_BRAND: &str = "CarLink";
-const ARBITER_SOCK: &str = "/run/carplay/arbiter.sock";
+// Renamed from /run/carplay/arbiter.sock: this socket arbitrates BETWEEN CarPlay and Android
+// Auto, so naming it after one of them was backwards. Safe to move — no server binds it yet
+// (arbiter_client falls back to standalone when the path is absent).
+const ARBITER_SOCK: &str = "/run/proj/arbiter.sock";
 
 /// `@<unix_ms> ` write-time stamp (docs/carplay/01_OCBM_PROTOCOL.md CH_LOG): the box.log tailer
 /// parses this prefix and uses it instead of the millisecond it happened to READ the line at.
 fn log(m: &str) {
     println!("@{} [wireless] {m}", now_ms());
+}
+
+/// Does this box own a SoftAP? `BOX_WIFI_AP=0` is the BT-only bridge role (gm_ccpa: the head
+/// unit owns Wi-Fi, this adapter is the Bluetooth radio and the MFi coprocessor).
+///
+/// The supervisor has exported this since the role existed (`session_supervisor.sh`, `wifi_ap:false`
+/// in the wireless config) and NOTHING on this side read it — so a bridge-role box still advertised
+/// the Android Auto SDP record and still ran the wireless-AA bootstrap, handing a Pixel credentials
+/// for an access point that does not exist on this box. What the phone got were the credentials
+/// `aa_ap_params` reads out of `/etc/hostapd.conf`, which the supervisor overwrites with the
+/// VEHICLE hotspot in this role — i.e. we told the phone to join the head unit and then answered
+/// as the head unit. Absent or any value other than "0" means a real AP, which keeps every
+/// non-bridge box on exactly today's path.
+fn wifi_ap_enabled() -> bool {
+    box_common::lever("BOX_WIFI_AP", "CARPLAY_WIFI_AP").as_deref() != Some("0")
 }
 
 fn now_ms() -> u64 {
@@ -338,9 +356,17 @@ fn run_active_session(
         // Restarted on error for the same reason as the SSP agent above: `run_services` returns
         // `Ok(())` on the shutdown flag, and without an SDP responder a paired phone disconnects.
         while !t.load(Ordering::Relaxed) {
-            let services = vec![
-                sdp_server::iap2_service(RFCOMM_CHANNEL),
-                sdp_server::android_auto_service(AA_RFCOMM_CHANNEL),
+            let mut services = vec![sdp_server::iap2_service(RFCOMM_CHANNEL)];
+            // Wireless Android Auto is unreachable without our own SoftAP, so in the BT-only
+            // bridge role the record is an invitation we cannot honour: the phone dials channel 4,
+            // we hand it AP credentials for an AP we do not run, and gearhead fails after the user
+            // has already seen "Connecting to Android Auto". Do not advertise what we cannot serve.
+            // HFP/HSP below are NOT gated with it — in this role the adapter IS the vehicle
+            // Bluetooth radio, and call audio is the point of the role.
+            if wifi_ap_enabled() {
+                services.push(sdp_server::android_auto_service(AA_RFCOMM_CHANNEL));
+            }
+            services.extend([
                 // The two headset-class records. gearhead will not start wireless setup unless the
                 // phone's `BluetoothProfile.HEADSET` reports us connected, and a phone whose
                 // `PhonePolicy` auto-connects to a bonded headset needs a record to find first.
@@ -349,7 +375,7 @@ fn run_active_session(
                 // §6b).
                 sdp_server::hfp_hf_service(HFP_HF_RFCOMM_CHANNEL),
                 sdp_server::hsp_hs_service(HSP_HS_RFCOMM_CHANNEL),
-            ];
+            ]);
             match sdp_server::run_services(services, &t) {
                 Ok(()) => break,
                 Err(e) => {
@@ -433,6 +459,13 @@ fn run_active_session(
         // (the Pi/AAOS port); refuse rather than regress it.
         if rfcomm_uspace::selected() {
             log("Android Auto: userspace RFCOMM backend cannot serve a second channel -- AA disabled");
+            return;
+        }
+        // Same gate as the SDP record above: no SoftAP, no wireless AA to bootstrap. Refusing here
+        // as well as in the record is deliberate — a phone that remembers this box from a previous
+        // (non-bridge) configuration can still dial channel 4 without an SDP lookup.
+        if !wifi_ap_enabled() {
+            log("Android Auto: BOX_WIFI_AP=0 (BT-only bridge role) -- wireless AA bootstrap disabled");
             return;
         }
         loop {
@@ -615,7 +648,7 @@ fn run_active_session(
     }
     // Ordering is load-bearing (audit #3, a re-occurrence of the #106 leak): JOIN the RFCOMM producer
     // thread BEFORE tearing down the A/V layer. bt_driver::run can be mid-handshake handling a 0x5702
-    // and call av::ensure_av_layer() (which spawns airplayd + rx-connect) with no abort re-check between
+    // and call av::ensure_av_layer() (which spawns carplayd) with no abort re-check between
     // the reply write and the spawn. If we teardown_av_layer() first and THEN join, that in-flight
     // handshake re-spawns the children right after the pkill -> orphaned rx-connect advertises a dead
     // :5000 (phone keeps dialing a connection-refused receiver) and /tmp/carplay_transport sticks at
@@ -630,13 +663,13 @@ fn run_active_session(
         let _ = h.join();
     }
     // Same #106 discipline as the RFCOMM accept producer: reconnect::attempt can be mid
-    // bt_driver::run → av::ensure_av_layer (spawning airplayd + rx-connect), so it must be joined
+    // bt_driver::run → av::ensure_av_layer (spawning carplayd), so it must be joined
     // BEFORE teardown_av_layer too, or an in-flight reconnect re-spawns the children right after the
     // pkill. reconnect_shutdown was set above; the loop and bt_driver::run both observe it.
     let _ = reconnect_handle.join();
     let _ = ssp_handle.join();
     let _ = sdp_handle.join();
-    // Now that no producer thread can spawn them, reap the airplayd + rx-connect this crate started
+    // Now that no producer thread can spawn them, reap the carplayd this crate started
     // (#106): a clean preempt/shutdown must not leave a dead-:5000 advertiser or a stuck transport flag.
     av::teardown_av_layer();
     // Bound the owner claim `run_aa_bootstrap` deliberately holds past an established bootstrap:
@@ -658,7 +691,7 @@ fn install_panic_hook(name: &'static str) {
 }
 
 fn main() {
-    install_panic_hook("carplay-wireless");
+    install_panic_hook("btd");
     let shutdown = Arc::new(AtomicBool::new(false));
     signal_hook::flag::register(signal_hook::consts::SIGTERM, shutdown.clone())
         .expect("register SIGTERM handler");

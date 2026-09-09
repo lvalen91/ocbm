@@ -135,7 +135,7 @@ Agents 4 and 8 argued for a YAML field. **Rejected** on agent 3's evidence:
    must not do that. Direct precedent: `CT_RADIO` was made a control message *instead of* a config
    field for exactly this reason, and says so in its own comment.
 2. **Wrong consumer.** `ocbmd` treats the pushed cfg as opaque bytes and never parses it
-   (`main.rs:2246,2256-2258` — a byte compare and a verbatim `write_cfg_file`); `carplay-wireless`
+   (`main.rs:2246,2256-2258` — a byte compare and a verbatim `write_cfg_file`); `btd`
    never reads `/tmp/carplay_cfg.yaml` at all. Either way it needs new parsing machinery.
 3. **No ACK path.**
 
@@ -147,7 +147,7 @@ the UI already looks.
 
 Agent 11 proposed `/etc` so it survives reboot. **Rejected** on a functional argument (agent 10):
 
-- `carplay-wireless` runs **only** while the host app is present — the supervisor brings it up on the
+- `btd` runs **only** while the host app is present — the supervisor brings it up on the
   `/tmp/host_present` 0→1 edge and tears it down on 1→0 (`tools/session_supervisor.sh:786-795`). There is
   **no app-less window** in which a persisted preference could ever be consulted.
 - It would be the project's first rootfs write for UI state, against docs/carplay/02_SESSION_LIFECYCLE.md's "session config is
@@ -176,7 +176,7 @@ to the back until the next successful session or a preference change.
 ### D4. Two things the implementation must NOT do
 
 - **Must not call `request_wireless_restart()`.** Copying `MGMT_FORGET_DEVICE`'s shape is the obvious
-  implementation and it is wrong: the supervisor's `wireless_down` SIGTERM/SIGKILLs carplay-wireless
+  implementation and it is wrong: the supervisor's `wireless_down` SIGTERM/SIGKILLs btd
   **and airplayd/rx-connect** and powers `hci0` down (the `setsid sh -c` block at
   `tools/session_supervisor.sh:653-667`, inside `wireless_down()` at `:620`) — so setting a
   preference would **kill the currently projecting phone**. There is no rate limit on MGMT verbs.
@@ -266,7 +266,7 @@ echoed verb byte only — there is no sequence token.
   snapshot already uses for `/tmp/carplay_transport` and `/tmp/phone_present`. The value is validated
   hex+colons so it needs no JSON escaping.
 
-### 4.3 `carplay-wireless`
+### 4.3 `btd`
 
 Two **pure, named** functions (agent 12 needs them as test seams):
 
@@ -474,7 +474,7 @@ Precedent that new box→host traffic is benign: the mac app has **no cases at a
 already sends CT ops the mac app merely throttle-logs.
 
 **Deployment order: box first, apps second.** "Old app + new box" is the benign row. Push ocbmd +
-carplay-wireless together in one reboot to avoid a mixed window. The macOS app needs no change at all
+btd together in one reboot to avoid a mixed window. The macOS app needs no change at all
 provided MGMT_INFO stays additive.
 
 **Rollback: app-only, and D2 is what makes it work** — there is no persisted box state to outlive it.
@@ -551,7 +551,7 @@ rather than an injected `now`. Still to build: the Rust seams `parse_preferred` 
 
 - **H1** Preference does **not** survive a box reboot (asserting D2's intent), and the app re-asserts
   it on the next session.
-- **H2** ocbmd → carplay-wireless handoff: SET_PREFERRED then observe `[reconnect]` log order.
+- **H2** ocbmd → btd handoff: SET_PREFERRED then observe `[reconnect]` log order.
 - **H3** **Acceptance test.** Two bonded iPhones: preferred one paged first, **and the non-preferred
   one still connects when the preferred is absent**.
 - **H4** Forget-preferred on hardware: loop does not page it; ACK sequencing survives the wireless

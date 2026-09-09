@@ -1,18 +1,18 @@
 [uplink] control-in connected from 127.0.0.1:49030
-[airplayd] cfg: /data/user/10/com.carlink.projection/files/carplay_cfg.yaml (42040 B) → 1920×1080@60 hevc=true dpad=false viewAreas=false mainBuffered=false safe=None
+[carplayd] cfg: /data/user/10/com.carlink.projection/files/carplay_cfg.yaml (42040 B) → 1920×1080@60 hevc=true dpad=false viewAreas=false mainBuffered=false safe=None
 [session] SETUP phase2 DataStream(130) scid=0 channelID="B2:69:DF:A0:28:03-RCS-48" clientTypeUUID="E9459FD0-BCAD-4C45-820F-1E72447EF2F2" controlType=2 wantsDedicatedSocket=true seed=8762373606684828145 reqKeys=["controlType", "channelID", "seed", "clientUUID", "type", "wantsDedicatedSocket", "sendMessageAsIs", "clientTypeUUID"] → streamID=2  [iAP channel]
 [session] SETUP phase2 screen(110) scid=16031944862179477512 → dataPort 38605
 [session] SETUP phase2 audio(102) scid=15230620673592148267 fmt=0x800000 48000Hz 2ch AacLc audioType="media" → dataPort 56491
 [uplink] control-in listening 127.0.0.1:9112 (mic PCM in / uplink back-channel out)
 [uplink] control-in connected from 127.0.0.1:33808
-[airplayd] cfg: /data/user/10/com.carlink.projection/files/carplay_cfg.yaml (42040 B) → 1920×1080@60 hevc=true dpad=false viewAreas=false mainBuffered=false safe=None
+[carplayd] cfg: /data/user/10/com.carlink.projection/files/carplay_cfg.yaml (42040 B) → 1920×1080@60 hevc=true dpad=false viewAreas=false mainBuffered=false safe=None
 [session] SETUP phase2 DataStream(130) scid=0 channelID="B2:69:DF:A0:28:03-RCS-49" clientTypeUUID="E9459FD0-BCAD-4C45-820F-1E72447EF2F2" controlType=2 wantsDedicatedSocket=true seed=13584737340212246436 reqKeys=["controlType", "channelID", "seed", "clientUUID", "type", "wantsDedicatedSocket", "sendMessageAsIs", "clientTypeUUID"] → streamID=1  [iAP channel]
 [session] SETUP phase2 screen(110) scid=17014193948599009870 → dataPort 34375
 [session] SETUP phase2 audio(102) scid=15440795104732269461 fmt=0x800000 48000Hz 2ch AacLc audioType="media" → dataPort 46149
 [uplink] control-in 127.0.0.1:33808 closed
 [uplink] control-in connected from 127.0.0.1:39820
 [uplink] control-in listening 127.0.0.1:9112 (mic PCM in / uplink back-channel out)
-[airplayd] cfg: /data/user/10/com.carlink.projection/files/carplay_cfg.yaml (42040 B) → 1920×1080@60 hevc=true dpad=false viewAreas=false mainBuffered=false safe=None
+[carplayd] cfg: /data/user/10/com.carlink.projection/files/carplay_cfg.yaml (42040 B) → 1920×1080@60 hevc=true dpad=false viewAreas=false mainBuffered=false safe=None
 [uplink] control-in connected from 127.0.0.1:44940
 [session] SETUP phase2 DataStream(130) scid=0 channelID="B2:69:DF:A0:28:03-RCS-50" clientTypeUUID="E9459FD0-BCAD-4C45-820F-1E72447EF2F2" controlType=2 wantsDedicatedSocket=true seed=18089046088320510429 reqKeys=["controlType", "channelID", "seed", "clientUUID", "type", "wantsDedicatedSocket", "sendMessageAsIs", "clientTypeUUID"] → streamID=1  [iAP channel]
 [session] SETUP phase2 screen(110) scid=1350674039916152027 → dataPort 45539

@@ -32,7 +32,7 @@ fn i2c_fd() -> i32 {
         return *cached;
     }
     // O_CLOEXEC: this is a PROCESS-LIFETIME fd (G_I2C, opened once) and this crate fork+execs the
-    // detached A/V daemons via av::ensure_av_layer(). Without it, airplayd and rx-connect inherit an
+    // detached A/V daemons via av::ensure_av_layer(). Without it, carplayd and rx-connect inherit an
     // open handle to the MFi chip's I2C bus and keep it for as long as they live.
     let fd = unsafe { libc::open(c"/dev/i2c-1".as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
     if fd < 0 {
@@ -45,10 +45,10 @@ fn i2c_fd() -> i32 {
 
 /// Path of the cross-process advisory lock serializing all MFi I2C access (#109). FIVE users share the
 /// single `/dev/i2c-1` chip (corrected 2026-07-25 — this used to say "both daemons"): wired `iap2d`,
-/// wireless `carplay-wireless` (here), `airplayd`'s `LocalMfiSigner`, `receiver`'s tunnel handshake
+/// wireless `btd` (here), `carplayd`'s `LocalMfiSigner`, `receiver`'s tunnel handshake
 /// via `mfi-i2c-local`, and `ocbmd`'s `CH_MFI` relay. The cert/sign sequences are stateful (write challenge → go → poll status → read
 /// result), so any interleaving corrupts both transactions. Every user `flock`s this path for the whole
-/// duration of a cert()/sign(), each with a bounded 10s LOCK_NB poll (matching `airplayd`'s `MfiLock`
+/// duration of a cert()/sign(), each with a bounded 10s LOCK_NB poll (matching `carplayd`'s `MfiLock`
 /// and `mfi-i2c-local`). The session arbiter also enforces single-transport, but this is the low-level
 /// guarantee independent of it.
 pub const MFI_LOCK_PATH: &[u8] = b"/tmp/carplay_mfi.lock\0";
@@ -71,7 +71,7 @@ impl MfiLock {
         if fd < 0 {
             return None;
         }
-        // BOUNDED acquire (LOCK_NB + deadline), matching `ccpa/airplayd/src/main.rs`'s `MfiLock` and
+        // BOUNDED acquire (LOCK_NB + deadline), matching `ccpa/carplayd/src/main.rs`'s `MfiLock` and
         // `mfi-i2c-local`'s: a wedged holder must not block this caller forever. The legitimate worst
         // case is the sign path's ~2.1s poll x 3 retries ~= 6.3s, so 10s is a real ceiling.
         const DEADLINE: Duration = Duration::from_secs(10);
@@ -322,7 +322,15 @@ pub fn sign(chal: &[u8]) -> Option<Vec<u8>> {
     }
     unsafe { libc::usleep(100_000) };
     let mut done = false;
-    for _ in 0..200 {
+    // Bounded by WALL CLOCK, not iteration count — the same defect audit #8 fixed in
+    // `mfi-i2c-local`. `for _ in 0..200` with a 10 ms sleep looks like ~2.1 s, and is, but only
+    // while every status read succeeds. The status read is itself `for _ in 0..5` with a 5 ms
+    // sleep, so under chip NAK each iteration costs ~35 ms and the loop runs ~7.1 s — and with
+    // the caller's retries that is ~21 s holding /tmp/carplay_mfi.lock, blowing through every
+    // other chip user's 10 s acquire deadline.
+    const SIGN_POLL_DEADLINE: std::time::Duration = std::time::Duration::from_millis(2500);
+    let poll_start = std::time::Instant::now();
+    while poll_start.elapsed() < SIGN_POLL_DEADLINE {
         let mut st = [0u8; 1];
         // Poll control-register 0x10 bit 4 = "signature ready" — byte-identical to the DEVICE-VERIFIED
         // wired iap2d path (ccpa/iap2d/src/main.rs:120). QC #124 flagged this as accepting non-ready

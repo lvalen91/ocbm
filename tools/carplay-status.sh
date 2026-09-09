@@ -16,7 +16,7 @@ fi
 echo "--- signals ---"
 echo "host_present=$(cat /tmp/host_present 2>/dev/null)   session_healthy=$(cat /tmp/session_healthy 2>/dev/null)"
 if [ -f /tmp/peer_pending ]; then echo "peer_pending=$(cat /tmp/peer_pending 2>/dev/null)"; fi
-echo "iap2d=$(pgrep -f iap2d | tr '\n' ' ')  airplayd=$(pgrep -f airplayd | tr '\n' ' ')  ocbmd=$(pgrep -f ocbmd | tr '\n' ' ')"
+echo "iap2d=$(pgrep -f iap2d | tr '\n' ' ')  carplayd=$(pgrep -f carplayd | tr '\n' ' ')  ocbmd=$(pgrep -f ocbmd | tr '\n' ' ')"
 echo "ncm0: $(ip -o link show ncm0 2>/dev/null | cut -c1-90 || echo 'n/a')"
 
 echo "--- recent lifecycle transitions (uptime-stamped, #30) ---"

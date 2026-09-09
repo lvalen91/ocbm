@@ -167,7 +167,7 @@ BT_AFTER_WLAN=0
 grep -qE 'while \[ ! -e /sys/class/net/' /script/attach_bluetooth.sh 2>/dev/null && BT_AFTER_WLAN=1
 
 # ---- 4c. THE SCO / HFP VOICE SETUP THIS UNIT'S OWN DISPATCHER APPLIES ------------------------
-# The bring-up in carplay-wireless forces a DOWN->UP cycle on the controller, and this controller
+# The bring-up in btd forces a DOWN->UP cycle on the controller, and this controller
 # is hciattach'd over UART, so it carries HCI_QUIRK_RESET_ON_CLOSE: the `down` makes the kernel
 # issue a real HCI_Reset, which DISCARDS everything attach_bluetooth.sh set after its own attach --
 # including the SCO setup HFP call audio needs (docs/wireless/01_BT_AND_RADIO.md "Accepted side

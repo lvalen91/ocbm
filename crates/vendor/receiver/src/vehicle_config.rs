@@ -3,7 +3,7 @@
 //! This mirrors Apple's own **CarPlaySimulator** authoring schema (`CarPlayConfigs.VehicleConfig`,
 //! parsed there by Yams; see `ccpa_custom/docs/13` §2 and `reference/carplay_sdk/apple_vehicleconfigs/`).
 //! The model is **host-authoritative / ephemeral** (docs/carplay/04_CAPABILITIES_AND_CONFIG.md): the macOS app ships a YAML at OCBM
-//! SUBSCRIBE, ocbmd lands it at `/tmp/carplay_cfg.yaml`, and airplayd parses it **per control
+//! SUBSCRIBE, ocbmd lands it at `/tmp/carplay_cfg.yaml`, and carplayd parses it **per control
 //! connection** into a [`DeviceConfig`] before building `/info`. A config push = a fresh session = a
 //! re-read `/info`, which is exactly the reconnect class the resolution lever lives in (docs/carplay/06_AV_PIPELINE.md).
 //!
@@ -15,7 +15,7 @@
 //! **What is applied today:**
 //! - `displayPanelsConfig.mainDisplayPanel.pixelDimensions.{width,height}` — the coded-resolution
 //!   lever the iPhone reads from `/info` `displays[].widthPixels/heightPixels`.
-//! - `accessoryConfig.enablesHEVC` (2026-07-12, user directive) — parsed here; the CALLER (airplayd)
+//! - `accessoryConfig.enablesHEVC` (2026-07-12, user directive) — parsed here; the CALLER (carplayd)
 //!   arms the receiver's `CARPLAY_HEVC` lever from it per connection (hevcInfo in `/info` +
 //!   `enabledFeatures:["hevc"]` in the SETUP phase-1 response). The host app's decoder is dual-codec
 //!   with an hvcC pre-warm path, so an iOS switch to HEVC is consumed end-to-end. See `info.rs`'s
@@ -88,6 +88,24 @@ pub struct VehicleConfig {
     /// Absent = the transport-gated default (PCM wired / 8-entry AAC wireless) is kept. See [`AudioConfig`].
     #[serde(default)]
     pub audio: AudioConfig,
+    /// `view_area_anim_ms` — OUR extension (top-level, snake_case: the `wifi_ap` / `hot_handover` /
+    /// `android_auto` shape), NOT an Apple `VehicleConfig` key and deliberately NOT inside
+    /// `viewAreas[]`: it is the runtime `animationDurationMillis` the box puts in its `updateViewArea`
+    /// ANSWER (`events::switch_view_area`), which is exactly why it cannot live in the Apple-schema
+    /// block. Integer milliseconds.
+    ///
+    /// Absent = `None` = 3000 (`levers::VIEW_AREA_ANIM_MS_DEFAULT`), the value the box always sent —
+    /// inherited from WWDC 2019-252's demo and the Simulator, never measured until 2026-09-09, when
+    /// 3000 -> 1000 visibly sped up the Dock resize on a live wired session (the first time anyone
+    /// varied it on hardware). The app emits the key ONLY when it differs from 3000, so every
+    /// pre-existing pushed document stays byte-identical — and the `APP_EMITTED_DOCUMENT` fixture,
+    /// being the app's default document, never carries it.
+    ///
+    /// Out of range (0..=10000) is CLAMPED to the nearest bound at arm time
+    /// (`levers::set_view_area_anim_ms`, logged by carplayd) — never a rejection. A non-integer value
+    /// is a serde type error and rejects the whole document, exactly as a mistyped Apple key does.
+    #[serde(default)]
+    pub view_area_anim_ms: Option<i64>,
 }
 
 /// One resolution of the OEM icon — a base64 PNG plus its pixel size.
@@ -627,7 +645,7 @@ pub struct SafeRect {
 /// C-2 (`touchpadSupport`, `steeringWheelSupport`, `mediaButtonsSupport`, `touchScreenMode`) are
 /// PARSE-ONLY until C-7/C-8 derive the display-features word from them
 /// (`dPadSupport`, `knobSupport`, `telephonyButtonsSupport`, `touchScreenSupportsMultiTouch` — each
-/// arms its HID device via the matching `events::set_*_advertised` lever in airplayd's
+/// arms its HID device via the matching `events::set_*_advertised` lever in carplayd's
 /// per-connection config apply). Apple's full set, read
 /// from `CarPlayConfigs.HIDConfig` in the Simulator binary (ivar offsets +0x18..+0x3d), is:
 /// `knobSupport`, `knobSupportsHomeAndBackButton`, `knobSupportsNudge`, `knobSupportsDPadNudgeFudge`,
@@ -648,7 +666,7 @@ pub struct SafeRect {
 pub struct HidConfig {
     #[serde(default, rename = "dPadSupport")]
     pub dpad_support: bool,
-    /// WIRED since the knob lever landed: airplayd arms it per connection via
+    /// WIRED since the knob lever landed: carplayd arms it per connection via
     /// `events::set_knob_advertised` (a thin delegate to `levers::set_knob`, so the HID-ingest
     /// gate reads the same cell) and `info.rs` emits the uid-4 `hidDevices[]` entry from it. The descriptor bytes
     /// must come from `HIDKnobCreateDescriptor` (70 B, home+back+nudge) or
@@ -734,7 +752,7 @@ pub struct DisplayPanelsConfig {
     /// on hardware 2026-08-11): cluster content works and its elements are toggleable. The mechanism is
     /// `showUI` with query parameters — `ClusterContent` {None, Instruction Card, Map, Navigation App}
     /// in `ControlsWindow.swift`, and `showSpeedLimit`/`showCompass`/`showETA` carried as query flags on
-    /// the cluster URL (`airplayd/src/main.rs`, `NAV_APPEARANCE_*` in `ocbm-proto`), which airplayd's own
+    /// the cluster URL (`carplayd/src/main.rs`, `NAV_APPEARANCE_*` in `ocbm-proto`), which carplayd's own
     /// comment calls "literally the elements inside the navigation video". That vocabulary was taken from
     /// Apple's Simulator (`AirPlayShowUIURL.airPlayURL`), so it is Apple's mechanism, not a workaround.
     ///
@@ -1040,6 +1058,15 @@ impl VehicleConfig {
         self.accessory_config.enables_focus_transfer
     }
 
+    /// The REQUESTED `updateViewArea` animation duration in ms: the pushed top-level
+    /// `view_area_anim_ms`, or [`crate::levers::VIEW_AREA_ANIM_MS_DEFAULT`] (3000) when absent.
+    /// Unclamped on purpose — `levers::set_view_area_anim_ms` clamps and returns the effective
+    /// value, so the arming site can log both what was asked for and what will be sent.
+    pub fn view_area_anim_ms(&self) -> i64 {
+        self.view_area_anim_ms
+            .unwrap_or(crate::levers::VIEW_AREA_ANIM_MS_DEFAULT)
+    }
+
     /// Whether to advertise `logTransfer` (docs/carplay/04_CAPABILITIES_AND_CONFIG.md Half A) — the host's
     /// `accessoryConfig.enablesLogTransfer`. Drives the logTransfer lever
     /// (`logTransferInfo` in `/info` + the SETUP `enabledFeatures` echo).
@@ -1049,7 +1076,7 @@ impl VehicleConfig {
 
     /// Whether the host asks for app-driven SETUP (`accessoryConfig.appDrivenSetup`, plan P1).
     /// Drives the `appsetup` lever the same way the other accessoryConfig toggles drive theirs: the
-    /// CALLER (airplayd `load_device_config`) arms `levers::set_appsetup` per connection — apply()
+    /// CALLER (carplayd `load_device_config`) arms `levers::set_appsetup` per connection — apply()
     /// never touches levers in this crate, so the config→lever seam stays in one place.
     pub fn app_driven_setup(&self) -> bool {
         self.accessory_config.app_driven_setup
@@ -1418,7 +1445,7 @@ videoStreamsConfig:
     ///
     /// It compares `DeviceConfig` and NOTHING ELSE. That is total within `DeviceConfig` (a Debug
     /// comparison catches every field, including ones added later), but several emitted surfaces
-    /// never travel through it — `accessory_config.*`, which airplayd reads straight off
+    /// never travel through it — `accessory_config.*`, which carplayd reads straight off
     /// `VehicleConfig`; `app_driven_setup()` / `view_areas_enabled()` / `alt_screen()`, which are
     /// armed as `levers::` and each drive a SETUP `enabledFeatures` token; and — the one that
     /// matters here — the HID surface C-2 exists to feed, since `displays[].features` and
@@ -1427,7 +1454,7 @@ videoStreamsConfig:
     ///
     /// So this test will NOT fail when C-8 flips the features word, because C-8 follows the
     /// established dpad/knob/telephony pattern: a `vc.touchpad_support()` accessor plus a lever arm
-    /// in airplayd, both invisible from here. Do not read a green suite as proof the wire is
+    /// in carplayd, both invisible from here. Do not read a green suite as proof the wire is
     /// unmoved. The wider closure is
     /// `tests/r4_c2_schema.rs::r4_c2_hid_fields_move_no_emitted_surface_including_the_non_device_config_ones`,
     /// which asserts the non-`DeviceConfig` surfaces too.
@@ -1849,6 +1876,44 @@ metadata:
         assert!(off.focus_transfer_enabled());
     }
 
+    /// `view_area_anim_ms` (OUR top-level extension, 2026-09-09): absent or null = 3000, the wire the
+    /// box always sent; present = the requested integer, carried UNCLAMPED (the lever clamps, so the
+    /// arm-time log can print both numbers). The fixture never carries the key — the app emits it
+    /// only when it differs from 3000 — so this literal is the only parse coverage it gets.
+    #[test]
+    fn view_area_anim_ms_absent_is_3000_and_present_is_carried() {
+        let absent = VehicleConfig::from_yaml(b"name: X\n").unwrap();
+        assert_eq!(absent.view_area_anim_ms, None);
+        assert_eq!(absent.view_area_anim_ms(), 3000);
+        let null = VehicleConfig::from_yaml(b"view_area_anim_ms: ~\n").unwrap();
+        assert_eq!(null.view_area_anim_ms(), 3000, "explicit null must behave as absent");
+        let set = VehicleConfig::from_yaml(b"name: X\nview_area_anim_ms: 1000\n").unwrap();
+        assert_eq!(set.view_area_anim_ms(), 1000);
+        // In-range bounds pass through untouched.
+        assert_eq!(VehicleConfig::from_yaml(b"view_area_anim_ms: 0\n").unwrap().view_area_anim_ms(), 0);
+        assert_eq!(
+            VehicleConfig::from_yaml(b"view_area_anim_ms: 10000\n").unwrap().view_area_anim_ms(),
+            10000
+        );
+        // Out of range parses (the document is NOT rejected) and is carried verbatim; the lever is
+        // what clamps it to the nearest bound.
+        let big = VehicleConfig::from_yaml(b"view_area_anim_ms: 50000\n").unwrap();
+        assert_eq!(big.view_area_anim_ms(), 50000);
+        assert_eq!(crate::levers::clamp_view_area_anim_ms(big.view_area_anim_ms()), 10000);
+        let neg = VehicleConfig::from_yaml(b"view_area_anim_ms: -5\n").unwrap();
+        assert_eq!(neg.view_area_anim_ms(), -5);
+        assert_eq!(crate::levers::clamp_view_area_anim_ms(neg.view_area_anim_ms()), 0);
+        // A non-integer is a TYPE error: the whole document is rejected, exactly like a mistyped
+        // Apple key, and carplayd falls back to its built-in default config (loudly).
+        assert!(VehicleConfig::from_yaml(b"view_area_anim_ms: fast\n").is_err());
+        assert!(VehicleConfig::from_yaml(b"view_area_anim_ms: 1.5\n").is_err());
+        // The fixture is the app's DEFAULT document and the app emits this key only when it differs
+        // from 3000 — so the fixture must not carry it. If this fails the emitter's default moved,
+        // which would re-push a different document to every box.
+        let fx = VehicleConfig::from_yaml(APP_EMITTED_DOCUMENT.as_bytes()).unwrap();
+        assert_eq!(fx.view_area_anim_ms, None);
+    }
+
     /// docs/carplay/04_CAPABILITIES_AND_CONFIG.md C-6. The bound exists because the `Tlv`/`Link` overflow guards are `debug_assert!`s
     /// compiled OUT of the box's release build, so an over-long name silently truncates a `0x1D01`
     /// — no panic, no log — on the message whose rejection is unrecoverable within a session.
@@ -2057,6 +2122,12 @@ metadata:
             "visible",
             "width",
             "wireless",
+            // NOT listed, on purpose — CONDITIONALLY emitted keys that the app's DEFAULT document
+            // (which this fixture is) never carries, so listing them would trip the "vanished"
+            // assertion: `wifi_ap` (emitted only when false; read by tools/session_supervisor.sh
+            // `wifi_ap_enabled`) and `view_area_anim_ms` (emitted only when != 3000; parsed here as
+            // `VehicleConfig::view_area_anim_ms`, covered by its own literal test). If either ever
+            // shows up in the regenerated fixture, the emitter's default moved — do not just add it.
         ];
 
         let parsed: serde_yaml::Value =

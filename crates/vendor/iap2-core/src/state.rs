@@ -19,7 +19,7 @@
 //! we declared wired in IdentifyInfo (which we do NOT — see message.rs). We deliberately reply to it
 //! with nothing but a log (`Action::Note`): sending the `0x4301 CarPlayStartSession` (accessory-
 //! source) the iPhone would then wait for is a proven dead end (the reference resolves the endpoint
-//! but never connects to :5000). The working session-start is the mDNS path (rx_connect), not a
+//! but never connects to :5000). The working session-start is the mDNS path (rx-connect), not a
 //! wired 0x4301 reply.
 
 /// Authentication/identification progress. Ordering mirrors the C's integer `state` (0..=5) so

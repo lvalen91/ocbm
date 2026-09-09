@@ -178,7 +178,7 @@ the directives here or rewrite those 16 comments; until then, read `#N` as "the 
 | **A** | Radio lifecycle re-gating: WiFi/BT power on only on app command, off on app command or app loss (`CT_RADIO` 0x16 + `/tmp/radio_off`, `hciconfig hci0 down` in both teardown branches, supervisor startup reconciliation) | Landed + DEPLOYED 2026-08-10. Cold-boot + supervisor-respawn tests PASS on hardware; the app/phone checklist (plan_A §5 tests 2–8, 10) and the app-side `CT_RADIO` caller are pending. |
 | **B5** | Audio formats: per-transport `audio.wired` / `audio.wireless` arms; the app's "auto" mode pushes both explicitly, the box presents the matching one | Landed 2026-08-10 (gate unanimous). Box transport-gated default demoted to the no-config / parse-failure floor. |
 | **B4** | mainBufferedAudio: `accessoryConfig.enablesMainBufferedAudio` becomes the primary arm via `levers::mainbuffered`, read by BOTH the `/info` `mainBufferedInfo` emission and the SETUP `"mainBuffered"` echo; app default flipped OFF with a one-shot UserDefaults migration; `CARPLAY_MAINBUFFERED` / `/tmp/mainbuffered_test` demoted to the no-config / parse-failure bench fallback (strictly YAML-wins, no OR-force-arm) | Landed 2026-08-10. Wireless arm remains UNCAPTURED (docs/carplay/04_CAPABILITIES_AND_CONFIG.md) — enabling it there is a deliberate experiment that can silence media. **If that ever needs a transport-specific gate, the doctrine-faithful home is an app-side `wired:`/`wireless:` arm for the key (B5's shape) — NOT a box-side veto of a value the app pushed, which directive 2 rules out.** |
-| **B3** | Metadata tier: `CARPLAY_METADATA` / `/tmp/carplay_metadata` → an app-pushed `metadata: {tier, skip}` section, armed once per process (first-arm-wins) on both the wired (iap2d) and tunnel (airplayd) arms via `iap2-core::config` | Landed 2026-08-10, NOT yet hardware-validated. App ships `proven` = the compiled floor, so the wire is unchanged until the tier is deliberately raised. Precedence pushed > env > file > compiled; `rx-only` refused on the pushed path. Raising the tier on hardware still carries the unrecoverable `0x1D03` risk — wired arm first, `idevicesyslog -p accessoryd` on every Identify-shape change. |
+| **B3** | Metadata tier: `CARPLAY_METADATA` / `/tmp/carplay_metadata` → an app-pushed `metadata: {tier, skip}` section, armed once per process (first-arm-wins) on both the wired (iap2d) and tunnel (carplayd) arms via `iap2-core::config` | Landed 2026-08-10, NOT yet hardware-validated. App ships `proven` = the compiled floor, so the wire is unchanged until the tier is deliberately raised. Precedence pushed > env > file > compiled; `rx-only` refused on the pushed path. Raising the tier on hardware still carries the unrecoverable `0x1D03` risk — wired arm first, `idevicesyslog -p accessoryd` on every Identify-shape change. |
 | **C** | Hardcoded configurable values → pushed config: Identify param 20/21 vehicle identity (the EV-telematics foundation), the advertised `/info` accessory name, display-features + HID descriptor derivation, and hold-IDLE-until-config in place of the compiled resolution default (and, with it, the retirement of the compiled metadata-tier `proven` floor B3 left standing) | **C-0 + C-1 + C-2 landed 2026-08-10; C-3 landed 2026-09-01; C-4..C-9 open** (this cell said "C-3..C-9 open" until 2026-09-04 while `docs/ops/04_OPEN_ITEMS.md` had already recorded C-3 resolved). **C-3 is a CODE landing, not a device proof:** `ccpa/iap2d/src/main.rs` now passes the app-pushed `vehicle_identity()` into `build_ident_info_with` / `build_ident_info_excluding_with`, so the wired Identify carries param 20 from config; no iPhone acceptance of that param-20 content has been observed and logged, so it is not upgraded to device-verified here. C-0 (research): Apple's spec archive marks param-20 sub 2 `EngineType` and sub 11 `SupportedChargingConnectors` `[0+]`, so a hybrid emits repeated sub-2 TLVs and the planned "first entry wins" degrade path was dropped; the per-connector power subs (12-20) are count-1, which is why duplicates must be deduped. C-1 (plumbing, ZERO wire change): `iapConfig:` parsing + resolved `VehicleIdentity` in `iap2-core::config`, `build_ident_info_with` threading, param-20 emission from config, param-21 gated on a pushed `vehicleStatus:` block. The wireless (BT-time) arm substitutes the baseline INSIDE the builder, so docs/wireless/00_WIRELESS_CARPLAY.md's byte-pin is structural, not conventional. Nothing read the identity until C-3 (2026-09-01, above). C-2 added the app half (a Vehicle Identity panel emitting `accessoryName:` + `iapConfig:`) and the receiver-side schema (`accessoryName` plus four `hidConfig` keys — three of which the app had ALREADY been emitting and serde had been silently discarding). Also parse-only: `apply()` never reads them and `info.rs` still emits the constant features word. **The app's param-21 control ships DISABLED behind a compile-time `vehicleStatusUnlocked = false`, which gates the EMITTER, not just the UI** — a warning shown at authoring time is the wrong shape of protection, because the setting persists and re-pushes every connection, so it would take effect by itself on the first session after C-3 with no re-consent. C-4 flips that constant in the same commit that adds the message ids. **C-6 BLOCKER — bound `accessoryName` before it reaches a `Tlv`.** Not a to-do: the reason it is urgent is that the overflow guards in `Tlv::str`/`Tlv::bytes` and `Link::build_msg` are `debug_assert!`s and are COMPILED OUT of the box's release profile, so an over-long name produces a silently truncated `0x1D01` — no panic, no log — on the one message whose rejection is unrecoverable within a session. The name lands in THREE TLV positions (param 0 `Name`, param 20 sub 1 `Name`, param 20 sub 6 `DisplayName`, plus param 21 sub 1 once armed), so per-field bounding does not generalise; the cap belongs at the iap2d call site, and the budget is a C-6 decision rather than a number guessed now. C-2 deliberately did NOT pick one — a guessed bound wearing the costume of a validated one is worse than none. **C-2 follow-up #1 — MAKE THE SWIFT EMITTER TESTABLE (highest-value open item on this workstream).** `iapConfigYAML`, `dedupedConnectors()`, `effectiveVehicleStatusCaps()` and `resetToDefault()` have ZERO automated coverage: `tests/run_tests.sh` compiles `App/VehicleConfig.swift` but not `SettingsWindow.swift`, and adding the latter drags in ControlsBridge -> AltVideoWindowController -> VideoDecoder -> VideoToolbox/IOKit, i.e. the whole app. This matters because app/box schema drift is THE repeated failure mode here — three `hidConfig` keys the app emitted were silently discarded by the box for months. The fix is to move the pure emitter into `App/VehicleConfig.swift`, which exists for precisely this reason (its own docstring: "Lives HERE, not next to the emitter in SettingsWindow.swift, because tests/run_tests.sh compiles this file and not that one"), and have the model delegate. A working proof of concept — built, and mutation-verified 9/9 by the C-2 gate, taking the Swift suite 174 -> 181 with a golden string byte-identical to `iap2-core`'s `APP_EMITTED_IAPCONFIG` so one literal is shared across Swift, iap2-core and receiver — is preserved at `scratchpad/r4_swift_emitter_testable.patch`. **The patch's golden string is STALE** — it was generated before `vehicleStatusUnlocked`, before connectors are dropped for non-electric vehicles, and before the box-side capability sort, so whoever lands this must REGENERATE the golden from the current emitter and re-diff it against `APP_EMITTED_IAPCONFIG`; the shared-literal argument only holds if the literal is re-derived, not copied. The 9/9 mutation table stands as evidence the test DESIGN works; the fixture bytes in it do not. DEFERRED FROM C-2 deliberately, not dismissed: as written it duplicates the four static vocabularies into a second type, so landing it requires rewiring `SettingsWindow` to delegate, which is a refactor that deserves its own gated change rather than riding a schema commit. C-2 is not unprotected meanwhile — the gate verified app<->box parity byte-for-byte by hand and confirmed the iap2-core fixture is byte-faithful, and `every_name_the_app_can_emit_resolves_to_a_wire_id` pins all 31 app-side names. **C-2 follow-up #2 (cosmetic, recorded so it is not lost):** the per-row connector `Picker` still offers already-used types; duplicates are dropped correctly by both the app and the box, so nothing malformed can ship, but the UI should grey used entries the way the mutually-exclusive `rangeWarning` rows are greyed — one considered pass rather than a third mechanism for the same rule. Framing stayed box-owned: param-21 capability flags are sorted onto the wire by the box, not by the app's UI grouping order. **⚠️ C-4 MUST precede C-5**: `features.rs` declares no `0xA100/0xA101/0xA102`, so emitting param 21 first would declare a component none of whose messages appear in params 6/7 — the `OptionalMsgNotValidWithoutRequiredMsgs` shape (docs/carplay/05_METADATA_AND_CONTROLS.md §5.6 rule 2), and `0x1D03` is unrecoverable. plan_C's "C-4 and C-5 are order-swappable" is retracted. |
 | **D** | Schema/serde expansion: full `hidConfig` parse, `lunaConfig`/`carpConfig`/`altDisplayPanels`, folding the hand-maintained wired `SENT_MSG_IDS`/`RCV_MSG_IDS` floor into the generated table, wireless credentials from pushed config | Planned, not started. |
 | **docs/carplay/04_CAPABILITIES_AND_CONFIG.md refresh** | The YAML-framework doc is THREE schema versions behind: it covers none of B5's `audio.wired`/`audio.wireless` arms, B3's `metadata:` section, or C-2's `accessoryName:` + `iapConfig:` + four new `hidConfig` keys, and needs a decision on whether it stays a schema of record now that the app's emitter is authoritative | Open. Deliberately NOT folded into B3 (it carries its own judgement calls and would have smuggled an ungated rewrite into a gated change). Drifts further with each B/C/D workstream. |
@@ -190,7 +190,7 @@ the directives here or rewrite those 16 comments; until then, read `#N` as "the 
 
 <!-- absorbed: ../carplay/04_CAPABILITIES_AND_CONFIG.md -->
 
-The host-authoritative config pipe that replaces airplayd's hardcoded resolution (docs/carplay/06_AV_PIPELINE.md) with a
+The host-authoritative config pipe that replaces carplayd's hardcoded resolution (docs/carplay/06_AV_PIPELINE.md) with a
 runtime `VehicleConfig` the macOS app pushes to the box. Grounded in Apple's own CarPlaySimulator
 authoring schema (docs/carplay/03_SDK_GROUND_TRUTH.md §2, `reference/carplay_sdk/apple_vehicleconfigs/`). This documents the MVP
 cut: the **pipe is complete end-to-end** and the **resolution lever is config-driven**; the rest of the
@@ -207,7 +207,7 @@ The macOS app is the source of truth. It authors an Apple-shape `VehicleConfig` 
 The box never persists it — the config lives and dies with the session.
 
 ```
- macOS app                    ocbmd (box)                         airplayd (box)
+ macOS app                    ocbmd (box)                         carplayd (box)
  ─────────                    ───────────                         ──────────────
  VehicleConfig YAML  ──SUBSCRIBE──▶  write /tmp/carplay_cfg.yaml
  (AppDelegate.vehicleConfigYAML)     (atomic .tmp+rename)
@@ -249,11 +249,11 @@ construction.
 - **Not mapped (parse-only — interim):** `lunaConfig`, `carpConfig`, `altDisplayPanels`, and most of
   `hidConfig`'s fields. These land in the schema roadmap — mapping them to the app-pushed config is
   the design (docs/carplay/04_CAPABILITIES_AND_CONFIG.md). (Several entries once on this list have since LANDED as doctrine exemplars,
-  parsed and armed per connection from the pushed YAML in airplayd's `load_device_config` →
+  parsed and armed per connection from the pushed YAML in carplayd's `load_device_config` →
   `levers::*`: `accessoryConfig.enablesHEVC`, `videoStreamsConfig.viewAreas` + safeArea geometry,
   `altVideoStreams` (alt screen + dims), and the `hidConfig` dPad/knob/telephony support booleans.)
 - **Not from YAML:** accessory identity (`device_id`, pairing `pi`) — that's pairing identity, fixed in
-  airplayd to match rx_connect, never touched by the vehicle config. The `VehicleConfig.name` is template
+  carplayd to match rx-connect, never touched by the vehicle config. The `VehicleConfig.name` is template
   metadata (e.g. "Widescreen"), NOT the advertised accessory name, so it is not the field to map. The
   advertised `/info` name IS a configurable value, though — per docs/carplay/04_CAPABILITIES_AND_CONFIG.md it becomes app-pushed (a
   dedicated config field); the fixed in-binary name is interim.
@@ -265,25 +265,25 @@ construction.
   struct mirroring Apple's schema (subset), `from_yaml()`, `apply(DeviceConfig)`. 4 unit tests: main-panel
   dims pulled (not the identically-named viewAreas `width`/`height`), non-1920 honored, partial/zero →
   base, malformed → error.
-- `receiver/Cargo.toml` — added `serde` + `serde_yaml` (NOT behind the `mic-uplink` feature, so airplayd's
+- `receiver/Cargo.toml` — added `serde` + `serde_yaml` (NOT behind the `mic-uplink` feature, so carplayd's
   `default-features=false` build includes them). `receiver/src/lib.rs` — `pub mod vehicle_config;`.
 - **`ccpa/ocbmd/src/main.rs`** — `CARPLAY_CFG_FILE=/tmp/carplay_cfg.yaml`, `write_cfg_file()` (atomic,
   empty→remove) / `clear_cfg_file()`; write on SUBSCRIBE, remove on STOP + heartbeat-loss + startup.
-- **`ccpa/airplayd/src/main.rs`** — `DEVICE_ID`/`PAIRING_IDENTITY` consts, `base_device_config()`,
+- **`ccpa/carplayd/src/main.rs`** — `DEVICE_ID`/`PAIRING_IDENTITY` consts, `base_device_config()`,
   `load_device_config()` (reads the YAML, falls back on absence/parse error). `build_info` moved **into**
   the accept loop (was built once from the 800×480→1920×720 hardcode); built per connection now.
-- **`host/CarPlayHost/carlink_macOS/App/AppDelegate.swift`** — `vehicleConfigYAML(width:height:)` builds
+- **`host/MacHost/carlink_macOS/App/AppDelegate.swift`** — `vehicleConfigYAML(width:height:)` builds
   the Apple-shape YAML; `client.sessionConfig` now carries it (was an ad-hoc `screen:{w,h,dpi}` string).
 
 ### Verification
 - `cargo test -p receiver --no-default-features vehicle_config` → 4/4 pass.
-- `cargo zigbuild --target armv7-unknown-linux-musleabihf --release -p airplayd -p ocbmd` → clean.
+- `cargo zigbuild --target armv7-unknown-linux-musleabihf --release -p carplayd -p ocbmd` → clean.
 - Host app `xcodebuild -scheme carlink_macOS -configuration Release CODE_SIGNING_ALLOWED=NO` → BUILD SUCCEEDED.
 - **Hardware validation: PASSED (2026-07-10).** Deployed at idle via `tools/uart_push.sh` (OCBM
   unavailable with the app closed), rebooted. On the app's next launch the full pipe was observed:
   - app `SUBSCRIBE sent (375 B config)` → ocbmd `SUBSCRIBE (375 B config)` → `/tmp/carplay_cfg.yaml`
     landed byte-for-byte (the `CarLink Widescreen` VehicleConfig)
-  - `[airplayd] cfg: /tmp/carplay_cfg.yaml (375 B) → 1920×720` (file read + parsed + applied per connection)
+  - `[carplayd] cfg: /tmp/carplay_cfg.yaml (375 B) → 1920×720` (file read + parsed + applied per connection)
   - host decoder `Format updated from SPS/PPS — 1920×720` (iPhone encoded at the YAML-driven resolution)
   - `phase=STREAMING`
   - **Controllability (different value) not yet run** — needs an app rebuild with a non-1920 `vehicleConfigYAML`
@@ -291,7 +291,7 @@ construction.
 
 #### Controllability + host-side geometry (2026-07-10, follow-on)
 Changed the pushed resolution to **2400×960** and proved the full chain follows a live value change:
-`app SUBSCRIBE → /tmp/carplay_cfg.yaml width:2400 → [airplayd] cfg … → 2400×960 → decoder Format … 2400×960`,
+`app SUBSCRIBE → /tmp/carplay_cfg.yaml width:2400 → [carplayd] cfg … → 2400×960 → decoder Format … 2400×960`,
 rendering full-frame. Then wired the host so a resolution change is one coherent action:
 - **`DisplayResolution.saved` is the single source of truth** for the CarPlay resolution. `AppDelegate.
   setupDevice` builds the pushed YAML from it AND calls `windowController.applyResolution` with the same
@@ -321,7 +321,7 @@ stays `host_present=0` with no ocbmd lines in `/tmp/box.log`. Fix = quit + reope
 is fully booted (no box surgery). A real fix would have the app retry HELLO until HELLO_ACK.
 
 #### Deploy/build gotchas hit during validation (for next time)
-- **xcodebuild writes to DerivedData, not `host/CarPlayHost/build/`.** The stale `build/Debug|Release`
+- **xcodebuild writes to DerivedData, not `host/MacHost/build/`.** The stale `build/Debug|Release`
   dirs are leftovers; launching them runs OLD code. Always launch the `-showBuildSettings`
   `BUILT_PRODUCTS_DIR` app (`~/Library/Developer/Xcode/DerivedData/carlink_macOS-…/Build/Products/<cfg>`).
 - **`strings`/`nm` don't surface Swift interpolated-literal segments or (stripped) symbols** — don't use
@@ -363,7 +363,7 @@ Sources: `CarPlayConfigs` Swift module in `…/CarPlaySimulator.devicekitplugin/
 > a *declaration of intent* unless its wiring is confirmed in `info.rs`/`vehicle_config.rs`. The app's
 > own `SettingsWindow.inertKeys` list is only as good as its last edit — **eight of the fields it marks
 > inert are armed today**; GROUND TRUTH is `vehicle_config.rs`'s accessors plus the `levers::`/`events::`
-> calls in `ccpa/airplayd/src/main.rs`. The list, the eight, and the setter names:
+> calls in `ccpa/carplayd/src/main.rs`. The list, the eight, and the setter names:
 > [../ops/06_CORRECTIONS_LEDGER.md](../ops/06_CORRECTIONS_LEDGER.md) `R-22-1`.
 
 ---
@@ -428,7 +428,7 @@ Informational `OSInfo` string in `/info` describing the accessory's own OS/stack
 
 #### rightHandDrive
 **DEVICE-VERIFIED 2026-09-05 — implemented AND proven in the same session.** On a 2400x960 ultrawide
-panel over WIRELESS CarPlay (iPhone, `airplayd_wl`), pushing `rightHandDrive: true` moved the CarPlay
+panel over WIRELESS CarPlay (iPhone, `carplayd_wl`), pushing `rightHandDrive: true` moved the CarPlay
 app rail, the status bar (clock/signal/battery), and the app-grid button to the RIGHT edge of the
 projection; owner-confirmed on screen. So the capability is real, the `/info` key is the right home
 for it, and this box now drives it. What landed: `info.rs` emits the `/info` boolean beside
@@ -900,7 +900,7 @@ needed for the basic behavior).
   `DeviceConfig.{main,alt}_safe_area`. A **full-frame** safeArea is treated as full-bleed (`None`) so
   non-curved configs stay byte-identical; only a real inset flips `view_areas_enabled()`.
 - **`/info`** (`info.rs` `view_areas`): emits the inset safeArea per display, validated `⊆ panel`
-  (fallback full-bleed). `airplayd` sets `CARPLAY_VIEWAREAS` when a real inset/toggle is present →
+  (fallback full-bleed). `carplayd` sets `CARPLAY_VIEWAREAS` when a real inset/toggle is present →
   `session.rs` echoes `"viewAreas"` in `enabledFeatures`.
 
 **VALIDATED 2026-07-12 (hardware):** a 100px L/R inset on the 1920×720 main → `cfg: … viewAreas=true

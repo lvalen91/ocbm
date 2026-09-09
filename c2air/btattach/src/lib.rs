@@ -3,7 +3,7 @@
 //! ## Why this exists at all, and why ONLY for the C2Air
 //!
 //! This is the one piece of genuinely board-specific Rust in the C2Air port. Everything else — ocbmd,
-//! iap2d, airplayd — builds from the shared CCPA sources with no C2Air-specific code (see
+//! iap2d, carplayd — builds from the shared CCPA sources with no C2Air-specific code (see
 //! `c2air/README.md`).
 //!
 //! The C2Air ships **no Bluetooth userspace whatsoever**. The vendor's `btapp` lived in the

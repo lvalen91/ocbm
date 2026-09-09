@@ -58,7 +58,7 @@ written by `ocbmd`:
 **Doctrine (docs/carplay/04_CAPABILITIES_AND_CONFIG.md): app-driven.** Box carries no opinions; the app pushes config (wireless on/off,
 hot-handover, pairing mode, WiFi creds) via CT_SUBSCRIBE → `carplay_cfg.yaml`. There is **no** host
 opcode to explicitly pick wired-CP / wireless-CP / AA (`CT_MODE_SELECT` is unrelated — projection vs
-console debug). The Rust `/run/carplay/arbiter.sock` is a STUB (always grants standalone); all real
+console debug). The Rust `/run/proj/arbiter.sock` is a STUB (always grants standalone); all real
 arbitration is the shell supervisor.
 
 **Phone-type detection was two ISOLATED probes** — CarPlay grepping Apple `05ac`, `aa-bridge`
@@ -74,7 +74,7 @@ matching Google `0x18d1`, neither aware of the other vendor. It is now one resol
 
 | # | Scenario | Behavior BEFORE the fixes in §4/§5 | OK then? | Gap |
 |---|----------|----------------|-----|-----|
-| 1 | Wired iPhone + app subscribed | CarPlay projects (projection_up→iap2d→airplayd) | ✅ | — |
+| 1 | Wired iPhone + app subscribed | CarPlay projects (projection_up→iap2d→carplayd) | ✅ | — |
 | 2 | Wired Android + app subscribed | CarPlay no-ops (no 05ac); **AA never auto-starts**; phone just charges | ❌ | No auto-AA selection |
 | 3 | aa-bridge run while iPhone present (normal) | `find_phone` 18d1-guard skips iPhone; **zero control transfers reach it** | ✅ | — |
 | 4 | iPhone mid-CarPlay, aa-bridge started | iPhone role-switched to host → invisible to aa-bridge's host bus | ✅ | — |
@@ -103,7 +103,7 @@ Single-owner flag in `box-common`, one definition of the token spellings shared 
 and the shell (`box_common::flags::owner()`).
 
 - **CarPlay claims it.** `arm()` calls `claim_carplay_owner()`; `kill_session()` releases. A `wired-cp`
-  claim with no `airplayd`/`iap2d` alive is stale, cleared, and falls through, so a crashed CarPlay
+  claim with no `carplayd`/`iap2d` alive is stale, cleared, and falls through, so a crashed CarPlay
   session cannot lock AA out permanently.
 - **AA claims it before it can serve.** `aa-bridge` prepares the accessory and claims the flag
   **before `accept()`**, serves one session per prepared accessory, clears at session end, and loops.
@@ -112,7 +112,7 @@ and the shell (`box_common::flags::owner()`).
   waited for the other and the box sat idle with a running bridge and a plugged-in phone. Claiming
   before `accept()` also keeps the flag honest: `wired-aa` means a live accessory link exists. Every
   wait on that path is bounded, since claiming early makes a hang a lock-out.
-- **Wireless AA claims it in two hops, and the second one ADOPTS the first.** `carplay-wireless`
+- **Wireless AA claims it in two hops, and the second one ADOPTS the first.** `btd`
   claims `wireless-aa` when the Bluetooth bootstrap establishes and deliberately HOLDS it across the
   Wi-Fi association (`run_aa_bootstrap`), so nothing takes the box while the phone is mid-handoff.
   That bootstrap runs from the channel-4 ACCEPT path — the phone dials us, which is the direction
@@ -129,7 +129,7 @@ and the shell (`box_common::flags::owner()`).
   → adopt, anything else — including `wired-aa` — → refuse and close). Released at session end by
   whichever of the two gets there first.
   **Consequence worth knowing:** the two processes write the SAME token, so "release only if it is
-  ours" cannot tell them apart. `carplay-wireless`'s teardown can clear the flag under a live pump.
+  ours" cannot tell them apart. `btd`'s teardown can clear the flag under a live pump.
   Bounded — that teardown means the radio is going, so the session is over anyway — and fixing it
   means putting a pid in a flag file that three daemons and the shell parse. See
   [`03_WIRELESS.md`](03_WIRELESS.md) §6c.
@@ -138,10 +138,10 @@ and the shell (`box_common::flags::owner()`).
   `:5277` relay; a shared file gives each of them a read-then-write TOCTOU, and the app's connection
   would go to whichever polled first. So the wireless arm registers an in-process intent BEFORE it
   writes the flag, and the wired arm consults that intent both when it takes a client and at the
-  point it would claim. The cross-process race (bridge vs `carplay-wireless` vs this supervisor)
+  point it would claim. The cross-process race (bridge vs `btd` vs this supervisor)
   remains and is bounded, not eliminated: a wired arm that wins the flag race still cannot obtain a
   client, so it releases after its 30 s announce window instead of projecting.
-- **`projection_owner()`'s `wireless-aa` liveness probe stays `pgrep carplay-wireless`** and is
+- **`projection_owner()`'s `wireless-aa` liveness probe stays `pgrep btd`** and is
   deliberately NOT widened to also accept `aa-bridge`. With `--wireless` the bridge is resident, so
   `pgrep aa-bridge` is true whenever the wireless stack is up — accepting it would make the
   stale-flag self-heal unreachable, which is strictly worse than the case it would cover.

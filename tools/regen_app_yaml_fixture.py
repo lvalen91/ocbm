@@ -49,7 +49,7 @@ def block(src, startpat):
     return '\n'.join(out)
 
 root = sys.argv[1] if len(sys.argv) > 1 else '.'
-p = os.path.join(root, 'host/CarPlayHost/carlink_macOS/App/SettingsWindow.swift')
+p = os.path.join(root, 'host/MacHost/carlink_macOS/App/SettingsWindow.swift')
 src = open(p).read().split('\n')
 harness = '''import Foundation
 struct AudioFormatRow { var streamType = 102; var audioType = "media"; var input = "none"; var output = "aac_lc_48k_stereo" }
@@ -78,6 +78,9 @@ final class VehicleConfigModel {
     // single-area document. The ON branch is exercised by the Swift harness (ViewArea2Rule tests) and
     // the Rust `second_main_view_area_is_carried_from_view_areas_1` literal, not here.
     var viewArea2Enabled = false, viewArea2X = 0, viewArea2Y = 0, viewArea2W = 0, viewArea2H = 0
+    // `view_area_anim_ms: <n>` is emitted ONLY when n != 3000 (absent = 3000 on the box). Default
+    // here so the fixture stays byte-identical; the non-default branch is a one-line append.
+    var viewAreaAnimMs = 3000
     var altSafeLeft = 0, altSafeTop = 0, altSafeRight = 0, altSafeBottom = 0
     var altDrawOutsideSafe = false
     var altVideoEnabled = true          // <-- the CLUSTER-ON branch; flip for the OFF document
@@ -131,7 +134,7 @@ final class VehicleConfigModel {
     var iapConfigYAML = ""
 }
 '''
-vc_src = open(os.path.join(root, 'host/CarPlayHost/carlink_macOS/App/VehicleConfig.swift')).read().split('\n')
+vc_src = open(os.path.join(root, 'host/MacHost/carlink_macOS/App/VehicleConfig.swift')).read().split('\n')
 harness += block(vc_src, 'enum YamlEmit {') + '\n' \
     + block(vc_src, 'enum ViewArea2Rule {') + '\n' \
     + 'extension VehicleConfigModel {\n' \

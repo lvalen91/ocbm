@@ -4,8 +4,9 @@
 # commands it. It reads ocbmd's presence signal /tmp/host_present and:
 #
 #   host PRESENT (1) -> go projection-ready + ARM:
-#        projection_up.sh (iAP2 handshake -> Identified, if not already) THEN airplayd + rx-connect.
-#   host GONE   (0) -> TEARDOWN: kill airplayd + rx-connect -> HOLDING PATTERN (iap2d stays up).
+#        projection_up.sh (iAP2 handshake -> Identified, if not already) THEN carplayd (which now
+#        carries mDNS discovery in-process; the separate rx-connect binary was merged into it 2026-09-08).
+#   host GONE   (0) -> TEARDOWN: kill carplayd -> HOLDING PATTERN (iap2d stays up).
 #
 # ocbmd supplies the one grace before it ever moves the flag: HEARTBEAT_GRACE=10s (beat loss), in
 # ccpa/ocbmd/src/main.rs; a blip inside it never reaches here. A clean CT_STOP gets NO grace (changed
@@ -14,12 +15,12 @@
 # re-SUBSCRIBE, so a quit->relaunch inside one tick cannot hide the GONE edge from us.
 # NOTE: this file defines no heartbeat constant of its own — it is edge-triggered on the flag.
 #
-# P0 lifecycle hardening (docs/carplay/02_SESSION_LIFECYCLE.md,§2 — tasks #22,#23): the supervisor no longer treats "airplayd
+# P0 lifecycle hardening (docs/carplay/02_SESSION_LIFECYCLE.md,§2 — tasks #22,#23): the supervisor no longer treats "carplayd
 # process alive" as healthy. It derives a real HEALTH signal from establishment milestones in
-# airplayd.log (pair-verify OK -> RECORD = Apple's "session established" edge), publishes it to
+# carplayd.log (pair-verify OK -> RECORD = Apple's "session established" edge), publishes it to
 # /tmp/session_healthy, and tracks STUCK counters (establishment stalls + presence flaps) that SURVIVE
 # teardown and reset only after a session has been confirmed-established for a hold period. This closes
-# the docs/carplay/02_SESSION_LIFECYCLE.md stall, where "ARMED + airplayd-alive" masked a session that never streamed and the one
+# the docs/carplay/02_SESSION_LIFECYCLE.md stall, where "ARMED + carplayd-alive" masked a session that never streamed and the one
 # counter was wiped by teardown() on every GONE edge. The phone_reset escalation LADDER that ACTS on
 # health=STUCK lands in task #24; here we detect, publish, bound the retry, and log the verdict.
 #
@@ -47,8 +48,7 @@ trap 'rm -rf "$_sup_lock" 2>/dev/null' EXIT
 trap 'rm -rf "$_sup_lock" 2>/dev/null; trap - EXIT; exit 143' INT TERM HUP
 
 FLAG=${FLAG:-/tmp/host_present}
-AL=/tmp/airplayd.log
-RL=/tmp/rx-connect.log
+AL=/tmp/carplayd.log
 HEALTHY=/tmp/session_healthy
 STATE=/tmp/carplay_state          # canonical one-glance lifecycle verdict (task #26)
 RING=/tmp/lifecycle.ndjson        # per-transition history ring, uptime-stamped (task #30)
@@ -64,7 +64,7 @@ CONFIRM_HOLD=15          # a session must stay established this long before STUC
 FLAP_N=5                 # presence 0->1 edges ...
 FLAP_WINDOW=20           # ... within this window => flapping (the docs/carplay/02_SESSION_LIFECYCLE.md signature)
 STALE_FLAG_N=3           # consecutive ticks (≈s) a "wireless" transport flag may persist with NO
-                         # carplay-wireless AND no airplayd alive before the stale-flag watchdog clears
+                         # btd AND no carplayd alive before the stale-flag watchdog clears
                          # it (dual-transport self-heal of a crashed/SIGKILLed wireless session)
 # escalation ladder (task #24 / docs/carplay/02_SESSION_LIFECYCLE.md):
 L1_AT=2                  # establishment stalls before the first phone_reset (L1)
@@ -76,7 +76,7 @@ L3_MAX_REBOOTS=3         # consecutive L3 reboots without a good session before 
 REBOOT_BUDGET=/etc/ccpa_reboot_count   # persists across reboots (jffs2); a plain count, no RTC needed
 
 armed=0
-fails=0                  # consecutive airplayd-death re-ARMs, for backoff
+fails=0                  # consecutive carplayd-death re-ARMs, for backoff
 proj_fails=0             # consecutive projection_up.sh failures (pre-ARM), for the #24 ladder fix
 backoff_until=0          # epoch(uptime) seconds; while now < this, do not re-ARM
 tick=0
@@ -198,8 +198,8 @@ write_state() {   # $1 = phase, $2 = reason
 }
 
 # Kill any running session daemons (idempotent). iap2d/iAP2 are deliberately left up (holding pattern).
-# True while a live WIRELESS session owns airplayd (airplayd writes /tmp/carplay_transport=wireless on
-# its control connection). The wired supervisor must NOT touch airplayd/rx-connect in that case — the
+# True while a live WIRELESS session owns carplayd (carplayd writes /tmp/carplay_transport=wireless on
+# its control connection). The wired supervisor must NOT touch carplayd in that case — the
 # critical QC finding: the old unconditional kill SIGKILLed a healthy wireless projection the moment a
 # USB phone appeared, and the establishment-stall ladder then escalated to REBOOTING the box at it.
 wireless_owns_session() {
@@ -234,12 +234,12 @@ projection_owner() {
       # daemons are gone (crash, missed release), the claim is stale — clear it and fall through, so a
       # dead CarPlay session can never lock Android Auto out permanently.
       #
-      # `iap2d` ALONE, not `airplayd || iap2d` (F2, device-proven 2026-08-27). WIRED CarPlay IS the
-      # Identified iAP2 link, and that link is iap2d; airplayd is NOT evidence of one. This very
-      # function's caller deliberately leaves airplayd running when the host goes away
-      # ("airplayd/rx-connect are wired-owned, left running"), and airplayd is shared with the
-      # wireless arm — so an `||` here means a surviving airplayd keeps a dead session's `wired-cp`
-      # claim alive FOREVER. Measured: unplug the iPhone mid-session -> iap2d exits, airplayd stays,
+      # `iap2d` ALONE, not `carplayd || iap2d` (F2, device-proven 2026-08-27). WIRED CarPlay IS the
+      # Identified iAP2 link, and that link is iap2d; carplayd is NOT evidence of one. This very
+      # function's caller deliberately leaves carplayd running when the host goes away
+      # ("carplayd are wired-owned, left running"), and carplayd is shared with the
+      # wireless arm — so an `||` here means a surviving carplayd keeps a dead session's `wired-cp`
+      # claim alive FOREVER. Measured: unplug the iPhone mid-session -> iap2d exits, carplayd stays,
       # flag stays `wired-cp` with an EMPTY bus; the box then reported "wired CarPlay" to the app with
       # nothing plugged in, and plugging an Android phone in did nothing at all because arm_aa stands
       # down against the flag. That is exactly the iPhone->Android swap failure.
@@ -253,7 +253,7 @@ projection_owner() {
       rm -f /tmp/projection_owner 2>/dev/null   # stale (aa-bridge gone) — self-heal
       ;;
     wireless-aa)
-      # Wireless Android Auto, served BY carplay-wireless (one Bluetooth identity advertises both
+      # Wireless Android Auto, served BY btd (one Bluetooth identity advertises both
       # protocols; the RFCOMM channel the phone opens decides which — docs/androidauto/03_WIRELESS.md
       # §6b). So the liveness check is the SAME process the `wireless` arm depends on.
       #
@@ -261,10 +261,10 @@ projection_owner() {
       # `carplay_transport` fallback, which is only written by the CarPlay AV arm and is absent
       # during an AA session — so projection_owner() returned "" and the supervisor believed the box
       # was IDLE while a wireless AA session was live. The next wired plug or host-present edge then
-      # ran preempt_wireless_for_wired / wireless_down, which `pkill`s carplay-wireless and takes the
+      # ran preempt_wireless_for_wired / wireless_down, which `pkill`s btd and takes the
       # AA session down mid-projection. The Rust reader (box_common::flags) decoded this value
       # correctly the whole time; the shell did not, and the shell holds the kill switch.
-      if pgrep carplay-wireless >/dev/null 2>&1; then echo wireless-aa; return; fi
+      if pgrep btd >/dev/null 2>&1; then echo wireless-aa; return; fi
       rm -f /tmp/projection_owner 2>/dev/null   # stale (daemon gone, e.g. pkill -9) — self-heal
       ;;
     wireless) echo "$o"; return ;;
@@ -294,15 +294,13 @@ kill_session() {
     return 0
   fi
   if wireless_owns_session; then
-    echo "[sup] kill_session suppressed — a live wireless session owns airplayd"
+    echo "[sup] kill_session suppressed — a live wireless session owns carplayd"
     return 0
   fi
-  pkill -f airplayd 2>/dev/null
-  pkill -f rx-connect 2>/dev/null
-  # brief SIGKILL fallback so a stuck airplayd can't double-bind :5000 on the next ARM
+  pkill -f carplayd 2>/dev/null
+  # brief SIGKILL fallback so a stuck carplayd can't double-bind :5000 on the next ARM
   sleep 1
-  pkill -9 -f airplayd 2>/dev/null
-  pkill -9 -f rx-connect 2>/dev/null
+  pkill -9 -f carplayd 2>/dev/null
   release_carplay_owner
 }
 
@@ -310,16 +308,16 @@ kill_session() {
 # ONLY from the main loop's `wireless_owns_session && wired_iphone_on_usb` guard, so it can NEVER fire
 # during a healthy wireless-ONLY session: a wireless phone is on Wi-Fi, not the USB bus, so
 # wired_iphone_on_usb() (a raw 05ac sysfs probe, flag-independent) is false for it. SIGTERM
-# carplay-wireless so its own teardown_av_layer() (av.rs) clears the transport flag + AV_LAYER_UP latch
-# and reaps the wireless airplayd/rx-connect, then WAIT (bounded ~5s) for the flag to actually clear
-# before returning, so the caller's arm() takes the wired path cleanly. If carplay-wireless is already
+# btd so its own teardown_av_layer() (av.rs) clears the transport flag + AV_LAYER_UP latch
+# and reaps the wireless carplayd, then WAIT (bounded ~5s) for the flag to actually clear
+# before returning, so the caller's arm() takes the wired path cleanly. If btd is already
 # gone (a stale flag with no owner), clear the flag directly so the wired takeover is never blocked.
 preempt_wireless_for_wired() {
-  echo "[sup] PREEMPT: genuine wired iPhone on USB while transport=wireless -> SIGTERM carplay-wireless, switching to wired"
+  echo "[sup] PREEMPT: genuine wired iPhone on USB while transport=wireless -> SIGTERM btd, switching to wired"
   # S3: bracket form, as :881/:914 already use, so this pkill doesn't also hit an unrelated wrapper
-  # whose argv contains the literal "/usr/sbin/carplay-wireless" (e.g. the radio_hal.sh bt_on child),
+  # whose argv contains the literal "/usr/sbin/btd" (e.g. the radio_hal.sh bt_on child),
   # which would orphan it.
-  pkill -f "[/]usr/sbin/carplay-wireless" 2>/dev/null
+  pkill -f "[/]usr/sbin/btd" 2>/dev/null
   _i=0
   while [ "$_i" -lt 25 ]; do
     wireless_owns_session || { echo "[sup] PREEMPT: transport flag cleared -- proceeding to wired arm"; return 0; }
@@ -394,7 +392,7 @@ arm_aa_wireless() {
 # mid-drive (first-come-wins, docs/androidauto/02_ARBITRATION.md §0). It is then reaped by the next
 # teardown once that session ends.
 aa_bridge_wireless_down() {
-  # `[a]a-bridge` for the same self-match reason the carplay-wireless patterns are bracketed: this
+  # `[a]a-bridge` for the same self-match reason the btd patterns are bracketed: this
   # text ends up in the detached subshell's own argv.
   pgrep -f "[a]a-bridge --wireless" >/dev/null 2>&1 || return 0
   if [ "$(cat /tmp/projection_owner 2>/dev/null)" = "wired-aa" ]; then
@@ -416,7 +414,7 @@ arm() {
     return 1
   fi
   if wireless_owns_session; then
-    echo "[sup] ARM suppressed — a live wireless session owns airplayd (dual-transport, first-come-wins)"
+    echo "[sup] ARM suppressed — a live wireless session owns carplayd (dual-transport, first-come-wins)"
     return 1
   fi
   echo "[sup] host PRESENT -> go projection-ready + ARM"
@@ -431,8 +429,8 @@ arm() {
     echo "[sup] projection bring-up failed — not arming (will retry while present)"
     return 1
   fi
-  kill_session   # idempotent: never leak a duplicate airplayd/rx-connect on re-ARM
-  : > "$AL"; : > "$RL"
+  kill_session   # idempotent: never leak a duplicate carplayd on re-ARM
+  : > "$AL"      # carplayd's in-process discovery thread logs here too (no separate rx-connect log since 2026-09-08)
   # docs/wireless/00_WIRELESS_CARPLAY.md: the wireless-metadata experiment (CARPLAY_WIRELESS_METADATA) is set ONLY at the wireless
   # spawn site (crates/vendor/wireless/src/av.rs::ensure_av_layer) — this is the WIRED launcher, and it
   # deliberately does NOT set that var: info.rs/session.rs's iAPChannelInfo/enabledFeatures echoes it
@@ -454,7 +452,7 @@ arm() {
   # a token we advertise but the phone never proposes can never appear negotiated; docs/carplay/04_CAPABILITIES_AND_CONFIG.md).
   [ -f /tmp/logtransfer_test ] && LT="CARPLAY_LOGTRANSFER=1 CARPLAY_SETUP_DUMP=/tmp/setup_req"
   # mainBufferedAudio Phase-A (docs/carplay/04_CAPABILITIES_AND_CONFIG.md; docs/carplay/04_CAPABILITIES_AND_CONFIG.md B4): the PRIMARY arm is now the pushed config's
-  # enablesMainBufferedAudio (app default OFF, applied per connection by airplayd) — this
+  # enablesMainBufferedAudio (app default OFF, applied per connection by carplayd) — this
   # /tmp/mainbuffered_test flag is SUBORDINATE and reaches the wire only on the no-config /
   # parse-failure paths (it seeds the lever via the env; ANY parsed pushed config overwrites it in
   # both directions, so with the app connected it is inert). CARPLAY_SETUP_DUMP rides the flag so
@@ -464,15 +462,17 @@ arm() {
   # bench flag OR config toggle, remove/disable immediately on any audio dropout.
   MB=
   [ -f /tmp/mainbuffered_test ] && MB="CARPLAY_MAINBUFFERED=1 CARPLAY_SETUP_DUMP=/tmp/setup_req"
-  env OCBM_FWD_ENC=1 $CM $LT $MB setsid airplayd >>"$AL" 2>&1 &   # /usr/sbin/airplayd
-  setsid rx-connect >>"$RL" 2>&1 &                # /usr/sbin/rx-connect
+  # ONE process now: carplayd starts its own mDNS advertise/browse thread after it binds :5000
+  # (ccpa/carplayd/src/discovery.rs). That ordering is why the separate launch is gone rather than
+  # merely moved — rx-connect used to advertise before the RTSP port was listening.
+  env OCBM_FWD_ENC=1 $CM $LT $MB setsid carplayd >>"$AL" 2>&1 &   # /usr/sbin/carplayd
   armed=1
   claim_carplay_owner   # tell the box (and aa-bridge) that wired CarPlay owns the port
   # fresh establishment window for this session
   saw_paired=0; saw_record=0; healthy=0; established_since=0
   estab_deadline=$(( $(now) + ESTAB_CONNECT_GRACE ))
   write_healthy 0
-  echo "[sup] ARMED (airplayd + rx-connect) — awaiting pair-verify -> RECORD"
+  echo "[sup] ARMED (carplayd, discovery in-process) — awaiting pair-verify -> RECORD"
   return 0
 }
 
@@ -509,10 +509,10 @@ escalate() {   # $1 = reason
     armed=0
     return
   fi
-  # NEVER escalate (least of all REBOOT) while a live wireless session owns airplayd — the wired
+  # NEVER escalate (least of all REBOOT) while a live wireless session owns carplayd — the wired
   # establishment watchdog must not act on a wireless session it doesn't manage (critical QC finding).
   if wireless_owns_session; then
-    echo "[sup] escalate suppressed ($1) — a live wireless session owns airplayd"
+    echo "[sup] escalate suppressed ($1) — a live wireless session owns carplayd"
     armed=0
     return
   fi
@@ -571,7 +571,7 @@ escalate() {   # $1 = reason
 # duplicating its subtleties). Kill, relaunch, verify. No session-state resets here — those are
 # ladder-specific and stay in escalate().
 restart_ocbmd_daemon() {
-  # -x, not -f (audit N3), and BOTH spawn forms — exactly the `airplayd_alive` idiom below. `-f`
+  # -x, not -f (audit N3), and BOTH spawn forms — exactly the `carplayd_alive` idiom below. `-f`
   # also matches the inittab RESPAWN WRAPPER (`{run_ocbmd.sh} /bin/sh /script/run_ocbmd.sh`):
   # killing it decapitates the thing that would bring ocbmd back, and matching it in the check
   # below certifies a DEAD daemon as alive.
@@ -592,7 +592,7 @@ restart_ocbmd_daemon() {
   # the host over CH_LOG (`LOG_SOURCES`, ccpa/ocbmd/src/main.rs) and /tmp/ocbmd.log is not on it,
   # so every ocbmd relaunched from here was INVISIBLE to the app for the rest of its life: on
   # 2026-09-05 this L2 fired ("ocbmd wedged (alive mtime stale >=1min, gadget CONFIGURED, pid=71)"),
-  # the fresh ocbmd deleted /tmp/carplay_cfg.yaml at startup, airplayd_wl (left running) served the
+  # the fresh ocbmd deleted /tmp/carplay_cfg.yaml at startup, carplayd_wl (left running) served the
   # reconnecting phone from compiled defaults (1920x720, H.264) while the app believed 2400x960/HEVC
   # was in force — and the app log carried ZERO box lines for the two minutes that decided it,
   # because everything the new ocbmd said went to a file nobody tails. The inittab respawn path
@@ -634,7 +634,7 @@ ocbmd_wedged() {
 
 # apply_pending — at an idle boundary (present==0), apply any peer-store mutation that peer_store.sh
 # deferred while a host was present (docs/carplay/02_SESSION_LIFECYCLE.md, #25). Runs restart-coupled: the store is only ever
-# mutated while idle, and the next ARM's airplayd re-reads it — never the live disk<->memory divergence
+# mutated while idle, and the next ARM's carplayd re-reads it — never the live disk<->memory divergence
 # that caused the docs/carplay/02_SESSION_LIFECYCLE.md stall. Safe to call every idle tick (no-op without a pending file).
 apply_pending() {
   [ -f "$PEER_PENDING" ] || return
@@ -649,11 +649,11 @@ apply_pending() {
 
 # Latch establishment milestones (grep-once; bound_logs may truncate the line later, so never rely on
 # re-grepping — once latched it stays latched for this session). docs/wireless/00_WIRELESS_CARPLAY.md #1.3: transport-scoped — while
-# a wireless session owns the box, read ITS log (/tmp/airplayd_wl.log), never the wired $AL. Grepping
+# a wireless session owns the box, read ITS log (/tmp/carplayd_wl.log), never the wired $AL. Grepping
 # both unconditionally would let a stale, never-truncated wl.log falsely mark an unrelated WIRED session
 # healthy (the exact cross-attribution bug per-transport logs were created to prevent).
 scan_milestones() {
-  if wireless_owns_session; then _ml=/tmp/airplayd_wl.log; else _ml="$AL"; fi
+  if wireless_owns_session; then _ml=/tmp/carplayd_wl.log; else _ml="$AL"; fi
   if [ "$saw_paired" = 0 ] && grep -q "pair-verify OK" "$_ml" 2>/dev/null; then
     saw_paired=1
     estab_deadline=$(( $(now) + ESTAB_STREAM_GRACE ))
@@ -677,14 +677,14 @@ prune_edges() {
 # Keep the RAM-backed /tmp logs bounded on the 123 MB no-swap box (belt-and-suspenders; the per-frame
 # churn was already removed). Best-effort in-place truncate to the tail when a log exceeds the cap.
 bound_logs() {
-  # docs/wireless/00_WIRELESS_CARPLAY.md #1.5: the wireless-side logs (av.rs's spawn_detached targets + carplay-wireless's own log)
+  # docs/wireless/00_WIRELESS_CARPLAY.md #1.5: the wireless-side logs (av.rs's spawn_detached targets + btd's own log)
   # were omitted here — unbounded append on the 123 MB no-swap tmpfs across long-lived wireless sessions.
   # /tmp/aa-bridge.log joined the list 2026-08-25: arm_aa appends every (re)launch to it, and the
   # bridge now retries the AOAP switch on a backoff rather than staying inert, so a phone that never
   # completes the switch (MDM-blocked, charge-only) appends indefinitely.
-  for f in /tmp/ocbmd.log /tmp/iap2d.log /tmp/supervisor.log "$AL" "$RL" \
+  for f in /tmp/ocbmd.log /tmp/iap2d.log /tmp/supervisor.log "$AL" \
            /tmp/aa-bridge.log \
-           /tmp/airplayd_wl.log /tmp/rx-connect_wl.log /tmp/wl.log; do
+           /tmp/carplayd_wl.log /tmp/wl.log; do
     [ -f "$f" ] || continue
     sz=$(wc -c < "$f" 2>/dev/null || echo 0)
     if [ "$sz" -gt 262144 ]; then
@@ -703,17 +703,17 @@ bound_logs() {
 # --- App-driven wireless bring-up (2026-07-16) -------------------------------------------------------
 # Wireless CarPlay radios are ON-DEMAND, driven by HOST-APP presence: brought up when the app is present
 # AND its pushed config enables wireless (default true), torn down when the host goes away. WIRED is the
-# unconditional always-on baseline (ocbmd + this supervisor spawn iap2d/airplayd on iPhone-USB-connect
+# unconditional always-on baseline (ocbmd + this supervisor spawn iap2d/carplayd on iPhone-USB-connect
 # regardless) — this only ADDS the wireless option alongside it, so the box waits for whichever transport
 # connects FIRST (dual-transport, first-come-wins; the wireless_owns_session guards above keep them from
 # fighting). The heavy bring-up (~15 s: WiFi/BT module loads) runs DETACHED so it never blocks the 1 s
-# loop, and each stage is internally idempotent (wlan_on/bt_on skip if already loaded; carplay-wireless
+# loop, and each stage is internally idempotent (wlan_on/bt_on skip if already loaded; btd
 # is pgrep-guarded). NEVER pipe a radio bring-up script to tail/head — a backgrounding daemon inheriting
 # the console PTY wedges it; always redirect to a logfile.
 WIRELESS_CFG=${CARPLAY_CFG_FILE:-/tmp/carplay_cfg.yaml}
 # Default TRUE: only an explicit `wireless: false` in the host YAML disables it (wired-only). A missing
 # file / missing key / `wireless: true` all mean enabled. Kept a raw grep so ocbmd + this shell need no
-# YAML parser (airplayd's receiver ignores the key; the supervisor is its sole consumer).
+# YAML parser (carplayd's receiver ignores the key; the supervisor is its sole consumer).
 wireless_enabled() { ! grep -qiE '^[[:space:]]*wireless:[[:space:]]*false' "$WIRELESS_CFG" 2>/dev/null; }
 # Android Auto enable lever (app-driven, docs/carplay/04_CAPABILITIES_AND_CONFIG.md). Default ON so a plugged Android phone projects out
 # of the box; the app opts out with `android_auto: false` in the pushed carplay_cfg.yaml (docs/androidauto/02_ARBITRATION.md).
@@ -736,18 +736,18 @@ aa_enabled() { ! grep -qiE '^[[:space:]]*android_auto:[[:space:]]*false' "$WIREL
 # plus the wired CarPlay daemons it spawns.
 carplay_session_live() {
   [ "${armed:-0}" = 1 ] && return 0
-  # iap2d ONLY — a bare `airplayd` is NOT a live wired CarPlay session (F2, device-proven
+  # iap2d ONLY — a bare `carplayd` is NOT a live wired CarPlay session (F2, device-proven
   # 2026-08-27, the same mistake as the `wired-cp` self-heal in projection_owner()).
   #
   # A wired CarPlay session IS the Identified iAP2 link, and that link is iap2d: it exits the moment
-  # the iPhone leaves the bus. airplayd does not — this script deliberately leaves it running when
-  # the host goes away ("airplayd/rx-connect are wired-owned, left running") and the wireless arm
-  # shares it — so testing airplayd here means ONE wired CarPlay session poisons the box for every
-  # Android phone that follows it, until something kills airplayd.
+  # the iPhone leaves the bus. carplayd does not — this script deliberately leaves it running when
+  # the host goes away ("carplayd are wired-owned, left running") and the wireless arm
+  # shares it — so testing carplayd here means ONE wired CarPlay session poisons the box for every
+  # Android phone that follows it, until something kills carplayd.
   #
   # Measured before this change: iPhone streams, unplug it, plug in a Pixel -> the supervisor logs
   # "no iPhone (05ac) on the bus" and latches to WAITING, and `arm_aa` is never reached at all
-  # because this returned true on the surviving airplayd. Android Auto simply never started.
+  # because this returned true on the surviving carplayd. Android Auto simply never started.
   #
   # The AA-hijack protection this guard exists for is unaffected: a live wired CarPlay session always
   # has iap2d holding the link, so the case it must refuse still reads true.
@@ -766,7 +766,7 @@ radio_off() { [ -f /tmp/radio_off ]; }
 # is a deliberate extension, enabled ONLY by the host YAML `hot_handover: true`. Absent/anything-else => the
 # standard "keep wireless on plug" behavior. See docs/ops/05_AUDITS.md and the transport-selection research 2026-08-01.
 hot_handover_enabled() { grep -qiE '^[[:space:]]*hot_handover:[[:space:]]*true' "$WIRELESS_CFG" 2>/dev/null; }
-wireless_running() { pgrep -f /usr/sbin/carplay-wireless >/dev/null 2>&1; }
+wireless_running() { pgrep -f /usr/sbin/btd >/dev/null 2>&1; }
 # Is ANY part of the wireless stack still drawing power? The advertiser can be dead while hostapd is
 # still beaconing and hci0 is still UP — which is exactly the state that made a wired session crawl
 # (owner report 2026-08-11), so all three are checked, not just the daemon.
@@ -776,16 +776,16 @@ wireless_stack_up() {
   hciconfig hci0 2>/dev/null | grep -q "UP RUNNING" && return 0
   return 1
 }
-# Is ANY airplayd alive, in EITHER spawn form — the WIRED supervisor's bare-name `setsid airplayd`
-# (argv[0]=="airplayd") or the wireless av.rs full-path `/usr/sbin/airplayd`? Exact-match probes for each
-# form (deliberately NOT `pgrep -f airplayd`, which would false-match a transient `tail`/`grep` of an
-# *airplayd*.log and wrongly report it alive). Used by the stale-flag watchdog to tell a truly-dead
+# Is ANY carplayd alive, in EITHER spawn form — the WIRED supervisor's bare-name `setsid carplayd`
+# (argv[0]=="carplayd") or the wireless av.rs full-path `/usr/sbin/carplayd`? Exact-match probes for each
+# form (deliberately NOT `pgrep -f carplayd`, which would false-match a transient `tail`/`grep` of an
+# *carplayd*.log and wrongly report it alive). Used by the stale-flag watchdog to tell a truly-dead
 # wireless session from a live one. (Over-reporting alive would only DELAY the watchdog, never mis-clear.)
-airplayd_alive() { pgrep -x airplayd >/dev/null 2>&1 || pgrep -x /usr/sbin/airplayd >/dev/null 2>&1; }
+carplayd_alive() { pgrep -x carplayd >/dev/null 2>&1 || pgrep -x /usr/sbin/carplayd >/dev/null 2>&1; }
 # Pairing association model from the host YAML `pairing:` (default just_works — the proven CCPA posture).
 # `numeric_comparison` selects SSP DisplayYesNo → the iPhone + box both show a 6-digit code to match.
-# Passed to carplay-wireless as CARPLAY_PAIRING_MODE (its ssp_agent reads the env).
-# `numeric_comparison_interactive` additionally sets CARPLAY_SSP_INTERACTIVE=1: the box waits for the
+# Passed to btd as BT_PAIRING_MODE (its ssp_agent reads the env).
+# `numeric_comparison_interactive` additionally sets BT_SSP_INTERACTIVE=1: the box waits for the
 # head unit's yes/no instead of confirming its own side at once. NOT reachable with iOS as the peer
 # (docs/wireless/01_BT_AND_RADIO.md, 2026-09-04) — kept for other peers and bench work.
 pairing_interactive() {
@@ -822,7 +822,7 @@ cfg_value() {
 # gm_ccpa bridge role: the 0x5702->0x5703 handoff must hand the iPhone the VEHICLE's hotspot, not the
 # box's own AP. `wifi_handoff::read_hostapd_ap_config()` reads /etc/hostapd.conf unconditionally, so
 # the cheapest correct intervention is to write the app-supplied credentials into that file before
-# carplay-wireless starts. This is safe precisely BECAUSE wifi_ap:false means no hostapd ever runs
+# btd starts. This is safe precisely BECAUSE wifi_ap:false means no hostapd ever runs
 # from it. /etc/hostapd.conf.stock is the pristine base, so repeated runs never drift.
 apply_host_wifi_creds() {
   # NOTE the underscore prefixes. The bare names s/p/c would CLOBBER the main loop's presence
@@ -896,25 +896,24 @@ wireless_up() {
   fi
   wireless_running && return   # idempotent guard (checked HERE, before the wrapper exists)
   # Clean slate before a fresh bring-up: reap any orphaned A/V children left by a prior session so the
-  # new stack can NEVER latch onto / collide with a stale airplayd or rx-connect (the observed
+  # new stack can NEVER latch onto / collide with a stale carplayd (the observed
   # "connection unsuccessful" after an app close+reopen). Safe here because this runs only on the
   # host-absent->present edge (app just (re)connected) with wireless enabled, and wlan_on/bt_on below
-  # give the SIGTERM'd stragglers a full settle before carplay-wireless spawns its own children.
+  # give the SIGTERM'd stragglers a full settle before btd spawns its own children.
   #
   # docs/wireless/00_WIRELESS_CARPLAY.md #1.4 (extended, review finding 2026-07-24): this pkill previously ran UNCONDITIONALLY, which
   # meant the CCPA-tab "Restart wireless"/Forget trigger (`wireless_down` then, ~4s later, THIS
   # function — see the main loop's `wireless_rebring_at` handling) could kill a live WIRED session's
-  # airplayd/rx-connect exactly like the bug #1.4 already fixed inside `wireless_down` itself. Only reap
+  # carplayd exactly like the bug #1.4 already fixed inside `wireless_down` itself. Only reap
   # here if they are NOT a live wired session: either the transport flag already says "wireless" (a
   # stale, uncleaned prior wireless session — safe and correct to reap), or neither process is even
   # running (nothing to protect).
   _wl_reaped=0
-  if wireless_owns_session || { ! pgrep -x airplayd >/dev/null 2>&1 && ! pgrep -x rx-connect >/dev/null 2>&1; }; then
+  if wireless_owns_session || ! pgrep -x carplayd >/dev/null 2>&1; then
     _wl_reaped=1
-    pkill -f airplayd 2>/dev/null
-    pkill -f rx-connect 2>/dev/null
+    pkill -f carplayd 2>/dev/null
   else
-    echo "[sup] wireless_up: airplayd/rx-connect are wired-owned — leaving them running, skipping the pre-bringup reap"
+    echo "[sup] wireless_up: carplayd is wired-owned — leaving it running, skipping the pre-bringup reap"
   fi
   mode=$(pairing_mode)
   if wifi_ap_enabled; then ap=1; else ap=0; fi
@@ -930,7 +929,7 @@ wireless_up() {
   # measured on hardware, four retries wedged the control session long enough for the phone to drop
   # Bluetooth — which is the session anchor, so the whole CarPlay attempt died with it.
   #
-  # Letting the box's own airplayd/rx-connect start is harmless in the bridge role: with wifi_ap:false
+  # Letting the box's own carplayd start is harmless in the bridge role: with wifi_ap:false
   # there is no wlan0 and the box has no route to the vehicle subnet, so nothing can reach them. They
   # latch AV_LAYER_UP instantly, the stall disappears, and the head-unit app remains the only
   # reachable AirPlay endpoint. Suppressing them properly needs an explicit AV_DISABLED gate in
@@ -938,14 +937,14 @@ wireless_up() {
   AV_SUPPRESS=''
   echo "[sup] host PRESENT + wireless enabled -> CLEAN bring-up of wireless stack (detached, pairing=$mode, wifi_ap=$ap, av_suppress=no)"
   # Detached session; sequential WiFi AP -> BT radio -> CarLink advertiser, each redirected (not piped).
-  # NO inner pgrep guard: the wrapper `sh -c` argv itself contains "/usr/sbin/carplay-wireless", so an
-  # inner `pgrep -f /usr/sbin/carplay-wireless` self-matches the wrapper and SKIPS the launch (the bug
-  # that left carplay-wireless never started). The outer `wireless_running && return` above is the guard.
-  # CARPLAY_PAIRING_MODE is inherited through setsid -> sh -c -> the exec'd carplay-wireless.
-  # CARPLAY_WIFI_AP is read by the inner shell at runtime (the body is single-quoted on purpose, so the
+  # NO inner pgrep guard: the wrapper `sh -c` argv itself contains "/usr/sbin/btd", so an
+  # inner `pgrep -f /usr/sbin/btd` self-matches the wrapper and SKIPS the launch (the bug
+  # that left btd never started). The outer `wireless_running && return` above is the guard.
+  # BT_PAIRING_MODE is inherited through setsid -> sh -c -> the exec'd btd.
+  # BOX_WIFI_AP is read by the inner shell at runtime (the body is single-quoted on purpose, so the
   # decision travels as an env var rather than by interpolating into the wrapper's argv).
   # shellcheck disable=SC2086  # AV_SUPPRESS is a deliberate word-split of VAR=VAL assignments
-  env $AV_SUPPRESS CARPLAY_PAIRING_MODE="$mode" CARPLAY_SSP_INTERACTIVE="$(pairing_interactive)" CARPLAY_WIFI_AP="$ap" OCBM_WL_REAPED="$_wl_reaped" setsid sh -c '
+  env $AV_SUPPRESS BT_PAIRING_MODE="$mode" BT_SSP_INTERACTIVE="$(pairing_interactive)" BOX_WIFI_AP="$ap" OCBM_WL_REAPED="$_wl_reaped" setsid sh -c '
     # Radio bring-up goes through the chipset-neutral seam. It resolves this unit'"'"'s own
     # bring-up mapping at runtime, so the supervisor never names a chip, a module or an attach
     # helper. Exit codes: 0 converged / 1 failed / 2 already up / 3 unsupported on this variant.
@@ -953,7 +952,7 @@ wireless_up() {
     # scripts, which simply do not exist on a Realtek or Broadcom unit, so wireless bring-up
     # failed SILENTLY here (the calls sit in this detached wrapper, redirected, exit status
     # unread) while wired projection kept working and nothing looked wrong.
-    if [ "$CARPLAY_WIFI_AP" = "0" ]; then
+    if [ "$BOX_WIFI_AP" = "0" ]; then
       echo "[sup] wifi_ap:false -> box SoftAP SUPPRESSED (BT-only bridge role; the head-unit app owns Wi-Fi)" >/tmp/wlan.log
     else
       sh /script/radio_hal.sh wifi_ap_on >/tmp/wlan.log 2>&1
@@ -963,7 +962,7 @@ wireless_up() {
     # its combined stdout/stderr into the universal log costs nothing and changes no lifecycle.
     sh /script/radio_hal.sh bt_on 2>&1 | tee -a /tmp/box.log >/tmp/bt.log
     # BENCH LEVER (2026-09-03): opt-in btmon capture for this wireless session. Armed by either the
-    # file flag or the env var -- the outer `env CARPLAY_PAIRING_MODE=... setsid sh -c` wrapper
+    # file flag or the env var -- the outer `env BT_PAIRING_MODE=... setsid sh -c` wrapper
     # above only lists the vars it OVERRIDES, so CARPLAY_BTMON, if exported by the caller, still
     # reaches here through the normal inherited environment. Whether the CCPA rootfs actually ships
     # btmon is unknown, so this must be a no-op (one log line, not a failure) when it is absent.
@@ -979,7 +978,7 @@ wireless_up() {
     fi
     # docs/wireless/00_WIRELESS_CARPLAY.md #1.3 (review finding 2026-07-24): truncate the wireless health log HERE, immediately
     # before exec, not right after the (SIGTERM-only, kill-unconfirmed) reap above — truncating early
-    # left a window where the OLD airplayd could still flush its buffered stdio (exit-time flush of an
+    # left a window where the OLD carplayd could still flush its buffered stdio (exit-time flush of an
     # O_APPEND-opened, fully-buffered log) and replay the PRIOR session'"'"'s "pair-verify OK"/"RECORD
     # done" lines back in after the truncate, exactly the bogus-instant-health bug this truncation
     # exists to prevent.
@@ -991,21 +990,20 @@ wireless_up() {
     # instead of inferring it from elapsed time — this is strictly stronger than the old timing,
     # under which a SIGTERM-ignoring straggler survived even the 15s.
     #
-    # Gated on OCBM_WL_REAPED: in the wired-owned skip branch a live wired airplayd is EXPECTED
+    # Gated on OCBM_WL_REAPED: in the wired-owned skip branch a live wired carplayd is EXPECTED
     # and writes to its own log, not this one, so it must not burn the bound.
     if [ "$OCBM_WL_REAPED" = 1 ]; then
       _i=0
-      while [ "$_i" -lt 25 ] && { pgrep -x airplayd || pgrep -x /usr/sbin/airplayd \
-            || pgrep -x rx-connect || pgrep -x /usr/sbin/rx-connect; } >/dev/null 2>&1; do
+      while [ "$_i" -lt 25 ] && { pgrep -x carplayd || pgrep -x /usr/sbin/carplayd; } >/dev/null 2>&1; do
         _i=$((_i + 1)); sleep 0.2
       done
     fi
-    : > /tmp/airplayd_wl.log
+    : > /tmp/carplayd_wl.log
     # S5: O_APPEND (>>), not >. The in-place tail-truncate in bound_logs (~:551-555) relies on
     # the writer fd being O_APPEND so writes after truncation land at the new end-of-file; a
     # non-append fd keeps writing at its old offset, leaving a sparse hole and re-truncating to
     # nothing every tick.
-    exec /usr/sbin/carplay-wireless </dev/null >>/tmp/wl.log 2>&1
+    exec /usr/sbin/btd </dev/null >>/tmp/wl.log 2>&1
   ' </dev/null >/dev/null 2>&1 &
   # The wireless Android Auto byte pump, alongside the advertiser that will bootstrap phones to it.
   # Started here rather than inside the wrapper above so its exit status and log line are visible;
@@ -1020,17 +1018,17 @@ wireless_down() {
   # BEFORE the already-fully-down early return below: that return only inspects the CarPlay-side
   # stack (advertiser, A/V children, hostapd, hci0), and the AA pump can outlive all four.
   aa_bridge_wireless_down
-  # COMPLETE wireless-stack teardown, tied to app presence: the advertiser (carplay-wireless) AND its
-  # setsid-detached A/V children (airplayd, rx-connect). pkill-ing ONLY the parent orphans the children,
+  # COMPLETE wireless-stack teardown, tied to app presence: the advertiser (btd) AND its
+  # setsid-detached A/V children (carplayd). pkill-ing ONLY the parent orphans the children,
   # and the next app-connect bring-up then collides with those orphans ("Address in use" on the
   # advertiser / a stale AirPlay receiver) -> iOS reports "connection unsuccessful". No head-unit app
   # means no possible session (wired OR wireless), so reaping the whole A/V stack here is correct and
-  # returns the box to the clean waiting state. Reap even if carplay-wireless already died (the
+  # returns the box to the clean waiting state. Reap even if btd already died (the
   # detached children can outlive it).
-  # `airplayd_alive` not `pgrep -x airplayd`: BusyBox `-x` matches the FULL invoked path, so a bare
-  # `-x airplayd` is BLIND to the wireless spawn form `/usr/sbin/airplayd` (device-proven, docs/wireless/00_WIRELESS_CARPLAY.md).
-  # A stranded wireless airplayd would otherwise trip this early return and never be reaped.
-  if ! wireless_running && ! airplayd_alive && ! pgrep -x rx-connect >/dev/null 2>&1 \
+  # `carplayd_alive` not `pgrep -x carplayd`: BusyBox `-x` matches the FULL invoked path, so a bare
+  # `-x carplayd` is BLIND to the wireless spawn form `/usr/sbin/carplayd` (device-proven, docs/wireless/00_WIRELESS_CARPLAY.md).
+  # A stranded wireless carplayd would otherwise trip this early return and never be reaped.
+  if ! wireless_running && ! carplayd_alive \
      && ! pgrep -x hostapd >/dev/null 2>&1 && ! { hciconfig hci0 2>/dev/null | grep -q "UP"; }; then
     return   # already fully down — processes dead AND radios actually powered off (docs/carplay/04_CAPABILITIES_AND_CONFIG.md: a
              # crashed stack can leave hostapd beaconing / hci0 UP with all three daemons gone;
@@ -1044,32 +1042,34 @@ wireless_down() {
     # an app-less box drops ACLs and answers nothing. SIGTERM first, brief settle, then SIGKILL only the A/V daemons (NOT the BT hci path
     # — heavy -9 on BT bring-up is what wedges the IW416 controller).
     # SELF-MATCH FIX 2026-08-01: the patterns MUST use the `[x]`-char-class form. This block runs as
-    # `setsid sh -c '<this text>'`, so its own argv literally contains "/usr/sbin/carplay-wireless",
-    # "airplayd", "rx-connect" — a plain `pkill -f /usr/sbin/carplay-wireless` SIGKILLs THIS subshell
+    # `setsid sh -c '<this text>'`, so its own argv literally contains "/usr/sbin/btd",
+    # "carplayd" — a plain `pkill -f /usr/sbin/btd` SIGKILLs THIS subshell
     # before it reaches wlan_off, orphaning the AP (hostapd kept broadcasting → iOS shows the phone still
     # on WiFi with CarPlay inactive). `[/]usr/...` matches the real daemon but NOT this text (verified:
     # busybox pgrep `[h]ostapd` matches, `[z]hostapd` doesn't). Same footgun the wireless_up guard notes.
     setsid sh -c '
-      pkill -f "[/]usr/sbin/carplay-wireless" 2>/dev/null
-      pkill -f "[a]irplayd" 2>/dev/null
-      pkill -f "[r]x-connect" 2>/dev/null
+      pkill -f "[/]usr/sbin/btd" 2>/dev/null
+      pkill -f "[c]arplayd" 2>/dev/null
       pkill -f "[b]tmon" 2>/dev/null   # btmon bench lever (2026-09-03), harmless if never armed
       sleep 1
-      pkill -9 -f "[a]irplayd" 2>/dev/null
-      pkill -9 -f "[r]x-connect" 2>/dev/null
-      pkill -9 -f "[/]usr/sbin/carplay-wireless" 2>/dev/null
+      pkill -9 -f "[c]arplayd" 2>/dev/null
+      pkill -9 -f "[/]usr/sbin/btd" 2>/dev/null
       pkill -9 -f "[b]tmon" 2>/dev/null
       # S4: the phase-mirror unlink moved IN HERE, after the backgrounded SIGKILL above, so a
-      # still-live carplay-wireless (killed -9 but not yet reaped) cannot re-publish a stale
+      # still-live btd (killed -9 but not yet reaped) cannot re-publish a stale
       # /tmp/bt_phase after the synchronous outer unlink used to run (audit 3.3: last-write-wins,
       # no other unlink point).
       rm -f /tmp/bt_phase
-      hciconfig hci0 noscan 2>/dev/null
       sh /script/radio_hal.sh wifi_ap_off >/tmp/wlan_off.log 2>&1
       # docs/carplay/04_CAPABILITIES_AND_CONFIG.md radio gating: POWER the BT radio off (page/inquiry dead, ACLs dropped), not just
-      # noscan — an app-less box must not keep the iPhone BT-connected. hci0 down (NOT bt_off.sh,
-      # whose rmmod path is the wedge-prone one); the next bring_up() does its proven down->up cycle.
-      hciconfig hci0 down 2>/dev/null
+      # noscan — an app-less box must not keep the iPhone BT-connected. Through the SEAM bt_off
+      # verb, which is exactly this noscan+down and leaves the attach in place (NOT bt_off.sh, whose
+      # rmmod path is the wedge-prone one); the next bring_up() does its proven down->up cycle.
+      # NOTE: no apostrophes in this block - it is the body of a single-quoted setsid sh -c.
+      # Raw `hciconfig hci0 noscan/down` here ran OUTSIDE the radio_hal.sh bt lock, so it could
+      # land between a concurrent bt_on attach and its readback and present as a wedged
+      # controller; it also hardcoded hci0 instead of the discovered device.
+      sh /script/radio_hal.sh bt_off >/tmp/bt_off.log 2>&1
     ' </dev/null >/dev/null 2>&1 &
     # docs/wireless/00_WIRELESS_CARPLAY.md #1.2/#1.3: this is OUR session ending — clear the health state we own and the transport
     # flag ourselves (value-scoped, so it never fires against a wired session's "wired"/absent value),
@@ -1077,24 +1077,24 @@ wireless_down() {
     saw_paired=0; saw_record=0; healthy=0; established_since=0; write_healthy 0
     [ "$(cat /tmp/carplay_transport 2>/dev/null)" = wireless ] && rm -f /tmp/carplay_transport
   else
-    # docs/wireless/00_WIRELESS_CARPLAY.md #1.4: airplayd/rx-connect are WIRED-owned right now (or nothing is running at all) — never
+    # docs/wireless/00_WIRELESS_CARPLAY.md #1.4: carplayd are WIRED-owned right now (or nothing is running at all) — never
     # kill them from here. Previously this function's pkill list had no such guard, so a CCPA-tab
-    # "Restart wireless"/Forget action during a live WIRED session killed the wired airplayd too — a
+    # "Restart wireless"/Forget action during a live WIRED session killed the wired carplayd too — a
     # real regression, not a wireless-only effect. Only the wireless-specific advertiser + radios are
     # ours to tear down in this case.
-    echo "[sup] $_wd_why -> tearing down wireless advertiser + radios only (airplayd/rx-connect are wired-owned, left running)"
+    echo "[sup] $_wd_why -> tearing down wireless advertiser + radios only (carplayd are wired-owned, left running)"
     # SELF-MATCH FIX 2026-08-01: `[/]usr/...` so this `sh -c` block doesn't SIGKILL itself before wlan_off
     # (see the COMPLETE-teardown branch above for the full rationale).
     setsid sh -c '
-      pkill -f "[/]usr/sbin/carplay-wireless" 2>/dev/null
+      pkill -f "[/]usr/sbin/btd" 2>/dev/null
       pkill -f "[b]tmon" 2>/dev/null   # btmon bench lever (2026-09-03), harmless if never armed
       sleep 1
-      pkill -9 -f "[/]usr/sbin/carplay-wireless" 2>/dev/null
+      pkill -9 -f "[/]usr/sbin/btd" 2>/dev/null
       pkill -9 -f "[b]tmon" 2>/dev/null
-      hciconfig hci0 noscan 2>/dev/null
       sh /script/radio_hal.sh wifi_ap_off >/tmp/wlan_off.log 2>&1
-      # docs/carplay/04_CAPABILITIES_AND_CONFIG.md radio gating: power BT off here too (see the COMPLETE-teardown branch rationale).
-      hciconfig hci0 down 2>/dev/null
+      # docs/carplay/04_CAPABILITIES_AND_CONFIG.md radio gating: power BT off here too, through the locked seam bt_off
+      # verb (see the COMPLETE-teardown branch rationale).
+      sh /script/radio_hal.sh bt_off >/tmp/bt_off.log 2>&1
     ' </dev/null >/dev/null 2>&1 &
   fi
 }
@@ -1139,19 +1139,19 @@ while :; do
   fi
 
   # (C) Stale-flag watchdog (dual-transport self-heal): /tmp/carplay_transport is only ever cleared by
-  # carplay-wireless's teardown_av_layer() (av.rs) on a CLEAN SIGTERM. A wireless session that dies
+  # btd's teardown_av_layer() (av.rs) on a CLEAN SIGTERM. A wireless session that dies
   # WITHOUT that (crash / SIGKILL / OOM — panic=abort does no unwinding) leaves the flag stuck at
   # "wireless" forever, which suppresses the ENTIRE wired path (arm/kill_session/escalate all gate on
-  # wireless_owns_session). If the flag says wireless but NEITHER carplay-wireless NOR any airplayd is
+  # wireless_owns_session). If the flag says wireless but NEITHER btd NOR any carplayd is
   # alive for STALE_FLAG_N consecutive ticks, the owning session is provably gone — clear the orphaned
-  # flag. Consecutive (not instant) so we never race a carplay-wireless momentarily between claims or an
-  # airplayd mid-(re)spawn. Requiring airplayd ALSO dead keeps this maximally conservative: it never
-  # clears a flag while any airplayd could still be serving a screen (the preempt edge above handles a
+  # flag. Consecutive (not instant) so we never race a btd momentarily between claims or an
+  # carplayd mid-(re)spawn. Requiring carplayd ALSO dead keeps this maximally conservative: it never
+  # clears a flag while any carplayd could still be serving a screen (the preempt edge above handles a
   # live-but-superseded wireless session when a real wired cable appears).
-  if wireless_owns_session && ! wireless_running && ! airplayd_alive; then
+  if wireless_owns_session && ! wireless_running && ! carplayd_alive; then
     stale_flag_ticks=$((stale_flag_ticks + 1))
     if [ "$stale_flag_ticks" -ge "$STALE_FLAG_N" ]; then
-      echo "[sup] STALE transport flag: 'wireless' with no carplay-wireless/airplayd for $stale_flag_ticks ticks -> clearing (self-heal, no reboot)"
+      echo "[sup] STALE transport flag: 'wireless' with no btd/carplayd for $stale_flag_ticks ticks -> clearing (self-heal, no reboot)"
       rm -f /tmp/carplay_transport
       stale_flag_ticks=0
     fi
@@ -1160,7 +1160,7 @@ while :; do
   fi
 
   # CCPA-tab wireless restart (ocbmd sets the flag for Restart-wireless, Forget-all, Forget-device): tear
-  # carplay-wireless down now, then re-bring-up a few ticks later (once it's actually gone) if a host is
+  # btd down now, then re-bring-up a few ticks later (once it's actually gone) if a host is
   # still present. This is how the app's box controls + a forget (reload with cleared keys) take effect.
   if [ -f "$WIRELESS_RESTART_FLAG" ]; then
     rm -f "$WIRELESS_RESTART_FLAG"
@@ -1175,7 +1175,7 @@ while :; do
 
   # App-commanded radio inhibit edges (CT_RADIO -> /tmp/radio_off, docs/carplay/04_CAPABILITIES_AND_CONFIG.md radio gating). Flag
   # appeared -> radios down NOW (wireless_down's docs/wireless/00_WIRELESS_CARPLAY.md #1.4 guard protects a wired-owned
-  # airplayd). Flag cleared -> bring-up rides the existing 4 s wireless_rebring_at deferral, NOT a
+  # carplayd). Flag cleared -> bring-up rides the existing 4 s wireless_rebring_at deferral, NOT a
   # direct wireless_up: (a) a quick off->on toggle must not race the off-edge's detached teardown
   # (same class the Restart-wireless deferral exists for), and (b) go_idle clears this flag and
   # host_present in the same instant, so an on-edge can arrive on the very tick the app went away
@@ -1311,7 +1311,7 @@ while :; do
         # a projection_up(05ac) attempt (audit scenario 2), and defers to a live wireless session.
         arm_aa
       elif wireless_owns_session; then
-        # docs/wireless/00_WIRELESS_CARPLAY.md #1.3: a live wireless session owns airplayd right now. `armed` stays 0 for the whole
+        # docs/wireless/00_WIRELESS_CARPLAY.md #1.3: a live wireless session owns carplayd right now. `armed` stays 0 for the whole
         # duration (arm()/kill_session()/escalate() all suppress themselves against wireless), so
         # WITHOUT this branch the wired logic below would keep calling arm() — which returns 1 here —
         # churn proj_fails, and eventually fire escalate("projection-failure") against a session the
@@ -1354,12 +1354,13 @@ while :; do
             fi
           fi
         fi
-      elif ! pgrep -x airplayd >/dev/null 2>&1 || ! pgrep -x rx-connect >/dev/null 2>&1 || ! pgrep -x iap2d >/dev/null 2>&1; then
-        # any of the three session daemons died while PRESENT -> re-ARM (was: airplayd only)
+      elif ! pgrep -x carplayd >/dev/null 2>&1 || ! pgrep -x iap2d >/dev/null 2>&1; then
+        # either session daemon died while PRESENT -> re-ARM. Was three (carplayd,
+        # iap2d); rx-connect is now a thread inside carplayd, so its death is carplayd's death.
         # (docs/wireless/00_WIRELESS_CARPLAY.md #1.1 hygiene: -x matches the process name, not -f's full-argv substring — avoids the
         # same false-match class already fixed in av.rs's Rust `running()`, e.g. a log tail/grep/editor
-        # with "airplayd" in its own argv suppressing a needed re-ARM.)
-        dead=""; for d in airplayd rx-connect iap2d; do pgrep -x "$d" >/dev/null 2>&1 || dead="$dead $d"; done
+        # with "carplayd" in its own argv suppressing a needed re-ARM.)
+        dead=""; for d in carplayd iap2d; do pgrep -x "$d" >/dev/null 2>&1 || dead="$dead $d"; done
         fails=$((fails + 1))
         back=$((fails * 5)); [ "$back" -gt 30 ] && back=30
         backoff_until=$(( $(now) + back ))
@@ -1367,7 +1368,7 @@ while :; do
         armed=0
         write_healthy 0
       else
-        # armed + airplayd alive: derive establishment health, detect a stall
+        # armed + carplayd alive: derive establishment health, detect a stall
         scan_milestones
         if [ "$saw_record" = 0 ] && [ "$(now)" -ge "$estab_deadline" ]; then
           stuck_fails=$((stuck_fails + 1))

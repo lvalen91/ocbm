@@ -108,7 +108,7 @@ column is the accurate description.
 
 ### Example task message (metadata flow)
 
-> Task: continue the wireless metadata implementation in `airplayd`.
+> Task: continue the wireless metadata implementation in `carplayd`.
 > 1. Per the CarPlay SDK, the accessory answers the phone's DataStream SETUP for stream type 130 (the
 >    RemoteControlSession iAP channel) and carries a full iAP2 link inside it — detect, link
 >    synchronisation, then identification. Confirm our SETUP response and message framing match what

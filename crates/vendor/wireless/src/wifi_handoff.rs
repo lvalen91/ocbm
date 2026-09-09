@@ -247,8 +247,8 @@ pub fn read_hostapd_ap_config() -> Option<AccessoryWiFiConfig> {
     // This is the answer the accessory gives to iAP2 0x5702 — the credentials the iPhone will use
     // to join. It MUST describe the AP that is actually running, or the phone leaves Bluetooth and
     // never arrives.
-    let path = std::env::var("CARPLAY_HOSTAPD_CONF")
-        .unwrap_or_else(|_| "/etc/hostapd.conf".to_string());
+    let path = box_common::lever("BOX_HOSTAPD_CONF", "CARPLAY_HOSTAPD_CONF")
+        .unwrap_or_else(|| "/etc/hostapd.conf".to_string());
     let text = std::fs::read_to_string(&path).unwrap_or_default();
     if text.is_empty() {
         eprintln!("[wifi_handoff] WARNING: {path} is empty or unreadable — 0x5703 will carry no credentials");

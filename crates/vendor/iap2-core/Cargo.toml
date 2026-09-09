@@ -2,7 +2,7 @@
 name = "carplay-iap2-core"
 version = "0.1.0"
 edition = "2021"
-description = "Transport-agnostic iAP2 protocol core (link framing, auth/identify state machine, TLV builder, MFi auth-service client) -- shared by the wired (carplayd) and wireless (carplay-wireless) accessory drivers"
+description = "Transport-agnostic iAP2 protocol core (link framing, auth/identify state machine, TLV builder, MFi auth-service client) -- shared by the wired (carplayd) and wireless (btd) accessory drivers"
 
 [dependencies]
 # rv32 (C2Air/V821) has no 64-bit atomics: no AtomicU64/AtomicI64 in core. Same API, const-new.

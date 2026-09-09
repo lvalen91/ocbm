@@ -280,7 +280,7 @@ mod tests {
 /// Blocking client for a remote MFi service (`mfid`).
 ///
 /// Lives here rather than in each caller because there are now two independent consumers on the
-/// Raspberry Pi port — `carplay-wireless` (BT-time iAP2 auth) and `airplayd` (`auth-setup` during
+/// Raspberry Pi port — `btd` (BT-time iAP2 auth) and `carplayd` (`auth-setup` during
 /// the AirPlay session) — and a second hand-rolled copy of the framing is exactly how the two drift.
 ///
 /// Deliberately blocking and synchronous: `sign` is called inside handshakes that run against the
@@ -332,7 +332,7 @@ pub mod client {
         }
     }
 
-    /// Keeps the `io::Result` call sites (airplayd's `MfiSigner` impl) one-liners.
+    /// Keeps the `io::Result` call sites (carplayd's `MfiSigner` impl) one-liners.
     impl From<Error> for io::Error {
         fn from(e: Error) -> io::Error {
             match e {

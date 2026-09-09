@@ -73,9 +73,9 @@ use box_common::flags::{self, ProjectionOwner};
 /// self-synchronizing.
 const VOICE_SEAM_ADDR: &str = "127.0.0.1:9003";
 
-/// airplayd's mic-uplink seam ("control-in"). During an Android Auto session airplayd is not
+/// carplayd's mic-uplink seam ("control-in"). During an Android Auto session carplayd is not
 /// running, so this daemon LISTENS here instead and speaks the identical protocol ocbmd already
-/// implements against airplayd: `mic <len>\n<pcm>` inbound, newline-framed
+/// implements against carplayd: `mic <len>\n<pcm>` inbound, newline-framed
 /// `uplink on <rate> <ch>` / `uplink off` outbound.
 const MIC_SEAM_ADDR: &str = "127.0.0.1:9112";
 
@@ -255,9 +255,9 @@ pub fn sco_format_msg(scid: u64, codec: ScoCodec) -> Vec<u8> {
 }
 
 /// The mic seam's `uplink on` line for a codec: `uplink on 8000 1` for CVSD — byte-identical to what
-/// airplayd sends and to what shipped — and `uplink on 16000 1 msbc` for wideband.
+/// carplayd sends and to what shipped — and `uplink on 16000 1 msbc` for wideband.
 ///
-/// The fourth token is deliberately ADDITIVE. ocbmd and airplayd both parse this line by
+/// The fourth token is deliberately ADDITIVE. ocbmd and carplayd both parse this line by
 /// whitespace-split and both ignore a token they do not expect, so a box that speaks it to an old
 /// host degrades to "16 kHz mono PCM", which is the wrong request but not a desync — whereas
 /// changing the first three tokens' meaning would break every existing reader.
@@ -589,7 +589,7 @@ pub struct ScoAudio {
 
 impl ScoAudio {
     /// Start the SCO listener and the mic-seam server. Never fails: a controller that cannot host a
-    /// SCO socket, or a `:9112` still owned by a dying airplayd, must not take the headset link —
+    /// SCO socket, or a `:9112` still owned by a dying carplayd, must not take the headset link —
     /// and therefore gearhead's HFP gate — down with it. Every failure is logged and retried.
     pub fn start(local_bdaddr: Option<[u8; 6]>) -> ScoAudio {
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -1175,17 +1175,17 @@ impl Drop for VoiceSink {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Uplink: we become airplayd's mic seam
+// Uplink: we become carplayd's mic seam
 // ---------------------------------------------------------------------------------------------
 
 /// Serve `:9112` while this box owns wireless Android Auto and the AG wants audio.
 ///
-/// **Why the ownership gate is load-bearing.** `:9112` belongs to airplayd, which binds it at
-/// startup for every CarPlay session. If we held it across a CarPlay session start, airplayd's bind
+/// **Why the ownership gate is load-bearing.** `:9112` belongs to carplayd, which binds it at
+/// startup for every CarPlay session. If we held it across a CarPlay session start, carplayd's bind
 /// would fail and the WIRED/wireless CarPlay microphone — Siri, phone calls — would be dead with
-/// only a line in airplayd's own log to say so. The projection owner flag is set before
-/// `av::ensure_av_layer` spawns airplayd, so releasing on any owner that is not `wireless-aa`
-/// closes that window. The converse race — airplayd still dying while we try to bind — is handled
+/// only a line in carplayd's own log to say so. The projection owner flag is set before
+/// `av::ensure_av_layer` spawns carplayd, so releasing on any owner that is not `wireless-aa`
+/// closes that window. The converse race — carplayd still dying while we try to bind — is handled
 /// by simply retrying, since a stale listener disappears when its process does.
 fn mic_seam_serve(shutdown: &AtomicBool, state: &State) {
     let mut listener: Option<TcpListener> = None;
@@ -1218,14 +1218,14 @@ fn mic_seam_serve(shutdown: &AtomicBool, state: &State) {
                 Ok(l) => {
                     bind_reported = false;
                     log(&format!(
-                        "mic seam listening {MIC_SEAM_ADDR} (we are airplayd's mic seam for this session)"
+                        "mic seam listening {MIC_SEAM_ADDR} (we are carplayd's mic seam for this session)"
                     ));
                     listener = Some(l);
                 }
                 Err(e) => {
                     if !bind_reported {
                         bind_reported = true;
-                        log(&format!("mic seam bind {MIC_SEAM_ADDR} failed: {e} — retrying (a previous airplayd may still be dying)"));
+                        log(&format!("mic seam bind {MIC_SEAM_ADDR} failed: {e} — retrying (a previous carplayd may still be dying)"));
                     }
                     std::thread::sleep(Duration::from_millis(500));
                     continue;
@@ -1307,7 +1307,7 @@ fn serve_mic_peer(stream: TcpStream, shutdown: &AtomicBool, state: &State) {
     let _ = stream.set_nodelay(true);
     // 250 ms, NOT the 1 s the other sockets use. This loop's tick is what bounds how long we can
     // still be holding `:9112` after this box stops owning wireless Android Auto — and the thing
-    // waiting for the port is airplayd, which binds ONCE at startup and gives up if it fails, so a
+    // waiting for the port is carplayd, which binds ONCE at startup and gives up if it fails, so a
     // lost race silently kills the microphone for a whole CarPlay session. See the owner re-check
     // below; a shorter tick is the cheap half of narrowing that window.
     let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
@@ -1339,7 +1339,7 @@ fn serve_mic_peer(stream: TcpStream, shutdown: &AtomicBool, state: &State) {
         // outlives the projection session) would keep `:9112` after CarPlay took the box.
         let o = flags::owner();
         if o != ProjectionOwner::WirelessAa && o != ProjectionOwner::WiredAa {
-            log("mic seam: the box no longer owns an Android Auto session — releasing 127.0.0.1:9112 to airplayd");
+            log("mic seam: the box no longer owns an Android Auto session — releasing 127.0.0.1:9112 to carplayd");
             break;
         }
         // The mic seam is deliberately brought up on `arm()`, which is BEFORE the AG has negotiated
@@ -1633,7 +1633,7 @@ mod tests {
     }
 
     /// The mic seam's fourth token. `uplink on 8000 1` must stay EXACTLY what shipped — ocbmd and
-    /// airplayd have both parsed that line for a year.
+    /// carplayd have both parsed that line for a year.
     #[test]
     fn the_mic_seam_line_gains_a_fourth_token_only_for_wideband() {
         assert_eq!(uplink_on_line(ScoCodec::Cvsd), "uplink on 8000 1");

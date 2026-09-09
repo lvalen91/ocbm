@@ -33,7 +33,7 @@ delegated to the box or deferred with justification — roadmap, not bugs.
 ### Correction to one agent's framing
 The nav/AltVideo audit concluded the app "can't be Apple-faithful because the dongle is the AirPlay
 endpoint." That is true for the *legacy stock-firmware* model but **wrong for ccpa_custom**: our own
-`airplayd` on the box IS the AirPlay receiver, so real AltVideo / VDC navigation / cluster ARE
+`carplayd` on the box IS the AirPlay receiver, so real AltVideo / VDC navigation / cluster ARE
 implementable (in the box, forwarded over OCBM). The agent's useful finding stands: the 0x2C/508/509 nav
 path is legacy proprietary code to retire — not a fidelity target.
 
@@ -125,7 +125,7 @@ the frame-cap fix lets the recovery keyframes actually land. Together they are t
   config, falling back to a logged drop when the config is neither `avcC` nor `hvcC`, which is the FourCC
   guard this bullet asked for. Whether a session NEGOTIATES HEVC is app-pushed, not compiled: `enablesHEVC`
   arms the box's two gates per connection (`hevcInfo` in `/info` + `enabledFeatures:["hevc"]`) via
-  `levers::set_hevc(vc.accessory_config.enables_hevc)` in airplayd, and the app's stored default is **ON**
+  `levers::set_hevc(vc.accessory_config.enables_hevc)` in carplayd, and the app's stored default is **ON**
   (`SettingsWindow`: `b("enablesHEVC", true)`). Only the app-less / parse-failure path clears the lever to
   off — that, not the app default, is the H.264 fallback this bullet assumed.
 - **Real nav / AltVideo / VDC / NMEA GPS** — implementable in *our* box (see correction above); large feature.
@@ -196,7 +196,7 @@ session ends. Wire details: `docs/androidauto/01_SESSION_AND_AV.md` §"Metadata 
 ### Settings window — projection-aware, vehicle-centric (reorganised 2026-09-04)
 
 Design contract, API reference, rendering rules and test contract:
-`host/CarPlayHost/carlink_macOS/App/Settings/DESIGN.md`. This section states the contract; the tab
+`host/MacHost/carlink_macOS/App/Settings/DESIGN.md`. This section states the contract; the tab
 files under `App/Settings/` are the implementation. It replaces the T1 plan in
 `docs/ops/08_FUTURE_TASKS.md`.
 
@@ -320,7 +320,7 @@ Desktop Head Unit ships the same kind of thing as `config/*.ini` (see `docs/ops/
 §F). Neither is a wire format: CarPlay's goes out as the AirPlay `/info` plist plus iAP2 Identify
 parameters, Android Auto's as `gal.ServiceDiscoveryResponse`.
 
-**Tests.** `host/CarPlayHost/tests/SettingsTests.swift` (`runSettingsTests()`, wired into
+**Tests.** `host/MacHost/tests/SettingsTests.swift` (`runSettingsTests()`, wired into
 `run_tests.sh` / `main.swift` by the integrator) covers the document round-trip and determinism, all
 presets, schema tolerance, the on-disk read/write path, the restriction mapping in both directions,
 `FeatureMatrix` completeness, and the neutral → Android Auto rendering. The `vc.profileKeysV1`
@@ -350,7 +350,7 @@ transport-efficiency + recovery-correctness problem, not a resolution problem. O
    slow pipe throttles the iPhone's encoder (Apple flow control) instead of dropping P-frames. Fewer/zero
    drops → continuous seq → no poisoning.
 3. **Renderer keyframe recovery — DONE (host).** `decoder.onNeedsKeyFrame → requestKeyframe()`.
-4. **Forward-path efficiency (next).** Cut the `airplayd → :9001 → ocbmd` local-TCP-loopback copies (unix
+4. **Forward-path efficiency (next).** Cut the `carplayd → :9001 → ocbmd` local-TCP-loopback copies (unix
    socket / splice) so the box sustains 4K@60 bitrate headroom and backpressure rarely engages. The stock
    firmware forwarded 4K@60 with no drops on this hardware — the target is parity.
 5. **HEVC (later, halves bitrate).** Once H.264 4K@60 is clean, HEVC 4K@60 is easier (lower bandwidth); the
@@ -480,16 +480,16 @@ true while `pushed` lacks it means "save and reconnect".
 "index":n,"reason":..}` (Android Auto owns the box, or no session). Path: `ControlsBridge.
 requestViewArea` (intent table entry `.viewArea`, CarPlay-only, outcome in `lastSent`) →
 `OCBMClient.sendViewArea` → `[INPUT_COMMAND 0x04][CMD_VIEW_AREA 0x11][index]` on `CH_INPUT` → ocbmd
-relays opaquely → airplayd `handle_input_frame` → `receiver::events::switch_view_area(DISPLAY_UUID,
+relays opaquely → carplayd `handle_input_frame` → `receiver::events::switch_view_area(DISPLAY_UUID,
 idx, "host viewArea")`, the SAME function that answers the phone's own `requestViewArea`, so the two
 paths share one policy: an index `/info` never declared is refused box-side (`[events] host viewArea
 index=N REFUSED — only M area(s) declared`), else `updateViewArea{uuid, viewAreaIndex,
 animationDurationMillis: 3000, adjacentViewAreas}` goes out. `ok:true` means accepted for send, not
 that iOS moved — confirm with `get viewarea` (`changes`, observed rect) and `shot`. Device-proven
 2026-09-05: iOS's own request is advisory and the accessory is the authority, which is why commanding
-the answer directly is a legitimate transition, not a hack. **Requires the 2026-09-07 airplayd on the
-box** (`build.sh`'s airplayd stanza → `target/armv7-unknown-linux-musleabihf/release/airplayd`, push
-with `ocbm-host`); an older airplayd logs `unknown INPUT_COMMAND 0x11 — dropped` and the fallback is
+the answer directly is a legitimate transition, not a hack. **Requires the 2026-09-07 carplayd on the
+box** (`build.sh`'s carplayd stanza → `target/armv7-unknown-linux-musleabihf/release/carplayd`, push
+with `ocbm-host`); an older carplayd logs `unknown INPUT_COMMAND 0x11 — dropped` and the fallback is
 `tap` on the Dock resize button. ocbmd needs no change. **Unverified on device** as of 2026-09-07.
 
 `tools/va_wired_sweep.sh` (docs/ops/02_TESTING.md) is the consumer these three were built for.

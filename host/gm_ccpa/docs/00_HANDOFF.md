@@ -349,7 +349,7 @@ non-issue — coarse-grained, zero-copy `ByteBuffer`s, decode is HW `MediaCodec`
 
 | Path | Role | Key reuse |
 |---|---|---|
-| `~/Documents/carlink/ccpa_custom` | Rust OCBM stack + AirPlay receiver core + macOS host | JNI the `receiver`/`pairing`/`rtsp`/`mfi`/`metadata`/`iap2-core` crates; `crates/ocbm-proto`; `host/CarPlayHost` = Kotlin OCBM-client template |
+| `~/Documents/carlink/ccpa_custom` | Rust OCBM stack + AirPlay receiver core + macOS host | JNI the `receiver`/`pairing`/`rtsp`/`mfi`/`metadata`/`iap2-core` crates; `crates/ocbm-proto`; `host/MacHost` = Kotlin OCBM-client template |
 | `~/Documents/carlink/carlink_native_personal` | stock-protocol Kotlin app (works today) | UI theme + touch model + `video/H264Renderer.java` (feedDirect) + Media3/PCM audio stack salvaged verbatim/near-verbatim |
 | `~/Documents/carlink/carplay_simulator` | Apple protocol reference | iAP2 msg/TLV dict, real receiver-session oslog captures, `VDCSchema-External.json` |
 

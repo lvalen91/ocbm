@@ -174,14 +174,14 @@ Three contract clauses, each bought with a real failure:
    that answers nothing.
 3. **Never reboot, never touch session daemons.** A backend that believes only a reboot can
    recover says so with an exit code and lets the layer that owns reboot policy decide. The HAL
-   never signals `airplayd`/`rx-connect`/`carplay-wireless`/`ocbmd` — it cannot know whether a
+   never signals `carplayd`/`rx-connect`/`btd`/`ocbmd` — it cannot know whether a
    live session is wired-owned, which is what the supervisor's conditional reap (docs/wireless/00_WIRELESS_CARPLAY.md #1.4)
    exists to decide.
 
 **Naming is load-bearing.** The supervisor's teardown runs in a detached `sh -c` whose own argv
 its own `pkill` patterns can see — a bug this project already paid for once (2026-08-01: a plain
 `pkill -f` killed the teardown subshell before it reached `wlan_off`, orphaning a still-beaconing
-AP). So the script name and every verb must avoid `airplayd`, `rx-connect`, `carplay-wireless`,
+AP). So the script name and every verb must avoid `carplayd`, `rx-connect`, `btd`,
 `ocbmd`, `hostapd`. Audited clear; re-audit before renaming a verb.
 
 **The owned AP layer is invoked as `/script/radio_ap_up.sh`, never
@@ -263,12 +263,12 @@ real failure three phases before anything switched.
 >
 > **If you are debugging "BT does nothing", do these two things first:**
 > 1. `ls /script/radio_hal.sh /script/radio_detect.sh` on the target. A targeted `ocbm_push.sh` does
->    NOT install them — its default set is `ocbmd` + `carplay-wireless` — so a box can hold a
+>    NOT install them — its default set is `ocbmd` + `btd` — so a box can hold a
 >    supervisor that depends on files it never received.
 > 2. `cat /tmp/bt.log /tmp/wlan.log`. That is the ONLY place the failure is written.
 >
 > Then read `CT_BOX_HEALTH` bit 0 (`BH_HCI_PRESENT`), which since 2026-08-29 means `hci0` is UP via
-> `HCIGETDEVINFO`. A health of `0x50` (`carplay-wireless|rootfs-ok`) with bit 0 clear is this fault's
+> `HCIGETDEVINFO`. A health of `0x50` (`btd|rootfs-ok`) with bit 0 clear is this fault's
 > exact signature. Full account: `../ops/06_CORRECTIONS_LEDGER.md` `R-20W-5`.
 >
 > Two facts this document predates and does not otherwise mention: `hci_uart` is a **loadable
@@ -355,11 +355,11 @@ come from one decision rather than two derivations. A placeholder is deliberatel
 if every source fails the next call retries rather than freezing `ccpa-0000` into flash.
 
 > **⚠️ CORRECTED: `/etc/carplay_ident` is NOT yet the single source of truth.** `radio_hal.sh` and
-> `radio_ap_up.sh` are its only readers; `carplay-wireless`, `bt_on.sh` and `ocbmd` each derive a
-> name independently, and `carplay-wireless` overwrites the advertised BT name every session — so
+> `radio_ap_up.sh` are its only readers; `btd`, `bt_on.sh` and `ocbmd` each derive a
+> name independently, and `btd` overwrites the advertised BT name every session — so
 > the divergence §6c claims to have eliminated is still live. Closing it is tracked in §7, not here.
 > Full detail, including the platform split (`hciconfig` on the CCPA, raw HCI only on the Raspberry
-> Pi under `CARPLAY_HCI_BACKEND=native`) and the correction history behind it:
+> Pi under `BT_HCI_BACKEND=native`) and the correction history behind it:
 > [../ops/06_CORRECTIONS_LEDGER.md](../ops/06_CORRECTIONS_LEDGER.md) `R-57-1`.
 
 ### 6d. What single-line extraction cannot represent — and why that was dangerous
@@ -408,8 +408,8 @@ variable assignments within the unit's branch — tracked in §7, not claimed he
   unloaded, which under on-demand radios is most of the time), and the hardcoded Raspberry Pi BT MAC
   at `bt_driver.rs:61`. **Added 2026-08-16:** that same chain is why §6c's "one box, one name" is
   **not yet achieved**. `/etc/carplay_ident` is read only by `radio_hal.sh` and `radio_ap_up.sh`;
-  `carplay-wireless` (`main.rs` → `bt_bringup::bring_up`), `bt_on.sh` and `ocbmd`'s `bt_name_from()`
-  each derive independently, and because the supervisor execs `carplay-wireless` *after*
+  `btd` (`main.rs` → `bt_bringup::bring_up`), `bt_on.sh` and `ocbmd`'s `bt_name_from()`
+  each derive independently, and because the supervisor execs `btd` *after*
   `radio_hal.sh bt_on` the controller ends up advertising `CarLink-<suffix>` rather than the seam's
   `ccpa-<4hex>`. In the BT-only bridge role the suffixes can differ too, not just the prefixes.
   Closing it means the Rust side reading the ident file first — a behaviour change, so it is listed
@@ -478,7 +478,7 @@ reads channel 1, and `rfcomm::connect_to` opens it.
 [bt-driver] IdentifyAccept ... RX 0x1D02 -> Identified
 [bt-driver] RX 0x5702 RequestAccessoryWiFiConfig -> replying 0x5703 (ssid="ccpa-b0df" ch=36 …)
 [bt-driver] RX 0x4E0E DeviceTransportIdentifier: param0=<phone bdaddr>, param1=<phone UDID>
-[av] started /usr/sbin/airplayd (detached) → transport=wireless → CarPlay active
+[av] started /usr/sbin/carplayd (detached) → transport=wireless → CarPlay active
 ```
 Also learned, correcting two of this doc's eliminated-models notes: **an active SDP transaction TO the
 phone holds the ACL** (Model A's idle L2CAP got reaped; a live ServiceSearchAttributeRequest does not),
@@ -553,7 +553,7 @@ mgmt `DEVICE_CONNECTED`.
 
 ### Status of the code
 The Model-A `l2cap_connect` + reconnect scaffolding was **not committed** and is being reverted from the
-working tree; the box is rolled back to the item-1 (committed) `carplay-wireless`. Re-create the socket
+working tree; the box is rolled back to the item-1 (committed) `btd`. Re-create the socket
 scaffolding from this doc for the Model-B session.
 
 ---
@@ -594,7 +594,7 @@ STATUS: FIXED in source and at HEAD, verified by review against the real kernel 
 ### The symptom
 
 From `SESSION_HANDOFF_2026-07-24.md`: the box becomes discoverable and stays so (`hciconfig hci0 name`
-reads `'CarLink-b0df'` steadily, `carplay-wireless` running, SDP/SSP bring-up clean in `/tmp/wl.log`).
+reads `'CarLink-b0df'` steadily, `btd` running, SDP/SSP bring-up clean in `/tmp/wl.log`).
 The iPhone **sees** the device in Settings > Bluetooth and taps it. Every attempt reports **"Pairing
 Unsuccessful."**
 
@@ -783,12 +783,12 @@ every unrecognized event. Now:
 - **Numeric comparison: default is to confirm our side immediately.** In numeric mode
   (`confirm_hint == 0`) `ssp_agent` publishes the code to `/tmp/pairing_code` and replies
   `OP_USER_CONFIRM_REPLY` at once — this is the default and needs no app attached. Behind
-  `CARPLAY_SSP_INTERACTIVE=1` (host YAML `pairing: numeric_comparison_interactive`, app Settings
+  `BT_SSP_INTERACTIVE=1` (host YAML `pairing: numeric_comparison_interactive`, app Settings
   "Answer the pairing code in this app") the agent instead waits for a real answer from the head
   unit: it records a pending confirm `{bdaddr, addr_type, deadline = now + 55 s}`
   (`PAIR_CONFIRM_WAIT_SECS`, inside `PAIRING_HOLD_SECS` so the connect hold is still open when the
   answer lands) and replies to nothing until the macOS app sends `CT_PAIR_CONFIRM` (`0x1C`,
-  `[accept u8]`, docs/carplay/01_OCBM_PROTOCOL.md) → ocbmd → carplay-wireless's control port
+  `[accept u8]`, docs/carplay/01_OCBM_PROTOCOL.md) → ocbmd → btd's control port
   (`127.0.0.1:9115`, `{"cmd":"pair_answer","accept":true|false}`, `control.rs`). Pair →
   `OP_USER_CONFIRM_REPLY`; Cancel or no answer in 55 s → `OP_USER_CONFIRM_NEG_REPLY`, raising
   `/tmp/pair_rejected` and clearing the code so the connect hold aborts and the reconnect driver
@@ -804,7 +804,7 @@ every unrecognized event. Now:
 | Who initiates the connect | Who confirms | iOS result |
 |---|---|---|
 | Box (reconnect/re-pair) | Box confirms immediately (default) | iOS shows its code sheet, user confirms on the phone, key = `auth_p192` |
-| Box (reconnect/re-pair) | Box waits for the head unit's own yes/no (`CARPLAY_SSP_INTERACTIVE=1`) | iOS returns `pairingComplete result:162` ~0.3 ms after its own confirm request — no sheet ever shown, even with Settings ▸ Bluetooth open |
+| Box (reconnect/re-pair) | Box waits for the head unit's own yes/no (`BT_SSP_INTERACTIVE=1`) | iOS returns `pairingComplete result:162` ~0.3 ms after its own confirm request — no sheet ever shown, even with Settings ▸ Bluetooth open |
 | Phone, from Settings ▸ Bluetooth | — (Just-Works, iOS offers NoInputNoOutput) | Pairs immediately, key = `unauth_p192`, no code anywhere |
 
 iOS will not hold a box-initiated numeric-comparison request open for a human on the accessory side
@@ -820,12 +820,12 @@ The new logging makes the next test conclusive rather than another guess:
 - **Only `DEVICE_CONNECTED`/`DEVICE_DISCONNECTED`, nothing else** → still an event-mask problem.
 - **`AUTH_FAILED` (0x0011)** → stale/mismatched link key. Check `/etc/carplay/bt_link_keys` and the
   iPhone's **Settings ▸ General ▸ CarPlay** list (CarPlay pairings persist there independently of the
-  Bluetooth entry). Moving the key store aside and restarting `carplay-wireless` clears both sides.
+  Bluetooth entry). Moving the key store aside and restarting `btd` clears both sides.
 - **Nothing at all, not even 0x000B on tap** → event delivery itself is broken; the mask hypothesis
   gains further weight.
 
 A zero-redeploy on-box probe also exists: `hciconfig hci0 down && hciconfig hci0 up`, then restart
-`carplay-wireless` and retry pairing.
+`btd` and retry pairing.
 
 **Do not build an HFP SDP record on the current evidence.** The standing hypothesis that the Class of
 Device (`0x200408`, Audio/Video Hands-free) needs a matching HFP/A2DP SDP record — the box serves only
@@ -838,9 +838,9 @@ This document covers the blocker. The same batch also fixed, from a 12-agent cod
 
 - **`server.rs`** — the pre-pair-verify plaintext accumulator was unbounded; any peer with network
   adjacency to `[::]:5000` could stream header-less bytes until allocation failed and `panic = "abort"`
-  killed `airplayd`. Now capped like the encrypted path.
-- **`airplayd/main.rs`** — its `LocalMfiSigner` was the only MFi chip user taking no
-  `/tmp/carplay_mfi.lock`, while `iap2d`, `carplay-wireless` and `mfi-i2c-local` all do. Both stateful
+  killed `carplayd`. Now capped like the encrypted path.
+- **`carplayd/main.rs`** — its `LocalMfiSigner` was the only MFi chip user taking no
+  `/tmp/carplay_mfi.lock`, while `iap2d`, `btd` and `mfi-i2c-local` all do. Both stateful
   sequences now hold a bounded (10 s) flock.
 - **`ocbmd`** — frame splicing: a queue resting mid-frame under USB backpressure (the normal state for
   4K video) let the next `drain()` write a complete CTRL/audio frame into the middle of it. Fixed with a
@@ -888,7 +888,7 @@ timeout. The retry loop now uses that as its health check instead of the exit co
 
 `bt_on.sh` backgrounded `attach_bluetooth.sh` with `&` and then waited only for
 `/sys/class/bluetooth/hci0` to *exist* (~100 ms) before returning. So `wireless_up()` immediately
-exec'd `carplay-wireless`, which runs its **own independent** Bluetooth bring-up — `killall
+exec'd `btd`, which runs its **own independent** Bluetooth bring-up — `killall
 bluetoothDaemon hcid sdpd` plus its own `hciconfig` calls (`bt_bringup::bring_up`) — concurrently with
 `attach_bluetooth.sh`'s still-in-flight retry loop.
 
@@ -897,7 +897,7 @@ minutes without ever converging.**
 
 **Fix:** `bt_on.sh` now waits (up to 500 s) for `/tmp/.hciattach_done` — a flag `attach_bluetooth.sh`
 already touched as its final statement and which nothing had ever read — before returning. So
-`carplay-wireless` cannot start until BT has genuinely converged.
+`btd` cannot start until BT has genuinely converged.
 
 ### Result
 

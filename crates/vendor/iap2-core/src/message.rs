@@ -195,7 +195,7 @@ pub enum TransportComponent {
 /// as the Wi-Fi SSID (`ccpa-<suffix>`) and the low-level BT name in `bt_on.sh`, so a box shows ONE
 /// consistent, distinct name on EVERY transport. Falls back to the SoC serial's last 4 hex when wlan0
 /// isn't up (radio-independent, always present), and to bare `base` if neither source is readable.
-/// Shared by the wired (`iap2d`) and wireless (`carplay-wireless`) identify paths so multiple boxes stop
+/// Shared by the wired (`iap2d`) and wireless (`btd`) identify paths so multiple boxes stop
 /// collapsing into one iOS "car" — this is the human-readable half of the per-box identity story (the
 /// cryptographic half is `wireless::box_identity`, which hashes the same hardware id).
 pub fn accessory_name(base: &str) -> String {

@@ -1,20 +1,20 @@
 [workspace]
 resolver = "2"
-members = ["crates/ocbm-proto", "crates/box-common", "crates/bt-common", "ccpa/ocbmd", "ccpa/iap2d", "ccpa/airplayd", "ccpa/aa-bridge", "ccpa/aa-wireless", "host/ocbm-host", "crates/vendor/wireless", "crates/vendor/rx-connect",
+members = ["crates/ocbm-proto", "crates/box-common", "crates/bt-common", "ccpa/ocbmd", "ccpa/iap2d", "ccpa/carplayd", "ccpa/aa-bridge", "ccpa/aa-wireless", "host/ocbm-host", "crates/vendor/wireless",
     # NCM bring-up instruments (not shipped, not installed — see ccpa/mfid/src/main.rs).
     "crates/mfi-wire", "ccpa/mfid", "host/mfi-probe",
     # Raspberry Pi target daemons (not shipped on the CCPA).
     "pi/apdhcpd",
     # C2Air (Allwinner V821, riscv32) board-specific code — not shipped on the CCPA, and deliberately
-    # the ONLY C2Air-specific Rust: ocbmd/iap2d/airplayd build for riscv32 from the shared sources
+    # the ONLY C2Air-specific Rust: ocbmd/iap2d/carplayd build for riscv32 from the shared sources
     # with no board-specific changes. See c2air/README.md.
     "c2air/btattach"]
-# Vendored external crates (copied in 2026-07-13 to make the project self-contained): airplayd's
+# Vendored external crates (copied in 2026-07-13 to make the project self-contained): carplayd's
 # receiver_core deps (from old/ncm_carplayd) + iap2d's carplay iAP2 core. Excluded from membership so
 # `--workspace` builds them only as path DEPENDENCIES with the features the project requests
-# (airplayd uses receiver default-features=false + ["mic-uplink-eld"], so the optional eld-codec /
-# static libfdk-aac IS built into airplayd — needs FDK_AAC_PREFIX; a deliberate pending-decision
-# flag point, see ccpa/airplayd/Cargo.toml).
+# (carplayd uses receiver default-features=false + ["mic-uplink-eld"], so the optional eld-codec /
+# static libfdk-aac IS built into carplayd — needs FDK_AAC_PREFIX; a deliberate pending-decision
+# flag point, see ccpa/carplayd/Cargo.toml).
 exclude = [
     "crates/vendor/mfi", "crates/vendor/mfi-i2c-local", "crates/vendor/pairing", "crates/vendor/receiver",
     "crates/vendor/rtsp", "crates/vendor/eld-codec",
@@ -42,7 +42,7 @@ strip = true
 # this is SCALAR: the armv7 musl target spec carries an explicit `-neon` that the CPU target does
 # not override, so no Rust code we ship is vectorized (see .cargo/config.toml for the measurement).
 # The rest of the tree stays opt-level="z" (size-first). The size delta lands
-# almost entirely in airplayd (the only binary carrying crypto + full A/V forwarding).
+# almost entirely in carplayd (the only binary carrying crypto + full A/V forwarding).
 [profile.release.package.chacha20]
 opt-level = 2
 [profile.release.package.poly1305]

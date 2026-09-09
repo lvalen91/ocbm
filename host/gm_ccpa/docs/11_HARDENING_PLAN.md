@@ -194,7 +194,7 @@ commit).
 
 ## R6.10 — box BT regression, 2026-08-27 evening (RESOLVED 2026-08-28)
 
-A deploy that pushed `session_supervisor.sh` (969→1227 lines) and `ocbmd`/`carplay-wireless` binaries
+A deploy that pushed `session_supervisor.sh` (969→1227 lines) and `ocbmd`/`btd` binaries
 left the box with `BOX_HEALTH 0x50` — `HCI_PRESENT` bit clear, no Bluetooth radio, no pairing
 possible — while OCBM claim/HELLO/MFi/SUBSCRIBE all still reported success with no error anywhere.
 

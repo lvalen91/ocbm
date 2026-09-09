@@ -12,10 +12,10 @@ How the box binaries are built, what they cost in flash/RAM, and how they are pu
 
 - **Box (armv7)** — target `armv7-unknown-linux-musleabihf`, **static (musl)**. The Rust daemons
   cross-build with `cargo zigbuild --release --target armv7-unknown-linux-musleabihf` (zig serves as
-  the C cross-linker); `airplayd` additionally needs `FDK_AAC_PREFIX=$PWD/scratchpad/fdk/install` for
+  the C cross-linker); `carplayd` additionally needs `FDK_AAC_PREFIX=$PWD/scratchpad/fdk/install` for
   its eld-codec. C probes use `zig cc -target arm-linux-musleabihf -static -Os -s`. Size profile below.
 - **Host** — macOS/Linux native, or Android. The two host *apps* are
-  `host/CarPlayHost/carlink_macOS` (Swift/Xcode, shipping) and `host/CarlinkAndroid` (Kotlin/Gradle,
+  `host/MacHost/carlink_macOS` (Swift/Xcode, shipping) and `host/CarlinkAndroid` (Kotlin/Gradle,
   AAOS 12L / API 32 — **no NDK and no Rust inside the app**; in-tree on a feature branch, not yet
   merged to `main`). `host/ocbm-host` is native **Rust** (`rusb`), and "`ocbm-rescue`" is a *role* of
   that same binary (`ocbm-host console`), not a separate build. The only `clang` + `libusb` artifact in
@@ -47,7 +47,7 @@ opt-level = 2
 [profile.release.package.receiver]
 opt-level = 2
 ```
-The size cost of those five lands almost entirely in `airplayd` — the only binary carrying crypto
+The size cost of those five lands almost entirely in `carplayd` — the only binary carrying crypto
 **and** full A/V forwarding. `Cargo.toml` is the authority; this is a quote of it.
 
 ### Storage budget (the box has very little)

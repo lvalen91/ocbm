@@ -423,7 +423,7 @@ impl Iap2Config {
     }
 
     /// Parse bytes already in hand. Preferred by any caller that has just read the document itself
-    /// (airplayd reads it per control connection and reports a CRC over exactly those bytes) — a
+    /// (carplayd reads it per control connection and reports a CRC over exactly those bytes) — a
     /// second read could see a different generation than the one that CRC describes.
     pub fn from_slice(bytes: &[u8]) -> Self {
         if bytes.is_empty() {

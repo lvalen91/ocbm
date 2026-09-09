@@ -299,7 +299,7 @@ fn scan_hfp_supported_features(blob: &[u8]) -> Option<u16> {
 /// KEPT, narrowed, for the one case that path does not cover: a bonded peer exposing NEITHER an
 /// iAP2 service NOR any audio gateway ([`Services::has_audio_gateway`]). There is nothing to
 /// connect to there, and holding the link is the only remaining lever for finding out what such a
-/// peer does with time. Gated by `CARPLAY_ACL_HOLD_SECS` / `/tmp/acl_hold_secs`.
+/// peer does with time. Gated by `BT_ACL_HOLD_SECS` / `/tmp/acl_hold_secs`.
 pub fn hold_acl(peer: [u8; 6], secs: u64, timeout_secs: i64) {
     match connect_sdp(peer, timeout_secs) {
         Ok(_sock) => {

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Protocol-agnostic Bluetooth primitives shared by the CarPlay and Android Auto wireless paths: HCI, userspace RFCOMM, a bluetoothd-less SDP server, and the pairing agent."
 
-# Extracted 2026-09-01 from crates/vendor/wireless (carplay-wireless), which had these as private
+# Extracted 2026-09-01 from crates/vendor/wireless (btd), which had these as private
 # modules of a binary. Wireless Android Auto needs the same radio machinery -- it advertises an SDP
 # record, accepts an RFCOMM connection and pairs, exactly as the CarPlay arm does -- and the
 # alternative was a second copy that would drift. The files moved VERBATIM; the only edit was

@@ -6,7 +6,7 @@
 //! (docs/carplay/05_METADATA_AND_CONTROLS.md) — legitimately arrives with **no `streamConnectionID` key at all**: the proven-good
 //! 2026-07-25 capture records the request keys verbatim as
 //! `["controlType","channelID","seed","clientUUID","type","wantsDedicatedSocket","sendMessageAsIs",
-//! "clientTypeUUID"]` (`docs/ops/captures/2026-07-25_SUCCESS_airplayd_wl_handshake.txt:25`). So
+//! "clientTypeUUID"]` (`docs/ops/captures/2026-07-25_SUCCESS_carplayd_wl_handshake.txt:25`). So
 //! `unwrap_or(0)` yielded 0, the stream was skipped before reaching the `130` arm, the response
 //! carried no entry and therefore no `streamID` transport token, and iOS's entire outbound iAP2 path
 //! never existed — the tunnel sat at `Init` with zero NowPlaying for ~10 days while A/V looked

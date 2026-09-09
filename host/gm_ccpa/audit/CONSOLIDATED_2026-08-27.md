@@ -81,7 +81,7 @@ reboot.
 
 **2.3 MED — `pkill -f` overmatch in `kill_session`/`escalate`/`preempt_wireless_for_wired`.** The
 detached `wireless_up` wrapper's `sh -c` body contains `airplayd`/`rx-connect` literals, so plugging
-a phone during the ~15 s bring-up kills it mid-`radio_hal`: radios half-up, `carplay-wireless` never
+a phone during the ~15 s bring-up kills it mid-`radio_hal`: radios half-up, `btd` never
 exec'd, no error surfaced. `wireless_down` already uses bracketed `[a]irplayd` forms; the fix was
 never applied elsewhere.
 

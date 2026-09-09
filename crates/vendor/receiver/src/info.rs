@@ -504,7 +504,7 @@ impl ViewArea2 {
 }
 
 /// The raw lever spec, if armed: env first, then the on-box file. The file form is what makes this
-/// testable without redeploying session_supervisor.sh: write it, reconnect the phone, and airplayd
+/// testable without redeploying session_supervisor.sh: write it, reconnect the phone, and carplayd
 /// picks it up on its next control connection. `/tmp` is tmpfs, so a box reboot reverts to the
 /// shipped single-area behaviour on its own — a bench lever that cannot be left on by accident.
 fn view_area_2_spec() -> Option<String> {
@@ -539,7 +539,7 @@ fn resolve_view_area_2(cfg: &DeviceConfig, lever: Option<String>) -> Option<View
         // validator here so a directly constructed config gets the same refusal as the lever.
         if !a.is_positive() {
             eprintln!(
-                "[airplayd] *** pushed viewAreas[1] REFUSED — {}x{}@{},{} has a zero/negative \
+                "[carplayd] *** pushed viewAreas[1] REFUSED — {}x{}@{},{} has a zero/negative \
                  dimension or a negative origin; declaring ONE view area ***",
                 a.w, a.h, a.x, a.y
             );
@@ -547,7 +547,7 @@ fn resolve_view_area_2(cfg: &DeviceConfig, lever: Option<String>) -> Option<View
         }
         let a = refuse_unless_contained(a, panel_w, panel_h, "pushed viewAreas[1]")?;
         eprintln!(
-            "[airplayd] second main view area {}x{}@{},{} initial={} from the pushed config \
+            "[carplayd] second main view area {}x{}@{},{} initial={} from the pushed config \
              (viewAreas[1]); CARPLAY_VIEWAREA2 bench lever {}",
             a.w,
             a.h,
@@ -561,7 +561,7 @@ fn resolve_view_area_2(cfg: &DeviceConfig, lever: Option<String>) -> Option<View
     let spec = lever?;
     let Some(a) = parse_view_area_2(&spec) else {
         eprintln!(
-            "[airplayd] *** CARPLAY_VIEWAREA2 REFUSED — cannot parse {:?} (want WxH@X,Y[:initial]); \
+            "[carplayd] *** CARPLAY_VIEWAREA2 REFUSED — cannot parse {:?} (want WxH@X,Y[:initial]); \
              declaring ONE view area ***",
             spec.trim()
         );
@@ -583,7 +583,7 @@ fn refuse_unless_contained(
         // 2026-09-05: `1416x842@492,59` was accepted against a 1416x842 panel and put a 1908x901
         // extent on the wire; iOS tore the session down right after RECORD.
         eprintln!(
-            "[airplayd] *** {what} REFUSED — {}x{}@{},{} extends to {}x{}, outside the \
+            "[carplayd] *** {what} REFUSED — {}x{}@{},{} extends to {}x{}, outside the \
              {panel_w}x{panel_h} panel; declaring ONE view area ***",
             a.w,
             a.h,
@@ -746,7 +746,7 @@ fn view_areas(
             // Log initial + adjacency too: the 2026-09-05 regression logs recorded the rects but not
             // which area the session started in, and that was the variable under test.
             eprintln!(
-                "[airplayd] view areas: 2 declared — [0] {width}x{height}@0,0, [1] {w2}x{h2}@{x2},{y2}, \
+                "[carplayd] view areas: 2 declared — [0] {width}x{height}@0,0, [1] {w2}x{h2}@{x2},{y2}, \
                  transitionControl=true, initialViewArea={} adjacentViewAreas={:?}",
                 a.initial_index(),
                 a.adjacent_from_initial()
@@ -1124,7 +1124,7 @@ fn build_info_with_view_area_2(cfg: &DeviceConfig, second: Option<ViewArea2>) ->
     );
 
     // hidDevices — touchscreen (index 0) + media buttons, sharing the display UUID. The D-Pad (uid 3)
-    // is appended only when `CARPLAY_DPAD` is set (airplayd arms it from the host YAML
+    // is appended only when `CARPLAY_DPAD` is set (carplayd arms it from the host YAML
     // `accessoryConfig.enablesDPad`), so the safe two-device set is the default and a third device is
     // opt-in + instantly revertible — the guard against the 2026-07-06 reconnect incident.
     // The descriptors patch a 2-byte HID **Logical Maximum** (`0x26 FF 7F`), which HID reads as

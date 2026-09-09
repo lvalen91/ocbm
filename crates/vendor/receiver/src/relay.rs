@@ -8,7 +8,7 @@
 //! response, so the phone never sees a relay-caused error. One USB RTT per exchange; `session.rs` is
 //! functionally untouched.
 //!
-//! TRANSPORT: airplayd LISTENS here on `127.0.0.1:9106` (9110 = HID, 9112 = mic — both taken) and
+//! TRANSPORT: carplayd LISTENS here on `127.0.0.1:9106` (9110 = HID, 9112 = mic — both taken) and
 //! ocbmd connects OUT to us, exactly the mic-seam mechanics (`ccpa/ocbmd` `ensure_rtsp_seam`). ocbmd
 //! is a dumb byte pipe: it chunks seam bytes into ≤64 KiB OCBM frames both ways, so ALL message
 //! framing here is endpoint-to-endpoint (this file ↔ the host app), which sidesteps OCBM's
@@ -95,7 +95,7 @@ pub enum RelayAnswer {
 /// control thread). One producer: a new accept REPLACES the old (ocbmd reconnects across restarts).
 static SEAM_TX: Mutex<Option<TcpStream>> = Mutex::new(None);
 
-/// Whether a live ocbmd connection is attached — the selection gate airplayd reads (`seam_up()`).
+/// Whether a live ocbmd connection is attached — the selection gate carplayd reads (`seam_up()`).
 static SEAM_UP: AtomicBool = AtomicBool::new(false);
 
 /// Generation counter for accepted seam connections: a superseded reader thread's EOF must not mark
@@ -103,7 +103,7 @@ static SEAM_UP: AtomicBool = AtomicBool::new(false);
 static SEAM_GEN: AtomicU32 = AtomicU32::new(0);
 
 /// Monotonic per-process relay-connection id mint. Hijack ⇒ a new `RemoteSession` ⇒ a new conn; the
-/// single serve FIFO in airplayd guarantees RS_CLOSE(old) precedes RS_OPEN(new) on the wire.
+/// single serve FIFO in carplayd guarantees RS_CLOSE(old) precedes RS_OPEN(new) on the wire.
 static CONN_SEQ: AtomicU32 = AtomicU32::new(0);
 
 /// The in-flight rpc registry's shape: (conn, cseq) → the waiter's answer channel.
@@ -119,7 +119,7 @@ fn pending() -> &'static Mutex<PendingMap> {
     P.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Is a host relay consumer attached? The airplayd selection gate
+/// Is a host relay consumer attached? The carplayd selection gate
 /// (`levers::appsetup() && relay::seam_up()`, both transports) reads this per connection, so a session
 /// that starts with no host present simply runs plain `AvSession` — failure mode #1 of the plan.
 pub fn seam_up() -> bool {
@@ -361,7 +361,7 @@ fn dispatch_inbound(msg: &[u8]) {
     }
 }
 
-/// Start the relay seam listener ONCE at process startup (airplayd main, next to the uplink
+/// Start the relay seam listener ONCE at process startup (carplayd main, next to the uplink
 /// listener). House pattern = `uplink::start_control_listener`: bind once, accept loop on its own
 /// thread; a bind failure logs and disables the feature (seam_up() stays false → plain AvSession).
 /// A NEW accept replaces the old connection — ocbmd reconnects across its restarts, and one producer
@@ -638,7 +638,7 @@ fn diff_setup(local: &[u8], host: &[u8]) -> Option<String> {
 
 /// [`SessionDelegate`] that wraps the real [`AvSession`] and relays SETUP/RECORD (request/response)
 /// and TEARDOWN (notify) to the host app. Inner ALWAYS runs first — it owns every side effect and its
-/// response is the oracle + the fallback. Selected per connection in airplayd
+/// response is the oracle + the fallback. Selected per connection in carplayd
 /// (`levers::appsetup() && relay::seam_up()`, both transports); plain `AvSession` otherwise.
 pub struct RemoteSession {
     inner: AvSession,

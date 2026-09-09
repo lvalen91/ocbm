@@ -217,7 +217,7 @@ fn handle_inbound_event(pt: &[u8]) {
         // until the disableBluetooth command is received" — i.e. this is the phone's signal that it's
         // now safe to let the BT link go. Recognized/logged here for observability; NOT wired to an
         // actual cross-process BT teardown action yet (that would mean signalling
-        // `carplay-wireless`, a separate process, from here) because a 12-Fable review of `bt_driver.
+        // `btd`, a separate process, from here) because a 12-Fable review of `bt_driver.
         // rs::run()` found it does NOT disconnect proactively once past this point: its only two
         // accessory-initiated closes are the 120s pre-Identify handshake budget (can't fire on an
         // already-operating session) and `Action::Abort` on a phone-sent 0xAA04
@@ -1060,7 +1060,8 @@ pub fn send_update_view_area(
 /// the box inventing one. A request outside it is refused (and logged) rather than passed through —
 /// iOS would clamp it to 0 silently, which looks like a working switch to the wrong area.
 ///
-/// The 3 s default matches WWDC 2019-252's demo and the Simulator's own transition duration.
+/// The animation duration is the per-connection `levers::view_area_anim_ms` (pushed top-level
+/// `view_area_anim_ms`; absent = 3 s, WWDC 2019-252's demo and the Simulator's own transition).
 pub fn request_view_area(d: &plist::Dictionary) {
     let uuid = d
         .get("params")
@@ -1082,7 +1083,7 @@ pub fn request_view_area(d: &plist::Dictionary) {
 /// `updateViewArea` with the adjacency FROM the new area (with two areas, simply "the other one").
 ///
 /// ONE function for both callers — the inbound `requestViewArea` answer above and the host-commanded
-/// `CMD_VIEW_AREA` in airplayd (2026-09-07, the ControlServer's `viewarea request <index>`) — so the
+/// `CMD_VIEW_AREA` in carplayd (2026-09-07, the ControlServer's `viewarea request <index>`) — so the
 /// two paths cannot disagree on policy. `origin` names the caller in the log line only. Returns
 /// whether the `updateViewArea` was actually written to the event channel.
 pub fn switch_view_area(display_uuid: &str, idx: i64, origin: &str) -> bool {
@@ -1097,7 +1098,17 @@ pub fn switch_view_area(display_uuid: &str, idx: i64, origin: &str) -> bool {
     // Adjacency from the NEW area: with two areas that is simply "the other one".
     let adjacent: Vec<i64> = (0..declared).filter(|i| *i != idx).collect();
     eprintln!("[events] {origin} index={idx} accepted (uuid={display_uuid:?})");
-    send_update_view_area(display_uuid, idx, 3000, &adjacent)
+    // Duration from the per-connection lever, armed by carplayd from the pushed top-level
+    // `view_area_anim_ms` (absent = 3000: the WWDC 2019-252 / Simulator value the box always sent,
+    // never measured until 2026-09-09, when 3000 -> 1000 was DEVICE-PROVEN to visibly speed up the
+    // Dock resize — the first time anyone varied it on hardware). Replaces the recompile-per-value
+    // loop that experiment ran on. The lever is already clamped to 0..=10000, so the
+    // `updateViewArea ->` line in send_update_view_area prints the value actually SENT — which
+    // matters, because iOS never acknowledges this field: that line is the only observability.
+    // Still open, and only a device can answer it: whether iOS has a FLOOR below which the value
+    // stops mattering (this same dictionary's viewAreaIndex is clamped SILENTLY, so a too-small
+    // duration is more likely clamped than rejected — watch the transition, not the log).
+    send_update_view_area(display_uuid, idx, crate::levers::view_area_anim_ms(), &adjacent)
 }
 
 pub fn send_set_night_mode(on: bool) -> bool {

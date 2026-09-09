@@ -20,7 +20,7 @@ struct SockaddrRc {
 
 fn open_listener(channel: u8) -> std::io::Result<std::fs::File> {
     // SOCK_CLOEXEC: this listener is open when bt_driver drives av::ensure_av_layer(), which
-    // fork+execs airplayd and rx-connect SETSID-DETACHED TO OUTLIVE THIS PROCESS (av.rs:13). Without
+    // fork+execs carplayd SETSID-DETACHED TO OUTLIVE THIS PROCESS (av.rs:13). Without
     // CLOEXEC those daemons inherit the RFCOMM listening fd and hold the channel after this process
     // dies, so a supervisor restart re-binds onto a channel someone else still owns.
     let fd = unsafe {

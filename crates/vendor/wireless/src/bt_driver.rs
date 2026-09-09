@@ -435,13 +435,13 @@ fn process_one(
         );
         if sent && !abort() {
             // The iPhone now has the AP credentials and will associate to wlan0, then look for the
-            // AirPlay receiver via mDNS. Bring up that layer (airplayd RTSP :5000 + rx-connect
+            // AirPlay receiver via mDNS. Bring up that layer (carplayd RTSP :5000 + rx-connect
             // advertise/browse/connect-out on wlan0) so it's discoverable the moment the phone joins.
             // Idempotent — safe on repeated 0x5702 and on reconnect.
             //
             // Re-check `abort` between the reply write and the spawn (audit #3): if shutdown/preempt was
             // signalled while we were writing 0x5703, spawning here would race the teardown and orphan
-            // airplayd/rx-connect. The main loop also joins this thread before teardown_av_layer(), so
+            // carplayd. The main loop also joins this thread before teardown_av_layer(), so
             // this guard is belt-and-suspenders against that ordering.
             crate::av::ensure_av_layer();
         }

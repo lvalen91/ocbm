@@ -113,7 +113,7 @@ retries `0x5702`, so the handler must be idempotent.
 > status it never reads. `hci_uart` is a **loadable module** on the CCPA, shipped inside
 > `/lib/firmware/nxp/iw416_ko.tar.gz`, and the seam is what extracts and `insmod`s it. If
 > `/script/radio_hal.sh` or `/script/radio_detect.sh` is missing — the state a targeted
-> `ocbm_push.sh` leaves, since it pushes `ocbmd` + `carplay-wireless` and nothing else — the `n_hci`
+> `ocbm_push.sh` leaves, since it pushes `ocbmd` + `btd` and nothing else — the `n_hci`
 > line discipline is never registered, `hciattach` fails `EINVAL`, and `hci0` never appears.
 >
 > Every layer above still reports success: OCBM claim, `CT_HELLO_ACK`, a real 945-byte certificate,
@@ -122,7 +122,7 @@ retries `0x5702`, so the handler must be idempotent.
 >
 > **Read `CT_BOX_HEALTH` first.** `BH_HCI_PRESENT` (bit 0) clear means *no controller registered at
 > all*, which is this fault — not "Bluetooth is down" (the sysfs node survives `hciconfig hci0
-> down`). A health of `0x50` (`carplay-wireless|rootfs-ok`) with bit 0 clear is the exact signature.
+> down`). A health of `0x50` (`btd|rootfs-ok`) with bit 0 clear is the exact signature.
 > The box's own `/tmp/bt.log`, `/tmp/wl.log` and friends are now streamed into logcat as
 > `[box:<file>]` lines, so the box side of this lands in the same capture as the app side.
 > See `ccpa_custom` `docs/ops/06_CORRECTIONS_LEDGER.md` R-20W-5.

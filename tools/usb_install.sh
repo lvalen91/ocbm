@@ -29,23 +29,23 @@ box 'mkdir -p /mnt/usb; for d in /dev/sda1 /dev/sda /dev/sdb1 /dev/sdb; do
      done; ls -la /mnt/usb 2>/dev/null | head' 20
 
 say "2/4 checksums as the box sees them (must match the host md5s)"
-box 'md5sum /mnt/usb/carplay-wireless /mnt/usb/ocbmd 2>&1' 30
+box 'md5sum /mnt/usb/btd /mnt/usb/ocbmd 2>&1' 30
 
 say "3/4 installing via copy-then-rename"
 box 'set -e
-     for b in carplay-wireless ocbmd; do
+     for b in btd ocbmd; do
        cp /mnt/usb/$b /usr/sbin/$b.new && chmod 755 /usr/sbin/$b.new && mv /usr/sbin/$b.new /usr/sbin/$b \
          && echo "INSTALLED $b"
      done
-     md5sum /usr/sbin/carplay-wireless /usr/sbin/ocbmd; df -h / | tail -1' 40
+     md5sum /usr/sbin/btd /usr/sbin/ocbmd; df -h / | tail -1' 40
 
 say "4/4 unmounting"
-box 'umount /mnt/usb && echo UNMOUNTED; ls -la /usr/sbin/carplay-wireless /usr/sbin/ocbmd' 20
+box 'umount /mnt/usb && echo UNMOUNTED; ls -la /usr/sbin/btd /usr/sbin/ocbmd' 20
 
 cat <<'EOF'
 [usb-install] done. Compare the md5s above against the host:
-    carplay-wireless  e926c7c41b2b96cf7983234ed1c8a1b9
+    btd  e926c7c41b2b96cf7983234ed1c8a1b9
     ocbmd             98dd66a71f6567637c9cdc5cdf3f7425
 Restart the services on the box only after BOTH match:
-    killall ocbmd carplay-wireless
+    killall ocbmd btd
 EOF

@@ -1,6 +1,6 @@
 #!/bin/sh
 # install_fhs.sh — install the validated OCBM stack into FHS locations on the box's jffs2 (rw) rootfs.
-#   daemons  -> /usr/sbin  (ocbmd, iap2d, airplayd, rx-connect)
+#   daemons  -> /usr/sbin  (ocbmd, iap2d, carplayd)
 #   tools    -> /usr/bin   (iap_role_switch)
 #   scripts  -> /script    (session_supervisor.sh, cold_start_now.sh; ocbm_boot.sh already there)
 # and repoints the boot hook ocbm_boot.sh at /usr/sbin/ocbmd (it currently launches /script/ocbmd —
@@ -8,7 +8,7 @@
 # updated scripts to /tmp. Idempotent; sync's to flash. UART early-console stays the recovery path.
 set -u
 echo "[install] daemons -> /usr/sbin"
-for b in ocbmd iap2d airplayd rx-connect; do
+for b in ocbmd iap2d carplayd; do
   if [ -f "/tmp/$b" ]; then
     # rm-then-cp: overwriting a RUNNING binary in place fails with ETXTBSY; unlink+create dodges it
     # (the running process keeps the old unlinked inode until it exits).
@@ -29,4 +29,4 @@ rm -f /script/ocbmd /script/cold_start_now.sh   # binary belongs in /usr/sbin; c
 echo "[install] sync to flash"
 sync
 echo "[install] result:"
-ls -l /usr/sbin/ocbmd /usr/sbin/iap2d /usr/sbin/airplayd /usr/sbin/rx-connect /usr/bin/iap_role_switch 2>&1 | sed 's/^/  /'
+ls -l /usr/sbin/ocbmd /usr/sbin/iap2d /usr/sbin/carplayd /usr/bin/iap_role_switch 2>&1 | sed 's/^/  /'

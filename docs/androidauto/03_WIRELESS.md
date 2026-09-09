@@ -39,7 +39,7 @@ after unexpected start request").
 
 Decision, 2026-09-01 (corrected in place 2026-09-01 after step 1 landed): **`ccpa/aa-wireless` is a
 LIBRARY, not a daemon** — it has no `main.rs` and no `[[bin]]`, and is served by the existing
-`carplay-wireless` daemon. It could not be its own process: `sdp_server` binds L2CAP PSM 1 with no
+`btd` daemon. It could not be its own process: `sdp_server` binds L2CAP PSM 1 with no
 `SO_REUSEADDR`, so a second SDP-serving daemon gets `EADDRINUSE` and is never advertised (§6b).
 `aa-bridge` stays a wired AOAP pump and is not refactored. The wired path ships and works; this one
 does not yet, and the two only need to agree about who owns the box. They meet at
@@ -51,7 +51,7 @@ does not yet, and the two only need to agree about who owns the box. They meet a
 | Bootstrap state machine | `wpp::Bootstrap` | **built**, transport-free and host-testable |
 | `ProjectionOwner::WirelessAa` (`"wireless-aa"` → `PM_WIRELESS_AA`) | `crates/box-common/src/flags.rs` | **built** |
 | Owner claim / stand-down | `aa-wireless/src/lib.rs` (`claim_owner`/`release_owner_if_ours`), called from `crates/vendor/wireless/src/main.rs` | **built** |
-| Shared BT primitives | `crates/bt-common` | **extracted 2026-09-01** from carplay-wireless; 29 tests |
+| Shared BT primitives | `crates/bt-common` | **extracted 2026-09-01** from btd; 29 tests |
 | AA SDP record + RFCOMM accept (channel 4) | `crates/bt-common/src/sdp_server.rs`, `crates/vendor/wireless/src/main.rs` | **built** (steps 3-4 below) — and §2f confirms this IS the direction: the phone dials us |
 | Headset gate: HFP-HF + HSP-HS records, AG search, AT SLC client | `crates/bt-common/src/sdp_record.rs` (`HandsFreeRecord`/`HeadsetRecord`), `sdp_server.rs`, `crates/vendor/wireless/src/hfp_hf.rs`, `sdp_client.rs`, `reconnect.rs` (`attempt_headset`) | **built 2026-09-04**, 30 host tests; the precondition the phone waits on (§6b, §6d) |
 | AP bring-up | — | not started (mechanism exists for CarPlay) |
@@ -72,7 +72,7 @@ claim only on `Established`.
 
 **Space is not a constraint on this workstream**, and the footprint open item in
 [`01_SESSION_AND_AV.md`](01_SESSION_AND_AV.md) §3 is answered. For reference if it ever tightens:
-`airplayd` (1,793,056 B) and `carplay-wireless` (495,976 B) are both shipped **unpacked**, and
+`carplayd` (1,793,056 B) and `btd` (495,976 B) are both shipped **unpacked**, and
 `ocbmd.orig` (450,888 B) is a backup git already holds — roughly 1.6 MB reclaimable without losing
 any function.
 
@@ -141,7 +141,7 @@ struct field rather than a constant so it can be narrowed to `0x001F` without to
 [`01_SESSION_AND_AV.md`](01_SESSION_AND_AV.md) §telephony — and the mismatch is still harmless, but
 for a different and stronger reason: BRSF 63 does not claim codec negotiation, so the AG never
 offers a codec and always opens plain CVSD narrowband regardless of what the SDP record advertises
-about wide-band speech. **Updated 2026-09-04:** the wideband lever (`CARPLAY_HFP_WBS`) sends
+about wide-band speech. **Updated 2026-09-04:** the wideband lever (`BT_HFP_WBS`) sends
 `AT+BRSF=191` instead, at which point the SDP record's WBS bit and the wire finally AGREE — the
 record needs no change either way, and with the lever off nothing here moves.)*
 
@@ -261,26 +261,26 @@ both daemons depend on. The alternative was a second copy, and two copies of a p
 | `ssp_agent.rs` | pairing / Secure Simple Pairing agent | unchanged |
 | `cloexec.rs` | fd hygiene | unchanged |
 
-Deliberately left in `carplay-wireless` as genuinely CarPlay-coupled: `sdp_client.rs` (browses for
+Deliberately left in `btd` as genuinely CarPlay-coupled: `sdp_client.rs` (browses for
 the iAP2 service — AA never needs it, since the phone browses *us*), `bt_bringup.rs` (sequences the
 CarPlay bring-up), and all the session logic (`av`, `bt_driver`, `control`, `wifi_handoff`,
 `mfi_local`, `box_identity`, `reconnect`, `arbiter_client`).
 
 **The extraction was a move, not a rewrite.** The files moved verbatim; the only source edit was
 widening `ssp_agent::state_dir` from `pub(crate)` to `pub`, because `control.rs` now reaches it
-across a crate boundary. `carplay-wireless` keeps every `crate::hci::…` / `crate::ssp_agent::…` path
+across a crate boundary. `btd` keeps every `crate::hci::…` / `crate::ssp_agent::…` path
 it had, via a re-export at its crate root. Verified against a pre-extraction build of the same
-commit: **66 tests before, 66 after** (37 in `carplay-wireless` + 29 in `bt-common`), and every
-behaviour-carrying string identical in the armv7 binary — `CARPLAY_HCI_BACKEND`, `CARPLAY_STATE_DIR`,
-`CARPLAY_PAIRING_MODE`, `bt_link_keys`, `projection_policy.json`. The binary is **not** byte-identical
+commit: **66 tests before, 66 after** (37 in `btd` + 29 in `bt-common`), and every
+behaviour-carrying string identical in the armv7 binary — `BT_HCI_BACKEND`, `BOX_STATE_DIR`,
+`BT_PAIRING_MODE`, `bt_link_keys`, `projection_policy.json`. The binary is **not** byte-identical
 (573,632 → 575,432 B, +0.3%); that is codegen and metadata from the crate split, not a behaviour
 change.
 
 Two traps this extraction walked into, both worth remembering:
 
 - **Do not cfg-gate the new crate to Linux.** The first cut did, on the reasoning that these are all
-  `AF_BLUETOOTH` sockets. But they compiled on macOS as part of `carplay-wireless`, and
-  `tools/run_tests.sh` runs `cargo test -p carplay-wireless` on the build host — gating took 29
+  `AF_BLUETOOTH` sockets. But they compiled on macOS as part of `btd`, and
+  `tools/run_tests.sh` runs `cargo test -p btd` on the build host — gating took 29
   tests out of the host run and broke the build outright. Per-syscall gating lives inside the
   modules that need it (`cloexec.rs` already has a macOS branch).
 - **Register the new crate in `tools/run_tests.sh`.** Its 29 tests used to run under the `wireless`
@@ -383,11 +383,11 @@ Still genuinely unknown, in the order they will bite:
   `WIRELESS_SETUP_HU_NOT_CONNECTED_TIMEOUT` 5 s later, and **that timeout is the HEADSET gate, not a
   dial we owe the phone** (§6b). The box therefore raises a headset link on the same SDP
   conversation (`reconnect::attempt_headset`), and the 30 s ACL hold
-  (`CARPLAY_ACL_HOLD_SECS` / `/tmp/acl_hold_secs`, `0` disables) is narrowed to a bond exposing
+  (`BT_ACL_HOLD_SECS` / `/tmp/acl_hold_secs`, `0` disables) is narrowed to a bond exposing
   NEITHER iAP2 nor any audio gateway. The cold, unbonded case is untested.
 - **Which route to the headset gate a given phone takes** — HFP with the AT SLC (what stock does) or
   HSP with none (what both public dongles do). Both are implemented and tried in that order;
-  `CARPLAY_AA_HEADSET_PATH=hfp|hsp` (or `/tmp/aa_headset_path`) forces one for a bench run. Which
+  `BT_AA_HEADSET_PATH=hfp|hsp` (or `/tmp/aa_headset_path`) forces one for a bench run. Which
   one this Pixel actually accepts is unmeasured — only stock's HFP success is evidence, and that was
   stock's stack, not ours.
 - ~~The right `security_mode` value~~ — answered: **8 = WPA2_PERSONAL**, field-proven (stock box capture; the 24/WPA2_ENTERPRISE attempt never associated). `crates/vendor/wireless/src/main.rs` sent 24 until 2026-09-04; fixed.
@@ -466,7 +466,7 @@ settled question rather than a failure. Static analysis supports the prediction 
 
 ## 6b. Implementation plan (agreed 2026-09-01, after two 3-agent review rounds)
 
-**Shape: wireless AA is served by the EXISTING `carplay-wireless` daemon, additively.** Not a second
+**Shape: wireless AA is served by the EXISTING `btd` daemon, additively.** Not a second
 binary. Wireless CarPlay is device-proven and must not regress; every step below is ordered so it
 stays working at each commit. Governed by the first-come-first-served rule in
 [`02_ARBITRATION.md`](02_ARBITRATION.md) §0.
@@ -488,7 +488,7 @@ and is silently never advertised.
 ### Step 1 — library
 
 Add `src/lib.rs` exposing `proto`, `wpp` and `run_bootstrap`. Keeping only `proto`+`wpp` would force
-`carplay-wireless` to reimplement the framing loop that is already written and tested. Drop the
+`btd` to reimplement the framing loop that is already written and tested. Drop the
 `[[bin]]` and the `build.sh` standalone-binary lines. `run_tests.sh` needs no change and
 `ocbm_install.sh` never had an entry.
 
@@ -522,7 +522,7 @@ Three corrections review forced:
   several records, so serve both and say so rather than discovering it in test.
 - **`DE_SEQ16` for the combined blob, now.** Two records leave 59 bytes under `put_seq8`'s 255-byte
   ceiling. Tripping it asserts, and the release profile is `panic = "abort"` — so an Android-side
-  cosmetic edit (a longer service name, a third record) would abort `carplay-wireless` and take
+  cosmetic edit (a longer service name, a third record) would abort `btd` and take
   CarPlay down with it.
 - **Concurrent SDP clients.** `listen(fd, 1)` plus run-to-completion `serve_client` is safe only
   while iPhones are the only browsers. A phone may legitimately idle on an open SDP channel, so once
@@ -558,7 +558,7 @@ machinery without altering what the box currently advertises.
   stock — whose record builders emit the 128-bit class alone and which does wireless AA on this
   hardware. openauto disagrees; only stock is proven here.
 
-Footprint: `carplay-wireless` 575,448 → 582,584 B (+7 KB), against ~3.4 MB free.
+Footprint: `btd` 575,448 → 582,584 B (+7 KB), against ~3.4 MB free.
 
 ### Step 4 — second accept thread
 
@@ -567,7 +567,7 @@ A separate thread running `accept_one(4, …)` mirroring `rfcomm_handle`'s shape
 Kernel RFCOMM multiplexes DLCs over one L2CAP session itself. Channel 4 must drop cleanly on claim
 failure exactly as channel 1 does.
 
-**Kernel backend only.** `rfcomm_uspace` (opt-in via `CARPLAY_RFCOMM_BACKEND=userspace`, used on the
+**Kernel backend only.** `rfcomm_uspace` (opt-in via `BT_RFCOMM_BACKEND=userspace`, used on the
 Pi) cannot serve two channels: `open_dlc` returns on the first matching SABM and sends `DM` to any
 other channel's, so an AA thread would actively reject CarPlay's DLC on a shared session, roughly
 half the time. AA stays excluded from that backend until it becomes a real multi-DLC multiplexer.
@@ -581,7 +581,7 @@ the untouched channel-1 loop. Both contend for the same `session_active` slot th
 - **Two independent blocking accepts, not a shared poll.** The kernel multiplexes DLCs over one
   L2CAP session itself, so neither loop can starve the other, and the proven CarPlay path is not
   edited at all.
-- **Kernel backend only.** The AA thread returns immediately under `CARPLAY_RFCOMM_BACKEND=userspace`
+- **Kernel backend only.** The AA thread returns immediately under `BT_RFCOMM_BACKEND=userspace`
   with a log line, because `rfcomm_uspace::open_dlc` answers any SABM for a channel it is not
   serving with `DM` — a second accept loop there would reject CarPlay's own DLC about half the time.
 - **AP credentials come from the running AP**: `wifi_handoff::read_hostapd_ap_config()` — the same
@@ -593,7 +593,7 @@ the untouched channel-1 loop. Both contend for the same `session_active` slot th
 - **The owner flag is claimed after the phone opens the channel**, via `aa_wireless::claim_owner`,
   which also stands down if another transport already owns the box and releases ours-only.
 
-Footprint: `carplay-wireless` 582,584 → 599,264 B. Still ~5.5× under the free-space budget.
+Footprint: `btd` 582,584 → 599,264 B. Still ~5.5× under the free-space budget.
 
 **This is the first change that alters what the box advertises**, so it is the first that needs a
 device test: an iPhone must still find iAP2 and project, before anything Android is attempted.
@@ -605,7 +605,7 @@ SDP clients on threads. The gate was whether wireless CarPlay still works, teste
 Auto attempt so that a failure could not be confused with an AA bring-up problem.
 
 - Bench: iPhone 18,4 / iOS 27.0, wired to the Mac for logging only; the CarPlay session itself is
-  wireless. Box running the new `carplay-wireless` (599,312 B) and the updated supervisor.
+  wireless. Box running the new `btd` (599,312 B) and the updated supervisor.
 - Result: **wireless CarPlay connected and ran.** `carkitd` reports `CarPlay session is active`.
 - **Zero** identification rejects across the whole capture — no `iapreject`, no
   `Identification info rejected`, no `RequiredInfoMissing`, no `OptionalMsgNotValidWithoutRequiredMsgs`.
@@ -819,7 +819,7 @@ code in it is unchanged. `tools/session_supervisor.sh` gained `arm_aa_wireless` 
 
 **One definition of the endpoint.** The address is `box_common::net::AP_IP`, hoisted there from
 `av.rs` on 2026-09-04; `aa-wireless`'s `AAW_IP` default now reads the same constant, and `av.rs`
-re-exports it so `carplay-wireless` keeps its `crate::av::AP_IP` path. The port is
+re-exports it so `btd` keeps its `crate::av::AP_IP` path. The port is
 `aa_wireless::DEFAULT_PORT`, which `aa-bridge` now depends on the crate for. What the bootstrap
 puts in `WifiStartRequest` and what the pump binds are therefore literally the same two symbols —
 §2f's "do not hardcode it in two places", enforced by the compiler rather than by review.
@@ -848,13 +848,13 @@ ordering is what a shared file cannot give you: read-then-write on `/tmp/project
 TOCTOU no matter how carefully it is read.
 
 **Owner policy** (`pump::decide_wireless_claim`, unit-tested): idle → claim `wireless-aa`; ALREADY
-`wireless-aa` → adopt, because `carplay-wireless` claims it at the end of the bootstrap and
+`wireless-aa` → adopt, because `btd` claims it at the end of the bootstrap and
 deliberately holds it across the association; anything else → refuse and close, including
 `wired-aa`. Released at session end whenever the flag still reads `wireless-aa`.
 
 **Known limit, stated rather than hidden.** `release_owner_if_ours` is ours-only by TOKEN, and this
-process and `carplay-wireless` write the same `wireless-aa` token — neither can tell its own claim
-from the other's. `carplay-wireless`'s session teardown can therefore clear the flag under a live
+process and `btd` write the same `wireless-aa` token — neither can tell its own claim
+from the other's. `btd`'s session teardown can therefore clear the flag under a live
 TCP session here. It is bounded: that teardown means the radio is going away, so the session is over
 anyway. Fixing it properly means putting a pid or a lock in the flag file, which changes a format
 three daemons and the shell supervisor parse.
@@ -910,7 +910,7 @@ accept threads.
   `BTHF_CONNECTION_STATE_SLC_CONNECTED` → HeadsetStateMachine `mConnected` immediately. Both public
   dongles use exactly this and exchange no AT traffic.
 
-`CARPLAY_AA_HEADSET_PATH=hfp|hsp`, or `/tmp/aa_headset_path`, forces one; default is auto. A forced
+`BT_AA_HEADSET_PATH=hfp|hsp`, or `/tmp/aa_headset_path`, forces one; default is auto. A forced
 path never silently falls back to the other — the lever exists to isolate a failure.
 
 **Channels are read, never assumed.** `sdp_client::query` searches `0x111F` and `0x1112` on the same
@@ -937,12 +937,12 @@ SCO for the life of each headset link, and both call directions were proven end 
 2026-09-04 (same section). Two clauses of the old sentence survive
 unchanged and are still policy: this layer **negotiates a codec only under the wideband lever**
 (default `AT+BRSF=63` claims no codec negotiation, so the AG always opens plain CVSD; with
-`CARPLAY_HFP_WBS` / `/tmp/hfp_wbs` it sends `AT+BRSF=191` + `AT+BAC=1,2` and answers `+BCS` —
+`BT_HFP_WBS` / `/tmp/hfp_wbs` it sends `AT+BRSF=191` + `AT+BAC=1,2` and answers `+BCS` —
 [`01_SESSION_AND_AV.md`](01_SESSION_AND_AV.md) §telephony) and **never answers an unsolicited
 result** —
 `+CIEV`/`+BSIR`/`RING`/`+BVRA` are drained, classified and logged (`+CIEV: 6,4` renders as
 `battchg = 4` against the `AT+CIND=?` names), and answering a call stays with the driver. The one
-exception is the bench lever `CARPLAY_HFP_AUTOANSWER=1`, which sends `ATA` on the ringing edge.
+exception is the bench lever `BT_HFP_AUTOANSWER=1`, which sends `ATA` on the ringing edge.
 
 **How long the link is held, and why it is bounded.** Outbound: hold until the owner flag reads
 `wireless-aa` (the phone dialled us and the bootstrap claimed the box), then hold for the whole

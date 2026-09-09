@@ -231,7 +231,7 @@ channel it can advertise."* Both describe this project's surface, not CarPlay's.
 
 ### App UI
 
-macOS Settings ▸ Configuration ▸ **Audio** (`host/CarPlayHost/carlink_macOS/App/SettingsWindow.swift`):
+macOS Settings ▸ Configuration ▸ **Audio** (`host/MacHost/carlink_macOS/App/SettingsWindow.swift`):
 
 - **Audio formats** mode picker: *Auto — match transport* / *Wired — PCM* / *Wireless — AAC (full 8)* /
   *Custom…*. Non-custom modes show a one-line summary of the resolved set.
@@ -244,7 +244,7 @@ macOS Settings ▸ Configuration ▸ **Audio** (`host/CarPlayHost/carlink_macOS/
 
 ### Data flow
 
-App authors YAML → OCBM SUBSCRIBE → ocbmd lands `/tmp/carplay_cfg.yaml` → airplayd
+App authors YAML → OCBM SUBSCRIBE → ocbmd lands `/tmp/carplay_cfg.yaml` → carplayd
 `load_device_config()` → `VehicleConfig::apply()` resolves `audio:` onto `DeviceConfig.audio_formats` →
 `build_info()` emits the `/info` `audioFormats` array. Re-read per control connection, so a config push =
 a fresh session picks it up.
@@ -260,7 +260,7 @@ Scope: CarPlay only. Android Auto negotiates its own audio sinks — see the And
 ### 0 · The path in one line
 
 ```
-iPhone ──RTP/UDP (ChaCha20-Poly1305)──▶ airplayd (box)
+iPhone ──RTP/UDP (ChaCha20-Poly1305)──▶ carplayd (box)
         └─ per-stream key + format + raw encrypted RTP ──seam :9002/:9003──▶ ocbmd
               └─ CH_MEDIA_AUDIO 0x21 / CH_ALT_AUDIO 0x22 ──USB accessory──▶ host app
                     └─ OCBMAVDecrypt (host-side decrypt) ──▶ AudioPlayer (AVAudioEngine)
@@ -349,9 +349,9 @@ voice silence.
 - A complete frame on an idle wire takes the `write_vectored` fast path straight to
   `/dev/usb_accessory`, skipping the queue copy.
 - On host teardown the audio queues are cleared with the rest of the session state, and the mic /
-  input / RTSP seams are dropped (they belong to the departed session's airplayd).
+  input / RTSP seams are dropped (they belong to the departed session's carplayd).
 
-### 4 · Host playback (macOS, `host/CarPlayHost/carlink_macOS/`)
+### 4 · Host playback (macOS, `host/MacHost/carlink_macOS/`)
 
 **Decrypt** — `OCBM/OCBMAVDecrypt.swift`. Media and voice payloads share `audioQueue` (both touch the
 scid-keyed `audioKeys`/`audioFormats` tables), reassemble their seam buffer, and decrypt each
@@ -407,7 +407,7 @@ The uplink is the **input leg of the type-100 MainAudio stream** and dies with i
 3. **Capture.** `Audio/MicCapture.swift` runs `AVAudioEngine` + `AVAudioConverter` to the
    box-negotiated rate/channels and emits **S16LE**; the engine only runs during a live turn — never
    a hot mic between turns.
-4. **Transport.** `CH_MIC 0x0031` → ocbmd `forward_mic` → airplayd's mic seam **`127.0.0.1:9112`**
+4. **Transport.** `CH_MIC 0x0031` → ocbmd `forward_mic` → carplayd's mic seam **`127.0.0.1:9112`**
    as `mic <len>\n<pcm…>` lines (`receiver::uplink::read_control`). The seam is established
    **eagerly**, because the `uplink on/off` gate travels back over it.
 5. **Encode + send.** `push_pcm` packetizes and `send_au` builds the RTP header (`ssrc = 0`, seq
@@ -416,7 +416,7 @@ The uplink is the **input leg of the type-100 MainAudio stream** and dies with i
    - **wired** — raw **big-endian** PCM in fixed sample-count packets, no encoder. This is the only
      path the box builds (feature `mic-uplink`);
    - **wireless** — AAC-ELD via `crates/vendor/eld-codec` (libfdk-aac shim), feature
-     `mic-uplink-eld`. fdk-aac is not available on the box, so **airplayd never enables it**. 16 kHz
+     `mic-uplink-eld`. fdk-aac is not available on the box, so **carplayd never enables it**. 16 kHz
      mono produces ASC `f8f03000`, byte-identical to the iPhone's own `speechRecognition` stream
      (`eld_16k_mono_asc_matches_iphone`).
 6. **One uplink at a time.** iOS re-SETUPs MainAudio each Siri turn; the newest instance's
@@ -471,11 +471,11 @@ of audio packets on both lanes with **0 failures**.
 Comment-only fixes, no behaviour change:
 
 - `crates/vendor/receiver/src/uplink.rs` — `start_control_listener`'s doc said "the control-in
-  (`:9110`) listener". `:9110` is the **HID input** seam; airplayd passes `127.0.0.1:9112`
+  (`:9110`) listener". `:9110` is the **HID input** seam; carplayd passes `127.0.0.1:9112`
   (`MIC_INGEST_ADDR`). Corrected to name the caller-supplied address.
 - `crates/ocbm-proto/src/lib.rs` — the `SEAM_FORMAT audio_type` legend stopped at `4 default`,
   omitting `5 compatibility`, which `session.rs` has emitted since the compatibility split.
-- `host/CarPlayHost/carlink_macOS/OCBM/OCBMAVDecrypt.swift` — same legend, same omission; the
+- `host/MacHost/carlink_macOS/OCBM/OCBMAVDecrypt.swift` — same legend, same omission; the
   `isVoice` comment now names the misrouting recorded in §7 rather than implying it is intended.
 
 ---
@@ -489,7 +489,7 @@ to 1920×720, the fix, and the on-hardware proof. From a 6-agent parse of the Ru
 live validation.
 
 ### Root cause — a hardcoded override (EVIDENCED, 5 of 6 agents)
-`~/Documents/carlink/ccpa_custom/ccpa/airplayd/src/main.rs` (the daemon the box actually runs)
+`~/Documents/carlink/ccpa_custom/ccpa/carplayd/src/main.rs` (the daemon the box actually runs)
 constructs `DeviceConfig::default()` (1920×720) and then **overrides it to 800×480** before building `/info`:
 ```rust
 let mut dev = DeviceConfig::default();   // 1920×720 (`impl Default for DeviceConfig` — info.rs:114-115 in today's `crates/vendor/receiver/src/info.rs`; was cited as info.rs:62-63 against the then-sibling `ncm_carplayd` tree)
@@ -516,11 +516,11 @@ observed SPS 800×480.
   (VideoConfig) from the iPhone's encoder and forwards it. `receiver/src/session.rs setup_phase2` (screen
   110 response = only `type` + `dataPort`).
 - **The docs/carplay/02_SESSION_LIFECYCLE.md "iOS cache pin / requires forget" theory is DISPROVEN.** The box was literally advertising
-  800×480 from `airplayd`; it was never an iOS cache artifact. (docs/carplay/02_SESSION_LIFECYCLE.md §"Video resolution" reasoned from
-  the 1920×720 *struct default*, not the airplayd override it couldn't see.) The "forget" done on
+  800×480 from `carplayd`; it was never an iOS cache artifact. (docs/carplay/02_SESSION_LIFECYCLE.md §"Video resolution" reasoned from
+  the 1920×720 *struct default*, not the carplayd override it couldn't see.) The "forget" done on
   2026-07-09 was chasing a wrong hypothesis.
 - No competing 800×480 literal existed anywhere else at the time of this sweep (2026-07-10, exhaustive):
-  the only `800`/`480` / `0x320`/`0x1E0` were `airplayd:342-343` (the override, since removed) and a
+  the only `800`/`480` / `0x320`/`0x1E0` were `carplayd:342-343` (the override, since removed) and a
   `hid.rs` unit-test constant. **Anchors re-verified 2026-08-16:** that test constant is now
   `crates/vendor/receiver/src/hid.rs:129-130` (`touch_is_little_endian_xy`; the same two values also occur
   at `hid.rs:111` in `multi_report_matches_apple_fill_order`), and the receiver's `DISPLAY_WH=(1920,720)`
@@ -528,12 +528,12 @@ observed SPS 800×480.
   statement about the 2026-07-10 tree: features added since carry their own 800×480 (the ALT/cluster
   fallback dims at `info.rs:612-613`).
   **Latent, flagged, not fixed:** `uplink.rs::set_display` has **no caller anywhere in the repo**.
-  What tracks the resolution is airplayd's own `DISPLAY_WH` static; the receiver's
+  What tracks the resolution is carplayd's own `DISPLAY_WH` static; the receiver's
   `uplink::handle_touch` path still scales against the never-updated 1920×720 default.
 
 ### The fix (deployed + validated)
-Changed `airplayd/src/main.rs:342-343` to **1920×720**, cross-compiled (armv7-musl), deployed to
-`/usr/sbin/airplayd` (old binary backed up `/usr/sbin/airplayd.res800bak`).
+Changed `carplayd/src/main.rs:342-343` to **1920×720**, cross-compiled (armv7-musl), deployed to
+`/usr/sbin/carplayd` (old binary backed up `/usr/sbin/carplayd.res800bak`).
 
 **On-hardware proof (2026-07-10):** a fresh session — *no iPhone "forget"* — produced:
 ```
@@ -751,14 +751,14 @@ live wired [CAP], see `old/ncm_carplayd/docs/14_WIRED_CARPLAY_PROTOCOL.md` §4.3
   the missing piece is that distinct alt focus — experiment with resourceID candidates then.
 - **Evidence:** old firmware `~/Documents/carlink/carlink_macOS/carlink_macOS/Protocol/{MessageTypes.swift:436-443
   (`aaRequestNaviScreen = 508` / `aaReleaseNaviScreen = 509` at :442-443), AdapterProtocol.swift:174-201}`
-  (the OLD-firmware companion app — NOT this repo's `host/CarPlayHost/carlink_macOS`);
+  (the OLD-firmware companion app — NOT this repo's `host/MacHost/carlink_macOS`);
   `old/carplay_RE/carplay_sdk/MAP/tbox_map/libSdCarplay.md:150` (changeModes altScreen dimension);
   `old/ncm_carplayd/docs/14` §4.3, §8.1.
 
 #### VALIDATED 2026-07-12 — end-to-end, live session
-Deployed (airplayd `180e796d`) + fixed host YAML generator + session reset. Live box log:
+Deployed (carplayd `180e796d`) + fixed host YAML generator + session reset. Live box log:
 ```
-[airplayd] cfg: /tmp/carplay_cfg.yaml (1711 B) → 1280×720@30 hevc=true dpad=true
+[carplayd] cfg: /tmp/carplay_cfg.yaml (1711 B) → 1280×720@30 hevc=true dpad=true
 [session] SETUP phase2 ALT screen(111) scid=… → dataPort 49454 (→ :9005)
 [session] SETUP phase2 screen(110) …        [session] SETUP phase2 audio(100) …
 [screen] iPhone connected … forwarding video → 127.0.0.1:9005   [screen] carlink :9005 connected
@@ -890,6 +890,33 @@ static multi-view-area) are documented with their implementation cost + teardown
   `setNightMode` / `setLimitedUI` / `hidSendReport` use; the `displayUUID` string nearby belongs to
   the HID dictionary). Inbound `requestViewArea` carries `uuid` + `viewAreaIndex` likewise.
   Corroborated by CINEMO's own log line `UpdateViewArea(uuid: %s, duration: %ums, area id %u)`.
+
+  **`animationDurationMillis` DEVICE-PROVEN 2026-09-09, wired CarPlay, 1920x1080 panel with a second
+  view area.** Until tonight the field was only ever sent at a hardcoded 3000 ms (measured at
+  2.978/2.988 s, so it was known to be honoured LITERALLY) — nobody had varied it. Swept from the
+  app via the new `view_area_anim_ms` config key:
+  - **10 ms — instant.** The switch between the two view areas is a flicker; no perceptible
+    animation.
+  - **10000 ms — takes the full 10 s.** iOS honours it end to end.
+  - **No floor and no cap anywhere in 10 ms – 10 s.** The value is used literally at both extremes,
+    which settles the open question of whether iOS clamps a short duration to a minimum. It does not.
+  - **The duration is the ANIMATION ENVELOPE, not the geometry change.** At 10000 ms the UI reaches
+    the target resolution at roughly the 5 s mark, then idles at that geometry showing CarPlay's own
+    transition blur until the declared duration expires. So the accessory does not get a
+    "geometry settled" moment at `animationDurationMillis`; it gets one earlier, and the remainder is
+    presentation. Normal behaviour, not a stall.
+  - INFERRED, not tested: with a LARGER delta between the two areas the stretch would plausibly
+    occupy more of the envelope rather than finishing early. Only a near-square pair of rects was
+    swept; a dramatic aspect/size change has not been.
+
+  Practical consequence: the accessory owns the pacing of a Dock resize completely, and can make it
+  instant. There is no reason to keep 3000 ms other than matching Apple's Simulator.
+
+  **Shipped range is 1000–10000 ms (owner, 2026-09-09) — a PRODUCT limit, not a protocol one.** iOS
+  has no floor; 10 ms was proven to work. The app deliberately does not offer sub-second because it
+  reads as abrupt in a vehicle. Anyone reading this later and wondering whether 10 ms is unreachable
+  because iOS rejects it: it is not, the clamp is ours, in `levers::VIEW_AREA_ANIM_MS_RANGE` and in
+  the app's emitter + `clampInPlace`. The DEFAULT remains 3000 (absent key).
   iPhone handler:
   `carEndpoint_updateViewArea` logging `viewAreaUpdate for display %@: viewArea %d adjacentViewAreas
   %@ animationDurationMillis %d` (AirPlaySender 10767-10772); CarKit `CARSession
@@ -1106,13 +1133,13 @@ unrecoverable, drop that frame and `forceKeyFrame` to repaint.**
 | Apple mechanism | Our implementation | Adheres / Deviates |
 |---|---|---|
 | Per-packet RTP **sequence number** | Per-**frame** `seq` (u64) in the box's forward wrapper | **Deviates (granularity), justified:** our decode + decrypt unit is the whole frame, and OCBM reassembles each frame reliably. The box no longer drops as policy — task #33 landed and it gates the seam read instead — so `seq` is not a drop-tracker: it is the **decrypt-counter resync** and the recovery marker after a seam teardown. That matters because the live loss mode is the 2 s `SO_SNDTIMEO` on the box→app seam write, which can tear a message mid-write — exactly why each forwarded message carries `SEAM_MAGIC` for the host to re-align on. Frame-level `seq` + `SEAM_MAGIC` detect the loss that remains; packet-level would be finer than our architecture needs. |
-| **Flow control** (limit outstanding) | Reliable forward + backpressure to the iPhone | **Adheres — LANDED** (task #33; the per-seam `gated` test in ocbmd's poll-build loop, `ccpa/ocbmd/src/main.rs`, `for (idx, (s, ch)) in d.av_conns.iter().enumerate()` → `let gated = match *ch`). Each video lane is limited to one outstanding frame: ocbmd stops reading that seam until its queue drains, blocking airplayd's screen thread, which stops it reading the iPhone's screen socket and closes the phone's TCP window. Two caveats: **video only** (audio is UDP-sourced and ungated, so no backpressure can reach its sender), and **bounded at ~2 s** by the seam's `SO_SNDTIMEO`, past which airplayd tears the seam down and requests a keyframe. That iOS responds by lowering its encode rate is the design expectation and is **not yet measured**. Apple flow-controls; the stock firmware sustained 4K@60 this way. |
+| **Flow control** (limit outstanding) | Reliable forward + backpressure to the iPhone | **Adheres — LANDED** (task #33; the per-seam `gated` test in ocbmd's poll-build loop, `ccpa/ocbmd/src/main.rs`, `for (idx, (s, ch)) in d.av_conns.iter().enumerate()` → `let gated = match *ch`). Each video lane is limited to one outstanding frame: ocbmd stops reading that seam until its queue drains, blocking carplayd's screen thread, which stops it reading the iPhone's screen socket and closes the phone's TCP window. Two caveats: **video only** (audio is UDP-sourced and ungated, so no backpressure can reach its sender), and **bounded at ~2 s** by the seam's `SO_SNDTIMEO`, past which carplayd tears the seam down and requests a keyframe. That iOS responds by lowering its encode rate is the design expectation and is **not yet measured**. Apple flow-controls; the stock firmware sustained 4K@60 this way. |
 | **NACK retransmit** (recover the packet) | Deferred | **Deviates, justified:** retransmit needs a bidirectional low-latency NACK channel + a sender retransmit buffer — a large transport addition. Apple's own fallback for *unrecovered* loss is `forceKeyFrame`, which we implement. seq + keyframe = Apple's unrecovered-loss path. Retransmit is a documented follow-on. |
 | **forceKeyFrame** on unrecovered loss | Box relays a keyframe request when the host detects a gap (reuses `events::send_force_key_frame`) | **Adheres.** |
 | Loss tracking / logging | Box logs drops; host logs seq gaps | **Adheres.** |
 
 ### Split (box = forwarder, host = recovery) — per the committed architecture
-- **Box (airplayd):** stamps a per-frame `seq` in the forward wrapper (the RTP-seq equivalent; the box
+- **Box (carplayd):** stamps a per-frame `seq` in the forward wrapper (the RTP-seq equivalent; the box
   already tracks this counter). Relays a `forceKeyFrame` to the iPhone when signaled (only the box holds
   the encrypted event channel + keys). The box never decodes/buffers/caches — it sequences what it forwards.
 - **Box (ocbmd):** ~~forwards/drops at **whole-frame** boundaries… (parse the seam length prefix;
@@ -1146,7 +1173,7 @@ unrecoverable, drop that frame and `forceKeyFrame` to repaint.**
    backpressure drop — verified/justified deviation from the docs/carplay/06_AV_PIPELINE.md draft (host re-aligns, ocbmd
    unchanged and stays a dumb byte-forwarder).
 2. **Keyframe relay — IMPLEMENTED.** Host gap → `OCBMClient.requestKeyframe` (throttled ≤1/500 ms) →
-   `CH_INPUT[INPUT_KEYFRAME]` → ocbmd relay → airplayd `events::send_force_key_frame` → iOS. Prompt repaint.
+   `CH_INPUT[INPUT_KEYFRAME]` → ocbmd relay → carplayd `events::send_force_key_frame` → iOS. Prompt repaint.
 3. **Efficiency (separate track):** reliable forward + backpressure so genuine drops are rare (stock
    firmware ran 4K@60 with no drops on this hardware; 72% CPU idle / load 0.90 when we were dropping).
 4. **Follow-on (fuller SDK parity):** NACK retransmit to recover the lost frame before falling back to keyframe.
@@ -1223,8 +1250,14 @@ makes it pass. Trust the validator.
 **not a clean rectangle** (a curve, notch, cutout, or overlapping cluster obscures part of the decoded
 frame). Per display you pick one:
 - **`safeArea` = avoidance.** "Part of this rectangle will be physically obscured — keep *interactive* UI
-  inside this smaller safe rectangle." iOS **insets** its tappable layout (wallpaper may still bleed out
+  inside this smaller safe rectangle." iOS **insets** its tappable layout (the WALLPAPER still bleeds out
   via `drawUIOutsideSafeArea`, but nothing touchable lands in the bad region).
+  **CONFIRMED ON HARDWARE 2026-09-09** — this read "wallpaper *may* still bleed out", which understated a
+  flag whose effect is directly visible. `drawUIOutsideSafeArea` is specifically what lets CarPlay RENDER
+  THE WALLPAPER into the inset band. With it OFF (the default) that band renders **BLACK**; with it ON the
+  wallpaper extends to fill it. Interactive UI stays inside the safe rectangle either way — the flag moves
+  only the backdrop, which is why it is safe to enable on a panel whose inset exists for a curve or notch
+  rather than for an obstruction. Observed wired, 1920x1080, insets 100/100/100/100.
 - **`cornerMasks` = masking/delegation.** "Render the whole rectangle full-bleed; *I* (the accessory)
   will cut it to the panel's real shape using the bitmap you give me." iOS renders full and hands off.
 
@@ -1260,7 +1293,7 @@ byte format is defined solely by the sender and had to be captured, not read fro
 ### 4. Arming (config-driven toggle — device-verified)
 
 **Primary: the macOS Settings switch "Corner masks (cutout)"** (Settings ▸ Configuration). It writes
-`accessoryConfig.enablesCornerMasks: true` into the pushed YAML; `airplayd` reads it via
+`accessoryConfig.enablesCornerMasks: true` into the pushed YAML; `carplayd` reads it via
 `VehicleConfig::corner_masks_enabled()` and calls `levers::set_cornermasks(...)` (same pattern as
 `set_viewareas`). **Persistent** — the app re-pushes config on every connect, so it survives box reboots
 (unlike `/tmp`). Verified end-to-end 2026-08-02: toggle ON → wallpaper extends to full frame + iOS
@@ -1374,8 +1407,8 @@ transport between them.**
 
 ### 2. What already exists (audit)
 
-#### Box — airplayd already SENDS touch; it just has no input source
-- **`receiver/hid.rs`** (compiled into airplayd, not gated): `touch_report(buttons,x,y)` → the exact 5-B
+#### Box — carplayd already SENDS touch; it just has no input source
+- **`receiver/hid.rs`** (compiled into carplayd, not gated): `touch_report(buttons,x,y)` → the exact 5-B
   `[buttons][x LE16][y LE16]`; `touch_report_normalized(buttons,nx,ny,w,h)` scales 0..1 → absolute; media
   buttons too. Unit-tested (LE order, clamping).
 - **`receiver/events.rs`** (compiled in, not gated): `send_hid_report(uid, report)` → the exact
@@ -1391,13 +1424,13 @@ transport between them.**
   2026-07-10 capture.)* Media-buttons descriptor (`uuid=2`) is advertised too.
 - **Missing:** anything that *feeds* `send_hid_report`. The only ingest in receiver_core is
   `uplink.rs::handle_touch`, fed by a local TCP control-in (`:9110`) — and `uplink.rs` is behind the
-  `mic-uplink` feature (it also holds the eld mic encoder), which airplayd builds **without**. So airplayd
+  `mic-uplink` feature (it also holds the eld mic encoder), which carplayd builds **without**. So carplayd
   has the touch *emitter* but not the *ingest*.
   **CORRECTED 2026-08-16 — true when written, false now, and the gap is closed.** The feature gate moved:
-  airplayd builds `receiver` with `default-features = false` plus its own default `mic-uplink-eld`
-  (`ccpa/airplayd/Cargo.toml`), which turns `mic-uplink` ON, so `uplink.rs` IS compiled in today. And the
-  touch ingest never landed in `uplink.rs` at all: airplayd owns its own dependency-free HID seam that
-  binds `127.0.0.1:9110` directly (`ccpa/airplayd/src/main.rs`, log line `HID input ingest on
+  carplayd builds `receiver` with `default-features = false` plus its own default `mic-uplink-eld`
+  (`ccpa/carplayd/Cargo.toml`), which turns `mic-uplink` ON, so `uplink.rs` IS compiled in today. And the
+  touch ingest never landed in `uplink.rs` at all: carplayd owns its own dependency-free HID seam that
+  binds `127.0.0.1:9110` directly (`ccpa/carplayd/src/main.rs`, log line `HID input ingest on
   127.0.0.1:9110 (task #20)`), exactly as §3 planned.
 
 #### Host — CarPlayView already reads local touch/trackpad input; it just goes nowhere
@@ -1417,8 +1450,8 @@ transport between them.**
 
 #### The gap (only this) — ALL FOUR CLOSED (2026-07-25, task #20)
 1. ~~No host→box **OCBM input channel**.~~ `CH_INPUT = 0x0030` + `INPUT_TOUCH` (`crates/ocbm-proto/src/lib.rs`).
-2. ~~No **ocbmd → airplayd** relay for input.~~ `INPUT_INGEST_ADDR = "127.0.0.1:9110"` (`ccpa/ocbmd/src/main.rs`).
-3. ~~No **airplayd ingest** feeding `send_hid_report`.~~ airplayd's own `:9110` listener →
+2. ~~No **ocbmd → carplayd** relay for input.~~ `INPUT_INGEST_ADDR = "127.0.0.1:9110"` (`ccpa/ocbmd/src/main.rs`).
+3. ~~No **carplayd ingest** feeding `send_hid_report`.~~ carplayd's own `:9110` listener →
    `hid::touch_report_normalized` (scaled by the `DISPLAY_WH` cell that `load_device_config` sets) →
    `events::send_hid_report`.
 4. ~~Host delegate routes to the legacy adapter, not OCBM.~~ `AppDelegate.carPlayView(_:didMultiTouch:x:y:)`
@@ -1426,7 +1459,7 @@ transport between them.**
 
 ### 3. Design decisions
 - **Scaling rides the pushed config's resolution (box renders app values).** Host sends **normalized**
-  coords (u16 fixed-point 0..65535); airplayd scales with `touch_report_normalized` using the SAME
+  coords (u16 fixed-point 0..65535); carplayd scales with `touch_report_normalized` using the SAME
   resolution it advertised in `/info` — itself the app-pushed VehicleConfig value (from
   `load_device_config`, task #5). One resolution authority, can't drift; per docs/carplay/04_CAPABILITIES_AND_CONFIG.md the box is
   rendering an app-authored value here, not owning a policy. (Tension noted: docs/host/00_MACOS_HOST_APP.md Tier-2 #8 wants
@@ -1434,7 +1467,7 @@ transport between them.**
   earned-fallback path.)
 - **Reuse the emitter as-is.** `hid.rs` + `events.rs::send_hid_report` are done and correct — no changes.
 - **Do NOT un-gate `uplink.rs` for touch.** It drags in eld/mic. Add a tiny, dependency-free `input`
-  ingest in airplayd instead (calls the existing `hid`/`events`). (Mic will reuse the transport later —
+  ingest in carplayd instead (calls the existing `hid`/`events`). (Mic will reuse the transport later —
   see §5 — un-gating only the PCM path then.)
 - **MVP = single-touch** (tap/drag/swipe): covers the core interaction with the descriptor already
   advertised. Multi-touch (pinch/two-finger) needs the 12-B multi-touch descriptor added to `/info`
@@ -1445,9 +1478,9 @@ transport between them.**
 1. **`ocbm-proto`**: add `CH_INPUT = 0x0030` (host→box) with sub-frames `[kind u8][…]`:
    `INPUT_TOUCH(0x01) = [phase u8][nx u16 LE][ny u16 LE][finger u8]` (nx/ny normalized 0..65535,
    phase 0=down/1=move/2=up). (Reserve `INPUT_MBUTTON`, `INPUT_CMD` for later phases.)
-2. **`ocbmd`**: on `CH_INPUT` frames, relay the payload to airplayd over a local socket (connect to
+2. **`ocbmd`**: on `CH_INPUT` frames, relay the payload to carplayd over a local socket (connect to
    `127.0.0.1:9110` on demand, mirror of the A/V seam but reverse). Small, in the existing poll loop.
-3. **`airplayd`**: new `input` module — a process-lifetime `TcpListener 127.0.0.1:9110`; parse
+3. **`carplayd`**: new `input` module — a process-lifetime `TcpListener 127.0.0.1:9110`; parse
    `INPUT_TOUCH`; `buttons = (phase==up ? 0 : 1)`; `report = hid::touch_report_normalized(buttons,
    nx/65535, ny/65535, W, H)`; `events::send_hid_report(1, &report)`. `W,H` from a shared cell updated by
    `load_device_config` (so scaling == advertised `/info`). No eld, no `uplink.rs`.
@@ -1463,7 +1496,7 @@ transport between them.**
   `hidConfig.touchScreenSupportsMultiTouch` / `CARPLAY_MULTITOUCH`), builds the report
   (`hid.rs::touch_report_multi` / `touch_report_multi_normalized`, unit-tested against Apple's fill
   order) and reassembles the one-finger-per-`INPUT_TOUCH` wire framing into a single two-contact report
-  (airplayd's `CONTACTS` slots + `contact_slot`; a third finger is dropped, as Apple's descriptor holds
+  (carplayd's `CONTACTS` slots + `contact_slot`; a third finger is dropped, as Apple's descriptor holds
   two). The **Android** host already drives it end-to-end (`CarlinkAndroid`'s `CarlinkManager` sends one
   `INPUT_TOUCH` per pointer with the finger id). **The remaining gap is the macOS host:**
   `AppDelegate.carPlayView(_:didMultiTouchTwo:)` is an empty stub, so pinch / two-finger scroll are still
@@ -1475,21 +1508,21 @@ transport between them.**
 
 ### 6. Microphone (next task, same transport) — DONE (2026-08-16 status)
 **Shipped as its own channel and its own seam, not as a `CH_INPUT` sibling:** `CH_MIC = 0x0031` → ocbmd
-`forward_mic` → airplayd's dedicated `MIC_INGEST_ADDR = "127.0.0.1:9112"`, kept separate from the `:9110`
+`forward_mic` → carplayd's dedicated `MIC_INGEST_ADDR = "127.0.0.1:9112"`, kept separate from the `:9110`
 HID seam so a mic fault cannot disturb working HID. The "un-gate just the PCM path" route below was not
-the one taken either — airplayd builds `mic-uplink-eld`, so both the wired PCM leg and the wireless
+the one taken either — carplayd builds `mic-uplink-eld`, so both the wired PCM leg and the wireless
 AAC-ELD encoder are compiled in. The original plan text is kept below as the record.
 
 Mic is the same host→box→iPhone shape, audio instead of HID, and the box code already exists in
 `uplink.rs` (`mic <len>\n<pcm>` → RTP → iPhone). **Wired mic = raw PCM 16 kHz mono big-endian, no eld
-encoder** (only wireless AAC-ELD needs eld), so airplayd can do it **without** the eld dependency by
-un-gating just the PCM path. Reuse the CH_INPUT sibling (or `CH_MIC`) → ocbmd → airplayd → the PCM uplink
+encoder** (only wireless AAC-ELD needs eld), so carplayd can do it **without** the eld dependency by
+un-gating just the PCM path. Reuse the CH_INPUT sibling (or `CH_MIC`) → ocbmd → carplayd → the PCM uplink
 framing. Host mic capture already exists (`MicCapture.swift`). This is a clean Phase-4 once the input
 transport (§4) is proven.
 
 ### 7. Touchpoints (files)
 - `crates/ocbm-proto/src/lib.rs` — `CH_INPUT` + sub-frame consts.
 - `ccpa/ocbmd/src/main.rs` — relay `CH_INPUT` → `127.0.0.1:9110`.
-- `ccpa/airplayd/src/main.rs` (+ small `input` fn) — ingest → `hid`/`events`; share `W,H` from `load_device_config`.
+- `ccpa/carplayd/src/main.rs` (+ small `input` fn) — ingest → `hid`/`events`; share `W,H` from `load_device_config`.
 - Host `OCBM/OCBMClient.swift` (send), `App/AppDelegate.swift` (delegate → OCBM), reuse `CarPlayView.swift` as-is.
 - Emitter unchanged: `receiver/hid.rs`, `receiver/events.rs`, `receiver/info.rs`.

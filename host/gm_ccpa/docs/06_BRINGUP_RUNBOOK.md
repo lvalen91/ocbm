@@ -153,7 +153,7 @@ logcat over `CH_FILE` as `[box:<file>]`, so watching the box's logs live needs n
 `ocbmd` gives `CH_CONSOLE` its own output queue drained after audio and video, so a chatty `tail -f`
 cannot starve a live A/V session.
 
-**`tools/ocbm_push.sh` is not an install.** Its default set is `ocbmd` + `carplay-wireless` and nothing
+**`tools/ocbm_push.sh` is not an install.** Its default set is `ocbmd` + `btd` and nothing
 else — pushing `session_supervisor.sh` without `/script/radio_hal.sh` and `radio_detect.sh` leaves the
 box with no radio bring-up and no error anywhere. This is exactly how Bluetooth died silently once
 (`ccpa_custom` `docs/ops/06_CORRECTIONS_LEDGER.md` R-20W-5): a targeted push landed the supervisor without the radio
@@ -182,7 +182,7 @@ ls /script/radio_hal.sh /script/radio_detect.sh
    network that no longer exists, forget that network on the iPhone before retrying.
 5. **`pkill -f session_supervisor` kills the shell running it** (its own cmdline matches). Use an
    explicit PID, or the `[s]ession_supervisor` char-class trick the script itself uses.
-6. **MFi can return status 1 transiently** while `carplay-wireless` is mid-bring-up doing its own chip
+6. **MFi can return status 1 transiently** while `btd` is mid-bring-up doing its own chip
    calls. Observed once as an immediate (~2 ms) failure on `copy_certificate` with the signature
    succeeding moments later; every subsequent attempt returned the full 945 bytes. Worth a soak loop
    before trusting it in the session path.

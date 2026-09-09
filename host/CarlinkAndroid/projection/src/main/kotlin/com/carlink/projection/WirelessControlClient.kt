@@ -9,15 +9,15 @@ import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Device management: the client half of `carplay-wireless`'s control socket.
+ * Device management: the client half of `btd`'s control socket.
  *
  * ## Why this had to be invented rather than reused
  *
  * On the CCPA there was no such surface, because the macOS app drove everything over OCBM and the
- * radio owner was the same box. On the Pi the radio owner (`carplay-wireless`, which drives `hci0`
+ * radio owner was the same box. On the Pi the radio owner (`btd`, which drives `hci0`
  * directly) and the UI are separate processes on the same host, and §2 of the design doc rules out
  * the stock Settings ▸ Bluetooth pane entirely: Android's Bluetooth stack is disabled so
- * `carplay-wireless` can own the controller, so that pane has no stack behind it and can never list
+ * `btd` can own the controller, so that pane has no stack behind it and can never list
  * or pair the phone. Whatever device list we show must come from here.
  *
  * ## Protocol
@@ -40,7 +40,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  * ## Absence is normal
  *
- * `carplay-wireless` may not be running — it is started per boot and can be down while the stack is
+ * `btd` may not be running — it is started per boot and can be down while the stack is
  * being worked on. A refused connect is therefore an expected state, not an error, and every call
  * degrades to "no devices" rather than throwing.
  */
@@ -80,7 +80,7 @@ class WirelessControlClient(
     /**
      * Poll for connection state.
      *
-     * Polling rather than a push subscription is deliberate for now: `carplay-wireless` has no event
+     * Polling rather than a push subscription is deliberate for now: `btd` has no event
      * loop that could push, and the seam already tells us the important transitions much sooner (the
      * first stream key is the earliest proof of a keyed session). This poll only supplies the
      * *identity* of the connected phone, which nothing else carries, and identity changing a second
@@ -207,7 +207,7 @@ class WirelessControlClient(
                 JSONObject(line)
             }
         } catch (e: IOException) {
-            // Expected while carplay-wireless is down. Logged only on the transition.
+            // Expected while btd is down. Logged only on the transition.
             if (available) log.i("control socket down — ${e.message}")
             available = false
             null

@@ -28,9 +28,9 @@ pub const CARPLAY_TRANSPORT: &str = "/tmp/carplay_transport";
 pub enum ProjectionOwner {
     /// Idle — no session; a new phone of either kind may claim the box.
     None,
-    /// Wired CarPlay (iap2d + airplayd over NCM).
+    /// Wired CarPlay (iap2d + carplayd over NCM).
     WiredCp,
-    /// Wireless CarPlay (carplay-wireless: BT + WiFi AP). Byte-compatible with the legacy "wireless".
+    /// Wireless CarPlay (btd: BT + WiFi AP). Byte-compatible with the legacy "wireless".
     WirelessCp,
     /// Wired Android Auto (aa-bridge AOAP pump).
     WiredAa,

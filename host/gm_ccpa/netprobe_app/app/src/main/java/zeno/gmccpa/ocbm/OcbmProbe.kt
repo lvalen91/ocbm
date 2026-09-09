@@ -514,7 +514,7 @@ class OcbmProbe(context: Context) {
 
     /**
      * Command the phone off Bluetooth **without** destroying the bond, by bouncing the box's wireless
-     * stack (`MGMT_RESTART_WIRELESS`). `carplay-wireless` restarts, which closes the RFCOMM link and
+     * stack (`MGMT_RESTART_WIRELESS`). `btd` restarts, which closes the RFCOMM link and
      * takes the controller non-discoverable before coming back up. The phone can reconnect afterwards
      * with no re-pairing.
      *
@@ -538,7 +538,7 @@ class OcbmProbe(context: Context) {
         val st = c.mgmtAction(Ocbm.MGMT_RESTART_WIRELESS)
         when (st) {
             null -> { log.w("   no MGMT_ACK — the box may be busy"); return false }
-            0 -> log.i("   ack ok — box bounces carplay-wireless (~4s), phone's BT link drops")
+            0 -> log.i("   ack ok — box bounces btd (~4s), phone's BT link drops")
             else -> { log.w("   ack status=$st (error)"); return false }
         }
         // Being explicit about the half we cannot drive, so it isn't mistaken for a bug later.

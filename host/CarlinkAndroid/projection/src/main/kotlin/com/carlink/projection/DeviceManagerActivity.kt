@@ -41,7 +41,7 @@ import kotlinx.coroutines.withContext
  *
  * ## Why this is a separate screen from Settings ▸ Bluetooth
  *
- * It has to be. §2: `carplay-wireless` owns `hci0` directly and Android's Bluetooth stack is
+ * It has to be. §2: `btd` owns `hci0` directly and Android's Bluetooth stack is
  * disabled so it can, which means the stock Bluetooth pane has no stack behind it and cannot pair
  * or list anything. Every device shown here comes from [WirelessControlClient].
  *
@@ -157,7 +157,7 @@ private fun DeviceScreen(
                 Column(Modifier.padding(16.dp)) {
                     Text("Projection service unavailable", style = MaterialTheme.typography.titleMedium)
                     Text(
-                        "carplay-wireless is not responding on port ${SeamContract.PORT_CONTROL}. " +
+                        "btd is not responding on port ${SeamContract.PORT_CONTROL}. " +
                             "No phone can be paired or connected until it is running.",
                         style = MaterialTheme.typography.bodyMedium,
                     )

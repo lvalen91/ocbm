@@ -8,14 +8,14 @@
 #   1. `/etc` IS A READ-ONLY SQUASHFS. radio_ap_up.sh `sed -i`s /etc/hostapd.conf and /etc/udhcpd.conf
 #      in place; here every write would fail. Both configs are GENERATED into /tmp from the vendor
 #      templates instead, and the generated hostapd.conf is the single source of truth for the
-#      credentials — carplay-wireless must be pointed at the SAME file via CARPLAY_HOSTAPD_CONF, or
+#      credentials — btd must be pointed at the SAME file via BOX_HOSTAPD_CONF, or
 #      the 0x5703 reply describes an AP that does not exist.
 #   2. The vendor templates live at `/etc/wifi/{hostapd,udhcpd-cp}.conf`, not `/etc/{hostapd,udhcpd}.conf`.
 #      `/etc/hostapd.conf` does not exist at all — which is exactly the failure the box reported:
 #          [wifi_handoff] WARNING: /etc/hostapd.conf is empty or unreadable — 0x5703 will carry no credentials
 #   3. THE SUBNET MUST BE 192.168.43.0/24, not the vendor's 192.168.50.0/24. This is not cosmetic and
 #      not negotiable from the box side: `av.rs:66` hardcodes `AP_IP = "192.168.43.1"` and passes it to
-#      rx-connect as RX_ADDR, and `airplayd` decides a control peer is WIRELESS by testing membership
+#      carplayd's discovery as RX_ADDR, and `carplayd` decides a control peer is WIRELESS by testing membership
 #      in 192.168.43.0/24 (main.rs:1243). On the vendor's 192.168.50.x a phone would associate, get an
 #      address, and then be classified as a WIRED peer. The shared Rust is proven on two CCPAs and is
 #      not being changed to suit this board, so the board conforms to it.
@@ -25,7 +25,7 @@
 # holds the per-unit carplay.key. Leases go to /tmp.
 #
 # Usage (on the box):  /tmp/c2air_ap_up.sh [start|status|stop]
-# Then start carplay-wireless with:  CARPLAY_HOSTAPD_CONF=/tmp/hostapd.conf
+# Then start btd with:  BOX_HOSTAPD_CONF=/tmp/hostapd.conf
 set -u
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH
 L="[c2air-ap]"
@@ -150,7 +150,7 @@ start_ap() {
 
   if running "[h]ostapd" && ifconfig "$IF" 2>/dev/null | grep -q "inet addr:$WLANIP" && running "[u]dhcpd $UDHCPD_CONF"; then
     echo "$L AP up: ssid=$NAME psk=$PSK ip=$WLANIP ch=$CH if=$IF dhcp=${BASE}.100-200"
-    echo "$L point carplay-wireless at it:  CARPLAY_HOSTAPD_CONF=$HOSTAPD_CONF"
+    echo "$L point btd at it:  BOX_HOSTAPD_CONF=$HOSTAPD_CONF"
     exit 0
   fi
   echo "$L AP did NOT converge (ssid=$NAME ch=$CH if=$IF):"

@@ -10,7 +10,7 @@
 #   "features": "+v7,+vfp3d16,+thumb2,-neon"
 #
 # An explicit `-neon` in the spec beats the CPU's implied features, so `-C target-cpu=cortex-a7`
-# emits no NEON at all — verified 2026-07-29 across all 64 .s files in airplayd's codegen graph
+# emits no NEON at all — verified 2026-07-29 across all 64 .s files in carplayd's codegen graph
 # (zero NEON instructions) and by A/B on the shipped binary (identical vld1/vst1 counts to a build
 # with no rustflags at all; those come from the C side, which zig cc does vectorize).
 #
@@ -51,7 +51,7 @@ rustflags = ["-C", "target-cpu=cortex-a7"]
 # Consequences, all observed on hardware rather than reasoned about:
 #   * `nanosleep` returns EINVAL, and `std::thread::sleep` asserts the errno is EINTR — so any
 #     thread that sleeps PANICS.
-#   * `carplay-wireless` SIGSEGVs at startup (`sepc: 0`, null jump) — it was the first daemon to
+#   * `btd` SIGSEGVs at startup (`sepc: 0`, null jump) — it was the first daemon to
 #     spawn a sleeping thread. ocbmd survived only because it is a single-threaded poll loop.
 #   * `settimeofday`/`clock_settime` return EINVAL, which is the REAL reason ocbmd's CT_SETTIME
 #     failed — not a missing `SYS_settimeofday`, which was an incorrect first diagnosis.

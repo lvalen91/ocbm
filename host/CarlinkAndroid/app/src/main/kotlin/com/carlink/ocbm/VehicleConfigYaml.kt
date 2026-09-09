@@ -297,7 +297,7 @@ object VehicleConfigYaml {
      *     fix.** They must be STRIPPED, not escaped.
      *
      * The stripped set is Cc only — C0 (`0x00`-`0x1F`), DEL and C1 (`0x7F`-`0x9F`) — matching the
-     * reference emitter (`host/CarPlayHost/carlink_macOS/App/VehicleConfig.swift`, `YamlEmit`), whose
+     * reference emitter (`host/MacHost/carlink_macOS/App/VehicleConfig.swift`, `YamlEmit`), whose
      * comment records the set as verified codepoint-by-codepoint against the box's own `serde_yaml` 0.9
      * and libyaml rather than reasoned about.
      *

@@ -8,7 +8,7 @@
 //!
 //!   1. No phone on USB. The wired loop is in its UNCLAIMED wait (`accept_while_wanted` with
 //!      `UNCLAIMED_RETRY`), polling `accept()` every 250 ms and holding no claim.
-//!   2. A phone finishes the Bluetooth bootstrap; `carplay-wireless` writes `wireless-aa`.
+//!   2. A phone finishes the Bluetooth bootstrap; `btd` writes `wireless-aa`.
 //!   3. `ocbmd::proj_mode_tick` (≤500 ms throttle) sends `PM_WIRELESS_AA`; the app opens its relay.
 //!   4. The wired loop's next `accept()` — up to 250 ms before its own `someone_else_owns()` poll —
 //!      takes that client, then runs `prepare_accessory()`, finds no phone on USB, gives up ~6 s
@@ -18,7 +18,7 @@
 //! So there is one acceptor thread and one queue, and the take is gated. The gate is in-process
 //! (`wireless_intent`), not the flag file: the wireless arm registers intent BEFORE it writes the
 //! flag, which makes the handoff ordered rather than merely likely. The flag is still consulted for
-//! the wired arm, so an owner claimed by a DIFFERENT process (`carplay-wireless`, the CarPlay
+//! the wired arm, so an owner claimed by a DIFFERENT process (`btd`, the CarPlay
 //! supervisor) also parks it.
 
 use std::collections::VecDeque;
@@ -49,7 +49,7 @@ const MAX_PENDING: usize = 2;
 
 /// How long an accepted-but-untaken app connection stays queued.
 ///
-/// There IS a state where neither arm may take one: `carplay-wireless` claims `wireless-aa` at the
+/// There IS a state where neither arm may take one: `btd` claims `wireless-aa` at the
 /// end of the Bluetooth bootstrap and holds it while the phone associates, so for those few seconds
 /// the wired arm is parked by the flag and the wireless arm has not registered intent yet. An app
 /// that connects and then quits inside that window would otherwise leave a DEAD socket at the head
@@ -142,7 +142,7 @@ impl AppPort {
         st.prune(self.ttl);
         let allowed = match arm {
             // Ordered against the wireless arm in-process, and against the OTHER PROCESSES that can
-            // own the box (carplay-wireless, the CarPlay supervisor) through the flag. The wired
+            // own the box (btd, the CarPlay supervisor) through the flag. The wired
             // loop's own `someone_else_owns()` poll runs at most every 250 ms; this closes that
             // window at the only point where it costs something.
             Arm::Wired => !st.wireless_intent && !(self.other_owner)(),
@@ -170,7 +170,7 @@ impl AppPort {
     /// The wired arm consults this at the two points it would WRITE the owner flag. The flag itself
     /// cannot carry that ordering: both arms read it and then write it, so the microseconds between
     /// the read and the write are a genuine TOCTOU that a file cannot close. This closes the
-    /// in-process half of it outright — the cross-process half (this bridge vs `carplay-wireless`
+    /// in-process half of it outright — the cross-process half (this bridge vs `btd`
     /// vs the shell supervisor) remains, and is bounded rather than eliminated: a wired arm that
     /// wins the flag race still cannot obtain a host client (`try_take` refuses it), so it releases
     /// after `ANNOUNCE_WINDOW` instead of projecting.
@@ -269,7 +269,7 @@ mod tests {
 
     #[test]
     fn another_owner_parks_the_wired_arm_even_with_no_wireless_intent() {
-        // e.g. carplay-wireless holding `wireless-aa` across the association, or a wired CarPlay
+        // e.g. btd holding `wireless-aa` across the association, or a wired CarPlay
         // session holding `wired-cp`. Neither is this process, so the flag is the only signal.
         let p = port(busy, LONG);
         let (s, _peer, _) = pair();

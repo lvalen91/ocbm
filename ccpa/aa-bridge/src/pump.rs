@@ -121,7 +121,7 @@ pub fn copy_stream<R: Read, W: Write>(
 pub enum Claim {
     /// Nobody owns the box — take it as `wireless-aa`.
     Take,
-    /// `wireless-aa` is ALREADY set. That is not a conflict: `carplay-wireless` claims it the moment
+    /// `wireless-aa` is ALREADY set. That is not a conflict: `btd` claims it the moment
     /// the phone finishes the Bluetooth bootstrap and deliberately HOLDS it across the association
     /// (`crates/vendor/wireless/src/main.rs::run_aa_bootstrap`), precisely so nothing else can take
     /// the box out from under a phone that is mid-handoff. The TCP connect we are answering IS that
@@ -244,7 +244,7 @@ mod tests {
     #[test]
     fn the_wireless_arm_takes_an_idle_box_and_adopts_its_own_bootstrap_claim() {
         assert_eq!(decide_wireless_claim(ProjectionOwner::None), Claim::Take);
-        // carplay-wireless already claimed it for the phone that is dialling us right now.
+        // btd already claimed it for the phone that is dialling us right now.
         assert_eq!(decide_wireless_claim(ProjectionOwner::WirelessAa), Claim::Adopt);
     }
 
