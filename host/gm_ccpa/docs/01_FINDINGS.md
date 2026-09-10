@@ -47,6 +47,11 @@ anywhere on the path. That session was Screen Mirroring, not CarPlay (the probe 
 exercised here — but transport, HTTP and RTSP framing are identical either way, and both have since been
 confirmed live (`12_OBSERVED_FLOW.md` Phase 4–6).
 
+**`AirPlayRx.kt` is historical** — it was deleted (`11_HARDENING_PLAN.md` T6.1, LANDED). Its successor
+is `CarPlayRx.kt`, which defaults to port **7011**, not 7010 (`CarPlayRx.kt:46`), and — unlike the probe
+above — DOES implement SRP-6a `pair-setup`/`pair-verify` (`CarPlayRx.kt:1153,1170`). "No pairing
+implemented" describes the 2026-07-31 probe only, not the current receiver.
+
 What this probe did **not** establish, since it matters for read order: `pair-setup` and `pair-verify`
 are chipless SRP-6a / Curve25519 — the MFi coprocessor is not touched until `auth-setup`, two steps
 later. The probe stopped at "no pairing implemented," not at an MFi wall.
@@ -115,7 +120,8 @@ readings and shapes the whole design.
 
 ---
 
-## 5. Media codecs (Intel HD 505 Gen9 — raw dump in `evidence/05_codecs.txt`)
+## 5. Media codecs (Intel HD 505 Gen9 — raw dump in `evidence/05_codecs.txt`, archive at
+`~/Documents/carlink/old/gm_ccpa/evidence/` — not under this tree; see §9)
 
 **Video — all hardware-decoded, max 3840×2160 @ up to 40 Mbps, each with a `.secure` DRM variant:**
 
@@ -175,10 +181,26 @@ satisfied.
 (`native/carplay-jni/src/lib.rs:366`), with `/info` regenerated under that same env — a static asset
 built under a different env than the running server is exactly the hazard this bug was.
 
-**Structural gaps still open against `airplayd`** (tracked in `11_HARDENING_PLAN.md`, not blocking):
-`arm_keepalive` TCP 3/3/3 dead-link detect (Java sockets can't express it), `start_input_listener()`
-HID on `127.0.0.1:9110` (not started — the app advertises `hidDevices` but does not implement it), and
-per-connection `build_info(&load_device_config())` (this project ships a static `/info` asset instead).
+**Structural gaps still open on the Kotlin/Android path** (not blocking): `arm_keepalive` TCP 3/3/3
+dead-link detect (Java sockets can't express it; `android.system.Os.setsockoptInt` can),
+`start_input_listener()` HID on `127.0.0.1:9110` (not started — the app advertises `hidDevices` but does
+not implement it), and per-connection `build_info(&load_device_config())` (this project ships a static
+`/info` asset instead). Live code sites: the doc comment above `Java_zeno_gmccpa_pair_NativeCore_nativeTouch`
+and the `build_info` comment block in `JNI_OnLoad` (both `native/carplay-jni/src/lib.rs`), and the
+`NOT YET IMPLEMENTED` block in `netprobe_app/app/src/main/java/zeno/gmccpa/CarPlayRx.kt` (search
+`arm_keepalive`).
+
+**Scope corrected 2026-09-09.** These are gaps in THIS app only, not in the reference. The native
+`carplayd` daemon implements all three: `fn arm_keepalive` (`ccpa/carplayd/src/main.rs`, called per
+control connection in `run_pairing_server`), `fn start_input_listener` (same file; binds `127.0.0.1:9110`,
+started from `main()` before the accept loop), and `pub fn build_info` (`crates/vendor/receiver/src/info.rs`)
+with `fn load_device_config` (`ccpa/carplayd/src/main.rs`) called per control connection in
+`run_pairing_server`. An earlier pass on 2026-09-09 entered these as flatly "not implemented", which
+was wrong about the reference; the rows now read correctly. They are tracked as OPEN rows N13-N15 in
+`11_HARDENING_PLAN.md` (the `CarPlayRx.kt` comment's stale pointer to §8 of this doc is tracked as N16).
+
+The `NOT YET IMPLEMENTED` wording in the `CarPlayRx.kt:906-908` comment carries the same error and
+still needs a source fix.
 
 ### 6b. Wireless VideoConfig is a QuickTime sample-description box, not a bare `avcC`/`hvcC` record
 
@@ -188,6 +210,11 @@ On the wired path the opcode-1 VideoConfig frame is a bare configuration record
 parameter sets, decodes to 0 bytes, and produces a healthy-looking session with a permanently black
 screen. Fix: `unwrap_sample_description()` in `session.rs` scans for the nested atom; bare records
 (`body[0] == 1`) pass through untouched, so the wired path is unaffected.
+
+`session.rs` is not under `host/gm_ccpa` — it lives in the external `ccpa_custom` `receiver` crate
+(`crates/vendor/receiver/src/session.rs`, `fn unwrap_sample_description`), reached via the
+`receiver = { path = "../../../../crates/vendor/receiver", … }` dependency in
+`native/carplay-jni/Cargo.toml`. Do not hunt for it in this tree.
 
 This bug is latent in `ccpa_custom`'s own reference implementation too — its proven wireless capture
 runs `OCBM_FWD_ENC` and forwards encrypted frames to the host without ever parsing the config, so that
@@ -231,15 +258,65 @@ write cap). See `12_OBSERVED_FLOW.md` for the current phase-by-phase mechanics a
 
 ## 8. What to protect from the debloat (`reference/debloat/gm_debloat_full.sh`)
 
-Two of its actions conflict with this plan (verified against the script):
+`reference/kept_packages.txt` is the authoritative keep list (thirteen entries). Five of them collided
+with the script as it stood on 2026-07-01 (byte-exact at
+`git show b049810:host/gm_ccpa/reference/debloat/gm_debloat_full.sh`) — four package actions plus the
+settings block that goes with three of them:
 
-- **Disables the SoftAP** (`gm_debloat_full.sh:352-354,482-484`: `wifi_ap_enabled 0`,
-  `fid_hotspot_disable_status 1`) — the very `myChevrolet` hotspot the plan needs. Skip it / re-enable.
-- **Disables `com.android.vending`** (`:292,542`) — the in-motion path relies on the Play-attributed
-  install; the attribution is a stored string so it likely survives, but re-test in-motion after a
-  debloat.
-- **Keep `com.gm.hmi.connection`** (`:247`, in the disable list) — it hosts `WifiHotspotActivity`, the
-  only GUI to read the hotspot passphrase, which the app cannot read programmatically (§4).
+- **SoftAP disable** (former `SECTION 5: Disable Wi-Fi Hotspot / SoftAP`, plus the `--- Wi-Fi hotspot ---`
+  block of `run_status_report`): wrote `tether_supported 0`, `wifi_ap_enabled 0`,
+  `fid_hotspot_disable_status 1`, `share_hotspot_data_status 0`, `soft_ap_timeout_enabled 1`,
+  `tethering_allow 0` (all `settings put global`, persistent across reboots), tried to kill `hostapd`
+  (`cmd wifi stop-softap`, then an airplane-mode toggle), and the status report FAILED the run if
+  `hostapd` was up — the very `myChevrolet` hotspot the plan needs.
+- **`com.android.networkstack.tethering.inprocess`, `….tethering.inprocess.csm`, `….tethering.csm`**
+  (former `TETHER_PACKAGES` array, `pm disable-user` + `am force-stop` from Section 5) — three keep-list
+  entries; disabling them is what stopped `hostapd` respawning at boot.
+- **`com.android.vending`** (`DISABLE_PACKAGES`, plus a per-boot `am force-stop` in former Section 7) — the
+  in-motion display path checks `installerPackageName=com.android.vending`; whether a user-disabled
+  installer still satisfies that check is untested on this build, so it stays enabled. Re-test in-motion
+  after any debloat.
+- **`com.gm.hmi.connection`** (`BLOAT_PACKAGES` — the *uninstall* list, `pm uninstall --user`, not the
+  disable list; recoverable with `pm install-existing --user <u> com.gm.hmi.connection`) — hosts
+  `WifiHotspotActivity`, the only GUI that can read the hotspot passphrase, which the app cannot read
+  programmatically (§4). `brand.chevrolet.app.connection` stays in the uninstall list: it was removed and
+  the hotspot GUI still worked.
+
+The other eight keep-list entries (`com.google.android.gms`, `com.google.android.gsf`, `com.gm.vmsplugin`,
+`com.gm.updater`, `com.gm.hmi.hvac`, `brand.chevrolet.app.hvac`, `com.google.android.embedded.projection`,
+`com.gm.domain.server.delayed`) were already commented out of, or never in, the script.
+
+**Reconciled 2026-09-10.** Section 5 (hotspot) and Section 7 (Play Store force-stop) are deleted outright,
+not flag-gated — the script is meant to re-run every boot, the settings persist, and one accidental run
+poisons the unit until six settings are reverted by hand. `com.gm.hmi.connection` and
+`com.android.vending` are out of the action arrays. A pre-flight guard (`KEEP_FILE` / `is_kept` block,
+placed after the arrays so `--status` is guarded too) reads `kept_packages.txt` and hard-fails with
+exit 1 if any keep-list package appears in `BLOAT_PACKAGES` or `DISABLE_PACKAGES`;
+`remove_package`/`disable_package` refuse kept packages a second time. To disable one deliberately,
+delete its line from `kept_packages.txt` first. Note the copy under `old/gm_ccpa` is a *different*
+2026-09-08 variant ("hotspot kept enabled; Play Store/Services/Maps removed"), not this file's ancestor.
+
+**Revert recipe for a unit that already had Section 5 applied** — the exact inverse of the four settings
+it wrote that gate the hotspot, then re-enable the three tethering packages for both users:
+
+```
+adb shell settings put global wifi_ap_enabled 1
+adb shell settings put global fid_hotspot_disable_status 0
+adb shell settings put global tether_supported 1
+adb shell settings put global tethering_allow 1
+for u in 0 10; do
+  for p in com.android.networkstack.tethering.inprocess \
+           com.android.networkstack.tethering.inprocess.csm \
+           com.android.networkstack.tethering.csm; do
+    adb shell pm enable --user $u $p
+  done
+done
+```
+
+Section 5 also wrote `share_hotspot_data_status 0` and `soft_ap_timeout_enabled 1`; their stock values
+were never recorded, so they are not in the recipe — if the hotspot still misbehaves after the above,
+`settings get global` both and compare against a unit that never ran the script. Reboot afterwards:
+the tethering packages are what start `hostapd` at boot.
 
 ---
 

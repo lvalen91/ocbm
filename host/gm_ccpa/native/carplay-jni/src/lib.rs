@@ -9,7 +9,7 @@
 //! control TCP connection and hands bytes in and out. Note that the *data plane* is different —
 //! `receiver::session` binds its own eight sockets and spawns its own threads, so once a session
 //! starts, Rust owns those regardless. A later step should move the listener itself into Rust to
-//! recover `airplayd`'s connection-hijack behaviour and its TCP_KEEPIDLE tuning, neither of which
+//! recover `carplayd`'s connection-hijack behaviour and its TCP_KEEPIDLE tuning, neither of which
 //! Java sockets can express.
 //!
 //! **Lifetime note.** `ControlServer<'a, P, S>` borrows one `Identity`. That is the whole `'a`, and
@@ -129,7 +129,7 @@ unsafe fn android_log(tag: &std::ffi::CStr, msg: &std::ffi::CStr) {
 // Peer store — controller id -> Ed25519 long-term public key, persisted.
 //
 // Without persistence every session re-runs pair-setup; with a wrong one, pair-verify fails and you
-// debug crypto that is fine. `airplayd` uses DiskPeers for exactly this reason.
+// debug crypto that is fine. `carplayd` uses DiskPeers for exactly this reason.
 // ---------------------------------------------------------------------------------------------
 struct AppPeers {
     path: std::path::PathBuf,
@@ -353,7 +353,7 @@ pub extern "system" fn JNI_OnLoad(vm: JavaVM, _reserved: *mut libc::c_void) -> j
     std::env::set_var("CARPLAY_WIRELESS_AUDIO", "1");
     // sessionManagement — the gap against every proven wireless session.
     //
-    // wireless/src/av.rs:334 sets this unconditionally when it spawns airplayd, so the 2026-07-25
+    // `ensure_av_layer` in `crates/vendor/wireless/src/av.rs` puts `("CARPLAY_SESSION_MGMT", "1")` as a literal in the `envs` vec it hands `spawn_detached` — set on every carplayd it spawns, no flag or branch gates it — so the 2026-07-25
     // capture that reaches A/V declares `sessionManagementInfo` in /info AND echoes "sessionManagement"
     // in the SETUP response. We declared neither, and `sessionManagementInfo` is one of the six keys in
     // Apple's own per-feature /info validation cluster (carEndpoint_validateInfoResponseKeyPresentForFeature,
@@ -374,7 +374,7 @@ pub extern "system" fn JNI_OnLoad(vm: JavaVM, _reserved: *mut libc::c_void) -> j
     // THE LEVERS — and this was the bug.
     //
     // /info is generated ahead of time by `infogen` with these levers set, but the RUNNING server
-    // reads them again at SETUP to build `enabledFeatures` (session.rs:531-567). airplayd never has
+    // reads them again at SETUP to build `enabledFeatures` (session.rs:531-567). carplayd never has
     // this problem because it calls build_info(&load_device_config()) per connection, which applies
     // the YAML and sets the levers in one place. We ship a static /info, so nothing was setting them
     // here: /info advertised `hevcInfo` while enabledFeatures omitted "hevc".
@@ -504,7 +504,7 @@ pub extern "system" fn Java_zeno_gmccpa_pair_NativeCore_nativeInit<'l>(
         )));
         let server = ControlServer::new(
             identity(&pi, seed),
-            b"3939".to_vec(),   // the accessory setup code, as airplayd bakes it in
+            b"3939".to_vec(),   // the accessory setup code, as carplayd bakes it in
             peers,
             RemoteMfiSigner { relay, fast: false },
             info,
@@ -639,14 +639,14 @@ pub extern "system" fn Java_zeno_gmccpa_pair_NativeCore_nativeIsEncrypted(
 
 /// Send a single-touch HID report to the iPhone.
 ///
-/// `airplayd` takes touch over a `127.0.0.1:9110` socket because its producer (ocbmd) is a separate
+/// `carplayd` takes touch over a `127.0.0.1:9110` socket because its producer (ocbmd) is a separate
 /// process. We are both ends, so this skips the socket and the length-prefixed framing entirely and
 /// calls the same `events::send_hid_report(1, …)` the socket path ends at — one less hop on the
 /// latency-sensitive path, and no framing to desync.
 ///
 /// `nx`/`ny` are normalized 0.0–1.0 in the advertised display geometry; `phase` follows the OCBM
 /// vocabulary (0 = DOWN, 1 = MOVE, 2 = UP). For that vocabulary this is identical to
-/// `handle_input_frame` (airplayd main.rs:938). It deliberately DIVERGES out-of-vocabulary: the
+/// `handle_input_frame` (`fn handle_input_frame`, `ccpa/carplayd/src/main.rs`). It deliberately DIVERGES out-of-vocabulary: the
 /// reference maps any unknown phase to tip-DOWN, this maps it to tip-UP. Android has ACTION_CANCEL
 /// upstream, and a stuck tip turns the next tap into a drag, so unknown fails toward release.
 /// Returns false between sessions (no event channel), which is not an error.
@@ -683,7 +683,7 @@ pub extern "system" fn Java_zeno_gmccpa_pair_NativeCore_nativeTouch(
 /// release `[0]` — a held index repeats the key on iOS.
 ///
 /// This is the ONLY working transport path in this app's bridge role. The OCBM `INPUT_MEDIA_BTN`
-/// opcode terminates in the BOX's `airplayd`, which never spawns its A/V layer here and therefore
+/// opcode terminates in the BOX's `carplayd`, which never spawns its A/V layer here and therefore
 /// holds no event channel; this process owns the channel instead, exactly as it does for touch.
 ///
 /// Blocks on the same global event mutex as `nativeTouch` — call it off the binder/UI thread. Returns
@@ -728,7 +728,7 @@ pub extern "system" fn Java_zeno_gmccpa_pair_NativeCore_nativeMediaButton(
 /// the reason it is safe to toggle repeatedly inside a live session.
 ///
 /// The macOS host drives the same receiver function over OCBM (`CMD_LIMITED_UI_ON`/`_OFF`, dispatched
-/// in `ccpa/airplayd/src/main.rs`) because there the receiver is a separate process on the box. Here
+/// in `ccpa/carplayd/src/main.rs`) because there the receiver is a separate process on the box. Here
 /// the receiver is in-process behind this JNI boundary, so the box is not involved at all and no OCBM
 /// opcode is needed.
 ///

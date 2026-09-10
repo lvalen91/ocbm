@@ -30,11 +30,11 @@ State legend: **LANDED** (confirmed in source), **OPEN** (not started or not fin
 | — | `SessionHolder` — receiver/probe/sink made process-scoped | LANDED | `MainActivity.kt`, `CarPlayRx.kt` (search `SessionHolder`) | No |
 | — | `NativeCore.BUSY` bounds `nativeInit` on CORE contention | LANDED | `pair/NativeCore.kt:56` | No |
 | C3/T2.1 | Foreground service + manifest `<service>` | LANDED | `av/CarPlaySessionService.kt` | No |
-| T2.2 | Full session-ownership relocation into the service (survive Activity *destruction*, not just backgrounding) | **OPEN** | not found; service exists but the risky slice (moving `cpRx`/`ocbmProbe`/`avSink` ownership) is not confirmed done | No |
+| T2.2 | Full session-ownership relocation into the service (survive Activity *destruction*, not just backgrounding) — scoped to `cpRx`/`ocbmProbe`/`avSink` only; does NOT cover re-seeding the per-Activity observers (`MainActivity.sessionUp`, `VehicleStateWatcher`, the supervisor's phase) | **OPEN** | not found; service exists but the risky slice (moving `cpRx`/`ocbmProbe`/`avSink` ownership) is not confirmed done | No |
 | T4.8 | Serialize MainActivity command dispatcher through one executor; guard destructive verbs | LANDED | `MainActivity.kt` `cmdExecutor` (single-thread) | No |
 | — | `CarPlayActivity.onSessionEnded()` tears the screen down on session end | LANDED | `av/CarPlayActivity.kt:77` | Partial — device-observed cold-start bug this fixed; teardown path itself not separately re-driven |
-| — | `AacPlayer.reclaimFocus()` recovers media after permanent `AUDIOFOCUS_LOSS` | LANDED | `av/AacPlayer.kt:174` | No |
-| — | `AacPlayer` full focus-listener + duck/pause/restore (R6.7 item 31) | LANDED | `av/AacPlayer.kt:117-225` (`AudioFocusRequest`, `focusListener`) | No |
+| — | `AacPlayer.reclaimFocus()` recovers media after permanent `AUDIOFOCUS_LOSS` | LANDED | `av/AacPlayer.kt` `reclaimFocus()` | No |
+| — | `AacPlayer` full focus-listener + duck/pause/restore (R6.7 item 31) | LANDED | `av/AacPlayer.kt`: the `AudioFocusRequest.Builder(...)...setOnAudioFocusChangeListener(focusListener)` call in `requestFocus()`, and the `focusListener` lambda (ends just above `focusName()`) | No |
 | C4/M3/T3.1–3.4 | `OcbmClient` `mfiLock`, length-correlated MFi responses, `Mfi.parse` truncation reject, `Tlv8` consecutive-only coalescing | LANDED | `ocbm/OcbmClient.kt`, `ocbm/OcbmProto.kt` | No |
 | T5.3 | Gate `mfi-i2c-local` behind `local-mfi` (off on Android); route `iap_tunnel` through `Arc<Mutex<dyn MfiSigner>>` | LANDED | `ccpa_custom crates/vendor/receiver/Cargo.toml:56,60`; `native/carplay-jni/src/lib.rs:468` (`set_remote_signer`) | No |
 | — | Box-log streaming over `CH_FILE` | LANDED | `ocbm/OcbmProbe.kt:656-674`, `ocbm/OcbmClient.kt:507-567` | **Yes** |
@@ -47,21 +47,25 @@ State legend: **LANDED** (confirmed in source), **OPEN** (not started or not fin
 | T0.2/T0.3/T0.5 | R8 keep-rule for `MfiRelay`; `build_apk.sh` → android-32, fail-fast, `pipefail`; `Cargo.toml` lto/strip/codegen-units | LANDED | `netprobe_app/app/proguard-rules.pro:7-8`; `tools/build_apk.sh:3,10`; `Cargo.toml:60-64` | No |
 | T6.1 | Delete `AirPlayRx.kt` + wirings | LANDED | absent from tree | No |
 | T6.3 | Delete dead code (`unsafe impl Send for Native`, `_UNUSED`, `nativeReady`, etc.) | LANDED | `unsafe impl Send for Native` absent from `lib.rs` | No |
-| 5.6 | `ACTION_CANCEL` emits a MOVE-then-slop instead of a phantom tap | LANDED | `av/CarPlayActivity.kt:426` (`PHASE_CANCEL`) | No |
+| 5.6 | `ACTION_CANCEL` emits a MOVE-then-slop instead of a phantom tap | LANDED | `av/CarPlayActivity.kt`: `PHASE_CANCEL` const, the `MotionEvent.ACTION_CANCEL -> { primaryPointerId = -1; PHASE_CANCEL }` arm in `onTouch`, and the `phase == PHASE_CANCEL` consumer branch | No |
 | 5.10 | `SessionSupervisor`'s `server` field made `@Volatile`, bound before dispatch | LANDED | `CarPlayRx.kt:129,299-313` | No |
 | 4.2/N8 | Recovery ladder: cooling rung waits instead of promoting; `handoffTimer` cancelled in accept path | LANDED | `SessionSupervisor.escalate`, `onDialAccepted` | No |
 | 4.2/N8b | Recovery ladder stands its blind 20 s retry down on forward progress (`deferLadder`), so rung 2 cannot fire into a live handshake — device-observed tearing down a healthy session twice, 2026-09-08 | LANDED 2026-09-08 | `SessionSupervisor.deferLadder`, `onBtPhase`, `onDialAccepted`; `04_SYSTEM_MODEL.md` §"The recovery ladder" | **Not yet** — needs a run where a rung fires and a handshake starts inside the 20 s window |
-| Leak fixes | `MainActivity` command executor and `OcbmProbe` executor now `shutdown()` on teardown | LANDED | `MainActivity.kt:843`, `OcbmProbe.kt:634` | No |
+| Leak fixes | `MainActivity` command executor and `OcbmProbe` executor now `shutdown()` on teardown | LANDED | `MainActivity.kt` `cmdExecutor.shutdown()`; `ocbm/OcbmProbe.kt` `ops.shutdown()` | No |
 | 5.12 | Build-time test asserting `/info`↔TXT equality | **OPEN** | no test file found for this | No |
-| 5.2 | Per-scope (not shared) sweep budget in `LogCapture` | **OPEN**, low urgency (nothing lost in the corpus) | `logging/LogCapture.kt:262` still filters by shared `FILE_PREFIX` | No |
+| 5.2 | Per-scope (not shared) sweep budget in `LogCapture` | LANDED | `logging/LogFiles.kt:164-203` (`sweep()` ages/ceilings each scope, `mine`/`otherNamePrefix`, under its own `Budget`) | No |
 | N6 | Drop `CORE` lock across the blocking JNI upcall | **OPEN** — flagged in source as needing its own `deep`-tier pass | not attempted | No |
 | HEVC reader/decoder thread split (T4.5 residual) | Separate read/decode threads behind `hevc.reader.thread` flag | **OPEN** | no reader-thread flag found in `av/HevcRenderer.kt` | No |
+| N13 | TCP keepalive not armed **on the Kotlin path**: `java.net.Socket` cannot express keepalive idle/interval/count; `android.system.Os.setsockoptInt` can. The reference arms 3 s idle / 3 s interval / 3 probes (~12 s dead-link detect) | **OPEN** — found 2026-09-09, previously untracked; scope corrected 2026-09-09; evidence re-cited 2026-09-10 | Reference **does** implement it: `fn arm_keepalive` (`ccpa/carplayd/src/main.rs`), called per control connection in `run_pairing_server`. Gap is this app only: the `NOT YET IMPLEMENTED` comment block in `CarPlayRx.kt` (search `arm_keepalive`), which correctly names this as a Kotlin-side gap; its formerly stale cross-references are N16 | No |
+| N14 | `start_input_listener()` HID endpoint on `127.0.0.1:9110` not implemented **on the Kotlin path** — this app calls `send_hid_report` in-process instead of over the reference socket | **OPEN** — found 2026-09-09, previously untracked; scope corrected 2026-09-09 | Reference **does** implement it: `fn start_input_listener` (`ccpa/carplayd/src/main.rs`, binds `127.0.0.1:9110`; started from `main()` before the accept loop). Gap is this app only: the doc comment above `Java_zeno_gmccpa_pair_NativeCore_nativeTouch` in `native/carplay-jni/src/lib.rs` (which now cites `fn handle_input_frame`, `ccpa/carplayd/src/main.rs`; its earlier `airplayd main.rs:938` citation was stale) | No |
+| N15 | Per-connection `build_info(&load_device_config())` not implemented **on the Kotlin path** — a static `/info` asset ships instead of a per-connection rebuild | **OPEN** — found 2026-09-09, previously untracked; scope corrected 2026-09-09 | Reference **does** implement it: `pub fn build_info` (`crates/vendor/receiver/src/info.rs`), `fn load_device_config` (`ccpa/carplayd/src/main.rs`) called per control connection in `run_pairing_server`. Gap is this app only: the `build_info(&load_device_config()) per connection` comment block in `JNI_OnLoad` (`native/carplay-jni/src/lib.rs`), which calls `receiver::info::build_info(&cfg)` once for its side effect | No |
+| N16 | Three stale cross-references in one source comment — the `NOT YET IMPLEMENTED` block in `CarPlayRx.kt` (search `arm_keepalive`): (1) pointed at `01_FINDINGS.md` §8 for these gaps, but §8 is now "What to protect from the debloat" — correct tracking is N13–N15 here; (2) cited `main.rs:407-432` (no binary named) for `arm_keepalive` — actually `fn arm_keepalive` in `ccpa/carplayd/src/main.rs`; (3) cited `server.rs:119` for `av_idle_ms` — actually `ControlServer::av_idle_ms` in `crates/vendor/receiver/src/server.rs` | **FIXED in working tree 2026-09-10** (concurrent Kotlin edit; mark LANDED once committed) — found 2026-09-09 | Committed `CarPlayRx.kt` at `HEAD` still carries all three (`see 01_FINDINGS §8`, `server.rs:119`, `main.rs:407-432`); the working-tree block now cites rows N13–N16 here, `fn arm_keepalive` (`ccpa/carplayd/src/main.rs`) and `ControlServer::av_idle_ms()` (`crates/vendor/receiver/src/server.rs`) by symbol | No |
 
 ### Discovery / mDNS (R6.1–R6.2, 2026-08-27)
 
 | ID | What | State | Evidence | Device-verified |
 |---|---|---|---|---|
-| N12 | `capture scope=… effective=… read_logs=…` prints only resolved values, on the pump thread | LANDED | `logging/LogCapture.kt:145-147,395,425` (`resolved: Boolean`) | **Yes** (2026-08-27 deploy log) |
+| N12 | `capturing requested=… effective=… read_logs=…` prints only resolved values, on the pump thread | LANDED | `logging/LogCapture.kt`: `val resolved: Boolean` on the status snapshot, and the pump's `log.i("capturing requested=…")` print | **Yes** (2026-08-27 deploy log) |
 | A1 | Two-arg `joinGroup` at all three 5353 sites | LANDED | `MdnsResponder.kt:90`, `MdnsInspect.kt:43,154` | **Yes** — br0 multicast users 1→2, `ENODEV` gone |
 | — | mdnsd leg decision | RESOLVED — A1 alone was sufficient; speculative NsdManager re-registration dropped, not built | doc record only | **Yes** |
 | RFC 6762 hygiene | AAAA answered with A + NSEC; announce spacing 250 ms → 1 s | LANDED | `MdnsResponder.kt:190-197,281` | Partial (A1 verified; AAAA/NSEC path not separately isolated) |
@@ -78,8 +82,8 @@ State legend: **LANDED** (confirmed in source), **OPEN** (not started or not fin
 | 5.7 | BT SYN resend capped at 10 total | LANDED | `crates/vendor/wireless/src/bt_driver.rs:141-226` (`SYN_RESEND_MAX = 9`, "audit 5.7") | Unverified this pass |
 | 3.4/3.5 | Split HOST_GONE emission; `F_REPLAY` bit2 semantics | **UNVERIFIED** | could not locate the source module (not under `crates/` or `tools/` in this checkout) | No |
 | R6.5 | TTL-gated deploy trial / dead-man before flashing a daemon | Process step, not code — treat as standing procedure, not a landed/open item | — | — |
-| R6.6.27–28 | Rotate AP passphrase; rotate `edSeed`/setup code fallback | **OPEN** | `crates/vendor/pairing/src/srp.rs`, `crates/vendor/rx-connect/src/main.rs:29` still carry the hardcoded `b"3939"` / `PI_FALLBACK` | No |
-| R6.6.29 | Scrub tracked credential files, widen `RE_WPA` redactor | **OPEN** | `ccpa_custom/pi/evidence/hostapd_5g.conf` still tracked; no `RE_WPA` symbol found in this checkout | No |
+| R6.6.27–28 | Rotate AP passphrase; rotate `edSeed`/setup code fallback | **OPEN** | Corrected 2026-09-09: the `crates/vendor/pairing/src/srp.rs` `b"3939"` citation was a false positive — every occurrence (`:205,218,226,231,232`) sits inside `#[cfg(test)] mod tests` (opens `:195`, EOF `:236`), a test fixture never read at runtime, not a shippable credential; dropped as evidence. The real setup-code fallback is `const PI_FALLBACK` in `ccpa/carplayd/src/main.rs:526` (read `:539`) — the old `crates/vendor/rx-connect/src/main.rs:29` pointer was stale, that crate no longer exists in this checkout and appears to have been merged into `carplayd`. `edSeed` rotation remains open per T6.5 above | No |
+| R6.6.29 | Scrub tracked credential files, widen `RE_WPA` redactor | **OPEN** | `ccpa_custom/pi/evidence/hostapd_5g.conf` still tracked; no box-side `RE_WPA` symbol found in `ccpa_custom`. Scoping note (2026-09-09): an `RE_WPA` symbol does exist, but in this repo at `logging/LogExport.kt:517` — that is app-side logcat redaction, not the box-side credential-file scrub this item is about, and must not be mistaken for coverage of it | No |
 
 **On the two open box-side credential items (R6.6.27–29): these are real, unremediated exposures in
 a sibling repo (`ccpa_custom`). This doc does not fix them (out of scope for this file) — flagging
@@ -103,6 +107,12 @@ Kept here because a one-line ledger entry isn't enough to act on.
   `CarPlaySessionService.kt` before assuming it's done. Land behind a `service.owner` flag if not:
   empty FGS → AvSink/AacPlayer → OCBM → native core, A/V last (re-attach must preserve both the
   `@Volatile` renderer publish and the `:9001` socket close that forces producer re-dial).
+  **Scope correction:** T2.2 as designed only ever covered `cpRx`/`ocbmProbe`/`avSink` ownership. It
+  does NOT cover re-seeding the per-Activity observers on an Activity recreate —
+  `MainActivity.sessionUp` (`MainActivity.kt:52`), `VehicleStateWatcher` (`MainActivity.kt:47`, `by
+  lazy` per-Activity instance), and the supervisor's phase tracking are all still Activity-owned state
+  with no relocation path of their own. That is a separate defect class; do not read T2.2 landing as
+  closing it.
 - **T5.1 — env-var config → `nativeInit` config.** Still the `−16720` desync class: `/info` is
   static-baked while `CARPLAY_SESSION_MGMT` etc. are env vars set in `JNI_OnLoad`
   (`lib.rs:351-370`). Fix: one explicit config struct through `nativeInit`; generate `/info` in Rust
@@ -122,9 +132,10 @@ Kept here because a one-line ledger entry isn't enough to act on.
   variable at a time.
 - **5.12 — `/info`↔TXT build-time test.** No test asserts `info.bplist` against the Kotlin TXT
   constants; a desync still only fails on hardware as pair-verify `-16720`.
-- **5.2 — per-scope sweep budget.** `LogCapture`'s 64 MB ceiling is shared across scopes instead of
-  per-`Scope`. Low urgency — no `ceiling: dropped` line has ever appeared in the corpus, max on-disk
-  observed is 7.69 MB.
+- **5.2 — per-scope sweep budget. LANDED.** `LogFiles.sweep()` (`logging/LogFiles.kt:164-203`) ages
+  and ceilings each scope (`netprobe-own-` / `netprobe-os-`) independently under its own `Budget`,
+  rather than applying one shared 64 MB ceiling across scopes — the earlier "shared ceiling" read of
+  `LogCapture.kt` was stale; that file only lists files, it does not sweep.
 - **N6 — drop `CORE` across the blocking JNI upcall.** Flagged in source as genuinely subtle;
   implement at `deep` tier, its own commit. The motivating "10 s phone timeout" figure is unsourced
   (only exists in 2026-08-27 comments) — the held-lock structure is real, the urgency claim was not.

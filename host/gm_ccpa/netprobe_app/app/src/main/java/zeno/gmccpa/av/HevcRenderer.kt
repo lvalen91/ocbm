@@ -19,10 +19,11 @@ import java.util.concurrent.atomic.AtomicLong
  *  - MIME `video/hevc`, and **`csd-0` is VPS+SPS+PPS concatenated** as one buffer. H.264 splits SPS into
  *    `csd-0` and PPS into `csd-1`; HEVC does not — passing them separately fails to configure.
  *  - Parameter sets arrive as the first Annex-B payload on the seam (the receiver converts the `hvcC`
- *    record — `01_FINDINGS.md` §8b), so we buffer until VPS(32)+SPS(33)+PPS(34) are all present.
+ *    record — `01_FINDINGS.md` §6b), so we buffer until VPS(32)+SPS(33)+PPS(34) are all present.
  *
  * **Access units, not NALs.** MediaCodec expects one AU per input buffer, and the seam already gives us
- * exactly that: it is message-framed `[u32 BE len][payload]` (`forward_screen`, session.rs:1768) with one
+ * exactly that: it is message-framed `[u32 BE len][payload]` (`fn forward_screen` / `fn forward_screen2`,
+ * `crates/vendor/receiver/src/session.rs`) with one
  * message per screen message. Treating it as a raw byte stream both loses those boundaries and appends
  * the next message's 4 length bytes to every trailing NAL.
  *
@@ -88,7 +89,8 @@ class HevcRenderer(
      * Consume the seam until it closes. Blocking; call on its own thread.
      *
      * The seam is **message-framed**: `[u32 BE len][payload]`, one message per screen message
-     * (`forward_screen`, session.rs:1768). Each payload is either the converted parameter sets
+     * (`fn forward_screen` / `fn forward_screen2`, `crates/vendor/receiver/src/session.rs`). Each
+     * payload is either the converted parameter sets
      * (VPS+SPS+PPS from the opcode-1 VideoConfig) or exactly one Annex-B access unit. That framing is
      * the whole point — TCP hides write boundaries, and the prefix hands us clean AU boundaries for
      * free, so no start-code heuristics or first_slice parsing are needed to know where a frame ends.
@@ -111,7 +113,8 @@ class HevcRenderer(
                     break
                 }
                 // A 0-length message is NOT a desync: forward_screen is called unconditionally with
-                // whatever the conversion produced (session.rs:2074), and an empty VideoConfig is
+                // whatever the conversion produced (`spawn_screen` in
+                // `crates/vendor/receiver/src/session.rs`), and an empty VideoConfig is
                 // exactly what this head unit emitted before the sample-description fix. Treating it
                 // as desync drops the connection and churns ForceKeyFrame on every reconnect.
                 if (len == 0) continue
@@ -180,7 +183,10 @@ class HevcRenderer(
         // Skip only a PURE parameter-set message — csd-0 already carries those. A mixed message
         // (parameter sets + VCL slices, which HEVC IDR access units routinely are) must be fed whole:
         // MediaCodec accepts in-band parameter sets inside an Annex-B AU, and dropping it would throw
-        // away the keyframe. ccpa_custom's proven consumer does the same (H264Decoder.swift:236-241).
+        // away the keyframe. ccpa_custom's macOS consumer reaches the same outcome by the other route:
+        // `performDecodeAVCCWithParamSets` (`VideoDecoder.swift`) diffs the in-band sets, rebuilds the
+        // format if they changed, and still decodes the AU's displayable NALs — VideoToolbox needs
+        // them out-of-band, MediaCodec takes them in-band.
         if (sawParamSet && !sawVcl) return
 
         if (!sawKeyframe) {

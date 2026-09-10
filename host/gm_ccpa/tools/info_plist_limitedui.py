@@ -25,7 +25,7 @@ WHAT THE BOX SERVES, AND WHY WE MIRROR IT
 -----------------------------------------
 The macOS path builds /info through `receiver::info` from app-pushed config: the Settings window
 emits a `limitedUIConfig:` YAML block, `OCBMClient` pushes it on SUBSCRIBE, `ocbmd` lands it at
-`/tmp/carplay_cfg.yaml`, `airplayd` parses it per control connection, and `vehicle_config.rs` turns it
+`/tmp/carplay_cfg.yaml`, `carplayd` parses it per control connection, and `vehicle_config.rs` turns it
 into `limited_ui_elements`. With the owner's current settings that resolves to:
 
     ["softKeyboard", "softPhoneKeypad", "musicLists", "longUserAlert"]

@@ -73,12 +73,12 @@ RFCOMM link stays up and idles — in the happy path only the phone ever closes 
 | # | Stage | Detail |
 |---|---|---|
 | C1 | Phone joins | `Sending iAP in-car wifi notification` → `setting WiFiManager to in-car` → `StartBonjourForWiFi … reason: initiated by CarKit` |
-| C2 | Advertise | `_airplay._tcp`, TXT: `deviceid`, `features`, `flags=0x4`, `model`, `protovers=1.0`, `pi`, `srcvers`. No `pk` key — the Ed25519 LTPK is exchanged inside pairing, not advertised. |
+| C2 | Advertise | `_airplay._tcp`, TXT: `deviceid`, `features`, `flags=0x4`, `model`, `protovers=1.0`, `pi`, `srcvers`. No `pk` key — the Ed25519 LTPK is exchanged inside pairing, not advertised. **Unverified-as-of-2026-09-09**: not traced into the TXT builder in `CarPlayRx.kt`; taken as reported, not re-checked against this repo's code. |
 | C3 | **Dial out** | Discovery is bidirectional. The accessory also browses `_carplay-ctrl._tcp` and sends the phone `GET /ctrl-int/1/connect` with an `AirPlay-Receiver-Device-ID` header. Surfaces phone-side as `HandleControlServerEvent command 'connect'`. |
 | C4 | Phone connects in | Resolves SRV → connects TCP. ~8 ms for SRV + DNS + connect. |
 
 App-side: `CarPlayRx.kt` advertises `_airplay._tcp` while browsing `_carplay-ctrl._tcp`
-(`CarPlayRx.kt:325`) and dials the resolved peer with `GET /ctrl-int/1/connect`
+(`CarPlayRx.kt:320`) and dials the resolved peer with `GET /ctrl-int/1/connect`
 (`CarPlayRx.kt:148,289,464-505`); the phone's `_carplay-ctrl` port changes every session.
 
 > **The `features` TXT value is load-bearing.** Its high word bit 32 (Car) is what makes iOS open RTSP
@@ -109,7 +109,7 @@ decrypt.
 `/auth-setup` runs inside the already-encrypted channel — an MFi attestation layered on top of
 pair-verify, not a bootstrap for it. Sequence: X25519 ECDH → SHA-1-derived AES-128-CTR key/IV →
 `create_signature(SHA1(ourPK‖peerPK))` **then** `copy_certificate()` (signature first,
-`ccpa_custom/crates/vendor/receiver/src/iap_tunnel.rs:594-626`) → M2 of 1113 bytes, with the certificate
+`ccpa_custom/crates/vendor/mfi/src/sap.rs:127-128`) → M2 of 1113 bytes, with the certificate
 in the clear and only the signature AES-encrypted.
 
 ---
@@ -212,7 +212,7 @@ metadata plane): 30.5 minutes, 58,068 video + 93,314 audio frames, zero failures
 **Teardown** is partial or full, distinguished by presence *and non-emptiness* of `streams[]` — a
 non-empty array stops just those streams and keeps the session; absent, non-array, or an **empty**
 array means full teardown
-(`ccpa_custom/crates/vendor/receiver/src/session.rs:1663-1682`). Treating `streams: []` as partial is a
+(`ccpa_custom/crates/vendor/receiver/src/session.rs:1737-1791`). Treating `streams: []` as partial is a
 real bug that leaks every stream thread — in Rust, `as_array()` returns `Some(&[])` for it, so test the
 length, not the `Option`.
 
@@ -310,9 +310,18 @@ metadata/controls plane entirely.
 coprocessor's signature poll. A USB round trip of a few hundred bytes adds noise against a 10 s
 phone-side budget.
 
-**But budget the pathological case.** The poll is bounded at 2.5 s by a wall-clock deadline in the app's
-own driver, not by firmware — it exists because an older iteration-count loop was observed running ~7.1
-s under chip NAK. With up to 3 MFi retries that is ~6.3 s against the phone's 10 s request timeout. The
+**But budget the pathological case.** The poll is bounded at 2.5 s by a wall-clock deadline, not by
+firmware — it exists because an older iteration-count loop was observed running ~7.1 s under chip NAK.
+**That deadline is box-side, not the app's:** `const SIGN_POLL_DEADLINE = Duration::from_millis(2500)`
+inside `Mfi::sign()` in `ccpa/ocbmd/src/main.rs` — `ocbmd`'s own I2C driver — reached from `handle_mfi`
+via `self.mfi.as_ref().and_then(|m| m.sign(…))`. It is `ocbmd` polling its local I2C chip, on the box,
+underneath the relay. (`crates/vendor/mfi-i2c-local/src/lib.rs` `sign()` carries an identical
+`SIGN_POLL_DEADLINE`, but that crate serves `mfid` and the reference `carplayd` (through `receiver`'s
+`local-mfi` feature), so it is not on the `CH_MFI` path this app hits.) The app's own OCBM driver sets
+separate, larger budgets on top of that relay call — `OcbmClient.mfiCertificate(timeoutMs = 12_000)` and
+`OcbmClient.mfiSign(timeoutMs = 15_000)` — which bound the USB round trip plus the box's own 2.5 s poll,
+not a second poll of their own.
+With up to 3 MFi retries the box-side poll is ~6.3 s against the phone's 10 s request timeout. The
 relay does not add meaningfully to this, but it leaves less headroom than the happy-path number
 suggests.
 

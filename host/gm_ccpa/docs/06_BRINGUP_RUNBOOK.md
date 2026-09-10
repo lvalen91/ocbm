@@ -88,14 +88,14 @@ adb install -r -g --user 10 apk/netprobe-debug-latest.apk
 adb install -i com.android.vending -r -g --user 10 apk/netprobe-debug-latest.apk
 ```
 
-The app installs as package `zeno.gmccpa` (the GM USB fixed-handler squat — a deliberate
-installer choice, not a bug). Every `am`/`pm`/`appops`/`dumpsys` command below targets that package
-name; source classes are still `zeno.gmccpa.*`, so activity components are
-`zeno.gmccpa/zeno.gmccpa.<Activity>`. A command naming `zeno.gmccpa` as the package fails
-silently — empty userId, empty tables — because no such package is installed.
+The app installs as package `zeno.gmccpa` (the GM USB fixed-handler squat, `android.car.usb.handler`,
+was reverted 2026-09-08 — TRUCK-VERIFIED; this is now just the app's own package name). Every
+`am`/`pm`/`appops`/`dumpsys` command below targets that package name; source classes are still
+`zeno.gmccpa.*`, so activity components are `zeno.gmccpa/zeno.gmccpa.<Activity>`.
 
-`--user 10` is mandatory: a user-0 install does not get the silent USB grant, so the attach dialog and
-`ACTION_USB_DEVICE_ATTACHED` routing never fire.
+`--user 10` is mandatory: a user-0 install does not get the attach dialog and
+`ACTION_USB_DEVICE_ATTACHED` routing to fire. There is no silent USB grant anymore — the ordinary
+attach resolver and its one-time permission dialog handle it on user 10.
 
 ### Run (scriptable — no tapping)
 
@@ -126,7 +126,7 @@ as `--es pass`.
 the command.
 
 ```bash
-cd ../ccpa_custom
+cd ../..   # host/gm_ccpa -> ccpa_custom root; `cd ../ccpa_custom` does not exist (corrected 2026-09-09)
 bash scratchpad/uart_cmd.sh /tmp/u1.txt 8 'tail -40 /tmp/wl.log'   # BT / iAP2 / handoff trace
 tr -d '\r' < /tmp/u1.txt | tail -40
 bash scratchpad/uart_cmd.sh /tmp/u2.txt 8 'grep -E "^(ssid|channel)=" /etc/hostapd.conf'
@@ -430,8 +430,9 @@ receiver's forwarder then connects to `nc` instead of `AvSink`.
 ## 7.1 Bringing up a full A/V session (the working procedure)
 
 This is the sequence that produced the working session in
-`../evidence/session_2026-08-05/WORKING_SESSION.md`.
-Assumes the CCPA adapter is on USB and the iPhone is paired to the vehicle over Bluetooth.
+`~/Documents/carlink/old/gm_ccpa/evidence/session_2026-08-05/WORKING_SESSION.md` (the `evidence/`
+archive lives in that standalone checkout, not under this tree — see `00_HANDOFF.md` §"Document
+policy"). Assumes the CCPA adapter is on USB and the iPhone is paired to the vehicle over Bluetooth.
 
 ### 0. Revive logging first — silence is not evidence
 ```bash
@@ -474,7 +475,7 @@ adb shell am start -n zeno.gmccpa/.MainActivity --es run av_stats
 ```
 `MainActivity` commands are safe during a live session — they detach the video renderer while audio and
 the seams keep running; `carplay_ui` reattaches it
-(`../evidence/session_2026-08-05/WORKING_SESSION.md`
+(`~/Documents/carlink/old/gm_ccpa/evidence/session_2026-08-05/WORKING_SESSION.md`
 §5).
 
 ### 4. Restore the screen after anything backgrounds it
@@ -515,7 +516,9 @@ much later as "CarPlay just doesn't start."
 ### Trap 1 — a credential-less `CT_SUBSCRIBE` pins `0x5703` to the box's stock SSID for the whole session
 
 `CT_SUBSCRIBE` is the radio-wake edge, and the box applies host-supplied Wi-Fi credentials only inside
-`wireless_up()` (`session_supervisor.sh` → `apply_host_wifi_creds`, called at `:547`), which runs on the
+`wireless_up()` (`session_supervisor.sh` → `apply_host_wifi_creds`, defined at `:827` and called at
+`:920` inside `wireless_up()` itself at `:863` — corrected 2026-09-09, it used to say the call was at
+`:547`, which is unrelated escalation/health-check logic), which runs on the
 `host_present` 0→1 edge.
 
 > Subscribe once without credentials and the wireless stack comes up against the box's stock
@@ -535,7 +538,7 @@ rather than proceeding into an unrecoverable state.
 detector, then relaunch with `--es ssid/--es pass`. Verify before trusting it:
 
 ```bash
-bash scratchpad/uart_cmd.sh /tmp/h.txt 11 'cat /etc/hostapd.conf'   # in ccpa_custom
+bash scratchpad/uart_cmd.sh /tmp/h.txt 11 'cat /etc/hostapd.conf'   # in ccpa_custom root (cd ../.. from here)
 tr -d '\r' < /tmp/h.txt | grep -aE '^ssid=|^channel=|^wpa_passphrase='
 ```
 Expect `ssid=myChevrolet 32D4`. If it still says `ccpa-b0df`, the credentials did not reach
@@ -611,6 +614,18 @@ adb shell pm grant zeno.gmccpa android.permission.READ_LOGS
 adb shell am force-stop zeno.gmccpa       # NOT optional — see below
 ```
 
+**The app's own on-screen/logcat suggestion is safe to copy again** (fixed 2026-09-09). It was not,
+between 2026-09-08 and 2026-09-09: `LogCapture.kt`'s `GRANT_CMD`/`FORCE_STOP_CMD` (pre-fix file
+byte-exact at commit `b049810` —
+`git show b049810:host/gm_ccpa/netprobe_app/app/src/main/java/zeno/gmccpa/logging/LogCapture.kt` —
+constants at `:163`/`:166`, printed at `:572`, `:608-609`, and into the capture-file header's
+`degraded :` line at `:794`; the header's `app :` line at `:790` hard-coded the same literal directly)
+survived the package-squat revert with the dead package `android.car.usb.handler` hard-coded, so a
+copy-pasted `pm grant` targeted a package not installed on the unit and failed. They are now
+`LogCapture.grantCmd(ctx)`/`forceStopCmd(ctx)`, built from the running app's `ctx.packageName`, so
+the printed remediation and the capture-file header (`header()`'s `app :` and `degraded :` lines)
+always name whatever package is actually installed. The commands above remain correct.
+
 **The force-stop is load-bearing.** `READ_LOGS` maps to the supplementary gid `log`, and supplementary
 gids are assigned at fork. An already-running process keeps reporting `GRANTED` from
 `checkSelfPermission` while `logd` still filters it to its own uid — permission says yes, the kernel
@@ -649,7 +664,7 @@ line per session is.
 
 | Question | Grep |
 |---|---|
-| Did the silent USB grant hold? | `grep 'USB HANDLER' … held=` and `grep 'prompted=' *.log` |
+| Did the USB permission grant land (dialog or cached "always")? | `grep 'USB HANDLER' … held=` and `grep 'prompted=' *.log` — `held=`/`prompted=` are legacy field names from the squat-era diagnostics (`UsbAttachActivity.kt`), kept on purpose post-revert since they still answer the same question about the ordinary attach flow |
 | Where does Bluetooth stall? | `grep -o 'btp_max=[A-Z_]*'` — `none`/`LINK_UP` = box never got RFCOMM; `AUTHENTICATING` = MFi; `IDENTIFYING` = iAP2 identification; `WIFI_HANDOFF` = BT succeeded, look at Wi-Fi |
 | Bond asymmetry (the "forget it in iOS and it works" shape) | `grep 'bond_changed=true'` |
 | Sessions that never produced video | `grep 'no_video=true'` |

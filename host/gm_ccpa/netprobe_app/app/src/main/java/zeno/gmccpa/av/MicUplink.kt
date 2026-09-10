@@ -30,14 +30,13 @@ import java.util.concurrent.atomic.AtomicLong
  * **Connect eagerly, not on first data.** The same socket carries the gate, so a data-triggered
  * connect deadlocks: no connection → no gate → no capture → no data.
  *
- ## Partial blocker — this class IS live, contrary to an earlier claim here
+ * ## This class IS live — both uplink encoders are compiled
  *
- * `Cargo.toml` enables `mic-uplink`, so the **wired PCM uplink path IS compiled**; only the ELD
- * encoder (`mic-uplink-eld`, needing libfdk-aac cross-built for `x86_64-linux-android`) is absent.
- * `/info` advertises FOUR input-capable entries, not three: the `compatibility` type-100 entry is
- * PCM 16 kHz mono, which `uplink::configure` arms normally. So if iOS SETUPs that stream with
- * `input=true`, this client gates on and works end to end. Only the three AAC-ELD entries hit the
- * `mic-uplink-eld` bail. Do not assume this class is dormant. See `docs/13_AUDIO_ROUTING.md` §4.
+ * `carplay-jni/Cargo.toml` enables receiver `mic-uplink` (wired big-endian PCM) and defaults
+ * `mic-uplink-eld` ON, so the truck x86_64 `.so` built by `tools/build_apk.sh` carries libfdk-aac
+ * and the AAC-ELD entries in `/info` are real; the mic uplink is owner-confirmed on the truck
+ * (`docs/13_AUDIO_ROUTING.md` §4). The ELD bail exists only for an aarch64/Pi build made with
+ * `--no-default-features`. Do not assume this class is dormant.
  */
 class MicUplink {
 
@@ -158,7 +157,9 @@ class MicUplink {
                 while (off < chunk && capturing.get()) {
                     val n = rec.read(buf, off, chunk - off)
                     if (n <= 0) {
-                        // ERROR_DEAD_OBJECT is recoverable (audioserver restart / route change). The
+                        // Any non-positive read (0, ERROR, ERROR_BAD_VALUE, ERROR_INVALID_OPERATION,
+                        // ERROR_DEAD_OBJECT) ends this capture; all are treated alike and none is
+                        // retried here — the next `uplink on` re-arms. The
                         // flag MUST be cleared here: the peer only sends `uplink off` on full control
                         // teardown, not per-SETUP, so the gate edge that would have reset it may never
                         // arrive — and iOS re-SETUPs MainAudio several times per Siri turn. Leaving it

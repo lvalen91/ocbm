@@ -42,7 +42,9 @@ import kotlin.concurrent.withLock
  *   makes that explicit. Sees `NETPROBE` (Kotlin) and `[rust ]` (JNI core) and nothing else.
  * - [Scope.WHOLE_OS] — needs `android.permission.READ_LOGS`, whose protection level is
  *   `signature|privileged|development`. The `development` bit is why it is reachable at all:
- *   `adb shell pm grant android.car.usb.handler android.permission.READ_LOGS`. Two operational
+ *   `adb shell pm grant <our-package> android.permission.READ_LOGS` — see [grantCmd], which fills
+ *   in the package from the running app rather than a literal (it was a literal, and it went stale
+ *   at the 2026-09-08 package revert; fixed 2026-09-09). Two operational
  *   traps, both of which this class detects and logs rather than failing silently:
  *   1. `pm grant` REJECTS a permission the manifest does not request. `AndroidManifest.xml` must
  *      carry `<uses-permission android:name="android.permission.READ_LOGS"/>` or the grant errors
@@ -159,11 +161,29 @@ object LogCapture {
 
     const val LOGS_DIR = "logs"
 
-    /** The `pm grant` that unlocks [Scope.WHOLE_OS]. Logged verbatim whenever the permission is missing. */
-    const val GRANT_CMD = "adb shell pm grant android.car.usb.handler android.permission.READ_LOGS"
+    /**
+     * The `pm grant` that unlocks [Scope.WHOLE_OS]. Logged verbatim whenever the permission is
+     * missing, so the operator can copy-paste it.
+     *
+     * The package name is read from the running app ([Context.getPackageName]) and never written
+     * down here. It used to be the `const val GRANT_CMD = "… android.car.usb.handler …"` literal,
+     * which silently went stale when the fixed-handler package squat was reverted to `zeno.gmccpa`
+     * on 2026-09-08: the app kept printing a grant recipe for a package that no longer exists on
+     * the device, and `pm grant` fails with nothing but "Unknown package". Derived, it cannot drift
+     * across the next rename (fixed 2026-09-09). BuildConfig is deliberately NOT used — the
+     * canonical build (`tools/build_apk.sh`) is a raw kotlinc compile that generates no
+     * BuildConfig class, and this module does not enable `buildFeatures { buildConfig true }`.
+     */
+    fun grantCmd(ctx: Context): String = grantCmd(ctx.packageName)
+
+    /** @see grantCmd */
+    fun grantCmd(pkg: String): String = "adb shell pm grant $pkg android.permission.READ_LOGS"
 
     /** …and the half everyone forgets: the `log` gid is only picked up by a freshly forked process. */
-    const val FORCE_STOP_CMD = "adb shell am force-stop android.car.usb.handler"
+    fun forceStopCmd(ctx: Context): String = forceStopCmd(ctx.packageName)
+
+    /** @see forceStopCmd */
+    fun forceStopCmd(pkg: String): String = "adb shell am force-stop $pkg"
 
     /**
      * V for what the two open faults live in, `*:I` under everything else. Derived from a real
@@ -569,7 +589,7 @@ private class Session(private val ctx: Context, private val cfg: LogCapture.Conf
         effectiveScope = LogCapture.Scope.OWN_PROCESS
         val why = "READ_LOGS reports granted but only our own pid is visible — the `log` gid is " +
             "assigned at fork, so the grant does not reach a process that was already running. " +
-            "Restart the app: ${LogCapture.FORCE_STOP_CMD}"
+            "Restart the app: ${LogCapture.forceStopCmd(ctx)}"
         log.w(why)
         enqueue(marker("SCOPE DEGRADED — $why"), critical = true)
     }
@@ -605,8 +625,8 @@ private class Session(private val ctx: Context, private val cfg: LogCapture.Conf
             effectiveScope = LogCapture.Scope.OWN_PROCESS
             log.w("READ_LOGS not held — capturing own process only. To capture the whole OS:")
             log.w("  1. AndroidManifest.xml must declare <uses-permission android:name=\"android.permission.READ_LOGS\"/> (pm grant rejects an undeclared permission)")
-            log.w("  2. ${LogCapture.GRANT_CMD}")
-            log.w("  3. ${LogCapture.FORCE_STOP_CMD}   (the `log` gid is only picked up by a fresh process)")
+            log.w("  2. ${LogCapture.grantCmd(ctx)}")
+            log.w("  3. ${LogCapture.forceStopCmd(ctx)}   (the `log` gid is only picked up by a fresh process)")
         }
         scopeResolved = true
     }
@@ -787,11 +807,11 @@ private class Session(private val ctx: Context, private val cfg: LogCapture.Conf
         appendLine("  file         : ${file.name}")
         appendLine("  session start: ${isoLocal(startedAtMs)}  /  ${isoUtc(startedAtMs)}")
         appendLine("  file opened  : ${isoLocal(System.currentTimeMillis())}")
-        appendLine("  app          : ${cfg.appVersion} (applicationId android.car.usb.handler, classes zeno.gmccpa.*)")
+        appendLine("  app          : ${cfg.appVersion} (applicationId ${ctx.packageName}, classes zeno.gmccpa.*)")
         appendLine("  device       : ${Build.MANUFACTURER} ${Build.MODEL} / ${Build.DEVICE} / ${Build.FINGERPRINT}")
         appendLine("  android      : ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
         appendLine("  scope        : $effectiveScope (requested ${cfg.scope}, READ_LOGS granted=$readLogsGranted)")
-        if (effectiveScope != cfg.scope) appendLine("  degraded     : ${LogCapture.GRANT_CMD} then ${LogCapture.FORCE_STOP_CMD}")
+        if (effectiveScope != cfg.scope) appendLine("  degraded     : ${LogCapture.grantCmd(ctx)} then ${LogCapture.forceStopCmd(ctx)}")
         appendLine("  pid          : ${android.os.Process.myPid()}")
         appendLine("  buffers ok   : ${buffersOk.joinToString(",").ifEmpty { "(none)" }}")
         appendLine("  buffers fail : ${buffersFailed.joinToString(" ").ifEmpty { "(none)" }}")

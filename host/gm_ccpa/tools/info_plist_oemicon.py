@@ -5,8 +5,8 @@ WHY THIS EXISTS
 ---------------
 `/info` for this app is a STATIC binary plist baked into the APK
 (`netprobe_app/app/src/main/assets/info.bplist`), served by the Rust core to the iPhone. It is NOT
-generated from the `CT_SUBSCRIBE` YAML: `oemIconConfig` is read by airplayd's `load_device_config`,
-and this app never runs airplayd (see native/carplay-jni/Cargo.toml, "LEVERS"). So the YAML cannot
+generated from the `CT_SUBSCRIBE` YAML: `oemIconConfig` is read by carplayd's `load_device_config`,
+and this app never runs carplayd (see native/carplay-jni/Cargo.toml, "LEVERS"). So the YAML cannot
 turn the OEM icon off here — only this file can.
 
 And OMITTING the keys is NOT the same as turning the icon off. From the macOS host's model

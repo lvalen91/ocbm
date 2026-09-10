@@ -18,10 +18,10 @@ A Carlinkit **CPC200-CCPA** adapter, on USB and speaking a custom protocol (**OC
 jobs: it is the phone's **Bluetooth radio**, and it is the **MFi coprocessor**. It is not the AirPlay
 endpoint, it is not an access point, and no media ever crosses it.
 
-The app installs under the package name `android.car.usb.handler` — not `zeno.gmccpa` — because that
-squat name is what earns a silent USB-permission grant from the platform's built-in USB handler
-allowlist; the source packages remain `zeno.gmccpa.*`
-(`netprobe_app/app/src/main/AndroidManifest.xml:13`, `app/build.gradle:20`).
+The app installs under its own package name, `zeno.gmccpa` — the GM USB fixed-handler squat
+(`android.car.usb.handler`) was reverted (2026-09-08) — TRUCK-VERIFIED. There is no silent USB-
+permission grant: the app goes through the platform's normal USB-attach permission flow, one-time
+dialog included (`netprobe_app/app/src/main/AndroidManifest.xml:19`).
 
 ---
 
@@ -59,7 +59,7 @@ the full binary path, which no shell script or immediately-exiting binary satisf
 The app claims USB `0x1314:0x2d00` (interface 0, bulk **IN `0x81` / OUT `0x01`**, 512-byte max packet;
 hardware-verified 2026-08-12 — `netprobe_app/.../ocbm/UsbBulkTransport.kt:19`). No AOA control handshake;
 it is a raw byte pipe. Then `CT_HELLO` → `CT_HELLO_ACK`, `CT_SETTIME` (the box has no RTC battery),
-`CT_SUBSCRIBE` with the session config — including `wifi_ap: false` (`OcbmProbe.kt:82`) — and a 1 Hz
+`CT_SUBSCRIBE` with the session config — including `wifi_ap: false` (`OcbmProbe.kt:84`) — and a 1 Hz
 `CT_HEARTBEAT`.
 
 **The app is the ignition.** The box's radios are off at boot; `ocbmd` mirrors host presence to
@@ -72,7 +72,9 @@ can start. (Practical consequence: give the app a `device_filter.xml` +
 
 The box's `CT_BOX_HEALTH` (`0x1A`) report carries per-subsystem readiness bits, including
 `BH_HCI_PRESENT` (bit 0), which the box sets from `HCIGETDEVINFO` on a raw HCI socket — the same ioctl
-`hciconfig` uses to print `UP RUNNING` (`ccpa_custom/ccpa/ocbmd/src/main.rs:789-839`). This is the
+`hciconfig` uses to print `UP RUNNING` (ioctl def `ccpa_custom/ccpa/ocbmd/src/main.rs:1147-1204`, setter
+at `:2156`; corrected 2026-09-09, previously cited `:789-839`, which is `LogTail`/`CH_LOG` rotation code).
+This is the
 signal the app's lifecycle layer (§4b) uses to know the box's radios actually came up, not just that
 `ocbmd` answered.
 
@@ -109,9 +111,17 @@ from the OS hotspot GUI (`com.gm.hmi.connection`'s `WifiHotspotActivity` — kee
 
 ### Phase 4 — the app becomes the accessory on Wi-Fi
 
-The app advertises `_airplay._tcp` on `br0` via `NsdManager`, using a deviceID consistent with what the
-box presented over Bluetooth, on its own port (GM's own CarPlay service holds `:7000` and must not be
-disturbed).
+The app advertises `_airplay._tcp` on `br0` via **two adverts run concurrently, deliberately, not one**
+*(corrected 2026-09-09; this entry previously named `NsdManager` as the sole mechanism)*:
+`NsdManager.registerService` (primary — the one iOS has demonstrably indexed) **and** a hand-rolled,
+self-hosted `MdnsResponder` run alongside it on purpose (`CarPlayRx.kt:372-445`, "ALONGSIDE NsdManager"
+rationale at `CarPlayRx.kt:429`). The reason the second one exists: AOSP drops `NsdServiceInfo.setHost()`
+on registration, so `NsdManager` cannot set the SRV target, and it shares GM's `Android.local` host,
+whose Bonjour record wins the endpoint-index race whenever GM registers first (`MdnsResponder.kt:16-26`).
+`MdnsResponder` answers mDNS itself, owns `gmccpa-rx.local`, and publishes exactly one address (`br0`),
+pinning a second, separately-keyed endpoint that carries the app's own deviceID — using a deviceID
+consistent with what the box presented over Bluetooth, on its own port (GM's own CarPlay service holds
+`:7000` and must not be disturbed).
 
 **Discovery is bidirectional.** The accessory also *browses* `_carplay-ctrl._tcp` and dials the phone
 with `GET /ctrl-int/1/connect`; the phone then opens the **control** connection inbound

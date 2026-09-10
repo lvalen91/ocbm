@@ -201,8 +201,9 @@ object Ocbm {
     // ---- CT_LOG_CTL (0x1B) — host→box `[CT_LOG_CTL][enabled u8][cap_kb u16 LE]` ----------------
     // Arms the CH_LOG stream: the box tails its universal log (source 0, truncated at cap_kb once
     // streamed) and the supervisor's per-daemon logs (tail-only). Entry layout on CH_LOG:
-    // [source u8][flags u8][seq u16 LE][unix_ms u64 LE][len u16 LE][text]. Not consumed by this app
-    // yet; defined so tools/proto_check.py keeps the three implementations in step.
+    // [source u8][flags u8][seq u16 LE][unix_ms u64 LE][len u16 LE][text]. Consumed by gm_ccpa
+    // (OcbmClient.handleLog / logCtl); CarlinkAndroid does not arm it yet. Defined here so
+    // tools/proto_check.py keeps the three implementations in step.
     const val CT_LOG_CTL: Byte = 0x1B
     const val LOG_CAP_DEFAULT_KB: Int = 0x100
     const val LOG_ENTRY_HDR: Int = 0x0E

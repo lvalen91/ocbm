@@ -31,7 +31,7 @@ import java.util.concurrent.atomic.AtomicLong
  * hand back to, so after a call or a Siri turn the knob stays pointed at Phone/Siri while media plays —
  * the head unit's volume UI then adjusts a group the driver cannot hear. Holding `AUDIOFOCUS_GAIN` here
  * gives the system a resting owner to return to. It also lets AAOS duck us properly for navigation
- * rather than relying solely on our own software ducking in [setDucked].
+ * rather than relying solely on our own software ducking in [setVoiceDucked]/[setFocusDucked].
  */
 class AacPlayer(private val am: android.media.AudioManager? = null) {
 
@@ -60,6 +60,8 @@ class AacPlayer(private val am: android.media.AudioManager? = null) {
         const val CONFIGURE_RETRY_MS = 5_000L
         /** How often [reclaimFocus] may re-request after a permanent loss. */
         const val FOCUS_RETRY_MS = 3_000L
+        /** 0.2, not 0.8: "duck by 20%" is ~2 dB and was reported by users as "does not duck at all". */
+        const val DUCK_GAIN = 0.2f
     }
 
     @Volatile private var focus: android.media.AudioFocusRequest? = null
@@ -155,12 +157,17 @@ class AacPlayer(private val am: android.media.AudioManager? = null) {
             // Cache ONLY a request that actually took. Caching on AUDIOFOCUS_REQUEST_FAILED made the
             // `focus != null` guard above permanent — no later start() ever retried, and abandonFocus()
             // then abandoned a request we never held.
-            if (r == android.media.AudioManager.AUDIOFOCUS_REQUEST_GRANTED ||
-                r == android.media.AudioManager.AUDIOFOCUS_REQUEST_DELAYED) {
+            // GRANTED only. DELAYED cannot occur — the builder never calls setAcceptsDelayedFocusGain —
+            // and treating it as held would be wrong anyway: a DELAYED grant means focus is NOT yet
+            // held, so clearing pausedForFocus and unducking on it would play over the current holder.
+            if (r == android.media.AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
                 focus = req
                 focusState = android.media.AudioManager.AUDIOFOCUS_GAIN
                 pausedForFocus = false
-                log.i("media audio focus: ${if (r == android.media.AudioManager.AUDIOFOCUS_REQUEST_GRANTED) "GRANTED" else "DELAYED"}")
+                // A synchronously GRANTED request gets no GAIN callback, so a focus duck left over from
+                // before an abandon would otherwise pin media at DUCK_GAIN with nothing left to clear it.
+                setFocusDucked(false)
+                log.i("media audio focus: GRANTED")
             } else {
                 log.w("media audio focus REQUEST_FAILED (result=$r) — not cached; the next start() retries")
             }
@@ -215,16 +222,21 @@ class AacPlayer(private val am: android.media.AudioManager? = null) {
         focusState = change
         log.i("media focus ${focusName(from)} -> ${focusName(change)}")
         when (change) {
-            android.media.AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> setDucked(true)
+            android.media.AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> setFocusDucked(true)
             android.media.AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
                 synchronized(this@AacPlayer) { pausedForFocus = true; applyPauseState("focus loss") }
             }
             android.media.AudioManager.AUDIOFOCUS_GAIN -> {
-                setDucked(false)
+                // Clears ONLY the focus duck. A voice duck the energy gate still holds stays in force
+                // (see [setVoiceDucked]); before 2026-09-09 this call restored unity over a live prompt.
+                setFocusDucked(false)
                 synchronized(this@AacPlayer) { pausedForFocus = false; applyPauseState("focus gain") }
             }
             android.media.AudioManager.AUDIOFOCUS_LOSS -> {
                 synchronized(this@AacPlayer) { pausedForFocus = true; applyPauseState("permanent focus loss") }
+                // No focus held means no focus-derived duck: without this a CAN_DUCK followed by LOSS
+                // resumed via [reclaimFocus] at DUCK_GAIN for the rest of the session.
+                setFocusDucked(false)
                 abandonFocus()
                 // NOT "the next start() re-requests" — see [reclaimFocus] for why that was a lie and
                 // what actually recovers it now.
@@ -262,9 +274,97 @@ class AacPlayer(private val am: android.media.AudioManager? = null) {
      */
     fun prime() {
         if (track != null) return
+        // Goes through [publishTrack] like every other builder. Today this path cannot race a hold or
+        // a duck edge by construction — prime() runs on the main looper before VoiceRouter exists and
+        // before any focus request is made — so the helper is here for a later reordering, not for a
+        // defect this path has.
         runCatching { buildTrack(cfgRate, cfgChannels) }
-            .onSuccess { track = it; log.i("primed AudioTrack ${cfgRate}Hz ${cfgChannels}ch — waiting for the stream") }
+            .onSuccess { publishTrack(it); log.i("primed AudioTrack ${cfgRate}Hz ${cfgChannels}ch — waiting for the stream") }
             .onFailure { log.w("prime failed (harmless; configure will build one): ${it.message}") }
+    }
+
+    /**
+     * Duck the media track. Only MEDIA is ever ducked — every other purpose plays at unity — and the
+     * effective gain is min(voiceDuck, focusDuck): the track sits at [DUCK_GAIN] while EITHER source
+     * wants it ducked and returns to unity only when NEITHER does.
+     *
+     * Two sources, two entry points, because two independent things legitimately ask and a caller
+     * must not be able to clear the other one's duck: VoiceRouter's energy gate ([setVoiceDucked] — a
+     * nav prompt or Siri turn is audibly loud on the voice track) and this player's own focus listener
+     * ([setFocusDucked] — AAOS handed us LOSS_TRANSIENT_CAN_DUCK). Until 2026-09-09 both wrote one
+     * shared boolean, last writer wins: an AUDIOFOCUS_GAIN landing mid-prompt restored media to unity
+     * over the prompt, and the gate's un-duck at the end of a prompt cancelled a focus duck AAOS had
+     * not lifted. The KDoc promised min() from the start; it was never implemented.
+     *
+     * Each entry point is idempotent per SOURCE (VoiceRouter re-asserts `onDuck(false)` at 1 Hz from
+     * its idle sweep), and a source edge that does not change the effective gain — the other source
+     * still holds — is logged once, not applied, so a capture shows which source is holding the duck.
+     */
+    fun setVoiceDucked(ducked: Boolean) = setDucked(DuckSource.VOICE, ducked)
+    fun setFocusDucked(ducked: Boolean) = setDucked(DuckSource.FOCUS, ducked)
+
+    private enum class DuckSource { VOICE, FOCUS }
+
+    private fun setDucked(source: DuckSource, ducked: Boolean) {
+        // synchronized, not a volatile compare-and-set: this is called from the voice decode thread,
+        // the main looper (focus callback) AND the UI thread (teardown). The read-compare-write-apply
+        // sequence being non-atomic let an interleaving leave duckGain=1.0 with the hardware at 0.2 —
+        // after which every later un-duck early-returns and the duck is unrecoverable for the life of
+        // the player, while the log claims it was restored. The lock also makes the two source flags
+        // and the gain derived from them a single atomic state, which is what the min() relies on.
+        synchronized(duckLock) {
+            when (source) {
+                DuckSource.VOICE -> { if (voiceDuck == ducked) return; voiceDuck = ducked }
+                DuckSource.FOCUS -> { if (focusDuck == ducked) return; focusDuck = ducked }
+            }
+            val g = if (voiceDuck || focusDuck) DUCK_GAIN else 1.0f
+            if (g == duckGain) {
+                log.i("media duck: $source ${if (ducked) "on" else "off"}, gain stays $g " +
+                      "(voice=$voiceDuck focus=$focusDuck)")
+                return
+            }
+            duckGain = g
+            runCatching { track?.setVolume(g) }
+            log.i("media ${if (g < 1.0f) "ducked to $g" else "restored to 1.0"} by $source " +
+                  "(voice=$voiceDuck focus=$focusDuck)")
+        }
+    }
+
+    /** Re-assert the current gain onto a freshly built track. Without this a track created while a
+     *  duck was in flight starts at unity and the duck is silently lost. Reads the EFFECTIVE gain,
+     *  under the same lock, so it is the min() of both sources at that instant. */
+    private fun applyGain(t: AudioTrack) {
+        synchronized(duckLock) { runCatching { t.setVolume(duckGain) } }
+    }
+
+    private val duckLock = Any()
+    // All three are written only under duckLock — and READ only under it too ([setDucked],
+    // [applyGain]), so none needs @Volatile. duckGain is the min() of the two source flags and
+    // is the ONLY value ever pushed to a track.
+    private var voiceDuck = false
+    private var focusDuck = false
+    private var duckGain = 1.0f
+
+    /** The ONLY way a built track becomes [track]. Publish FIRST, then re-derive gain and hold state
+     *  from the shared flags: an edge that landed before the publish saw `track == null` and pushed
+     *  nothing, so the re-derivation picks it up; an edge after the publish pushes to the live track
+     *  itself. Deriving BEFORE publishing (buildTrack used to) lost any edge in between — for gain a
+     *  stale volume, for the hold a track paused by the builder while a concurrent AUDIOFOCUS_GAIN
+     *  ran [applyPauseState], hit `track ?: return`, and left it paused with both flags false.
+     *
+     *  Lock order: `duckLock` (inside [applyGain]) is released before `this` is taken; the two are
+     *  never nested, here or anywhere else. Callers ([prime], [configure], the [feed] rebuild) hold
+     *  neither. No `else t.play()`: [buildTrack] already called `play()`, and an else here would
+     *  resume a track [stop] deliberately paused. */
+    private fun publishTrack(t: AudioTrack) {
+        track = t
+        applyGain(t)                                      // duckLock, released before the next line
+        synchronized(this) {                              // same monitor as the flag writers
+            if (pausedForAssistant || pausedForFocus) {
+                runCatching { t.pause() }
+                log.i("new track starts paused (assistant=$pausedForAssistant focus=$pausedForFocus)")
+            }
+        }
     }
 
     /**
@@ -281,43 +381,17 @@ class AacPlayer(private val am: android.media.AudioManager? = null) {
      * `read()`, but never one parked in the blocking `write()`. `pause()` is documented to interrupt an
      * in-flight write; `flush()` then drops queued PCM so nothing plays out after stop and no write is
      * left waiting on buffer space that would never free.
-     */
-    /**
-     * Duck the media track. Only MEDIA is ever ducked — every other purpose plays at unity, and the
-     * effective gain is min(commandedDuck, focusDuck).
      *
-     * 0.2, not 0.8: "duck by 20%" is ~2 dB and was reported by users as "does not duck at all".
+     * Silence the track BEFORE abandoning focus — the same order as `VoiceRouter.Sink.release()`
+     * (pause → flush → stop → release, then abandon). AAOS hands focus to the next owner the moment we
+     * abandon; until 2026-09-09 that came first, so for the window before `pause()` landed we were
+     * still writing PCM at full gain while another app had already been told it owned focus.
      */
-    fun setDucked(ducked: Boolean) {
-        // synchronized, not a volatile compare-and-set: this is called from the voice decode thread
-        // AND the UI thread (teardown). The read-compare-write-apply sequence being non-atomic let an
-        // interleaving leave duckGain=1.0 with the hardware at 0.2 — after which every later
-        // setDucked(false) early-returns and the duck is unrecoverable for the life of the player,
-        // while the log claims it was restored.
-        synchronized(duckLock) {
-            val g = if (ducked) 0.2f else 1.0f
-            if (g == duckGain) return
-            duckGain = g
-            runCatching { track?.setVolume(g) }
-            log.i("media ${if (ducked) "ducked to 0.2" else "restored to 1.0"}")
-        }
-    }
-
-    /** Re-assert the current gain onto a freshly built track. Without this a track created while a
-     *  duck was in flight starts at unity and the duck is silently lost. */
-    private fun applyGain(t: AudioTrack) {
-        synchronized(duckLock) { runCatching { t.setVolume(duckGain) } }
-    }
-
-    private val duckLock = Any()
-    @Volatile private var duckGain = 1.0f
-
     fun stop() {
         val hadConsumer = consumeStarted
         // Sample before the release below nulls the track; -1 means "no track to ask".
         val underruns = runCatching { track?.underrunCount }.getOrNull() ?: -1
         running.set(false)
-        abandonFocus()
         runCatching { track?.pause() }
         runCatching { track?.flush() }
         // If consume() never ran, nothing else will EVER release the primed track: releaseAv() is
@@ -330,6 +404,10 @@ class AacPlayer(private val am: android.media.AudioManager? = null) {
             runCatching { t?.stop() }; runCatching { t?.release() }
             log.i("released the primed track (the media seam never connected)")
         }
+        // Last, once no track of ours is still playing (or, with a consumer, is paused and flushed —
+        // its release follows on the consume thread, which `running=false` has already told to stop
+        // writing).
+        abandonFocus()
         log.i("stopping — ${framesDecoded.get()} frames played, ${framesDroppedNoTrack.get()} dropped " +
               "(no track), $underruns underruns, ${bytesIn.get()} bytes")
     }
@@ -439,7 +517,7 @@ class AacPlayer(private val am: android.media.AudioManager? = null) {
             // otherwise discard it and build for what actually arrived — a primed track must never
             // silently impose the wrong rate or channel count on the stream.
             val primed = track
-            t = if (primed != null && sampleRate == cfgRate && channels == cfgChannels) {
+            val built: AudioTrack = if (primed != null && sampleRate == cfgRate && channels == cfgChannels) {
                 log.i("adopting the primed AudioTrack")
                 primed
             } else {
@@ -452,9 +530,11 @@ class AacPlayer(private val am: android.media.AudioManager? = null) {
                 }
                 buildTrack(sampleRate, channels)
             }
+            t = built
 
             codec = c
-            track = t
+            // Idempotent on an adopted primed track: it re-derives the same gain and hold it already has.
+            publishTrack(built)
             cfgRate = sampleRate
             cfgChannels = channels
             configureFailedAt = 0L
@@ -469,7 +549,11 @@ class AacPlayer(private val am: android.media.AudioManager? = null) {
         }
     }
 
-    /** Track construction, shared by [configure] and the ERROR_DEAD_OBJECT rebuild in [feed]. */
+    /** Track construction, shared by [prime], [configure] and the ERROR_DEAD_OBJECT rebuild in [feed].
+     *
+     *  Returns an UNPUBLISHED, playing track at unity gain. The caller MUST hand it to [publishTrack];
+     *  nothing here reads the duck or hold flags, because doing so before the publish is exactly the
+     *  window that lost edges (see [publishTrack]). */
     private fun buildTrack(sampleRate: Int, channels: Int): AudioTrack {
         val chMask = if (channels >= 2) AudioFormat.CHANNEL_OUT_STEREO else AudioFormat.CHANNEL_OUT_MONO
         val minBuf = AudioTrack.getMinBufferSize(sampleRate, chMask, AudioFormat.ENCODING_PCM_16BIT)
@@ -496,10 +580,6 @@ class AacPlayer(private val am: android.media.AudioManager? = null) {
             // still in hand, then rethrow. (The caller's comment claimed this was handled; it was not.)
             .also { trk ->
                 try { trk.play() } catch (e: Throwable) { runCatching { trk.release() }; throw e }
-                applyGain(trk)
-                // A hold taken before this track existed must still apply, or a focus loss (or a Siri
-                // turn) during startup plays out at full volume on the track that replaces it.
-                if (pausedForAssistant || pausedForFocus) runCatching { trk.pause() }
             }
     }
 
@@ -549,9 +629,9 @@ class AacPlayer(private val am: android.media.AudioManager? = null) {
                             log.e("AudioTrack ERROR_DEAD_OBJECT — rebuilding")
                             track = null
                             runCatching { t.release() }
-                            track = runCatching { buildTrack(cfgRate, cfgChannels) }
+                            runCatching { buildTrack(cfgRate, cfgChannels) }
+                                .onSuccess { publishTrack(it) }
                                 .onFailure { log.e("track rebuild failed: ${it.message}") }
-                                .getOrNull()
                         } else if (w < 0) {
                             log.e("AudioTrack.write returned $w")
                         }

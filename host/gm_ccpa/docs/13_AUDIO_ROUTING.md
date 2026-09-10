@@ -30,7 +30,8 @@ gaps.
 | Media recovery after a voice/call turn | **FIXED 2026-09-08 (`b8e8736`), re-measurement on the truck not yet recorded.** Owner-observed 2026-09-04 as 10–20 s of silence; device-measured at **12.0 s** on gminfo37. Two clocks: `assistantTick` cleared `pausedForAssistant` after `ASSISTANT_HOLD_MS` (4 s), but focus was abandoned only by `Sink.release()` at `Purpose.idleMs` (15 s for ASSISTANT), so media resumed on the focus edge, not the assistant edge. `ASSISTANT.idleMs` is now `ASSISTANT_HOLD_MS + 1` sweep period, closing the gap to ~1 s by design — see §3 |
 
 **Source, current as of this doc:** `netprobe_app/app/src/main/java/zeno/gmccpa/av/{AacPlayer,
-VoiceRouter, MicUplink}.kt`, wired into `CarPlayActivity.kt`. `VoiceRouter` (597 lines) replaces the
+VoiceRouter, MicUplink}.kt`, wired into `CarPlayActivity.kt`. `VoiceRouter` (656 lines as of
+2026-09-09, was 597) replaces the
 earlier `drainVoice`, which accepted `:9003` and discarded every byte — that silence is why this
 section previously read "design only, nothing implemented"; it no longer applies.
 
@@ -77,18 +78,36 @@ The vehicle's bus map, read from `/vendor/etc/car_audio_configuration.xml` on th
 | `bus0_media_out` | music | type 102 `media` | `USAGE_MEDIA` + `CONTENT_TYPE_MUSIC` | (handled by `AacPlayer`, not `VoiceRouter`) |
 | `bus1_navigation_out` | navigation | type 101, 48 k stereo | `USAGE_ASSISTANCE_NAVIGATION_GUIDANCE` + `SPEECH` | `NAV` |
 | `bus2_voice_command_out` | voice_command | atype 2/4, 16 k mono | `USAGE_ASSISTANT` + `SPEECH` | `ASSISTANT` |
-| `bus3_call_ring_out` | call_ring | atype 3 `alert` | `USAGE_VOICE_COMMUNICATION_SIGNALLING` + `SONIFICATION` | `ALERT` |
+| `bus4_call_out` | call | atype 3 `alert` | `USAGE_VOICE_COMMUNICATION_SIGNALLING` + `SONIFICATION` | `ALERT` — same bus as CALL, see below |
 | `bus4_call_out` | call | atype 1 `telephony` | `USAGE_VOICE_COMMUNICATION` + `SPEECH` | `CALL` |
 
 **You never address a bus directly.** GM's `CarAudioService` maps `usage → context → volume group →
 bus`; picking the right usage is the whole mechanism. `carlink_native_personal` confirms this and
 contains no `CarAudioManager`, no zone API, no bus address anywhere.
 
-> **`USAGE_VOICE_COMMUNICATION_SIGNALLING` for alerts is UNPROVEN on this head unit** — no truck test
-> has exercised the `ALERT` sink. GM remaps `USAGE_NOTIFICATION_RINGTONE` to `BUS_NOTIFICATION` rather
-> than AOSP's `CALL_RING`, and `carlink_native_personal`'s attempt to steer ringtones was **reverted**
-> (blocked voice-assistant volume adjust without improving ringtone control). Treat this row as a
-> hypothesis to measure on the next truck visit, not a confirmed mapping.
+**`bus0_media_out` is a shared HAL mix bus, not a switch.** From
+`audio_policy_configuration.xml:571-572`:
+`<route type="mix" sink="bus0_media_out" sources="mixport_bus0_media_out,bus3_sxm_in,bus4_lvm_in,
+bus8_tuner_in,bus10_tuner_am_in,bus13_dab_in,bus14_rsi_in"/>` — GM FM/AM/SXM/DAB (all
+`isExternalBus=1` / `AUDIO_DEVICE_IN_BUS role="source"`) is injected at the DSP and never passes
+through AudioFocus or an `AudioTrack`. `type="mix"` means the hardware **sums** these sources rather
+than switching between them, so an app that keeps writing PCM into `bus0_media_out` during a
+focus-loss window produces genuine double-talk over live radio, not a silent no-op — this is the
+mechanism behind the device-observed `Use hal ducking signals true`. `AacPlayer.reclaimFocus()` has
+not been tested against a live FM session; needs vehicle time.
+
+> **ALERT is not distinguishable from CALL on this build — confirmed, not a hypothesis (2026-09-09).**
+> `audio_policy_engine_product_strategies.xml`'s `voice_call` product strategy puts
+> `AUDIO_USAGE_VOICE_COMMUNICATION` and `AUDIO_USAGE_VOICE_COMMUNICATION_SIGNALLING` in the SAME
+> `<AttributesGroup volumeGroup="phone">`, and the decompiled `CarAudioContext.CONTEXT_TO_USAGES` in
+> `CarService.apk` settles it at the context/bus level: context 5 (`CALL` → `bus4_call_out`) carries
+> usages `{VOICE_COMMUNICATION, VOICE_COMMUNICATION_SIGNALLING}`; context 4 (`CALL_RING` →
+> `bus3_call_ring_out`) carries only `{NOTIFICATION_RINGTONE}`. So ALERT (`USAGE_VOICE_COMMUNICATION_
+> SIGNALLING`) lands on `bus4_call_out`, the same bus, context and volume group as CALL — it does not
+> reach `bus3_call_ring_out` at all. The earlier claim that GM remaps `USAGE_NOTIFICATION_RINGTONE` to
+> `BUS_NOTIFICATION` is also wrong on this table: usage `NOTIFICATION_RINGTONE` maps straight to
+> `CALL_RING`/`bus3_call_ring_out`, matching AOSP. Nothing in this build routes CarPlay's `alert`
+> purpose to `bus3_call_ring_out`.
 
 ---
 
@@ -123,15 +142,34 @@ solve — it hardcodes `mFramesPerPacket` per codec instead, which `MediaCodec` 
 
 ## 3. Playback mechanics — implemented, per `carlink_native_personal`-derived rules
 
-Every rule below is a device-proven GM behaviour, applied in `VoiceRouter.Sink` and `AacPlayer`. They
-are not preferences.
+Every rule below is a device-proven GM behaviour, intended to be applied in both `VoiceRouter.Sink`
+and `AacPlayer`. **CORRECTED 2026-09-09: rules 2, 3 and 7 were audited against the actual code.
+Rules 2 and 3 diverge between the two sinks (rule 3 is still an open code defect). Rule 7 was
+`VoiceRouter.Sink`-only when audited and was fixed in `AacPlayer` the same day. See each rule.**
 
 1. **48 kHz everywhere, no `PERFORMANCE_MODE_LOW_LATENCY`.** `AUDIO_OUTPUT_FLAG_FAST` is denied to
    third-party apps on this unit (`createTrack_l(8): AUDIO_OUTPUT_FLAG_FAST denied by server`), so low
    latency mode buys nothing and can add jitter. Not AOSP-documented.
-2. **Buffer = `getMinBufferSize() × 4`**, prefilled before `play()`.
-3. **`WRITE_NON_BLOCKING` with residual retry** — a short write (including `written == 0`) is retried
-   next pass, not dropped.
+2. **Buffer sizing differs per caller.** `VoiceRouter.Sink.configure()` uses
+   `maxOf(minBuf * 4, <bytes for TRACK_BUFFER_MIN_MS at the negotiated rate>)`, where
+   `TRACK_BUFFER_MIN_MS = 2 * KEEPALIVE_PERIOD_MS` = 400 ms — so `getMinBufferSize() × 4` is only a
+   FLOOR under a rate-derived 400 ms minimum (the code's own comment records that the old rate-blind
+   `maxOf(minBuf, 4096) * 4` was too small at 16 kHz mono). `AacPlayer.buildTrack()` uses
+   `maxOf(getMinBufferSize(), 8192) × 2` — half the multiple, floored at 8192 bytes, no time-derived
+   minimum. Neither path "prefills" PCM before calling `play()`; both start the track playing as soon
+   as it is built and let the codec feed it from empty.
+3. **`WRITE_NON_BLOCKING`, but the two callers diverge on retry, and neither retries a residual
+   write.** `VoiceRouter.Sink.feed()` writes with `WRITE_NON_BLOCKING`; the
+   `if (w == 0) { ausDropped.incrementAndGet(); break }` branch in its write loop counts the AU as
+   dropped and moves on — it does **not** retry next pass. (The neighbouring `w < 0` branch is a
+   different thing: the `ERROR_DEAD_OBJECT` track rebuild.) `AacPlayer.feed()`'s media write does not
+   pass `WRITE_NON_BLOCKING` at all; it is a deliberate **blocking** write, per the code's own KDoc in
+   `AacPlayer.kt` (search "parked in the blocking `write()`")
+   that a blocking write is required there so `pause()` (not a socket close) is what unblocks a
+   consume thread parked in it. **Open code defect (2026-09-09):** the documented intent — a short or
+   zero-length write retried on the next pass rather than silently dropped — is not what either sink
+   does today; `VoiceRouter.Sink` drops, and `AacPlayer` never uses non-blocking writes in the first
+   place. Needs a follow-up code fix, not just a doc correction.
 4. **One `OnAudioFocusChangeListener` instance per usage** (`VoiceRouter.Sink.focusListener`) — AAOS
    `CarAudioFocus` keys on listener identity, so a shared listener cannot hold focus for two usages.
 5. **Silence-fill, not pause, for continuous streams** (`Sink.keepAlive()`). AAOS picks the volume
@@ -143,7 +181,16 @@ are not preferences.
    message previously wedged `USAGE_VOICE_COMMUNICATION` as the active volume group for a whole
    session.
 7. **`pause()`/release before `abandonAudioFocusRequest()`** at sink teardown, so AAOS sees no active
-   player of that usage at abandon time.
+   player of that usage at abandon time. `VoiceRouter.Sink.release()` follows this order (pause → flush
+   → stop → release, then abandon; `VoiceRouter.kt:607-616`). **`AacPlayer.stop()` now follows it too
+   (`AacPlayer.kt:361-381`): `running=false` → `pause()` → `flush()` → (release the primed track if the
+   seam never connected) → `abandonFocus()` last. CORRECTED 2026-09-09, fixed in source the same day:
+   the audit that morning found `abandonFocus()` called BEFORE `pause()`/`flush()`, so for the window
+   before `pause()` landed the app was still writing PCM at full gain while AAOS had already handed
+   focus to the next owner.** With a live consumer the track's `stop()`/`release()` still happen later
+   on the consume thread (that is deliberate — see the KDoc on `stop()`); by abandon time the track is
+   paused and flushed, which is what AAOS's active-player check sees. **Not truck-verified** — a
+   green build proves compilation only.
 
 ### Siri volume: PAUSE media, do not merely duck it — CONFIRMED ON HARDWARE 2026-08-12
 
@@ -176,12 +223,40 @@ Two things this also settles:
 - **Stock GM CarPlay can never reach `VOICE_COMMAND`** — it plays everything through a single
   `USAGE_UNKNOWN` source, so its Siri is indistinguishable from media.
 
-### Ducking (`AacPlayer.setDucked`, `VoiceRouter` energy gate)
+### Ducking (`AacPlayer.setVoiceDucked` / `setFocusDucked`, `VoiceRouter` energy gate)
 
-Duck **only** the media track: `effective = mediaVolume × min(commandedDuck, focusDuck)`.
+**CORRECTED 2026-09-09 (twice). First correction, that morning: the `effective = mediaVolume ×
+min(commandedDuck, focusDuck)` formula this section used to state did not exist in code — `setDucked`
+was one shared `duckGain` boolean written by two callers, last writer wins. Second correction, same
+day, after the fix landed: the min() arbitration is now implemented, with a different shape than the
+old formula described.** Duck **only** the media track. What actually runs:
 
-- Focus map: `LOSS_TRANSIENT_CAN_DUCK` → **0.2**, `LOSS_TRANSIENT`/`LOSS` → 0.0, `GAIN` → 1.0.
-  0.2, not 0.8 — "duck by 20%" (≈2 dB) was reported by users as "does not duck".
+- Two INDEPENDENT duck sources, each with its own entry point so a caller cannot touch the other's
+  (`AacPlayer.kt:297-298`): `setVoiceDucked(Boolean)` is `VoiceRouter`'s energy gate, wired via
+  `onDuck` at `CarPlayActivity.kt:260`; `setFocusDucked(Boolean)` is `AacPlayer`'s own focus listener
+  (`LOSS_TRANSIENT_CAN_DUCK` → true at `AacPlayer.kt:223`, `AUDIOFOCUS_GAIN` → false, and `LOSS` and a
+  fresh focus grant also clear it, since no focus held means no focus-derived duck). Both funnel into
+  one private `setDucked(source, ducked)` (`AacPlayer.kt:302-325`) that keeps a flag per source and
+  derives the effective gain as **0.2 if EITHER flag is set, 1.0 only when NEITHER is** — the min() of
+  the two — under the single `duckLock`. `applyGain()` (`:330-332`) re-asserts that effective gain onto
+  any track built mid-duck, under the same lock.
+- **What was wrong before the fix:** with one shared boolean, an `AUDIOFOCUS_GAIN` landing while a nav
+  prompt was still loud restored media to unity over the prompt, and the gate's un-duck at the end of a
+  prompt cancelled a focus duck AAOS had not lifted. The `synchronized(duckLock)` block that already
+  existed fixed a *different*, older race (a non-atomic read-compare-write that could leave
+  `duckGain=1.0` with the hardware at 0.2 and the duck unrecoverable) — it never arbitrated between
+  sources. Both the old race and the new arbitration now live behind the same lock, so the two flags
+  and the gain derived from them change as one atomic state.
+- Idempotence is per source (`VoiceRouter` re-asserts `onDuck(false)` at 1 Hz from its idle sweep);
+  a source edge that does not change the effective gain because the other source still holds is logged
+  as `media duck: <SOURCE> off, gain stays 0.2 (voice=… focus=…)` and not applied, so a capture shows
+  which source is holding the duck.
+- **Not truck-verified.** The arbitration compiles; whether AAOS's `CAN_DUCK`/`GAIN` edges and the
+  energy gate actually interleave the way the fix assumes has not been observed. §A4 still stands.
+- 0.2, not 0.8 — "duck by 20%" (≈2 dB) was reported by users as "does not duck".
+- `LOSS_TRANSIENT`/`LOSS` do **not** duck to 0.0 through `setFocusDucked`. They go through a different
+  mechanism entirely: the focus listener sets `pausedForFocus = true` and fully pauses the media track
+  (`AacPlayer.kt:223-239`), the same pause path Siri uses, not a duck-to-zero gain.
 - Expect to duck yourself through the focus round-trip: this app's own NAV request
   (`GAIN_TRANSIENT_MAY_DUCK`) and CALL/Siri requests (`GAIN_TRANSIENT`) come back to the MEDIA listener
   as a loss. That is the mechanism, not a bug.
@@ -321,7 +396,8 @@ platform telemetry call is neutered, which is correct for a third-party app.
 
 **CORRECTED 2026-08-31 — the previous claim that `compatibility`/PCM is wired-only was wrong about
 what the box ADVERTISES.** `preset_wireless_8()` carries two `compatibility` entries unconditionally
-(`ccpa_custom crates/vendor/receiver/src/info.rs:1008-1035`): type 100 PCM 16k-mono/48k-stereo and
+(`ccpa_custom crates/vendor/receiver/src/info.rs:1404-1430`, moved from :1008-1035 — checked
+2026-09-09): type 100 PCM 16k-mono/48k-stereo and
 type 101 PCM 48k-stereo. There is no transport branch on that list, so they are offered on every
 wireless session.
 
@@ -349,7 +425,8 @@ worked, so neither this path nor the audio-focus path is confirmed for it.
 | The sink the box chose per stream | airplayd stderr | `[audio] stream {ty} {codec} -> {label} :{port}` |
 
 Box-side lines are bare `eprintln!` in `ccpa_custom crates/vendor/receiver/src/session.rs` (the
-phase-2 line ~:889) and `spawn_audio`; nothing gates them, and they reach this app's logcat through
+phase-2 line :935, not ~:889 — checked 2026-09-09; :886 is the unrelated ALT-screen(111) line) and
+`spawn_audio`; nothing gates them, and they reach this app's logcat through
 the `CH_FILE` box-log stream. A fourth line dumps the full stream dict for every audio-range type
 (100..=112) but is marked for removal once uplink negotiation is confirmed — do not build a
 procedure on it.

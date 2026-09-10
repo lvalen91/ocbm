@@ -275,7 +275,7 @@ class CarPlayMediaBrowserService : MediaBrowserService() {
      *
      * This replaces an earlier claim in this file that "the existing OCBM INPUT_MEDIA_BTN path already
      * carries wheel buttons to the phone". That was inherited from the WIRED design and is false here:
-     * `INPUT_MEDIA_BTN` is consumed by the BOX's `airplayd`, which in this app's bridge role never
+     * `INPUT_MEDIA_BTN` is consumed by the BOX's `carplayd`, which in this app's bridge role never
      * spawns its A/V layer and therefore holds no event channel — the report would go nowhere. Nothing
      * in this app ever emitted the opcode either. Meanwhile wheel keys arrive as `KeyEvent`s routed to
      * the active `MediaSession` — this one — where the previously empty callback swallowed them. The

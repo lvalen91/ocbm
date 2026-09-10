@@ -86,7 +86,8 @@ class CarPlayRx(
     /**
      * The SAME device id, decimal. This asymmetry is deliberate and is the thing that was broken:
      * TXT `deviceid` and /info `deviceID` carry the colon MAC, but the
-     * `AirPlay-Receiver-Device-ID` HTTP header carries a DECIMAL uint64 (rx-connect's mac_to_dec()).
+     * `AirPlay-Receiver-Device-ID` HTTP header carries a DECIMAL uint64 (`mac_to_dec` in
+     * `ccpa/carplayd/src/discovery.rs`).
      * Sending the MAC string makes iOS parse it base-10 as 0, look up "receiver 0" among the peers
      * it has browsed, find nothing, and have nothing to dial back to — which is exactly the
      * accepted-connection / no-reply / no-inbound symptom.
@@ -292,8 +293,9 @@ class CarPlayRx(
         //   carManager_handlePendingAutoconnect: No matching endpoint found for deviceID ...
         // and our own record landed 16 ms later. Advertising and dialing together is a race we lose.
         //
-        // rx-connect never hits this because it registers the advert (main.rs:183) BEFORE it browses
-        // (:186), and on the box the advert has been live for the whole AP lifetime before the phone
+        // carplayd never hits this because its discovery thread registers the advert (`mdns.register`,
+        // `fn run` in `ccpa/carplayd/src/discovery.rs`) BEFORE it browses (`mdns.browse`, three lines
+        // later), and on the box the advert has been live for the whole AP lifetime before the phone
         // even associates. So: advertise first, let iOS index it, only then dial.
         //
         // BIND HERE, NOT ON THE POOL THREAD. `server` used to be assigned inside acceptLoop, and
@@ -445,7 +447,7 @@ class CarPlayRx(
         }.onFailure { log.w("self-hosted advert threw: ${it.javaClass.simpleName}: ${it.message}") }
     }
 
-    /** The TXT set, byte-identical to rx-connect's (`main.rs:152-167`). */
+    /** The TXT set, byte-identical to carplayd's (`fn run` in `ccpa/carplayd/src/discovery.rs`, the `("deviceid", …)…("srcvers", …)` tuple list). */
     private fun txtRecord(): Map<String, String> = linkedMapOf(
         "deviceid" to deviceId,
         // The Car bit (high word bit 32) is what makes iOS open RTSP back to the advertised port.
@@ -464,7 +466,8 @@ class CarPlayRx(
      * The iPhone's `_carplay-ctrl` port CHANGES every session (58028 -> 58095 -> 58241 observed), and
      * NsdManager happily answers a resolve from its cache — so a single resolve at startup dials a
      * dead port forever (5s timeouts while the phone is off-network, then ECONNREFUSED once it is
-     * back). rx-connect never hits this because mdns-sd delivers a fresh ServiceResolved on every
+     * back). carplayd's discovery loop (`ccpa/carplayd/src/discovery.rs`) never hits this because
+     * mdns-sd delivers a fresh ServiceResolved on every
      * re-announce. Restarting discovery is the only way to force NsdManager to re-resolve, so do it
      * on a cadence until the phone actually dials us back.
      */
@@ -480,8 +483,8 @@ class CarPlayRx(
             log.i("no live control connection — restarting discovery to force a FRESH resolve")
             // Do NOT clear lastDial here. Doing so cancelled the cooldown entirely, so every 12s
             // restart spawned another retry loop on top of the ones still running — up to a dozen
-            // concurrent dialers hammering one phone port. rx-connect dedups and only clears on
-            // ServiceRemoved.
+            // concurrent dialers hammering one phone port. carplayd's discovery loop dedups (the
+            // `dialed` set in `ccpa/carplayd/src/discovery.rs`) and only clears on ServiceRemoved.
             discListener?.let { try { nsd?.stopServiceDiscovery(it) } catch (_: Throwable) {} }
             discListener = null
             try { Thread.sleep(600) } catch (_: InterruptedException) { return }
@@ -628,7 +631,8 @@ class CarPlayRx(
             }
         }
         if (!running.get()) return
-        // rx-connect retries up to 10x at 1s and only marks a peer dialed on success. The phone
+        // carplayd's connect-out (`ccpa/carplayd/src/discovery.rs`) retries up to 10x at 1s and only
+        // marks a peer dialed on success. The phone
         // holds a 30s assertion on the connect command, so an early dial is simply wasted.
         // THE WIRE IS THE AUTHORITY; NsdManager is only the discovery trigger.
         //
@@ -711,8 +715,8 @@ class CarPlayRx(
     private fun connectOut(host: InetAddress, peerPort: Int): Boolean {
         try {
             Socket().use { s ->
-                s.connect(InetSocketAddress(host, peerPort), 3000)   // rx-connect main.rs:53
-                s.soTimeout = 2000                                    // rx-connect main.rs:75
+                s.connect(InetSocketAddress(host, peerPort), 3000)   // carplayd `connect_out`: connect_timeout 3 s
+                s.soTimeout = 2000                                    // carplayd `connect_out`: set_read_timeout 2 s
                 // A bare IPv6 literal with a zone id and a port glued on is not a parseable Host
                 // header. Brackets, and the zone belongs to the socket, not the header.
                 val hostHdr = if (host is java.net.Inet6Address)
@@ -722,7 +726,8 @@ class CarPlayRx(
                     // form rather than inventing an address.
                     "[${host.hostAddress?.substringBefore('%') ?: host.hostName}]:$peerPort"
                 else "${host.hostAddress}:$peerPort"
-                // Header set and order mirror rx-connect exactly. No CSeq: this is plain HTTP, not
+                // Header set and order mirror carplayd's connect-out (`ccpa/carplayd/src/discovery.rs`)
+                // exactly. No CSeq: this is plain HTTP, not
                 // RTSP, and no reference sends one.
                 val req = buildString {
                     append("GET /ctrl-int/1/connect HTTP/1.1\r\n")
@@ -735,7 +740,7 @@ class CarPlayRx(
                 log.i(">> GET /ctrl-int/1/connect -> ${host.hostAddress}:$peerPort  (device-id=$deviceIdDec decimal)")
                 val ins = BufferedInputStream(s.getInputStream())
                 val status = readLine(ins)
-                // Match rx-connect's semantics exactly (main.rs:89-98): an empty response, a read
+                // Match carplayd's `connect_out` response handling (`ccpa/carplayd/src/discovery.rs`) exactly: an empty response, a read
                 // timeout, or an unparseable status line is TENTATIVELY ACCEPTED — the phone may open
                 // RTSP asynchronously without answering. Only an explicit non-2xx is a refusal.
                 // Scoring silence as failure turned the most likely real outcome into nine more dials.
@@ -754,7 +759,7 @@ class CarPlayRx(
                 }
             }
         } catch (t: java.net.SocketTimeoutException) {
-            // A READ timeout is the documented tentatively-accepted case (rx-connect main.rs:89-98):
+            // A READ timeout is the documented tentatively-accepted case (carplayd `connect_out`: `WouldBlock`/`TimedOut` → true):
             // the phone frequently accepts the nudge and opens RTSP asynchronously without answering.
             // This used to fall through to the generic catch and be scored a failure — the exact
             // behaviour the comment above says turned the most likely real outcome into nine more
@@ -870,7 +875,7 @@ class CarPlayRx(
         // no peer addr — uplink skipped" on every Siri and telephony stream. Video and downlink audio
         // are unaffected, which is why this looks like a mic bug rather than an addressing bug.
         // The phone is ALWAYS IPv6 link-local on this rig (fe80::…%br0), so this is the normal path,
-        // not an edge case. connectOut() at :534 already brackets correctly — these must stay in step.
+        // not an edge case. connectOut() already brackets correctly (the `hostHdr` construction) — these must stay in step.
         val raw = c.inetAddress?.hostAddress?.substringBefore('%') ?: ""
         val addr = if (raw.contains(':')) "[$raw]:${c.port}" else "$raw:${c.port}"
         val h = NativeCore.start(pi, edSeed, info, peers, addr, relay)
@@ -896,14 +901,16 @@ class CarPlayRx(
             val buf = ByteArray(16384)
             var wasEncrypted = false
             while (running.get()) {
-                // 30 s SO_RCVTIMEO matches the reference (airplayd main.rs:1052). Breaking on timeout
-                // is reference-correct for the pre-A/V phase: net.rs:37-44 closes the connection when
+                // 30 s SO_RCVTIMEO matches the reference (`set_read_timeout(30 s)` just before `arm_keepalive` in
+                // `run_pairing_server`'s per-connection path, `ccpa/carplayd/src/main.rs`). Breaking on timeout
+                // is reference-correct for the pre-A/V phase: the `WouldBlock` arm of `serve_connection`
+                // (`crates/vendor/receiver/src/net.rs`) closes the connection when
                 // `av_idle_ms()` is None (no A/V ever flowed) or A/V has been idle >= 30 s.
                 //
-                // NOT YET IMPLEMENTED (both are real gaps, see 01_FINDINGS §8):
+                // NOT YET IMPLEMENTED (both are real gaps, see docs/11_HARDENING_PLAN.md status ledger rows N13–N16):
                 //   • the A/V-flowing case — the reference CONTINUES on timeout while A/V is live,
-                //     which needs `ControlServer::av_idle_ms()` (server.rs:119) exported over JNI;
-                //   • `arm_keepalive` 3s/3s/3 (main.rs:407-432) for ~12 s dead-link detect, which
+                //     which needs `ControlServer::av_idle_ms()` (`crates/vendor/receiver/src/server.rs`) exported over JNI;
+                //   • `arm_keepalive` 3s/3s/3 (`fn arm_keepalive`, `ccpa/carplayd/src/main.rs`, armed per control connection) for ~12 s dead-link detect, which
                 //     java.net.Socket cannot express but android.system.Os.setsockoptInt can.
                 // Until av_idle_ms is exported, an unconditional `continue` here would match no
                 // reference state at all and would leak sessions on silent link loss.
@@ -1121,8 +1128,9 @@ class CarPlayRx(
             }
             // Anything we do not implement must NOT be answered with a bodyless 200. iOS's first
             // request on the control connection is pair-verify M1, and a false success looks like a
-            // valid empty M2 — strictly worse than an error. 05_SESSION_FLOW §8 rule 9: unhandled
-            // must not be answered with silence OR with a fake success. Log loudly.
+            // valid empty M2 — strictly worse than an error. 05_SESSION_FLOW §8 "Ordering rules that
+            // kill sessions", rule 9, makes the same point for SETUP stream types: never answer with
+            // silence; omit and log loudly. Its HTTP-level counterpart is a 501, not a fake 200.
             else -> {
                 log.w("UNIMPLEMENTED ${r.method} ${r.path} -> 501 (deliberately not a fake 200)")
                 write(out, 501, cseq, emptyMap(), ByteArray(0), r.version)

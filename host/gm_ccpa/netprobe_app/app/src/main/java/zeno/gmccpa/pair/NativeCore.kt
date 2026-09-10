@@ -70,7 +70,7 @@ object NativeCore {
      * phase: 0=DOWN 1=MOVE 2=UP. Returns false between sessions (no event channel) — not an error.
      *
      * Unlike video/audio this needs no handle: the receiver's event channel is process-global state
-     * (`events::send_hid_report`), the same singleton airplayd's :9110 socket path ends at.
+     * (`events::send_hid_report`), the same singleton carplayd's :9110 socket path ends at.
      */
     fun touch(phase: Int, nx: Float, ny: Float, w: Int, h: Int): Boolean =
         available && nativeTouch(phase, nx, ny, w, h)

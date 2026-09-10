@@ -12,7 +12,7 @@ package zeno.gmccpa.av
  *
  * ## Scope, deliberately small
  * Handles exactly the shapes a `/command` payload uses: dictionaries, ASCII and UTF-16 strings,
- * integers, booleans, reals and data. No sets, no dates, no UIDs, no `bplist15`/keyed archives.
+ * integers, booleans, reals and data; sets decode as arrays. No dates, no UIDs, no `bplist15`/keyed archives.
  * Anything unrecognised decodes to `null` rather than throwing, because this parses attacker-
  * adjacent bytes on a session thread: a malformed plist must cost one dropped record, never the
  * connection.

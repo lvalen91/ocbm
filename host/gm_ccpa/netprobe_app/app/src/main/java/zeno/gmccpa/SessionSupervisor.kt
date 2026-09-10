@@ -43,7 +43,7 @@ enum class RxPhase(val label: String) {
     RX_READY("receiver ready"),
     /** OCBM claimed, HELLO + MFi proven. Radios not woken yet. */
     BOX_LINKED("box linked"),
-    /** Both sides green and the box has been told to bring its radios up. */
+    /** Both sides green and the box told to bring its radios up. Also the recovery hub: inbound/grace expiry and adapter-recovered paths re-enter here and re-arm the ladder. */
     ARMED("armed"),
     BT_PAIRING("pairing"),
     BT_PAIRED("paired"),
@@ -139,13 +139,15 @@ class SessionSupervisor(private val act: Actions) {
         /**
          * Minimum spacing per rung. These are not politeness — they are correctness.
          *
-         * Rung 3 restarts the app, which drops `host_present`. The box's supervisor treats a
-         * host_present cycle inside ~20 s as flapping and escalates to an `ocbmd` restart and then a
-         * full box reboot, so a ladder that retried freely would brick the session it was trying to
+         * There is no rung 3 action: `runRung` returns false past rung 2 and the ladder falls to
+         * STALLED, so this array has exactly one entry per rung that exists (`lastRungAt` and the
+         * `escalate` loop bound are both sized from it; a 4th entry was dead — 2026-09-10). The spacing matters because rungs 1–2 touch the box: a `host_present` cycle inside
+         * ~20 s reads as flapping to the box supervisor, which escalates to an `ocbmd` restart and then
+         * a full box reboot, so a ladder that retried freely would brick the session it was trying to
          * rescue. Rung 1 exists precisely because `CT_RADIO` resets the box's radios WITHOUT touching
          * host_present, so it is the strongest lever that carries no flap risk at all.
          */
-        val RUNG_COOLDOWN_MS = longArrayOf(30_000L, 90_000L, 180_000L, 300_000L)
+        val RUNG_COOLDOWN_MS = longArrayOf(30_000L, 90_000L, 180_000L)
 
         /**
          * How long after rung 1 a box-health regression is presumed to be our own doing.
@@ -168,7 +170,7 @@ class SessionSupervisor(private val act: Actions) {
     val current: RxPhase get() = phase
 
     /**
-     * Three independent deadlines, not one slot.
+     * Five independent deadlines, not one slot.
      *
      * A single `timer` field was wrong in a way that only shows up under load: rung 1 schedules the
      * `CT_RADIO` on-edge 2 s after the off-edge, and with one slot that schedule silently cancelled
@@ -712,7 +714,7 @@ class SessionSupervisor(private val act: Actions) {
      * when nothing is going on. But the retry it arms is blind: it fires on a fixed 20 s schedule
      * carrying the ORIGINAL `why`, regardless of what the box and phone have achieved since. A
      * handshake in flight is not silence, and rung 2 is `MGMT_RESTART_WIRELESS` — the one rung that
-     * tears down the box's whole wireless stack, `airplayd` included.
+     * tears down the box's whole wireless stack, `carplayd` included.
      *
      * Device-observed twice on 2026-09-08, the second time with the ladder shooting a handshake in
      * the back mid-authentication:

@@ -5,11 +5,14 @@
 [`04_SYSTEM_MODEL.md`](04_SYSTEM_MODEL.md) — canonical, outranks every architecture blurb elsewhere.
 Then [`05_SESSION_FLOW.md`](05_SESSION_FLOW.md) (wire-level session buildup, read §8 before writing any
 protocol code), then `evidence/session_2026-08-05/WORKING_SESSION.md`
-(the working proof — in the standalone `gm_ccpa` archive, not this tree; see §9), `01_FINDINGS.md` (what's proven), `06_BRINGUP_RUNBOOK.md` (how to run it),
+(the working proof — in the standalone archive, not this tree; see §9), `01_FINDINGS.md` (what's proven), `06_BRINGUP_RUNBOOK.md` (how to run it),
 `11_HARDENING_PLAN.md` (live landed-vs-deferred ledger — more current than this file for the hardening
 queue) and `13_AUDIO_ROUTING.md` (audio design + build status).
 
-Project root: `~/Documents/carlink/gm_ccpa`.
+Project root: `~/Documents/carlink/ccpa_custom/host/gm_ccpa` (this project was merged into `ccpa_custom`
+on 2026-09-08 — see §9). The `evidence/` archive is NOT under this root: it lives in the standalone
+checkout at `~/Documents/carlink/old/gm_ccpa/evidence/`. Every bare `evidence/...` path in this doc set
+resolves there.
 
 
 ## CarPlay dynamic resize + AAOS display modes (2026-09-08) — DEVICE-PROVEN
@@ -219,7 +222,36 @@ now `ASSISTANT_HOLD_MS + 1` sweep period. `reclaimFocus()` covers the separate *
    routing are owner-confirmed on the truck 2026-09-04; the focus fixes still need a session.)
 4. **Arm untethered capture** on the same visit (`06` §7): grant `READ_LOGS` then force-stop the app
    (the gid is assigned at fork — a running process reports the grant without having it), and run
-   `export_log` before leaving.
+   `export_log` before leaving. The app's own printed remediation is trustworthy again — see the
+   fixed defect below.
+
+   **FIXED 2026-09-09 — `LogCapture.kt` no longer names the reverted squat package.** *(Was: OPEN
+   DEFECT 2026-09-09.)* The package-squat revert (§ above) landed in the manifest and
+   `build.gradle` (`applicationId zeno.gmccpa`) on 2026-09-08 but not in the Kotlin. The pre-fix file
+   is byte-exact at commit `b049810`
+   (`git show b049810:host/gm_ccpa/netprobe_app/app/src/main/java/zeno/gmccpa/logging/LogCapture.kt`):
+   `GRANT_CMD` (`@b049810 :163`) and `FORCE_STOP_CMD` (`:166`) still hard-coded
+   `android.car.usb.handler`, and those two constants were what the app printed to the operator as
+   remediation when scope degraded (`:572`, `:608-609`) and stamped into the `degraded :` line of
+   every degraded capture-file header (`:794`); the header's `app :` line (`:790`) carried the same
+   literal a third time, typed out directly as `applicationId android.car.usb.handler` rather than via
+   either constant — the app's on-device guidance named a package that no longer existed on the
+   device, so a copy-pasted `pm grant` silently failed. `MainActivity.kt`'s scriptable-entry-point
+   KDoc example (`@b049810 :636-637`) was stale the same way.
+
+   Fixed 2026-09-09 by **deriving the package from the running app instead of re-typing the
+   literal**, so it cannot drift at the next rename: the two `const val`s are now
+   `LogCapture.grantCmd(ctx)` / `LogCapture.forceStopCmd(ctx)`
+   (`fun grantCmd` / `fun forceStopCmd` in
+   `netprobe_app/app/src/main/java/zeno/gmccpa/logging/LogCapture.kt`, built from `ctx.packageName`),
+   with all call sites updated (`verifyScope()`, `resolveScope()`, and the `degraded :` line of
+   `header()`) and `header()`'s `app :` line now printing `applicationId ${ctx.packageName}`.
+   `MainActivity.kt`'s KDoc `am start` example now says `zeno.gmccpa/zeno.gmccpa.MainActivity`. `BuildConfig.APPLICATION_ID` was deliberately NOT used:
+   the canonical build (`tools/build_apk.sh`) is a raw `kotlinc` compile that generates no
+   BuildConfig, and the module does not set `buildFeatures { buildConfig true }`. **The operator can
+   copy-paste what the app prints again.** Remaining `android.car.usb.handler` hits in the tree are
+   deliberate historical comments (manifest header, `UsbAttachActivity.kt`, `build_apk.sh:33`).
+   Verified by a green `tools/build_apk.sh` only — compilation, not on-device behaviour.
 5. **Archive `--es run dump_setup` hex into the standalone checkout's `evidence/`** on first contact
    (`evidence/` is gitignored here — see §9).
 
@@ -252,11 +284,13 @@ further action.
   **per host**, both adverts targeted the platform hostname `Android.local`, and GM won by registering
   at boot (we start ~51 s later). Fixed by a second mDNS advert on a hostname we own
   (`gmccpa-rx.local`, `MdnsResponder.kt`) — detail in `12_OBSERVED_FLOW.md` Failure Point 3.
-- **The app installs as `zeno.gmccpa`** (labelled "GM CCPA"), squatting the package gminfo37
-  Y181 grants silent USB permission to — `zeno.gmccpa` in a command or class reference is stale except
-  as the source-code package (`zeno.gmccpa/.MainActivity`). `am`/`appops`/`pm
+- **The app installs as `zeno.gmccpa`** (labelled "GM CCPA"). The package squat on the GM USB
+  fixed-handler name (`android.car.usb.handler`) was reverted (2026-09-08) — TRUCK-VERIFIED; `zeno.gmccpa`
+  is now the app's real installed package, not just the source-code package, and there is no longer a
+  silent USB-permission grant — the app goes through the ordinary attach resolver and its one-time
+  permission dialog. `am`/`appops`/`pm
   grant`/`force-stop`/`uninstall`/`dumpsys package` all take `zeno.gmccpa`. Install to
-  **user 10** (a user-0 install does not get the fixed-handler grant):
+  **user 10** (a user-0 install does not get the attach dialog / `ACTION_USB_DEVICE_ATTACHED` routing):
   `adb install -i com.android.vending -r -g --user 10 <apk>`.
   A re-packaged app is a **new** app to the platform — first install starts with an empty `filesDir`
   (no `carplay_peers.bin`, iPhone must re-pair) and the app uid changes on every uninstall/reinstall, so
@@ -362,7 +396,11 @@ shim, a separate HEVC renderer (the salvage app is H.264-only PCM).
 - **`zeno.carlink`** on the unit is a **separate, unrelated app** (stock-Carlinkit-firmware product,
   `carlink_native_personal`). Do not confuse it with this project's `zeno.gmccpa`.
 - **`uart_cmd.sh` signature:** `uart_cmd.sh OUTFILE SECONDS 'command'`. Send one or two short commands
-  per call — long compound commands over UART get truncated/garbled.
+  per call — long compound commands over UART get truncated/garbled. **This means
+  `ccpa_custom/scratchpad/uart_cmd.sh` specifically** — a different, incompatible `uart_cmd.sh` also
+  exists at `ccpa_custom/host/uart_cmd.sh` (`Usage: uart_cmd.sh "shell command" [read_seconds]` —
+  command first, seconds optional, no outfile argument); running that one against this doc's examples
+  fails confusingly rather than loudly (found 2026-09-09).
 - **Mac build toolchain:** Android SDK `~/Library/Android/sdk` (platforms 35–37), kotlinc 2.3.10.
   Gradle-free build via `tools/build_apk.sh` (kotlinc→d8→aapt2→zipalign→apksigner; Java 21 fights AGP
   7.4). **Compiles against `android-32`** (the unit's real API level, since `11` R0) — `android-35` let
@@ -433,8 +471,8 @@ Git: tag `baseline-2026-08-05-working` is the golden commit; each hardening rele
 tag belong to the standalone `gm_ccpa` repo.** This project was merged into `ccpa_custom` at
 `host/gm_ccpa` on 2026-09-08 via `git subtree add`, which preserved the commits but **rewrote every
 hash** — the tag was not carried across. To bisect or roll back by tag, use the standalone checkout at
-`../../../gm_ccpa/`, which is the archive of record for history, `evidence/` and the golden APKs. Do not
-delete it.
+`~/Documents/carlink/old/gm_ccpa/`, which is the archive of record for history, `evidence/` and the
+golden APKs. Do not delete it.
 
 Cross-project memory: the Claude memory `direct-wifi-carplay-aaos` (in the `ccpa_custom` project's
 memory dir) carries the full device-proven history.

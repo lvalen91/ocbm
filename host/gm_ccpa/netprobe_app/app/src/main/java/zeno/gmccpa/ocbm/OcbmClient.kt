@@ -20,7 +20,8 @@ import java.util.concurrent.atomic.AtomicInteger
  *   3. CT_SUBSCRIBE with the config blob. This is the presence latch: `/tmp/host_present` goes to 1
  *      and the box supervisor brings the radios up from that edge. THE APP IS THE IGNITION.
  *   4. CT_HEARTBEAT at 1 Hz. Miss the box's 10 s watchdog and it emits SEV_HOST_GONE, clears its
- *      own `subscribed` flag, and IGNORES further heartbeats until a fresh SUBSCRIBE.
+ *      own `subscribed` flag, and no heartbeat restores presence until a fresh SUBSCRIBE (it answers
+ *      an unsubscribed host's heartbeat only with a HOST_GONE nudge every 30 s).
  */
 class OcbmClient(
     private val transport: RawBulkTransport,
@@ -576,14 +577,14 @@ class OcbmClient(
      * wire response carries no opcode echo or request id, so without a lock a certificate can be
      * returned as the answer to a signature request (auth-setup then fails and the session drops).
      */
-    private companion object {
+    companion object {
         /**
          * Host instance nonce: fixed for this PROCESS, re-sent on every reattach it makes.
          *
          * Derived from the pid and the process start time so two successive launches cannot collide,
          * and never 0 — the box reads 0 as "not supplied" and falls back to its old blind behaviour.
          */
-        val HOST_INSTANCE: Int = run {
+        private val HOST_INSTANCE: Int = run {
             val h = (android.os.Process.myPid().toLong() shl 20) xor android.os.SystemClock.elapsedRealtime()
             val v = (h xor (h ushr 32)).toInt()
             if (v == 0) 1 else v
@@ -592,7 +593,7 @@ class OcbmClient(
          * What kind of host this is. Diagnostic only — the box logs it and reports it in MGMT_INFO so
          * "what is talking to me" is answerable. Deliberately carries no serial, address or user data.
          */
-        const val HOST_LABEL = "gm-ccpa head unit (bridge role)"
+        internal const val HOST_LABEL = "gm-ccpa head unit (bridge role)"
     }
 
     /**
@@ -823,7 +824,7 @@ class OcbmClient(
 
     // ---- teardown -------------------------------------------------------------------------------
 
-    /** Clean shutdown: CT_STOP gives the box its 5 s grace so a quick relaunch reuses the session. */
+    /** Clean shutdown: CT_STOP ends the box session immediately (no warm-reuse grace since 2026-09-03) so a relaunch gets a clean session. */
     fun stop() {
         if (!running.compareAndSet(true, false)) return
         // JOIN, do not just interrupt: bulkTransfer is not interruptible, so a tick already inside

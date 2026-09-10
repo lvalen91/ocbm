@@ -253,10 +253,11 @@ class CarPlayActivity : Activity() {
         val p = AacPlayer(getSystemService(android.content.Context.AUDIO_SERVICE) as? android.media.AudioManager)
         p.start(); p.prime(); player = p
         // The non-media half. Ducking is routed straight at the media track: every other purpose
-        // plays at unity, so min(commandedDuck, focusDuck) collapses to this one call.
+        // plays at unity. This is the VOICE duck source only; AacPlayer combines it with its own
+        // focus-driven duck (min of the two), so an AUDIOFOCUS_GAIN cannot cancel a live prompt's duck.
         voiceRouter = VoiceRouter(
             this,
-            onDuck = { ducked -> player?.setDucked(ducked) },
+            onDuck = { ducked -> player?.setVoiceDucked(ducked) },
             // Pausing (not ducking) media is what lets the volume knob reach the voice group while
             // Siri speaks — MUSIC outranks VOICE_COMMAND, and a ducked track still counts as active.
             onAssistant = { speaking -> player?.setAssistantSpeaking(speaking) },
@@ -273,10 +274,12 @@ class CarPlayActivity : Activity() {
         // The video seam is served whether or not a Surface exists, and the connection is HELD either
         // way. With no renderer we drain and DISCARD.
         //
-        // Closing instead produced a ~30-60 Hz accept/close storm: `forward_screen` re-dials on the very
-        // next frame with NO backoff (session.rs:1790-1821) — the 2 s connect_timeout is a ceiling on
-        // failure, not a delay — and fires a ForceKeyFrame on EVERY successful connect
-        // (session.rs:1808-1811). That is one connect plus one encrypted event-channel command per frame,
+        // Closing instead produced a ~30-60 Hz accept/close storm: `forward_screen2`
+        // (`crates/vendor/receiver/src/session.rs`) re-dials on the very next frame with NO backoff —
+        // `connect_timeout(2 s)` per call, `Err` returns and the next frame retries; the 2 s is a ceiling
+        // on failure, not a delay — and fires a ForceKeyFrame on EVERY successful connect, from the
+        // spawned `send_force_key_frame_stream` thread in the same fn. That is one connect plus one
+        // encrypted event-channel command per frame,
         // taken on the GLOBAL event mutex that also carries touch, and it makes iOS emit all-IDR at
         // roughly 10x bitrate, degrading audio too. "Don't accept yet" would not have helped: on Linux
         // connect() to a bound listener completes in the kernel without accept().
@@ -290,14 +293,16 @@ class CarPlayActivity : Activity() {
         serve(gen, aus, "audio") { ins -> p.consume(ins) }
 
         // :9003 carries every NON-media audioType — Siri, telephony, alerts, navigation prompts
-        // (session.rs routes them there, tagged `[rate u32 BE][ch u16 BE][atype u8][len u32 BE][AU]`). We do not
-        // decode it yet, but it MUST be bound: `forward_to_sink` logs its failed connect once per RTP
-        // packet with no transition gate, so the first nav prompt of a drive produces ~50 log lines a
-        // second, permanently, burying every other diagnostic in the ring buffer.
+        // (session.rs routes them there, tagged `[rate u32 BE][ch u16 BE][atype u8][len u32 BE][AU]`).
+        // `VoiceRouter.consume` decodes it — a real AAC-ELD decode into USAGE_VOICE_COMMUNICATION /
+        // USAGE_ASSISTANT tracks, with the media duck driven from it. Independently of that, the seam
+        // MUST be bound: `forward_to_sink` logs its failed connect once per RTP packet with no
+        // transition gate, so the first nav prompt of a drive produces ~50 log lines a second,
+        // permanently, burying every other diagnostic in the ring buffer.
         //
-        // Draining is deliberate — accepting without reading fills the socket buffer and stalls the
-        // producer's write for its full 2 s timeout. Best-effort by design: voice is optional, so a
-        // bind failure must NOT take video and media audio down with it.
+        // Reading continuously is required, not just decoding — accepting without reading fills the
+        // socket buffer and stalls the producer's write for its full 2 s timeout. Best-effort by
+        // design: voice is optional, so a bind failure must NOT take video and media audio down with it.
         val vos = bindOrNull(9003)
         if (vos != null) {
             servers.add(vos)
@@ -313,7 +318,8 @@ class CarPlayActivity : Activity() {
         // stale-listener / EADDRINUSE shape the per-generation AtomicBoolean exists to prevent.
         //
         // Best-effort like :9003, but for the opposite reason. An UNBOUND port here is cheap: the
-        // producer connects lazily per record and warns once (metadata.rs:44-46), unlike the voice
+        // producer connects lazily per record and warns once (the `WARNED.swap` block in
+        // `crates/vendor/iap2-core/src/metadata.rs`), unlike the voice
         // seam's per-packet log storm. An accepted-but-unread one is the expensive case — the producer
         // writes under a SINK mutex it SHARES with the iAP2 reader, and since the core is in-process
         // that reader is our own thread, so a stalled consumer here stalls iAP2 ingest for the whole
@@ -388,13 +394,15 @@ class CarPlayActivity : Activity() {
      * No Surface: keep the seam connected and throw the frames away.
      *
      * Draining is not optional. Accepting but not reading fills the socket buffer, stalls the producer's
-     * `write_all` for the full 2 s SO_SNDTIMEO (session.rs:1799), then drops the connection anyway —
+     * `write_two` for the full 2 s SO_SNDTIMEO (`forward_screen2`'s `set_write_timeout`,
+     * `crates/vendor/receiver/src/session.rs`), then drops the connection anyway —
      * back-pressuring the screen thread and, through it, the iPhone's screen socket. Reading and
      * discarding costs one read plus a memcpy into a reused buffer.
      *
      * Framing is the seam's own `[u32 BE len][payload]`, read exactly as [HevcRenderer.consume] reads
      * it, so a desync cannot make this allocate — the payload is skipped, never allocated. A 0-length
-     * message is legal (session.rs:2074) and is not a desync.
+     * message is legal (`spawn_screen` calls `forward_screen` unconditionally with whatever the
+     * conversion produced, `crates/vendor/receiver/src/session.rs`) and is not a desync.
      *
      * Returns as soon as a renderer appears; [attachRenderer] then closes the socket so the producer
      * re-dials into the new renderer with ONE fresh ForceKeyFrame — the designed heal path. If no frames
@@ -419,16 +427,6 @@ class CarPlayActivity : Activity() {
         }
         log.i("discarded $msgs frames ($bytes B) with no Surface")
     }
-
-    /**
-     * Consume and discard the voice seam.
-     *
-     * A pure byte drain, deliberately NOT a framing parse: the point is to keep the producer's socket
-     * healthy and its per-packet connect-failure log silent, and a byte drain cannot desync. Real
-     * consumption (AAC-ELD decode into a USAGE_ASSISTANT / USAGE_VOICE_COMMUNICATION track) is the
-     * follow-up; until then Siri and call audio are silently dropped, which is a known gap rather than
-     * a surprise.
-     */
 
     private fun readFully(ins: java.io.InputStream, dst: ByteArray, n: Int): Boolean {
         var off = 0
@@ -530,16 +528,6 @@ class CarPlayActivity : Activity() {
         touchHandler?.post { NativeCore.forceKeyFrame() }
     }
 
-    /**
-     * Touch → HID report to the iPhone, dispatched off the UI thread.
-     *
-     * A send takes the event-channel lock and can block on a stalled socket write for seconds; doing
-     * that inline from `onTouch` risks an ANR. MOVEs are coalesced latest-wins (a stale MOVE has no
-     * value once a newer one exists) while DOWN and UP are never dropped and keep their order.
-     *
-     * Single-touch: only the primary pointer is tracked. Without that, a second finger lifting sends
-     * UP while the first is still down, and iOS sees the gesture end mid-drag.
-     */
     /**
      * An inbound `/command` plist off the `:9004` seam.
      *
@@ -652,6 +640,16 @@ class CarPlayActivity : Activity() {
         }.onFailure { log.w("setGeometry $r failed: ${it.javaClass.simpleName}: ${it.message}") }
     }
 
+    /**
+     * Touch → HID report to the iPhone, dispatched off the UI thread.
+     *
+     * A send takes the event-channel lock and can block on a stalled socket write for seconds; doing
+     * that inline from `onTouch` risks an ANR. MOVEs are coalesced latest-wins (a stale MOVE has no
+     * value once a newer one exists) while DOWN and UP are never dropped and keep their order.
+     *
+     * Single-touch: only the primary pointer is tracked. Without that, a second finger lifting sends
+     * UP while the first is still down, and iOS sees the gesture end mid-drag.
+     */
     private fun onTouch(v: View, ev: MotionEvent): Boolean {
         if (v.width <= 0 || v.height <= 0) return false
         val action = ev.actionMasked

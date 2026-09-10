@@ -92,7 +92,7 @@ class UsbBulkTransport(
     }
 
     /**
-     * Claim interface 0 and locate the bulk pair. Rather than hardcoding endpoint addresses we pick
+     * Walk every interface and claim the one carrying the bulk pair. Rather than hardcoding endpoint addresses we pick
      * the interface that actually carries a bulk IN + bulk OUT pair — some units differ.
      */
     fun open(dev: UsbDevice): Boolean {

@@ -77,7 +77,7 @@ which is why the role flag (§11 B3) is load-bearing rather than cosmetic.
 | `metadata` | 2406 | MOVES to app — NowPlaying/RouteGuidance TLV |
 | `eld-codec` | 95 | DROP/optional — head unit has native AAC-ELD (MediaCodec) |
 | `rx-connect` | 238 | REPLACE with Android `NsdManager` (advertise `_airplay._tcp`, browse) |
-| `airplayd` (daemon) | — | NOT SPAWNED in this role. Its receiver orchestration moves into the app; its `LocalMfiSigner` role is already covered by `ocbmd`'s `handle_mfi` |
+| `carplayd` (daemon; was `ccpa/airplayd` before commit `9c7191a`) | — | NOT SPAWNED in this role. Its receiver orchestration moves into the app; its `LocalMfiSigner` role is already covered by `ocbmd`'s `handle_mfi` |
 
 ---
 
@@ -93,11 +93,13 @@ which is why the role flag (§11 B3) is load-bearing rather than cosmetic.
   where the server sits.
 - **`ControlServer` is generic over MFi.** `mfi::auth_client::MfiSigner`
   (`crates/vendor/mfi/src/auth_client.rs`) is two methods: `copy_certificate()` and
-  `create_signature(digest)`. `LocalMfiSigner` (on-box chip, `ccpa/airplayd/src/main.rs`) implements it
+  `create_signature(digest)`. `struct LocalMfiSigner` (on-box chip, `ccpa/carplayd/src/main.rs`) implements it
   against `/dev/i2c-1`.
-- **`MfiAuthClient` is dead code, not a working remote signer** — its `connect()` only stores an address
-  string, `request()` is private, nothing in the tree constructs it. It is a useful shape to copy (the
-  `CH_MFI` payload framing is byte-identical to its wire format) but `RemoteMfiSigner` is new work.
+- **`MfiAuthClient` no longer exists** (removed as audit Fix #19 — corrected 2026-09-09, was
+  previously described here as dead code worth copying). `crates/vendor/mfi/src/auth_client.rs` now
+  contains only the `MfiSigner` trait (`auth_client.rs:9-15`); the removal is recorded in the file's
+  own header comment (`auth_client.rs:3-4`). There is no surviving struct whose wire-format shape can
+  be copied — `RemoteMfiSigner` is new work against the `MfiSigner` trait shape, full stop.
 
 **The app runs `ControlServer<_, RemoteMfiSigner>`**, where `RemoteMfiSigner` relays `copy_certificate`
 / `create_signature` over OCBM `CH_MFI` to the CCPA's coprocessor. **The CCPA side needs nothing new**:
@@ -137,8 +139,10 @@ crypto/protocol across the six crates §10 relocates.
 
 `wifi_handoff.rs` is not an unfinished scaffold — its module header says so but the code contradicts
 it. The `0x5703` path is already wired: `read_hostapd_ap_config()` (parses `/etc/hostapd.conf`) is
-dispatched from `bt_driver.rs:245` on the `0x5702` request, builds `0x5703`, and writes it on control
-session 1.
+dispatched from `crates/vendor/wireless/src/bt_driver.rs:417` on the `0x5702` request (corrected
+2026-09-09; was misquoted as `bt_driver.rs:245`), inside the same `0x5702` handler that calls
+`build_accessory_wifi_configuration_information` at `bt_driver.rs:426` to build `0x5703`, and writes
+it on control session 1.
 
 The `0x5703` builder is generic and reusable as-is:
 
@@ -146,7 +150,8 @@ The `0x5703` builder is generic and reusable as-is:
 build_accessory_wifi_configuration_information(&AccessoryWiFiConfig { ssid, passphrase, security_type, channel })
 ```
 
-**Change:** replace the `read_hostapd_ap_config()` call at `bt_driver.rs:245` with a source fn that
+**Change:** replace the `read_hostapd_ap_config()` call at `crates/vendor/wireless/src/bt_driver.rs:417`
+with a source fn that
 builds `AccessoryWiFiConfig` from app-supplied vehicle creds handed up over OCBM (`myChevrolet 32D4` +
 user passphrase + WPA2 + 5 GHz channel), reusing the same `has_wpa && !pass.is_empty() →
 Wpa2OrWpa3Personal` mapping. The builder, TLV layout, enums, and session-1 dispatch are untouched. Needs
@@ -358,7 +363,7 @@ ordinary app UID.
 **B3. CCPA bridge role** (first box-side code). Skip `av::ensure_av_layer()`; drop `wlan_on.sh` from the
 wireless launch wrapper so the box raises no AP; swap the `read_hostapd_ap_config()` call in
 `bt_driver.rs` for app-supplied vehicle creds arriving over OCBM. Gated behind a role flag in the
-`CT_SUBSCRIBE` YAML. **Device-proven** — BT comes up, no `hostapd` runs on the box, no `airplayd` is
+`CT_SUBSCRIBE` YAML. **Device-proven** — BT comes up, no `hostapd` runs on the box, no `carplayd` is
 spawned.
 
 **B4. BT bring-up + handoff, driven from the app.** **Device-proven** — the iPhone pairs, completes iAP2

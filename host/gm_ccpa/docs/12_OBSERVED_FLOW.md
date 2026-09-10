@@ -25,10 +25,11 @@ does, in order, with the log lines you should expect to see.
 > 4. exactly **one** OCBM bring-up per process (Failure Point 4).
 
 **Last verified end-to-end:** 2026-08-12 with event-driven standby — RECORD to first frame **0.82 s**
-(was 49.6 s). Evidence: `../evidence/session_2026-08-12-standby/`,
-which is the current regression oracle. Earlier captures:
-`../evidence/session_2026-08-12-freshpair/` (pre-standby, same clean-slate
-procedure) and `../evidence/session_2026-08-12/` (16 min unbroken, 21,000 frames).
+(was 49.6 s). Evidence (`evidence/` lives in the standalone archive at
+`~/Documents/carlink/old/gm_ccpa/evidence/`, not under this tree):
+`evidence/session_2026-08-12-standby/`, which is the current regression oracle. Earlier captures:
+`evidence/session_2026-08-12-freshpair/` (pre-standby, same clean-slate
+procedure) and `evidence/session_2026-08-12/` (16 min unbroken, 21,000 frames).
 
 ---
 
@@ -73,7 +74,7 @@ isolation. A transient `status 1` here is known and benign if a retry succeeds (
 `ABORT:` path inside it is a bare `return` — so a bare `try/catch` around it never fires for "no
 adapter," "claim failed," or "no `CT_HELLO_ACK`." Until 2026-08-28 this meant the launcher could report
 "box claimed, MFi proven" with no adapter on the bus at all. Fixed by checking `LinkResult.helloOk`
-explicitly (`MainActivity.kt:515-521`).
+explicitly (the `if (!r.helloOk)` gate after `ocbm().runAll()` in `MainActivity.autoStart()`, with the `GATE ON THE RESULT` comment above it).
 
 ## Phase 2 — `CT_SUBSCRIBE`: the radio-wake edge — **credentials MUST be present**
 
@@ -327,8 +328,13 @@ POST /feedback every 2 s
 
 ## Phase 7 — Localhost seam → MediaCodec
 
-Rust `forward.rs` dials **outbound** to `127.0.0.1:9001` and `:9002`, so the consumer must be listening
-**before** stream SETUP or every access unit is dropped (`connect carlink :900x failed`).
+Rust `session.rs` (`spawn_screen`/`spawn_audio`) dials **outbound** to `127.0.0.1:9001` and `:9002`, so
+the consumer must be listening **before** stream SETUP or every access unit is dropped (`connect carlink
+:900x failed`). `forward.rs` supplies only the byte-transform applied to each access unit before that
+write (AVCC→Annex-B for video, raw AAC-LC→ADTS for media audio) — it contains no socket, no `connect`;
+the dial and the log line `"[screen] iPhone connected from {peer}; forwarding video →
+127.0.0.1:{sink_port}"` are in `session.rs`. (Corrected 2026-09-09 — the doc previously attributed the
+outbound dial to `forward.rs`.)
 
 > ### The consumers stand by; they are not started on demand
 > `CarPlayRx` fires `onSessionUp` the moment the phone opens the control connection — before
@@ -393,7 +399,7 @@ Two teardown gaps were found on the same device session and both are now fixed:
   transient) paused and abandoned focus correctly, but nothing re-requested it — the old assumption
   that "the next `start()` re-requests" was false, so media stayed silent even though Siri and phone
   calls (on a separate track, `VoiceRouter`) were still audible. Fixed by
-  `AacPlayer.reclaimFocus()` (`av/AacPlayer.kt:174`), called from `feed()` — i.e. only when audio is
+  `AacPlayer.reclaimFocus()` (`av/AacPlayer.kt`), called from `feed()` — i.e. only when audio is
   actually arriving, which is the honest signal media is meant to be playing — rate-limited to one
   attempt per `FOCUS_RETRY_MS` since a focus request is a binder call and a refusing head unit keeps
   refusing.
@@ -444,14 +450,14 @@ It remains available to *restore* the screen after something backgrounds it.
 >
 > `iap_tunnel.rs` was calling the local-chip path directly instead of the `MfiSigner` the
 > `ControlServer` already held — on the head unit that signer is `RemoteMfiSigner`
-> (`native/carplay-jni/src/lib.rs:184`), which relays over OCBM `CH_MFI` to the box and is the only
+> (`struct RemoteMfiSigner`, `native/carplay-jni/src/lib.rs`), which relays over OCBM `CH_MFI` to the box and is the only
 > chip path that works from Android (the same one `/auth-setup` uses successfully every session).
 >
-> **Fix.** `receiver::iap_tunnel::set_remote_signer()` (`crates/vendor/receiver/src/iap_tunnel.rs:583`)
+> **Fix.** `receiver::iap_tunnel::set_remote_signer()` (`pub fn set_remote_signer`, `crates/vendor/receiver/src/iap_tunnel.rs`)
 > installs an `Arc<Mutex<dyn MfiSigner>>` the tunnel now calls instead of `mfi_i2c_local` when one is
 > present; `mfi_i2c_local` is compiled in only under `local-mfi` (on-box builds), so an Android build
 > without a remote signer now fails loudly instead of silently. The embedder wiring is
-> `native/carplay-jni/src/lib.rs:468`, landed in `ed3329f` (2026-08-28), the same commit as the
+> the `receiver::iap_tunnel::set_remote_signer(...)` call in `Java_zeno_gmccpa_pair_NativeCore_nativeInit` (`native/carplay-jni/src/lib.rs`), landed in `ed3329f` (2026-08-28), the same commit as the
 > box-log-to-logcat change. **This has not yet been exercised on a live truck session** — no capture
 > post-dates the fix. Verify by confirming the tunnel's next `TX detect+SYN` gets a real
 > `copy_certificate`/`create_signature` round trip instead of the lock-busy line above.
@@ -524,7 +530,7 @@ adb shell "cat /proc/net/tcp6" | awk -v u="$((1000000 + APPID))" '$8==u && $4=="
 
 ## Vehicle state → CarPlay: drive-restricted UI and day/night
 
-**Device-proven 2026-09-08 on gminfo38, owner-observed both directions.** `av/VehicleStateWatcher.kt`
+**Device-proven 2026-09-08 on gminfo37, owner-observed both directions.** `av/VehicleStateWatcher.kt`
 drives two CarPlay runtime levers from AAOS vehicle state:
 
 | Lever | Command | Source | Status |

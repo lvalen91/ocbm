@@ -11,7 +11,7 @@ import android.content.Context
  *
  * Two entry points:
  *   [selfTest]  — framing + client bring-up against a FakeTransport. No hardware, no adapter.
- *   [runAll]    — the real link: claim, HELLO, SETTIME, SUBSCRIBE, heartbeat, MFi, MGMT.
+ *   [runAll]    — the real link: claim, HELLO, MGMT_INFO snapshot, SETTIME, MFi, MGMT_INFO, SUBSCRIBE, heartbeat.
  */
 class OcbmProbe(context: Context) {
 
@@ -71,7 +71,7 @@ class OcbmProbe(context: Context) {
      * The CT_SUBSCRIBE config blob.
      *
      * `wireless`/`pairing`/`wifi_ap`/`wifi_*` are read by the box supervisor's raw greps;
-     * `accessoryConfig` would be read by airplayd's serde. Unknown keys are silently ignored by
+     * `accessoryConfig` would be read by carplayd's serde. Unknown keys are silently ignored by
      * both, so sending a key the deployed box doesn't understand yet is always safe.
      */
     fun btOnlyConfig(): ByteArray {
@@ -175,8 +175,15 @@ class OcbmProbe(context: Context) {
         val helloThread = Thread { c.hello(4000) }
         helloThread.start()
         val wrote = fake.takeWritten(2000)
-        check("client emits CT_HELLO first", wrote != null && wrote.size == 22 &&
-            wrote[Ocbm.HDR_LEN] == Ocbm.CT_HELLO && wrote[Ocbm.HDR_LEN + 1] == Ocbm.VERSION)
+        val helloLen = Ocbm.HDR_LEN + 6 + OcbmClient.HOST_LABEL.toByteArray(Charsets.UTF_8).size
+        check("client emits CT_HELLO first (hdr + nonce + label)",
+            wrote != null && wrote.size == helloLen &&
+                wrote[Ocbm.HDR_LEN] == Ocbm.CT_HELLO && wrote[Ocbm.HDR_LEN + 1] == Ocbm.VERSION,
+            "got ${wrote?.size} expected $helloLen")
+        check("CT_HELLO instance nonce is non-zero (0 = 'not supplied' to the box)",
+            wrote != null && wrote.size >= Ocbm.HDR_LEN + 6 &&
+                (wrote[Ocbm.HDR_LEN + 2].toInt() or wrote[Ocbm.HDR_LEN + 3].toInt() or
+                 wrote[Ocbm.HDR_LEN + 4].toInt() or wrote[Ocbm.HDR_LEN + 5].toInt()) != 0)
         // Answer with a HELLO_ACK carrying the full cap set including MFI.
         val ackPayload = byteArrayOf(Ocbm.CT_HELLO_ACK, 1, 0x3F, 0, 0, 0, Ocbm.MODE_PROJECTION)
         fake.feed(Framing.frame(Ocbm.CH_CTRL, Ocbm.F_BOTH, 0, ackPayload))
@@ -513,15 +520,6 @@ class OcbmProbe(context: Context) {
     }
 
     /**
-     * Command the phone off Bluetooth **without** destroying the bond, by bouncing the box's wireless
-     * stack (`MGMT_RESTART_WIRELESS`). `btd` restarts, which closes the RFCOMM link and
-     * takes the controller non-discoverable before coming back up. The phone can reconnect afterwards
-     * with no re-pairing.
-     *
-     * This is the right lever for test hygiene between runs: it clears a half-live session without the
-     * heavy-handedness of forgetting the bond.
-     */
-    /**
      * `CT_RADIO`. Serialized on [ops] like every other box verb so it cannot interleave with a
      * bring-up or a teardown mid-frame.
      */
@@ -530,6 +528,15 @@ class OcbmProbe(context: Context) {
         c.radio(on)
     }.get()
 
+    /**
+     * Command the phone off Bluetooth **without** destroying the bond, by bouncing the box's wireless
+     * stack (`MGMT_RESTART_WIRELESS`). `btd` restarts, which closes the RFCOMM link and
+     * takes the controller non-discoverable before coming back up. The phone can reconnect afterwards
+     * with no re-pairing.
+     *
+     * This is the right lever for test hygiene between runs: it clears a half-live session without the
+     * heavy-handedness of forgetting the bond.
+     */
     fun disconnectPhone(): Boolean = ops.submit<Boolean> { disconnectPhoneLocked() }.get()
 
     private fun disconnectPhoneLocked(): Boolean {

@@ -21,7 +21,7 @@ import java.util.concurrent.Executors
  * Started life as a non-privileged capability prober named NetProbe (`com.carlink.netprobe`), renamed
  * 2026-08-14; the logcat tag stays `NETPROBE` because `native/carplay-jni/src/lib.rs` writes it from
  * Rust and `tools/tri_capture.sh` greps for it. The feasibility probes it was built around have
- * served their purpose and were retired (docs/11 T6.2). What remains is the launcher UI, the `--es run`
+ * served their purpose and were retired 2026-08-12 (then docs/11 task T6.2, "Trim MainActivity feasibility probes"; the row was dropped from the ledger in the 2026-08-31 rewrite). What remains is the launcher UI, the `--es run`
  * command dispatcher, and the permanent diagnostic verbs: `display`, `dump_setup`, `mdns_self`,
  * `av_stats`, `ocbm_state`.
  *
@@ -355,7 +355,7 @@ class MainActivity : Activity() {
         supervisor.userRecover()
     }
 
-    /** Confirmation for the two adapter verbs that cannot be walked back by pressing Start again. */
+    /** Confirmation for the three adapter verbs that cannot be walked back by pressing Start again. */
     private fun confirmBoxAction(a: BoxAction) {
         android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
             .setTitle(a.label)
@@ -409,7 +409,7 @@ class MainActivity : Activity() {
             // Credentials confirmed in the dialog reach the probe immediately, so a Start that
             // follows cannot use the previous values.
             onCredentials = { _, _, _ -> runAsync { applyHotspotFields() } }
-            // Reboot and forget-bond are destructive to a live session and, unlike everything else on
+            // Reboot, restart-wireless and forget-bond are destructive to a live session and, unlike everything else on
             // this screen, are not undone by pressing Start again — so they ask first.
             onBoxAction = { a ->
                 when (a) {
@@ -558,13 +558,17 @@ class MainActivity : Activity() {
     }
 
     /**
-     * Entered on adapter attach — but NOT directly from the platform anymore. The app installs as
-     * `android.car.usb.handler` (the GM USB fixed-handler squat, see the manifest header + docs/59), so
-     * on this unit the framework grants USB permission to our UID SILENTLY on every attach and launches
-     * [UsbAttachActivity]; that NoDisplay trampoline filters to the OCBM
-     * adapter and forwards a matching ACTION_USB_DEVICE_ATTACHED intent here. Permission is per-UID, so
-     * by the time this runs `hasPermission(dev)` is already true — no dialog. (On a NON-squat unit the
-     * trampoline's own device_filter still makes the ordinary attach-activity path grant implicitly.)
+     * Entered on adapter attach — but NOT directly from the platform anymore. The platform launches
+     * [UsbAttachActivity]; that NoDisplay trampoline filters to the OCBM adapter and forwards a
+     * matching ACTION_USB_DEVICE_ATTACHED intent here. Permission comes from the ordinary attach
+     * resolver: the framework shows the standard USB dialog once per device, "always open" caches
+     * it, and the grant to our UID lands before the trampoline is launched — so by the time this
+     * runs `hasPermission(dev)` is normally true. Normally, not always: on a cold start the grant
+     * can commit after we sample it (see UsbAttachActivity's "process age" note), which is why
+     * UsbBulkTransport polls hasPermission() instead of trusting this. (Until 2026-09-08 the
+     * app installed as `android.car.usb.handler`, the GM USB fixed-handler squat — see the manifest
+     * header + `ccpa_custom/docs/host/01_ANDROID_AND_AAOS.md` §"GM AAOS USB permission handler" — and under that squat the framework granted our UID USB permission SILENTLY
+     * on every attach. The squat was reverted; the install package is `zeno.gmccpa` again.)
      * In a wireless-only design this attach is also the only physical trigger there is. Device-proven
      * 2026-08-17.
      */
@@ -642,9 +646,12 @@ class MainActivity : Activity() {
 
     /**
      * Scriptable entry point, so bring-up can be driven from a shell instead of by tapping:
-     *   adb shell am start -n android.car.usb.handler/zeno.gmccpa.MainActivity --es run ocbm_selftest
-     *   (install package is android.car.usb.handler — the USB fixed-handler squat; this class is still
-     *    zeno.gmccpa.MainActivity, so the am component is <install-pkg>/<class>. See the manifest header.)
+     *   adb shell am start -n zeno.gmccpa/zeno.gmccpa.MainActivity --es run ocbm_selftest
+     *   (the am component is <install-pkg>/<class>. Install package and class package are the same
+     *    again since the android.car.usb.handler USB fixed-handler squat was reverted 2026-09-08;
+     *    this example said android.car.usb.handler/… until 2026-09-09. Never re-hard-code it in a
+     *    printed string — see LogCapture.grantCmd, which derives it from ctx.packageName.
+     *    See the manifest header.)
      * Accepts: ocbm_selftest | ocbm_link | ocbm_state | ocbm_disconnect | ocbm_forget | ocbm_stop
      *          | carplay_rx | carplay_stop | carplay_ui | full | av_sink | av_stats
      *          | display | dump_setup | mdns_self

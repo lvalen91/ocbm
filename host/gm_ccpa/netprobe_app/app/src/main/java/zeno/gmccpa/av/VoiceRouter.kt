@@ -235,8 +235,9 @@ class VoiceRouter(
      * is a SIGSEGV in libmedia, not a catchable exception, so no runCatching helps: the app dies and
      * takes the session with it, precisely when a driver taps away mid-Siri.
      *
-     * Unducking here IS safe and necessary — setDucked is synchronized and idempotent, and the
-     * consume thread may never run again to do it.
+     * Unducking here IS safe and necessary — `onDuck` lands in AacPlayer.setDucked, which is
+     * synchronized, idempotent per source, and only one input of a min(voice, focus) so it cannot
+     * cancel a focus duck — and the consume thread may never run again to do it.
      */
     fun stop() {
         running.set(false)

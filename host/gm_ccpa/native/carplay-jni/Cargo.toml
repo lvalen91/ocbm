@@ -31,7 +31,7 @@ libc = "0.2"
 # (levers::fwd_enc treats "0"/"false"/"off"/empty as the explicit opt-out).
 #
 # LEVERS, the other contract to re-check on every advance: levers are now "seeded from env once per
-# process, then WRITTEN per connection" — but the per-connection write is done by airplayd's
+# process, then WRITTEN per connection" — but the per-connection write is done by carplayd's
 # `load_device_config`/`VehicleConfig::apply()`, which gm_ccpa NEVER runs. So gm_ccpa's one-shot
 # `levers::set_hevc(true)` etc. in JNI_OnLoad still stands. If gm_ccpa ever adopts the config path,
 # re-verify this or HEVC silently drops out of the SETUP enabledFeatures echo while the static
