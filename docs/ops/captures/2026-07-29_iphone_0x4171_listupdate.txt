@@ -1,7 +1,7 @@
 # 2026-07-29 — live 0x4171 ListUpdate frames (wire evidence for the flat repeated-group encoding)
 #
-# Box: carplayd 17cece8a1f3a453ab0454fa055221041, /tmp/carplay_metadata = extended
-# Source: /tmp/carplayd_wl.log, captured live over SSH during the session.
+# Box: airplayd 17cece8a1f3a453ab0454fa055221041, /tmp/carplay_metadata = extended
+# Source: /tmp/airplayd_wl.log, captured live over SSH during the session.
 #
 # NOTE ON TRUNCATION: log_datastream_frame caps its hex dump at 48 bytes. Frame 3 below is
 # 126 bytes on the wire; only its first 48 are shown. The visible prefix covers the iAP2

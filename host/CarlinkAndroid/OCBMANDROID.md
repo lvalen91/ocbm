@@ -11,6 +11,14 @@ media crossing the USB bulk pipe.
 
 ## WHERE THINGS STAND (updated 2026-08-16, end of session)
 
+> **Status note, 2026-09-11 — dormant, and behind.** Nothing below has moved since 2026-08-16, and the
+> OCBM protocol has: `crates/ocbm-proto` is canonical and this app's `OcbmProto.kt` trails it (see
+> `tools/proto_check.py`, which still checks it). `gm_ccpa` used to symlink this app's `OcbmProto.kt`;
+> that link was replaced by an app-owned fork on 2026-09-11 because the ownership had inverted — gm_ccpa
+> (`host/gm_ccpa/`) and the macOS host (`host/MacHost/`) are the current implementations. When work
+> resumes here, follow those two and the canonical crate, not the other way round; do not re-share
+> this file into gm_ccpa.
+
 **The adapter is currently in `ncm_only` mode.** `/script/ncm_only` exists, so `start_main_service.sh`
 skips `ocbm_boot.sh` and the box comes up as a USB-NCM network device instead of the OCBM accessory.
 

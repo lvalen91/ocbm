@@ -78,8 +78,8 @@ RFCOMM link stays up and idles — in the happy path only the phone ever closes 
 | C4 | Phone connects in | Resolves SRV → connects TCP. ~8 ms for SRV + DNS + connect. |
 
 App-side: `CarPlayRx.kt` advertises `_airplay._tcp` while browsing `_carplay-ctrl._tcp`
-(`CarPlayRx.kt:320`) and dials the resolved peer with `GET /ctrl-int/1/connect`
-(`CarPlayRx.kt:148,289,464-505`); the phone's `_carplay-ctrl` port changes every session.
+(`browseForPhone()`, called from `CarPlayRx.start()`) and dials the resolved peer with `GET /ctrl-int/1/connect`
+(the `dialsSinceInbound` KDoc, the `ORDER IS LOAD-BEARING` comment in `start()`, and the outbound-nudge section `rediscoverLoop()` / `browseForPhone()` / `dialOut()` → `connectOut()`); the phone's `_carplay-ctrl` port changes every session.
 
 > **The `features` TXT value is load-bearing.** Its high word bit 32 (Car) is what makes iOS open RTSP
 > back to the advertised port. Drop it and the phone answers the connect-out with 200 OK and never opens
@@ -109,7 +109,7 @@ decrypt.
 `/auth-setup` runs inside the already-encrypted channel — an MFi attestation layered on top of
 pair-verify, not a bootstrap for it. Sequence: X25519 ECDH → SHA-1-derived AES-128-CTR key/IV →
 `create_signature(SHA1(ourPK‖peerPK))` **then** `copy_certificate()` (signature first,
-`ccpa_custom/crates/vendor/mfi/src/sap.rs:127-128`) → M2 of 1113 bytes, with the certificate
+`exchange_with_secret` in `ccpa_custom/crates/vendor/mfi/src/sap.rs`) → M2 of 1113 bytes, with the certificate
 in the clear and only the signature AES-encrypted.
 
 ---
@@ -212,7 +212,7 @@ metadata plane): 30.5 minutes, 58,068 video + 93,314 audio frames, zero failures
 **Teardown** is partial or full, distinguished by presence *and non-emptiness* of `streams[]` — a
 non-empty array stops just those streams and keeps the session; absent, non-array, or an **empty**
 array means full teardown
-(`ccpa_custom/crates/vendor/receiver/src/session.rs:1737-1791`). Treating `streams: []` as partial is a
+(`fn teardown`, `ccpa_custom/crates/vendor/receiver/src/session.rs`). Treating `streams: []` as partial is a
 real bug that leaks every stream thread — in Rust, `as_array()` returns `Some(&[])` for it, so test the
 length, not the `Option`.
 
@@ -230,7 +230,7 @@ Each of these is an observed, reproducible hard failure. Highest-value section h
    `Failed to obtain transport token from SETUP response: -6727 kNotFoundErr` and its entire outbound
    path to the accessory ceases to exist. Observed 20+ times in one failing session.
 3. **Accessory→phone RCS frames must be stamped `'cmnd'`, not `'comm'`** (phone→accessory direction —
-   `datastream.rs:72,74`). The wrong 4CC is dropped silently, with no logging on either side, returning
+   `const MSGTYPE_COMM` / `const MSGTYPE_CMND`, `datastream.rs`). The wrong 4CC is dropped silently, with no logging on either side, returning
    `noErr`. Symptom: the phone parks in FSM state `Pending` retransmitting SYN-ACK forever.
 4. **Declaring a `Start*` iAP2 message id without its `Stop*` partner rejects the whole Identify** —
    Apple's condition name is `OptionalMsgNotValidWithoutRequiredMsgs`.
@@ -303,7 +303,7 @@ Phone-enforced timeouts: 10 s on every normal request, 1 s on teardown, 30 s tem
 | 5, 6 | Phase F — tunnel iAP2 cert + sign | **app** | **OCBM `CH_MFI`** |
 
 The `local-mfi` feature gate must cut inside `iap_tunnel.rs` at its two chip call sites
-(`iap_tunnel.rs:527-626`), not at the module boundary — gating the module out would remove the
+(`fn mfi_cert` and `fn mfi_sign`, where the `#[cfg(feature = "local-mfi")]` arms now sit; stale line cite, re-anchored 2026-09-10 — the old range is now `handle_one` and the remote-signer docs), not at the module boundary — gating the module out would remove the
 metadata/controls plane entirely.
 
 **OCBM relay latency is a non-issue.** `/auth-setup` costs 1.91 s end-to-end, essentially all of it the

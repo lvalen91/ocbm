@@ -32,8 +32,13 @@ object CapturePrefs {
     }
 
     /** The config the boot receiver, the USB trampoline and the UI all start from. */
-    fun config(ctx: Context, appVersion: String): LogCapture.Config =
-        LogCapture.Config(scope = scope(ctx), appVersion = appVersion)
+    fun config(ctx: Context): LogCapture.Config =
+        LogCapture.Config(scope = scope(ctx), appVersion = appVersion(ctx))
+
+    /** versionName from the installed package, so the capture header cannot drift from the manifest. */
+    private fun appVersion(ctx: Context): String =
+        runCatching { ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName }
+            .getOrNull() ?: "?"
 
     private fun prefs(ctx: Context) =
         ctx.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE)

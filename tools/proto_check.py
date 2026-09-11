@@ -2,9 +2,8 @@
 """Check every OCBM client against the canonical constant table.
 
 `crates/ocbm-proto/src/lib.rs` is the protocol. Every other implementation -- the macOS Swift
-client, the Android Kotlin client, and the sibling gm_ccpa checkout when it is present -- restates
-those constants by hand in its own language, and nothing has ever verified that the restatements
-agree. They did not: CT_PROJ_MODE, CT_BOX_HEALTH, the BH_* health bits, F_REPLAY and the whole
+client, the CarlinkAndroid Kotlin client, and gm_ccpa's own Kotlin client -- restates those
+constants by hand in its own language, and nothing has ever verified that the restatements agree. They did not: CT_PROJ_MODE, CT_BOX_HEALTH, the BH_* health bits, F_REPLAY and the whole
 CH_FILE opcode set reached the box and the gm_ccpa client while this repo's own Kotlin and Swift
 clients never learned them (found 2026-08-31).
 
@@ -13,8 +12,15 @@ byte. That is an ERROR here. A constant a client simply does not define yet is d
 today -- reported as a gap, and an error only for the CORE set (channel ids, CT_* opcodes, frame
 flags), which every client must be able to name even where it does not act on the opcode.
 
-Usage:  tools/proto_check.py [--strict] [path/to/gm_ccpa]
+Usage:  tools/proto_check.py [--strict]
         --strict  treat every gap as an error, not just the core set.
+
+All three clients live in this repo and are always checked. Until 2026-09-11 gm_ccpa was covered
+only when its root was passed as an argument -- and then only by accident, because its OcbmProto.kt
+was a symlink into CarlinkAndroid's copy, so the "third client" was the second one read twice. The
+file is now an app-owned fork, so it is a real third client and it is in CLIENTS. A positional path
+is rejected rather than ignored: the only thing it could name is a second checkout, i.e. exactly the
+stale copy the fork exists to stop anyone checking by mistake.
 """
 
 import re
@@ -25,9 +31,9 @@ REPO = Path(__file__).resolve().parent.parent
 CANON = REPO / "crates/ocbm-proto/src/lib.rs"
 CLIENTS = {
     "kotlin (CarlinkAndroid)": REPO / "host/CarlinkAndroid/app/src/main/kotlin/com/carlink/ocbm/OcbmProto.kt",
+    "kotlin (gm_ccpa)": REPO / "host/gm_ccpa/netprobe_app/app/src/main/java/zeno/gmccpa/ocbm/OcbmProto.kt",
     "swift (carlink_macOS)": REPO / "host/MacHost/carlink_macOS/OCBM/OCBMFraming.swift",
 }
-GM_CLIENT = "netprobe_app/app/src/main/java/zeno/gmccpa/ocbm/OcbmProto.kt"
 
 # Prefixes every client must be able to name: the channel map, the control opcodes, the frame flags.
 CORE = ("CH_", "CT_", "F_", "MAGIC", "HDR_LEN", "MAX_PAYLOAD")
@@ -103,13 +109,11 @@ def read(p: Path):
 def main() -> int:
     argv = [a for a in sys.argv[1:] if a != "--strict"]
     strict = "--strict" in sys.argv
-    clients = dict(CLIENTS)
     if argv:
-        gm = Path(argv[0]).expanduser() / GM_CLIENT
-        if not gm.is_file():
-            print(f"no gm_ccpa client at {gm}", file=sys.stderr)
-            return 2
-        clients["kotlin (gm_ccpa)"] = gm
+        print(f"unexpected argument {argv[0]!r}: every client is in-tree and checked by default "
+              "(the gm_ccpa root argument was retired 2026-09-11)", file=sys.stderr)
+        return 2
+    clients = dict(CLIENTS)
 
     canon = canonical()
     # The MFi sub-protocol lives in its own container in the clients (`object Mfi`), with the `MFI_`

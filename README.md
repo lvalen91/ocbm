@@ -121,16 +121,16 @@ wireless CarPlay — same client contract, its own decode/render/mic stack. It i
 feature branch and not yet merged to `main`; see `host/CarlinkAndroid/OCBMANDROID.md`.
 
 **One protocol definition.** `crates/ocbm-proto` is canonical and `tools/proto_check.py` verifies
-every client against it — the Swift client, the Kotlin client, and a sibling checkout when one is
-passed. A value that disagrees is an error; a constant a client has not defined is a gap, and an
+every client against it — the Swift client and both Kotlin clients (CarlinkAndroid, gm_ccpa), all
+in-tree, with no arguments. A value that disagrees is an error; a constant a client has not defined is a gap, and an
 error only for channels, `CT_*` opcodes and frame flags.
 
 **In-tree, not a sibling.** `host/gm_ccpa/` is a different architecture — wireless CarPlay as an
 unprivileged AAOS app, with the adapter reduced to the Bluetooth radio and the MFi coprocessor — and it
-was merged into this repo on 2026-09-08 (`git subtree add`, history preserved). It shares this tree's
-protocol rather than copying it: its `carplay-jni` takes `receiver`, `pairing` and `mfi` as cargo path
-deps, and its `OcbmProto.kt` is a symlink to this repo's copy, so the protocol is edited once, here. Its
-app-level code is deliberately its own.
+was merged into this repo on 2026-09-08 (`git subtree add`, history preserved). Its `carplay-jni` takes
+`receiver`, `pairing` and `mfi` as cargo path deps; its `OcbmProto.kt` is its own file (forked from the
+CarlinkAndroid copy 2026-09-11 — it was a symlink before), kept honest by `tools/proto_check.py` against
+`crates/ocbm-proto`. Its app-level code is deliberately its own.
 
 ## Architecture in brief
 

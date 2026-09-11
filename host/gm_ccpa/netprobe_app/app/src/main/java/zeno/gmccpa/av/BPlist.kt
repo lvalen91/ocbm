@@ -32,7 +32,6 @@ object BPlist {
     fun parse(b: ByteArray): Any? = runCatching { Reader(b).parse() }.getOrNull()
 
     /** `dict["a"]["b"]` as a String, or null. Convenience for the shallow `/command` shape. */
-    @Suppress("UNCHECKED_CAST")
     fun str(root: Any?, vararg path: String): String? = dig(root, path) as? String
 
     /** `dict["a"]["b"]` as a Long, or null. */
@@ -58,6 +57,10 @@ object BPlist {
         private var numObjects = 0
         private var topObject = 0
         private var offsetTableOffset = 0
+        /** Total object expansions one parse may perform. Depth alone does not bound work: a dict whose
+         *  entries all reference the same dict costs len^depth expansions, and nothing is memoised.
+         *  Exhausting it throws; parse()'s runCatching turns that into the documented null. */
+        private var budget = MAX_OBJECTS * 4
 
         fun parse(): Any? {
             if (b.size < 40 || String(b, 0, 8, Charsets.US_ASCII) != HEADER) return null
@@ -84,6 +87,7 @@ object BPlist {
 
         private fun obj(index: Int, depth: Int): Any? {
             if (depth > 16 || index < 0 || index >= numObjects) return null
+            if (--budget < 0) throw IllegalStateException("bplist: expansion budget exhausted (cyclic or repeated refs)")
             var p = offsetOf(index)
             if (p < 0 || p >= b.size) return null
             val marker = b[p].toInt() and 0xFF
@@ -103,6 +107,10 @@ object BPlist {
                 0x6 -> { val (len, q) = count(n, p); String(b, q, len * 2, Charsets.UTF_16BE) }
                 0xD -> {                                                        // dict
                     val (len, q) = count(n, p)
+                    // The ref table must fit in the buffer BEFORE the map is sized from `len`: HashMap(len)
+                    // allocates tableSizeFor(len) slots on the first put, so a crafted count is a ~4-8 GB
+                    // allocation (OutOfMemoryError) rather than the AIOOBE every other malformed shape hits.
+                    if (len < 0 || q + 2L * len * objectRefSize > b.size) throw IllegalArgumentException("bplist: dict ref table exceeds buffer")
                     val out = LinkedHashMap<String, Any?>(len)
                     for (i in 0 until len) {
                         val kRef = be(q + i * objectRefSize, objectRefSize).toInt()

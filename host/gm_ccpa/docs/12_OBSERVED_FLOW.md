@@ -24,12 +24,36 @@ does, in order, with the log lines you should expect to see.
 > 3. a **self-hosted mDNS advert** on a hostname we own (Failure Point 3);
 > 4. exactly **one** OCBM bring-up per process (Failure Point 4).
 
-**Last verified end-to-end:** 2026-08-12 with event-driven standby — RECORD to first frame **0.82 s**
-(was 49.6 s). Evidence (`evidence/` lives in the standalone archive at
+**Last verified end-to-end: 2026-09-09**, app build `7c92000`, capture bundle
+`gmccpa_probe_20260909_225421` + its full `logcat.log`. This is now the reference session: it is the
+first capture that carries the **whole** stack — pair-verify, `/auth-setup`, SETUP 130/110/102, HEVC,
+AAC-LC, the iAP2 metadata tunnel authenticating and Identifying, album art, the mic uplink, touch,
+and a clean teardown — with GM's own CarPlay service live throughout.
+
+Measured, from the control connection landing:
+
+| Milestone | Elapsed from inbound |
+|---|---|
+| `INBOUND CONTROL CONNECTION` (22:55:20.349) | 0 |
+| control channel ENCRYPTED (pair-verify done) | **57 ms** |
+| `/auth-setup` OK, 1113 B M2 (2 chip ops over `CH_MFI`) | 1.691 s |
+| `RECORD done` | 1.723 s |
+| **`FIRST FRAME RENDERED`** | **2.598 s** |
+
+`RECORD done` → first frame is **875 ms**. First audio is *not* a latency figure here: iOS did not
+SETUP the type-102 stream until 8.5 s after RECORD, which is the phone's choice, not ours.
+Session totals: **1358 frames rendered, 0 AUs dropped**, 843 media audio frames, 361 mic chunks.
+
+> **This supersedes the previous banner's "2026-08-12, RECORD to first frame 0.82 s".** That number
+> is not contradicted — it measured a different span on a warm standby path — but 2026-08-12 is no
+> longer the newest end-to-end proof, and several rows below that said "not yet exercised" now are.
+> `05_SESSION_FLOW.md` §9's "session-start → first-video-frame is not measured anywhere in the
+> corpus — don't quote a number for it" is **retired**: it is 2.598 s from inbound, measured here.
+
+Earlier captures remain the archive (`evidence/` lives in the standalone checkout at
 `~/Documents/carlink/old/gm_ccpa/evidence/`, not under this tree):
-`evidence/session_2026-08-12-standby/`, which is the current regression oracle. Earlier captures:
-`evidence/session_2026-08-12-freshpair/` (pre-standby, same clean-slate
-procedure) and `evidence/session_2026-08-12/` (16 min unbroken, 21,000 frames).
+`evidence/session_2026-08-12-standby/`, `evidence/session_2026-08-12-freshpair/` and
+`evidence/session_2026-08-12/` (16 min unbroken, 21,000 frames).
 
 ---
 
@@ -101,9 +125,20 @@ phone. Over RFCOMM: `DETECT/SYN` → `0xAA01` cert (**chip call 1**, local i²c)
 (**chip call 2**) → `0x1D01` Identify → `0x1D02` accepted → `0x5702` → **`0x5703` carrying the vehicle's
 hotspot**. The phone leaves BT-only and joins `br0`.
 
-> **The phone must initiate the BR/EDR connection.** Outbound paging from the box fails
-> (`CONNECT_FAILED status=0x07`, `Resource busy`, `Connection refused`) — observed every time. Trigger
-> from Settings ▸ General ▸ CarPlay on the iPhone. There is no way to drive this from the Mac.
+> **CORRECTED 2026-09-09 — outbound paging from the box WORKS, and it is now the normal path.**
+> This block used to read "The phone must initiate the BR/EDR connection. Outbound paging from the
+> box fails (`CONNECT_FAILED status=0x07`, `Resource busy`, `Connection refused`) — observed every
+> time." That was already contradicted by `04_SYSTEM_MODEL.md` §4c.4 (2026-09-08) and is now
+> contradicted by a full capture: the box drove the entire reconnect itself, unprompted —
+> `[reconnect] 1 bonded phone(s) — driving reconnect when idle` → `[sdp-client] L2CAP SDP channel up
+> (phone paged)` → `iAP2 RFCOMM channel on the phone = 1` → `[reconnect] RFCOMM connected OUT to the
+> phone (ch 1) — starting iAP2 handshake` → cert → sign → Identify → `0x5703`.
+>
+> What actually fails is a **one-sided bond**: the box holds a link key the phone has discarded, the
+> authenticated RFCOMM connect times out after ~8 s, and iOS reports `keys available ? No`. The fix
+> is to clear BOTH sides and re-pair, not to tap the phone. Full account in `04_SYSTEM_MODEL.md`
+> §4c.4 and in "The half-bond" below. Triggering from Settings ▸ General ▸ CarPlay on the iPhone
+> remains a valid manual kick, but it is no longer a precondition.
 
 There is **no join confirmation** over iAP2; a successful `0x5703` write is the only signal, and iOS
 retries `0x5702`, so the handler must be idempotent.
@@ -363,7 +398,7 @@ outbound dial to `forward.rs`.)
 | `:9001` video | `[u32 BE len][Annex-B payload]`, one message per screen message |
 | `:9002` audio | **no** prefix — raw ADTS |
 | `:9003` voice | consumed by `VoiceRouter` → Siri→`Voice`, call→`Phone`/`Call`, nav→`Navigation`, each owner-confirmed audible on the truck 2026-09-04. (The `:9003 (voice, drained)` lines in the 2026-08-12 captures predate `VoiceRouter` and are stale.) |
-| `:9004` metadata | unavailable — deferred by decision |
+| `:9004` metadata | **LIVE since 2026-09-09** — `[cpui] meta seam connected` / `[rust] [meta] connected to ocbmd metadata seam 127.0.0.1:9004`. Carries now-playing deltas (543 `0x5001` frames in one session) and album art (a 76,869 B JPEG reassembled over the iAP2 session-2 file transfer). The old "unavailable — deferred by decision" row, and the `[meta] seam 127.0.0.1:9004 unavailable` line said to be "expected today", are both retired |
 
 ```
 [hevc ] VPS (28 B)  SPS (66 B)  PPS (11 B)
@@ -390,7 +425,7 @@ Two teardown gaps were found on the same device session and both are now fixed:
   state and stopped there. When the phone went out of Wi-Fi range, the pump timed out, the session was
   correctly declared down, and the last decoded video frame stayed on the Surface indefinitely — a
   frozen CarPlay screen over a dead session, still swallowing touches. Fixed by
-  `CarPlayActivity.onSessionEnded()` (`av/CarPlayActivity.kt:77`), which finishes the Activity rather
+  `CarPlayActivity.onSessionEnded()` (companion fun, `av/CarPlayActivity.kt`), which finishes the Activity rather
   than clearing the Surface and staying up — finishing is also what makes a *resume* work: `startSession`
   returns early on "already started," so a stale live Activity would otherwise absorb the returning
   phone's `onSessionUp` and the screen would never rebuild.
@@ -458,9 +493,25 @@ It remains available to *restore* the screen after something backgrounds it.
 > present; `mfi_i2c_local` is compiled in only under `local-mfi` (on-box builds), so an Android build
 > without a remote signer now fails loudly instead of silently. The embedder wiring is
 > the `receiver::iap_tunnel::set_remote_signer(...)` call in `Java_zeno_gmccpa_pair_NativeCore_nativeInit` (`native/carplay-jni/src/lib.rs`), landed in `ed3329f` (2026-08-28), the same commit as the
-> box-log-to-logcat change. **This has not yet been exercised on a live truck session** — no capture
-> post-dates the fix. Verify by confirming the tunnel's next `TX detect+SYN` gets a real
-> `copy_certificate`/`create_signature` round trip instead of the lock-busy line above.
+> box-log-to-logcat change.
+>
+> **DEVICE-CONFIRMED 2026-09-09.** *(Was: "has not yet been exercised on a live truck session — no
+> capture post-dates the fix.")* The capture is exactly the verification this block asked for. The
+> tunnel got real chip round trips through the relay, not the lock-busy line:
+> ```
+> [iap-tunnel] remote MFi signer installed — tunnel chip ops go through the embedder, not /dev/i2c-1
+> [iap-tunnel] TX detect+SYN over AirPlay tunnel — starting fresh iAP2 session
+> [iap-tunnel] RX SYN-ACK — link up (zero-ack=true), ACKing
+> [iap-tunnel] TX 0xAA01 AuthenticationCertificate (tunnel)   ← [jni] MFi certificate via OCBM relay: 945 bytes
+> [iap-tunnel] TX 0xAA03 AuthenticationResponse (tunnel)      ← [jni] MFi signature via OCBM relay: 128 bytes
+> [iap-tunnel] AuthSuccess → RX 0x1D02 -> Identified
+> [events] iAP2-tunnel metadata: 3 subscribes (now_playing, route_guidance, call_state)
+> ```
+> Zero `lock busy` lines, zero handshake-budget expiries, and the metadata plane then delivered
+> NowPlaying and artwork for the rest of the session. **Six chip ops per session is now observed, not
+> derived.** One new warning surfaced and is benign on this box role:
+> `[iap-tunnel] WARN /sys/class/bluetooth/hci0/address unreadable -- param 17 carries a placeholder
+> BD address` — the head unit has no local HCI, and the phone accepted the Identify anyway.
 
 ### Clearing a pairing — there are THREE independent stores
 

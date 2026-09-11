@@ -73,7 +73,7 @@ echo
 echo "Streaming filtered live log -> $LIVE"
 echo ">>> START THE WIRELESS CARPLAY SESSION NOW.  Ctrl-C when the session is over. <<<"
 idevicesyslog -u "$UDID" \
-  -p 'carplayd|carkitd|accessoryd|CarPlay|wifid|mediaremoted|nowplayingd|sharingd' \
+  -p 'airplayd|carkitd|accessoryd|CarPlay|wifid|mediaremoted|nowplayingd|sharingd' \
   --no-colors -o "$LIVE" || true
 
 # ---- POST RUN: pull archive (retroactive, PERSISTED entries only) -----------
@@ -103,4 +103,4 @@ echo "Query the archive, e.g.:"
 echo "  $LOG show --archive \"$ARCH\" --style compact --info --debug \\"
 echo "     --predicate 'process == \"accessoryd\"' | grep -E 'LOG;|iAP2Packet'"
 echo "  $LOG show --archive \"$ARCH\" --style compact --info --debug \\"
-echo "     --predicate 'process == \"carplayd\"' | grep -iE 'carEndpoint|RCS|iap|SETUP'"
+echo "     --predicate 'process == \"airplayd\"' | grep -iE 'carEndpoint|RCS|iap|SETUP'"

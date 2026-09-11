@@ -1,19 +1,16 @@
 package zeno.gmccpa
 
-import com.carlink.ocbm.Ocbm
+import zeno.gmccpa.ocbm.Ocbm
 import android.app.Activity
 import android.content.Intent
-import android.net.Uri
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
-import android.os.Build
 import android.os.Bundle
-import android.os.Process
 import zeno.gmccpa.logging.CapturePrefs
 import zeno.gmccpa.logging.LogCapture
 import zeno.gmccpa.logging.LogExport
 import zeno.gmccpa.logging.SessionSummary
-import java.util.concurrent.Executors
+import zeno.gmccpa.logging.SessionTrace
 
 /**
  * GM CCPA — the instrument shell for the wireless CarPlay receiver.
@@ -22,11 +19,11 @@ import java.util.concurrent.Executors
  * 2026-08-14; the logcat tag stays `NETPROBE` because `native/carplay-jni/src/lib.rs` writes it from
  * Rust and `tools/tri_capture.sh` greps for it. The feasibility probes it was built around have
  * served their purpose and were retired 2026-08-12 (then docs/11 task T6.2, "Trim MainActivity feasibility probes"; the row was dropped from the ledger in the 2026-08-31 rewrite). What remains is the launcher UI, the `--es run`
- * command dispatcher, and the permanent diagnostic verbs: `display`, `dump_setup`, `mdns_self`,
- * `av_stats`, `ocbm_state`.
+ * command dispatcher, and the permanent diagnostic verbs: `mdns_self`, `ocbm_state`.
  *
  * Export goes through the Storage Access Framework (ACTION_CREATE_DOCUMENT) -> built-in file manager
- * -> USB, because the app's external files dir is NOT reachable by adb or other apps on this unit.
+ * -> USB, because the app's external files dir is NOT reachable by adb (`run-as` is blocked on this
+ * user build, and so is `adb pull` of the app's private dir) or by other apps on this unit.
  */
 class MainActivity : Activity() {
 
@@ -34,22 +31,32 @@ class MainActivity : Activity() {
     private lateinit var ui: LauncherUi
 
     /**
-     * CarPlay-identity receiver probe (Car bit set + the _carplay-ctrl connect-out).
-     *
-     * Backed by [SessionHolder], NOT by an instance field — see that object for why. The accessor
-     * keeps every existing call site unchanged while the object itself now outlives this Activity.
-     */
-    /**
      * Vehicle-state levers (drive-restricted UI, day/night). Created eagerly so the Car API is bound
      * before the first session rather than on the first gear change — `SENSOR_RATE_ONCHANGE` would
      * otherwise leave us with no gear opinion until the driver happens to move the lever.
      */
     private val vehicle by lazy { zeno.gmccpa.av.VehicleStateWatcher(this) }
+
+    /**
+     * CarPlay-identity receiver probe (Car bit set + the _carplay-ctrl connect-out).
+     *
+     * Backed by [SessionHolder], NOT by an instance field — see that object for why. The accessor
+     * keeps every existing call site unchanged while the object itself now outlives this Activity.
+     */
     private var cpRx: CarPlayRx?
         get() = SessionHolder.cpRx
         set(v) { SessionHolder.cpRx = v }
     /** Set once the phone has a live session, so [onResume] can restore the CarPlay screen. */
     @Volatile private var sessionUp = false
+
+    /**
+     * Period of the `## STATUS` anchor while the receiver is up. Slower than SessionTrace's 30 s
+     * default on purpose: the board has ~8 entries plus the phase, so a block is ~12 lines, and the
+     * receiver waits for a phone for the whole drive — at 30 s that is ~1400 lines an hour on top of
+     * the 641 the reference session produced in four minutes. One block a minute still bounds how
+     * far a reader must scroll from any offset to learn what was up.
+     */
+    private val BOARD_TICK_MS = 60_000L
 
     /**
      * Owns the session phase and the recovery ladder. Everything that used to be inferred from which
@@ -89,7 +96,12 @@ class MainActivity : Activity() {
 
     /** [RxPhase] is the truth; [LinkState] is how the launcher screen renders it. */
     private fun linkStateFor(p: RxPhase): LinkState = when (p) {
-        RxPhase.IDLE -> LinkState.STOPPED
+        // Restart Session tells the supervisor onStopped() first (deliberate teardown), and its
+        // to(IDLE) report lands on the UI thread AFTER the RESTARTING status the command set — so
+        // without this the word flipped to STOPPED for the whole settle while the detail line counted
+        // down a re-claim. The flag is the truth about whether a restart is in flight; the phase is
+        // honestly idle underneath it.
+        RxPhase.IDLE -> if (restartInProgress.get()) LinkState.RESTARTING else LinkState.STOPPED
         RxPhase.RX_READY -> LinkState.SEARCHING
         RxPhase.RX_UNHEALTHY, RxPhase.BOX_UNHEALTHY -> LinkState.FAILED
         RxPhase.BOX_LINKED -> LinkState.CLAIMING
@@ -110,39 +122,30 @@ class MainActivity : Activity() {
             // Give the receiver the proven MFi relay and a persistent peer store. Without the
             // store every session re-runs pair-setup; with a stale one, pair-verify fails and you
             // debug crypto that is fine.
+            // Event-driven standby: the control connection is the signal to get the decoders and
+            // seams listening, so they are ready before the first stream SETUP rather than
+            // whenever an operator gets round to running carplay_ui. Callbacks are bound below via
+            // [bindReceiver] — the one site shared with [rebindSessionCallbacks] — rather than passed
+            // as constructor args, so the two paths cannot drift.
             val rx = CarPlayRx(
                 this,
                 mfiRelay = ocbmProbe?.mfiRelay(),
-                // Event-driven standby: the control connection is the signal to get the decoders and
-                // seams listening, so they are ready before the first stream SETUP rather than
-                // whenever an operator gets round to running carplay_ui.
-                onSessionUp = { launchCarPlayUi(); vehicle.onSessionUp() },
-                // Nothing observed session END before this. See onCarPlaySessionDown.
-                onSessionDown = { onCarPlaySessionDown() },
-                onStalled = { n -> onCarPlayStalled(n) },
-                onDialAccepted = { supervisor.onDialAccepted() },
                 peerFile = java.io.File(filesDir, "carplay_peers.bin").absolutePath
             )
-            // AvSink is NOT started here. It binds the same :9001/:9002 the real decoders need, so
-            // starting it on every receiver path made the collision structural — CarPlayActivity only
-            // survived because `carplay_ui` stops it one statement before launching, and bindOrNull's
-            // retry papers over the race. Lose that race and the Activity finishes: black screen with a
-            // live session. It remains available as an explicit opt-in via `--es run av_sink`.
+            bindReceiver(rx)
             cpRx = rx; rx.start()
+            // The receiver coming up is the start of the app's session, so the periodic status
+            // anchor starts here — not on the phone's control connection, because the waiting phase
+            // (advert up? browse up? peer seen?) is exactly where a capture opened at a random
+            // offset most needs a `## STATUS` block. Idempotent across Activity generations; the
+            // receiver is process-scoped and so is the ticker. Stopped by [stopEverything].
+            SessionTrace.Board.startTicker(BOARD_TICK_MS)
             // Bind the Car API alongside the receiver. Safe if android.car is absent — the watcher
             // degrades to night-mode-only and says so once.
             vehicle.start()
             reportReceiverHealth(rx)
         } else { cur.stop(); cpRx = null }
     }
-
-    /**
-     * Consumer for the receiver's localhost A/V seam. Must be listening BEFORE the streams are set
-     * up — `forward.rs` dials out per access unit and drops the AU if nobody answers.
-     */
-    private var avSink: AvSink?
-        get() = SessionHolder.avSink
-        set(v) { SessionHolder.avSink = v }
 
     /** OCBM link to the CCPA adapter; null until first use. Survives across Run-all invocations. */
     private var ocbmProbe: zeno.gmccpa.ocbm.OcbmProbe?
@@ -158,7 +161,7 @@ class MainActivity : Activity() {
      */
     private fun ocbm(): zeno.gmccpa.ocbm.OcbmProbe =
         (ocbmProbe ?: zeno.gmccpa.ocbm.OcbmProbe(applicationContext)).also {
-            // The box narrates the phone's side of the session over CH_CTRL. All five observers live
+            // The box narrates the phone's side of the session over CH_CTRL. All six observers live
             // on the probe, not the client, because the client is rebuilt on every re-claim — and
             // because the BT phases arrive DURING runAll(), before any caller could re-wire them.
             it.onSessionEvent = { sev -> onBoxSessionEvent(sev) }
@@ -277,14 +280,18 @@ class MainActivity : Activity() {
             }
             // This is the ONLY lever that re-applies the hotspot credentials without a full
             // host_present cycle: ocbmd just writes /tmp/wireless_restart and ACKs immediately, then
-            // session_supervisor.sh does wireless_down, waits ~4 s, and calls wireless_up — and
-            // wireless_up is what runs apply_host_wifi_creds. So the ACK below means "request
-            // accepted", NOT "wireless is back"; the radios are genuinely down for a few seconds and
-            // any live session dies with them.
+            // session_supervisor.sh picks the flag up on its next tick (~1 s), does wireless_down,
+            // waits 4 s, and calls wireless_up — and wireless_up is what runs apply_host_wifi_creds.
+            // The BT controller then re-attaches over HCI ~8 s later, so BH_HCI_PRESENT comes back
+            // ~12 s after the press. The ACK below means "request accepted", NOT "wireless is back";
+            // the radios are genuinely down for several seconds and any live session dies with them.
             BoxAction.RESTART_WIFI -> {
                 ui.setDetail("asking the adapter to bounce its wireless stack…")
+                // BEFORE the verb goes out, as rung 1 does: the health regression this causes is ours,
+                // and the ladder used to climb on it — an app restart on top of the box's restart.
+                supervisor.onManualWirelessRestart()
                 val st = c.mgmtAction(Ocbm.MGMT_RESTART_WIRELESS)
-                if (st == 0) ui.setDetail("wireless restarting — hotspot credentials re-applied in ~5 s")
+                if (st == 0) ui.setDetail("wireless restarting — radios down ~5 s, Bluetooth back in ~12 s; hotspot credentials re-applied on the way up")
                 else reportMgmt("restart wireless", st)
             }
             BoxAction.REBOOT -> {
@@ -341,6 +348,10 @@ class MainActivity : Activity() {
      * Re-runs the receiver's readiness probe before touching the box, because half of what "CarPlay
      * will not start" turns out to mean is that this side was never ready — and that is both the
      * cheapest thing to check and the one the driver has no other way to see.
+     *
+     * A live session or an open grace window is refused by the supervisor, not here: the probe's
+     * verdict is still worth logging, and `sessionLive` read on this thread can be a step behind the
+     * phase the supervisor owns. See `SessionSupervisor.onReceiverReady` / `userRecover`.
      */
     private fun userRecover() {
         emit("")
@@ -365,8 +376,8 @@ class MainActivity : Activity() {
                     "needs a fresh claim afterwards."
                 BoxAction.RESTART_WIFI ->
                     "Restart the adapter's wireless stack?\n\nThe radios go down for about five " +
-                    "seconds and a live session drops. This is also the only way to re-apply " +
-                    "changed hotspot credentials without unplugging."
+                    "seconds, Bluetooth takes ~12 s to come back, and a live session drops. This is " +
+                    "also the only way to re-apply changed hotspot credentials without unplugging."
                 BoxAction.FORGET_PHONE ->
                     (if (cpRx?.sessionLive == true)
                         "A CarPlay session is RUNNING and this will end it.\n\n" else "") +
@@ -387,9 +398,6 @@ class MainActivity : Activity() {
         else -> ui.setDetail("$what: adapter returned error $status")
     }
 
-    companion object {
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // A launcher screen, not an instrument panel. The instrument is logcat (`-s NETPROBE`), which
@@ -404,8 +412,20 @@ class MainActivity : Activity() {
         // prefills the known value and keeps it editable. --es ssid/--es pass still override.
         ui = LauncherUi(this).apply {
             onStart = { runAsync { autoStart(manual = true) } }
-            onStop = { runAsync { stopEverything() } }
+            // abortClaimWait first, on THIS thread: a Start with no adapter sits in awaitClaimable
+            // for up to ten minutes ON the command executor, so the stop queued behind it could not
+            // run until the wait ended — Stop was dead for exactly as long as it was needed. The
+            // flag is the only thing that ends the wait early (OcbmProbe.claimAbort).
+            onStop = {
+                // Raised BEFORE queueing: a Start already queued ahead could otherwise begin on the
+                // executor between the two statements and miss it. Withdrawn if the queue is closed,
+                // or a process-wide flag would refuse every Start of the next Activity generation.
+                SessionHolder.stopRequested = true
+                ocbmProbe?.abortClaimWait()
+                if (!runAsync { stopEverything() }) SessionHolder.stopRequested = false
+            }
             onRecover = { runAsync { userRecover() } }
+            onRestart = { requestRestart() }
             // Credentials confirmed in the dialog reach the probe immediately, so a Start that
             // follows cannot use the previous values.
             onCredentials = { _, _, _ -> runAsync { applyHotspotFields() } }
@@ -437,24 +457,30 @@ class MainActivity : Activity() {
             }
         }
         setContentView(ui.root)
-        // BEFORE anything decides whether to start a session: the receiver, the OCBM probe and the
-        // A/V sink are process-scoped and may already be running from a previous Activity generation
-        // (see SessionHolder). Re-attach them to THIS generation, or their callbacks keep driving a
-        // dead supervisor and a dead Ui while this screen shows an idle launcher.
+        // BEFORE anything decides whether to start a session: the receiver and the OCBM probe are
+        // process-scoped and may already be running from a previous Activity generation (see
+        // SessionHolder). Re-attach them to THIS generation, or their callbacks keep driving a dead
+        // supervisor and a dead Ui while this screen shows an idle launcher.
         rebindSessionCallbacks()
 
-        ProbeLog.banner("GM CCPA v4  uid=${Process.myUid()}  pkg=$packageName  (adb logcat -s ${ProbeLog.TAG})")
+        // The PID anchor. Replaces a banner that carried uid and package but not the PID, which is
+        // the only key that attributes this process's ~250 framework lines per session (CCodec,
+        // MediaCodec, BufferQueueProducer, …) in a whole-OS capture. See ProbeLog.identity.
+        ProbeLog.identity(this)
         // Capture was only ever started from BootReceiver, the USB trampoline and the scope menu —
         // never from here, so a launcher start recorded nothing at all and the drive-ready process
         // had no logcap-pump thread. start() is idempotent and self-reaping, so calling it on every
         // onCreate is free when capture is already running.
-        runCatching { LogCapture.start(applicationContext, CapturePrefs.config(this, "4.0")) }
-        // The intent that launched us decides the path: a USB attach or an --es run verb is explicit,
-        // anything else (launcher icon, task switch) means "just bring the session up".
-        if (!handleAttachIntent(intent)) {
-            if (intent?.getStringExtra("run") != null) handleRunExtra(intent)
-            else runAsync { autoStart(manual = false) }
-        }
+        runCatching { LogCapture.start(applicationContext, CapturePrefs.config(this)) }
+        dispatchIntent(intent)
+    }
+
+    /** The intent decides the path: a USB attach or an --es run verb is explicit; anything else
+     *  (launcher icon, task switch) means "just bring the session up". Shared by [onCreate] and
+     *  [onNewIntent] so the two paths cannot drift. */
+    private fun dispatchIntent(i: Intent?) {
+        if (handleAttachIntent(i)) return
+        if (i?.getStringExtra("run") != null) handleRunExtra(i) else runAsync { autoStart(manual = false) }
     }
 
     /**
@@ -489,8 +515,12 @@ class MainActivity : Activity() {
      *
      * Idempotent. [manual] only changes the message when there is nothing to do, so the Start button
      * says something useful instead of appearing dead.
+     *
+     * Returns what the bring-up achieved, or null when a guard found nothing to do — Restart Session
+     * needs the distinction to name its failure (no adapter / no HELLO / subscribed) rather than
+     * reading it back off the status line.
      */
-    private fun autoStart(manual: Boolean) {
+    private fun autoStart(manual: Boolean): zeno.gmccpa.ocbm.OcbmProbe.LinkResult? {
         // Never tear down a live CarPlay session to "start" one.
         //
         // The `subscribed` guard below is not sufficient on its own. After a mid-session USB re-attach
@@ -501,12 +531,20 @@ class MainActivity : Activity() {
         if (cpRx?.sessionLive == true) {
             setStatus(LinkState.LIVE, "CarPlay session is live")
             if (manual) emit("a CarPlay session is live — Start would tear it down; refusing")
-            return
+            return null
         }
         if (ocbmProbe?.client?.subscribed == true) {
             setStatus(LinkState.WAITING, "link already up — waiting for the phone")
             if (manual) emit("already subscribed; nothing to do")
-            return
+            return null
+        }
+        // A Stop pressed while this Start was still queued: its press-time abortClaimWait found no
+        // wait to abort (or a probe this run would replace), and awaitClaimable resets the abort flag
+        // on entry — so without this the queued Start ran the full ten-minute wait with the Stop
+        // parked behind it. The flag is consumed by stopEverything, which runs next.
+        if (SessionHolder.stopRequested) {
+            emit("Stop was pressed before this Start ran — not starting; the stop runs next")
+            return null
         }
         setStatus(LinkState.SEARCHING, "looking for the adapter…")
         applyHotspotFields()
@@ -529,32 +567,203 @@ class MainActivity : Activity() {
             if (!r.helloOk) {
                 setStatus(LinkState.FAILED, r.failureDetail())
                 emit("link NOT established: ${r.failureDetail()}")
-                return
+                return r
             }
             // The supervisor writes the state word from here on. A synchronous setStatus() next to an
             // async supervisor event raced it, and losing that race visibly reverted the status line.
             supervisor.onBoxLinked(r.mfiProven)
+            return r
         } catch (t: Throwable) {
             setStatus(LinkState.FAILED, t.message ?: t.javaClass.simpleName)
             throw t
         }
     }
 
-    private fun stopEverything() {
+    private fun stopEverything() = try { stopEverythingLocked() } finally { SessionHolder.stopRequested = false }
+
+    private fun stopEverythingLocked() {
         sessionUp = false   // else onResume would relaunch the CarPlay screen after an explicit Stop
+        // FIRST, before anything is torn down. Every armed expectation is about a step this stop
+        // makes impossible, and `CarPlayRx.stop` can spend up to 1.5 s draining a pump parked in
+        // `NativeCore.feed` — long enough for a near-expiry watchdog to fire `EXPECTED-MISSING` on
+        // a step the operator just cancelled. That line would be worse than none: it is the
+        // fastest way to teach a reader to ignore the mechanism.
+        SessionTrace.cancelAll("operator stop (stopEverything)")
         cpRx?.stop(); cpRx = null
-        avSink?.stop(); avSink = null
-        ocbmProbe?.let { it.stop(); emit(it.stats()) }; ocbmProbe = null
+        // Stamped AFTER stop() for Restart Session's settle (see restartSession for why after): Stop
+        // followed by Restart inside five seconds is the same detached-teardown race as a restart
+        // alone, and only the stamp lets it be caught.
+        ocbmProbe?.let { it.stop(); emit(it.stats()); SessionHolder.lastProbeStopAt = android.os.SystemClock.elapsedRealtime() }
+        ocbmProbe = null
         supervisor.onStopped()
+        // Stops the ticker and forgets every entry; the supervisor's (posted, so later) `to(IDLE)`
+        // re-registers `phase: idle` as the only thing on a clean board.
+        SessionTrace.Board.reset("operator stop (stopEverything)")
         setStatus(LinkState.STOPPED, "idle — press Start or plug the adapter in")
+    }
+
+    // ---- Restart Session ----------------------------------------------------------------------------
+
+    /**
+     * Minimum gap between the box losing us (CT_STOP, or the heartbeat timeout if that write was lost)
+     * and our next CT_SUBSCRIBE.
+     *
+     * Grounded in the box supervisor, not chosen. `wireless_down` is a DETACHED teardown and
+     * `wireless_up` early-returns while it is still running, so a presence edge that lands inside the
+     * teardown is swallowed: the bring-up simply does not happen and nothing says so. The supervisor's
+     * own settle for that hazard is 4 s, used twice (the Restart-wireless deferral and the CT_RADIO
+     * on-edge, tools/session_supervisor.sh `wireless_rebring_at`), with the comment that a quick
+     * off->on "must not race the off-edge's detached teardown". 5 s clears it with margin, and one
+     * restart is one presence edge against FLAP_N=5 / FLAP_WINDOW=20 s. Do not shorten.
+     */
+    private val RESTART_SETTLE_MS = 5_000L
+
+    /**
+     * True from the moment Restart Session is pressed until [restartSession] has finished.
+     *
+     * Taken on the UI thread AT THE PRESS, not inside the command: the command executor is
+     * single-threaded, so a press during a bring-up queues behind it, and a second press during that
+     * wait would queue a SECOND full restart that tears down the session the first had just rebuilt.
+     * Taking the flag at the press rejects the repeat at once and lets the button read "Restarting…"
+     * while the command is still waiting its turn. Also what [linkStateFor] reads to render the
+     * supervisor's IDLE as RESTARTING.
+     */
+    private val restartInProgress = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** The Restart Session button. UI thread. Safe in any state, any number of times. */
+    private fun requestRestart() {
+        if (!restartInProgress.compareAndSet(false, true)) {
+            emit("restart already in progress — ignoring the repeat press")
+            ui.setDetail("restart already in progress…")
+            return
+        }
+        ui.setRestartBusy(true)
+        // Same reason as the Stop button above: a Start parked in awaitClaimable holds the command
+        // executor, and only this flag ends the wait early. A restart pressed during that wait
+        // restarts the wait, which is the right reading of the press.
+        ocbmProbe?.abortClaimWait()
+        if (!runAsync { restartSession() }) { restartInProgress.set(false); ui.setRestartBusy(false) }
+    }
+
+    /**
+     * The one button that fixed things in the old carlink_native app: drop the phone, release the box,
+     * wait, re-claim. For the driver who cannot force-stop the app or reach the adapter.
+     *
+     * What it deliberately does NOT do:
+     *  - Send a second disconnect after the re-claim. `MGMT_RESTART_WIRELESS` into a fresh bring-up is
+     *    the 2026-09-08 collapse (BT phases collapse, PROJ_MODE NONE, `EAAccessoryLeft`, and the phone
+     *    then 200-OKs every nudge and never dials back). The clean slate already comes from CT_STOP ->
+     *    `go_idle` plus `wireless_up`'s carplayd reap and its fresh `apply_host_wifi_creds`.
+     *  - Touch the pairing. No `forgetPhone`, no `MGMT_FORGET_*`, and the peer store is not deleted:
+     *    `go_idle` and `wireless_down` never touch the box's key store, and `carplay_peers.bin` is
+     *    deleted only by Forget Pairing. A restart must never cost the driver a re-pair.
+     *  - Retry on its own. Each failure is named so the driver knows whether pressing again can help.
+     *
+     * Ordering that is load-bearing: the supervisor is told first (the teardown is deliberate, not a
+     * fault); the probe is dropped and rebuilt so its HELLO carries a NEW nonce (OcbmProbe.hostInstance
+     * — a lost CT_STOP is otherwise read by the box as "presence never dropped" and no wireless_up
+     * runs); and [autoStart] rebuilds the probe BEFORE the receiver, because CarPlayRx captures
+     * `mfiRelay()` in its constructor.
+     */
+    private fun restartSession() {
+        try {
+            emit(""); emit("==================== DRIVER-REQUESTED SESSION RESTART ====================")
+            setStatus(LinkState.RESTARTING, "closing the session…")
+            // The supervisor FIRST, then the expectations — same order and reason as Forget Pairing:
+            // told afterwards, it would read the session-down as a fault, open a grace window and climb
+            // the ladder on a receiver we are about to replace.
+            supervisor.onStopped()
+            SessionTrace.cancelAll("operator restart (restartSession)")
+            sessionUp = false
+            val rx = cpRx
+            if (rx != null) {
+                // A pump parked in NativeCore.feed is recorded, not waited for. Only Forget needs the
+                // drain, because only Forget deletes a file a still-live core could resurrect; here the
+                // fresh receiver IS the fix and the old core is fenced from every callback.
+                if (!rx.stop()) emit("restart: a receiver pump did not unwind within 1500 ms (parked in NativeCore.feed) — proceeding; the fresh receiver replaces it")
+                cpRx = null
+                tearDownSessionConsumers("driver restarted the session")
+            }
+            val old = ocbmProbe
+            var usbStuck = false
+            if (old != null) {
+                old.stop(quick = true)
+                // Stamped AFTER stop(), because the settle is measured from the box's GONE edge and
+                // that edge is `go_idle` on CT_STOP — which is the LAST thing OcbmClient.stop() writes,
+                // behind the bounded log pull (up to 4 x 1 s), CT_LOG_CTL off and the <=3 s heartbeat
+                // join. Stamped before, a box that is alive but slow on CH_FILE ate the whole settle
+                // inside stop(): `left` was already <= 0, the loop was skipped, and CT_SUBSCRIBE landed
+                // 2-3 s after go_idle — inside the detached wireless_down the 5 s exists to clear.
+                // Silent failure: ARMED, radios never up, and the deadline blames the phone. (If the
+                // CT_STOP write is lost the edge is the heartbeat timeout instead; the fresh nonce is
+                // what makes that case recoverable — see OcbmProbe.hostInstance.)
+                SessionHolder.lastProbeStopAt = android.os.SystemClock.elapsedRealtime()
+                emit(old.stats())
+                usbStuck = old.usbReleaseDeferred
+                ocbmProbe = null
+            }
+            SessionTrace.Board.reset("operator restart (restartSession)")
+            // Settle from the LAST probe stop, whoever made it: Stop followed by Restart inside five
+            // seconds is the same edge race as a restart alone, and this is where it can be caught.
+            // A restart with nothing running and no recent stop skips straight to the bring-up.
+            val since = SessionHolder.lastProbeStopAt
+            if (since != 0L) {
+                var left = RESTART_SETTLE_MS - (android.os.SystemClock.elapsedRealtime() - since)
+                while (left > 0) {
+                    ui.setDetail("adapter released — re-claiming in ${(left + 999) / 1000} s")
+                    Thread.sleep(minOf(left, 1_000L))
+                    left = RESTART_SETTLE_MS - (android.os.SystemClock.elapsedRealtime() - since)
+                }
+            }
+            if (usbStuck) emit("restart: the old link's USB read thread is still parked in bulkTransfer — this process still holds the interface, so the re-claim below is expected to be refused")
+            // awaitClaimable waits up to ten minutes and says nothing to the screen meanwhile. Tell the
+            // driver at 30 s what it is waiting on and leave the wait running — an adapter appearing
+            // late is the common case, not a fault. A UI-thread timer because the command thread is
+            // inside autoStart for the duration; `client == null` is what "still waiting to claim"
+            // looks like from outside, and the flag drops the message if the restart has moved on.
+            ui.root.postDelayed({
+                val p = ocbmProbe
+                if (restartInProgress.get() && p != null && p.client == null) ui.setDetail(
+                    if (p.claimWaitState == "present-no-permission")
+                        "adapter is on the bus but USB permission is not held — accept the dialog (still waiting)"
+                    else "no adapter on the USB bus after 30 s — still waiting (up to 10 min); check the cable"
+                )
+            }, 30_000L)
+            // A Stop pressed during the settle has nothing to abort (the probe is already gone) and is
+            // queued BEHIND the bring-up below — whose awaitClaimable can hold the executor for ten
+            // minutes with no adapter attached. The later press wins: leave the bring-up to Stop.
+            if (SessionHolder.stopRequested) {
+                emit("restart: Stop was pressed during the settle — not re-claiming; the stop runs next")
+                return
+            }
+            val r = autoStart(manual = true)   // narrates "looking for…" / "claiming the adapter…" itself
+            when {
+                // Both guards passed everything-null moments ago; something else brought a session up
+                // during the settle. It is up — leave it alone.
+                r == null -> emit("restart: a session came up on its own during the settle — leaving it")
+                // autoStart already set FAILED with the generic "no adapter claimed". Say more only when
+                // we KNOW the reason is this process.
+                !r.claimed && usbStuck -> setStatus(LinkState.FAILED,
+                    "adapter re-claim refused: this app still holds the USB interface (the old link's read is stuck in the kernel) — no adapter command can fix that; unplug and replug the adapter, or restart the app")
+                !r.claimed -> Unit
+                !r.helloOk -> setStatus(LinkState.FAILED,
+                    "adapter claimed but ocbmd did not answer HELLO in 20 s — the box's own supervisor restarts a wedged ocbmd within ~2 min; press Restart Session again after that")
+                !r.subscribed -> Unit   // a credential refusal throws before this; runAll narrates anything else
+                else -> {
+                    // ARMED has no clock of its own; give this one a deadline, and a named verdict.
+                    supervisor.onRestartSubscribed()
+                    ui.setDetail("adapter up — waiting for the iPhone to reconnect Bluetooth")
+                }
+            }
+        } finally {
+            restartInProgress.set(false)
+            ui.setRestartBusy(false)
+        }
     }
 
     override fun onNewIntent(intent: Intent?) {
         super.onNewIntent(intent)
-        if (!handleAttachIntent(intent)) {
-            if (intent?.getStringExtra("run") != null) handleRunExtra(intent)
-            else runAsync { autoStart(manual = false) }
-        }
+        dispatchIntent(intent)
     }
 
     /**
@@ -567,8 +776,10 @@ class MainActivity : Activity() {
      * can commit after we sample it (see UsbAttachActivity's "process age" note), which is why
      * UsbBulkTransport polls hasPermission() instead of trusting this. (Until 2026-09-08 the
      * app installed as `android.car.usb.handler`, the GM USB fixed-handler squat — see the manifest
-     * header + `ccpa_custom/docs/host/01_ANDROID_AND_AAOS.md` §"GM AAOS USB permission handler" — and under that squat the framework granted our UID USB permission SILENTLY
-     * on every attach. The squat was reverted; the install package is `zeno.gmccpa` again.)
+     * header + `ccpa_custom/docs/host/01_ANDROID_AND_AAOS.md` §"GM AAOS USB permission handler". That
+     * squat was SUPPOSED to make the framework grant our UID USB permission silently on every attach;
+     * corrected 2026-09-10, it did not — the app still needed the user to grant adapter permission,
+     * which is why it was reverted. The squat was reverted; the install package is `zeno.gmccpa` again.)
      * In a wireless-only design this attach is also the only physical trigger there is. Device-proven
      * 2026-08-17.
      */
@@ -576,7 +787,7 @@ class MainActivity : Activity() {
         if (i?.action != UsbManager.ACTION_USB_DEVICE_ATTACHED) return false
         @Suppress("DEPRECATION")
         val dev = i.getParcelableExtra<UsbDevice>(UsbManager.EXTRA_DEVICE) ?: return false
-        ProbeLog.banner("USB ATTACH 0x%04x:0x%04x — permission implicitly granted on this path"
+        ProbeLog.banner("USB ATTACH 0x%04x:0x%04x forwarded from the trampoline — permission is polled by the claim loop, not assumed"
             .format(dev.vendorId, dev.productId))
         if (dev.vendorId != zeno.gmccpa.ocbm.UsbBulkTransport.VID_CARLINKIT) return false
         if (dev.productId != zeno.gmccpa.ocbm.UsbBulkTransport.PID_OCBM) {
@@ -653,8 +864,7 @@ class MainActivity : Activity() {
      *    printed string — see LogCapture.grantCmd, which derives it from ctx.packageName.
      *    See the manifest header.)
      * Accepts: ocbm_selftest | ocbm_link | ocbm_state | ocbm_disconnect | ocbm_forget | ocbm_stop
-     *          | carplay_rx | carplay_stop | carplay_ui | full | av_sink | av_stats
-     *          | display | dump_setup | mdns_self
+     *          | carplay_rx | carplay_stop | carplay_ui | full | mdns_self
      *          | export_log | export_log_raw | capture_status | capture_whole_os | capture_own
      */
     private fun handleRunExtra(intent: Intent?) {
@@ -689,29 +899,29 @@ class MainActivity : Activity() {
                 if (cpRx == null) toggleCarPlayRx()
                 ocbm().runAll()
             }
-            // The real UI: fullscreen HEVC + AAC + touch. Starts its OWN seam consumers, so the
-            // diagnostic AvSink must not also be running or they contend for :9001/:9002.
+            // The real UI: fullscreen HEVC + AAC + touch.
             "carplay_ui" -> runAsync { launchCarPlayUi() }
-            "av_sink" -> runAsync { if (avSink == null) avSink = AvSink(filesDir).also { it.start() } else emit("sink already up") }
-            "av_stats" -> runAsync { emit(avSink?.stats() ?: "no A/V sink running") }
-            "display" -> runAsync { displayProbe() }
-            "dump_setup" -> runAsync { dumpSetupRequests() }
             "mdns_self" -> runAsync { MdnsInspect.inspect(CarPlayRx.ACCESSORY_NAME) }
-            "carplay_stop" -> runAsync { cpRx?.stop(); cpRx = null; avSink?.stop(); avSink = null }
+            "carplay_stop" -> runAsync { cpRx?.stop(); cpRx = null }
             "ocbm_state" -> runAsync { ocbmProbe?.sessionState() ?: emit("no OCBM link") }
             // Session teardown. disconnect = drop BT, keep the bond (test hygiene between runs).
             // forget = clear the bond entirely; also forget the car on the iPhone.
             "ocbm_disconnect" -> runAsync { ocbmProbe?.disconnectPhone() ?: emit("no OCBM link") }
             "ocbm_forget" -> runAsync { ocbmProbe?.forgetPhone(i.getStringExtra("mac")) ?: emit("no OCBM link") }
-            "ocbm_stop" -> runAsync { ocbmProbe?.let { it.stop(); emit(it.stats()) }; ocbmProbe = null }
+            "ocbm_stop" -> runAsync {
+                ocbmProbe?.let { it.stop(); emit(it.stats()); SessionHolder.lastProbeStopAt = android.os.SystemClock.elapsedRealtime() }
+                ocbmProbe = null
+            }
             else -> emit("unknown run extra '$what'")
         }
     }
 
-    // Single-thread executor: a fresh Thread per command let two toggles delivered close together
-    // both observe a null cpRx/avSink and each start one, double-binding :9001/:9002 — the
-    // session-fatal seam collision. Serializing commands makes the check-and-start atomic w.r.t. other
-    // commands.
+    // Single-thread executor: a fresh Thread per command let two Starts delivered close together both
+    // observe `cpRx == null` and each build a CarPlayRx. The second `bind(:7011)` fails EADDRINUSE
+    // (SO_REUSEADDR does not permit a second LISTEN), so its self-test reports "listening" FAIL and
+    // the supervisor declares RX_UNHEALTHY — while both instances advertise `gmccpa-rx.local`, the
+    // double-answer hazard CarPlayRx warns about. Serializing commands makes the check-and-start
+    // atomic w.r.t. other commands.
     private val cmdExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
         Thread(r, "netprobe-cmd").apply { isDaemon = true }
     }
@@ -725,7 +935,6 @@ class MainActivity : Activity() {
      * everything above it and kills the CarPlay screen.
      */
     private fun launchCarPlayUi() {
-        avSink?.stop(); avSink = null   // it binds the same seams; the two cannot coexist
         sessionUp = true
         // Tell the AAOS media card a session exists. Deliberately NOT a flip to PLAYING: playback
         // state is whatever iOS reports in the first nowPlaying record, never inferred from a session
@@ -751,19 +960,34 @@ class MainActivity : Activity() {
      */
     private fun onCarPlaySessionDown() {
         sessionUp = false
+        // Deliberately NOT SessionTrace.cancelAll here. The receiver's own per-generation
+        // expectations (pair-verify, auth-setup) are dropped by the pump whose finally fired this;
+        // the box-side expectations are about the OCBM link, which the phone leaving does not end,
+        // and a blanket cancel would silence a genuine box fault in flight. A/V expectations that
+        // are session-scoped belong to CarPlayActivity.onSessionEnded below, which owns that seam.
         // TAKE THE SCREEN DOWN WITH THE SESSION. This used to stop at the three lines below, none of
         // which the CarPlay screen can see — so a phone that went out of Wi-Fi range left its last
         // decoded frame frozen on the display over a dead session, swallowing touches, and the
         // returning phone could not rebuild it because startSession() guards on "already started".
         // Device-reported 2026-08-28. See CarPlayActivity.onSessionEnded.
-        zeno.gmccpa.av.CarPlayActivity.onSessionEnded("control connection went away")
+        tearDownSessionConsumers("control connection went away")
+        supervisor.onSessionDown()   // owns the state word and the grace window
+    }
+
+    /**
+     * Everything that must go down WITH a CarPlay session, minus the supervisor. Shared by the
+     * receiver's session-down above and by [restartSession], whose deliberate `stop()` fences that
+     * callback (CarPlayRx.stopped) — so the restart has to do this itself or a mid-session restart
+     * leaves the CarPlay screen frozen on its last frame over a dead session.
+     */
+    private fun tearDownSessionConsumers(why: String) {
+        zeno.gmccpa.av.CarPlayActivity.onSessionEnded(why)
         // The card must go idle with the session. This IS an inference we are entitled to make: the
         // phone never sends a final "stopped" record, it simply stops sending.
         zeno.gmccpa.av.CarPlayMediaBrowserService.onSessionDown()
         // Both vehicle levers are session-scoped — the receiver refuses them with no event channel —
         // so drop the sent-state here and let onSessionUp push them fresh.
         vehicle.onSessionDown()
-        supervisor.onSessionDown()   // owns the state word and the grace window
         ui.setPairingCode("")
     }
 
@@ -775,6 +999,18 @@ class MainActivity : Activity() {
     private fun onCarPlayStalled(dials: Int) {
         // The supervisor renders the sentence; it holds the terminal phase this belongs to.
         supervisor.onStalled(dials)
+    }
+
+    /**
+     * The receiver's accept loop gave up and closed :7011 while the receiver was otherwise up. This
+     * is the same verdict [reportReceiverHealth] would reach if anything re-ran it — `listening`
+     * now reads false — delivered on the edge instead, because nothing re-runs it. Goes through the
+     * existing onReceiverReady(false) entry so the phase word and the launcher render (FAILED) are
+     * the ones a failed readiness check already produces.
+     */
+    private fun onCarPlayListenerLost(why: String) {
+        emit("!! receiver listener retired: $why")
+        supervisor.onReceiverReady(false, "listener retired: $why")
     }
 
     /**
@@ -806,16 +1042,19 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun runAsync(block: () -> Unit) {
+    /** Returns false when the command was dropped, so a caller holding state for it can release it. */
+    private fun runAsync(block: () -> Unit): Boolean {
         try {
             cmdExecutor.execute {
                 try { block() } catch (t: Throwable) { emit("!! run aborted: ${t.javaClass.simpleName}: ${t.message}") }
             }
+            return true
         } catch (_: java.util.concurrent.RejectedExecutionException) {
             // onDestroy shut the executor down. Anything submitted after that comes from a callback
             // still holding this dead Activity, and dropping it is the point — but it must not throw
             // back into whichever box or receiver thread made the call.
             emit("command dropped — the Activity that owned it is gone")
+            return false
         }
     }
 
@@ -834,10 +1073,19 @@ class MainActivity : Activity() {
         emit("forget: a pump is still in the native core — waiting for it to unwind before deleting")
         val deadline = android.os.SystemClock.elapsedRealtime() + 17_000L
         while (android.os.SystemClock.elapsedRealtime() < deadline) {
-            if (cpRx?.liveConnectionCount() ?: 0 == 0) return true
+            if ((cpRx?.liveConnectionCount() ?: 0) == 0) return true
             try { Thread.sleep(250) } catch (_: InterruptedException) { Thread.currentThread().interrupt(); return false }
         }
         return false
+    }
+
+    /** One binding site so toggleCarPlayRx() and rebindSessionCallbacks() cannot drift. */
+    private fun bindReceiver(rx: CarPlayRx) {
+        rx.onSessionUp = { launchCarPlayUi(); vehicle.onSessionUp() }
+        rx.onSessionDown = { onCarPlaySessionDown() }
+        rx.onStalled = { n -> onCarPlayStalled(n) }
+        rx.onListenerLost = { why -> onCarPlayListenerLost(why) }
+        rx.onDialAccepted = { supervisor.onDialAccepted() }
     }
 
     /**
@@ -850,10 +1098,10 @@ class MainActivity : Activity() {
      */
     private fun rebindSessionCallbacks() {
         SessionHolder.cpRx?.let { rx ->
-            rx.onSessionUp = { launchCarPlayUi() }
-            rx.onSessionDown = { onCarPlaySessionDown() }
-            rx.onStalled = { n -> onCarPlayStalled(n) }
-            rx.onDialAccepted = { supervisor.onDialAccepted() }
+            bindReceiver(rx)
+            // The previous generation's onDestroy disconnected its Car API; this generation's
+            // watcher is a fresh lazy instance and has to be bound exactly as toggleCarPlayRx does.
+            vehicle.start()
             emit("re-attached the surviving CarPlay receiver to this Activity generation")
         }
         if (SessionHolder.ocbmProbe != null) ocbm()   // ocbm() rebinds the probe's six observers
@@ -880,94 +1128,6 @@ class MainActivity : Activity() {
         cmdExecutor.shutdown()
         super.onDestroy()
     }
-    private inline fun section(title: String, body: () -> Unit) {
-        emit(""); emit("==================== $title ====================")
-        try { body() } catch (t: Throwable) { emit("!! section failed: ${t.javaClass.simpleName}: ${t.message}") }
-    }
-
-    private fun displayProbe() {
-        section("DISPLAY GEOMETRY (drives /info)") {
-            val dm = resources.displayMetrics
-            emit("resources.displayMetrics: ${dm.widthPixels}x${dm.heightPixels} density=${dm.density} dpi=${dm.xdpi}x${dm.ydpi}")
-            if (Build.VERSION.SDK_INT >= 30) {
-                val wm = windowManager
-                val maxB = wm.maximumWindowMetrics.bounds
-                val curB = wm.currentWindowMetrics.bounds
-                emit("maximumWindowMetrics (the panel): ${maxB.width()}x${maxB.height()}")
-                emit("currentWindowMetrics  (we get)  : ${curB.width()}x${curB.height()}")
-                val ins = wm.currentWindowMetrics.windowInsets
-                val bars = ins.getInsets(android.view.WindowInsets.Type.systemBars())
-                emit("system bar insets: left=${bars.left} top=${bars.top} right=${bars.right} bottom=${bars.bottom}")
-            }
-            val d = windowManager.defaultDisplay
-            @Suppress("DEPRECATION") emit("refreshRate=${d.refreshRate}")
-
-            // Ask for true immersive and re-measure — this is the 2400x960-vs-1416x960 question.
-            runOnUiThread {
-                @Suppress("DEPRECATION")
-                window.decorView.systemUiVisibility =
-                    android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
-                    android.view.View.SYSTEM_UI_FLAG_FULLSCREEN or
-                    android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
-                    android.view.View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
-                    android.view.View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
-                    android.view.View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-            }
-            Thread.sleep(1500)
-            if (Build.VERSION.SDK_INT >= 30) {
-                val after = windowManager.currentWindowMetrics
-                val b = after.bounds
-                val ins = after.windowInsets.getInsets(android.view.WindowInsets.Type.systemBars())
-                emit("AFTER immersive: bounds=${b.width()}x${b.height()} insets l=${ins.left} t=${ins.top} r=${ins.right} b=${ins.bottom}")
-                // The window was already full-panel; the question was only ever whether the bars
-                // still OVERLAY it. Insets are the answer, not bounds.
-                if (ins.left == 0 && ins.top == 0 && ins.right == 0 && ins.bottom == 0) {
-                    emit("=> TRUE fullscreen: advertise ${b.width()}x${b.height()} with NO safeArea")
-                } else {
-                    val sx = ins.left; val sy = ins.top
-                    val sw = b.width() - ins.left - ins.right
-                    val sh = b.height() - ins.top - ins.bottom
-                    emit("=> GM chrome still overlays the panel.")
-                    emit("   Advertise ${b.width()}x${b.height()} WITH safeArea origin=($sx,$sy) size=${sw}x${sh}")
-                    emit("   (that is what safeArea exists for: iOS keeps interactive UI inside it,")
-                    emit("    wallpaper may still bleed to the full rect. Needs the viewAreas lever on.)")
-                }
-            }
-        }
-    }
-
-    /**
-     * Print the feature tokens the iPhone PROPOSES in its SETUP request.
-     *
-     * `enabledFeatures` in our response must be a SUBSET of this (05_SESSION_FLOW §5 E2). The
-     * receiver asserts its lever set instead of intersecting, so echoing something the phone did not
-     * propose is an InvalidParameter — which is what
-     * `carEndpoint_validateEnabledFeaturesWithAccessory` rejected us with. The binary plist stores
-     * these as plain ASCII, so scanning for printable runs is enough to read them.
-     */
-    private fun dumpSetupRequests() {
-        section("SETUP REQUEST (what the phone proposes)") {
-            val files = filesDir.listFiles { f -> f.name.startsWith("setup_req") }?.sortedBy { it.name }
-            if (files.isNullOrEmpty()) { emit("no setup_req dumps — run a session first"); return@section }
-            for (f in files) {
-                val b = f.readBytes()
-                emit("${f.name}: ${b.size} bytes")
-                val toks = StringBuilder()
-                val out = ArrayList<String>()
-                for (byte in b) {
-                    val c = byte.toInt().toChar()
-                    if (c.isLetterOrDigit() || c == '.' || c == '_') toks.append(c)
-                    else { if (toks.length >= 4) out.add(toks.toString()); toks.setLength(0) }
-                }
-                if (toks.length >= 4) out.add(toks.toString())
-                emit("  tokens: ${out.joinToString(", ")}")
-            }
-        }
-    }
-
-
-    // ---- helpers ----------------------------------------------------------------------------------
-
     // ---- capture control -------------------------------------------------------------------------
 
     /**
@@ -1002,7 +1162,7 @@ class MainActivity : Activity() {
     private fun setCaptureScope(scope: LogCapture.Scope) {
         CapturePrefs.setScope(this, scope)
         LogCapture.stop()
-        val ok = LogCapture.start(this, CapturePrefs.config(this, "4.0"))
+        val ok = LogCapture.start(this, CapturePrefs.config(this))
         // Print ONLY what is known synchronously. `effectiveScope` and `readLogsGranted` are both
         // resolved later on the pump thread, so sampling status() here read the pre-resolution
         // defaults and printed them as fact - on hardware, `effective=WHOLE_OS read_logs=false` when
@@ -1021,13 +1181,13 @@ class MainActivity : Activity() {
 }
 
 /**
- * PROCESS-scoped owner of the three objects that must outlive any single Activity.
+ * PROCESS-scoped owner of the two objects that must outlive any single Activity.
  *
  * They used to be MainActivity instance fields. AAOS destroys the backgrounded launcher while the
  * process lives (CarPlayActivity runs on its own `taskAffinity`, so the launcher spends the whole
  * session in the background), and `onDestroy` stopped only the supervisor and the command executor
- * — so the receiver, the OCBM probe and the A/V sink were left running and UNREACHABLE. The next
- * `onCreate` then saw three nulls and built duplicates that cannot work: `ServerSocket.bind(:7011)`
+ * — so the receiver and the OCBM probe were left running and UNREACHABLE. The next `onCreate` then
+ * saw two nulls and built duplicates that cannot work: `ServerSocket.bind(:7011)`
  * fails EADDRINUSE against the orphan's listener (SO_REUSEADDR does not permit a second LISTEN), so
  * the self-test reports "listening" FAIL and the supervisor declares RX_UNHEALTHY, while the ORPHAN
  * keeps serving the phone into a dead supervisor. The probe fought the orphan for the USB interface
@@ -1041,6 +1201,19 @@ class MainActivity : Activity() {
  */
 object SessionHolder {
     @Volatile var cpRx: CarPlayRx? = null
-    @Volatile var avSink: AvSink? = null
     @Volatile var ocbmProbe: zeno.gmccpa.ocbm.OcbmProbe? = null
+    /**
+     * `elapsedRealtime` of the last `OcbmProbe.stop()` this process made, or 0. Process-scoped like the
+     * probe it describes, because the settle it feeds (`MainActivity.restartSession`) is about the
+     * BOX's teardown clock, which does not restart when the Activity does.
+     */
+    @Volatile var lastProbeStopAt = 0L
+    /**
+     * The Stop button was pressed and its `stopEverything` has not yet run. Read by `autoStart` and by
+     * the restart's settle so a bring-up queued AHEAD of the stop yields to it instead of parking the
+     * command executor in a ten-minute `awaitClaimable` the stop cannot reach (`claimAbort` is reset
+     * on entry to that wait, and during the restart settle there is no probe to abort at all).
+     * Consumed — cleared — by `stopEverything`, whatever the outcome of the teardown.
+     */
+    @Volatile var stopRequested = false
 }

@@ -18,10 +18,20 @@ A Carlinkit **CPC200-CCPA** adapter, on USB and speaking a custom protocol (**OC
 jobs: it is the phone's **Bluetooth radio**, and it is the **MFi coprocessor**. It is not the AirPlay
 endpoint, it is not an access point, and no media ever crosses it.
 
+**There are TWO such adapters, and they are interchangeable.** Both run identical OCBM firmware built
+from `ccpa_custom`, on identical hardware **except the WLAN chipset** — one NXP IW416, one Realtek
+RTL8822CS. The firmware's `radio_caps` layer (`RADIO_CHIP`, `RADIO_BT_ATTACH`, `RADIO_WLAN_MODULES`,
+`RADIO_BT_AFTER_WLAN`) abstracts that difference, so nothing in this app is chipset-aware and neither
+box is "the test box". Two places where the variant is nonetheless observable, both recorded where
+they matter: the Realtek part must load its WLAN driver before Bluetooth will attach, which makes
+`wlan0` exist (§2 below), and the two boxes derive different identities (`CarLink-626a` vs
+`CarLink-f867`), so a phone bonded to one holds no record for the other.
+
 The app installs under its own package name, `zeno.gmccpa` — the GM USB fixed-handler squat
-(`android.car.usb.handler`) was reverted (2026-09-08) — TRUCK-VERIFIED. There is no silent USB-
-permission grant: the app goes through the platform's normal USB-attach permission flow, one-time
-dialog included (`netprobe_app/app/src/main/AndroidManifest.xml:19`).
+(`android.car.usb.handler`) was reverted (2026-09-08) — TRUCK-VERIFIED. The app goes through the
+platform's normal USB-attach permission flow, one-time dialog included — and **that was true under
+the squat as well**: corrected 2026-09-10, the squat did NOT deliver the silent per-UID grant it was
+adopted for, so the revert cost nothing (the header comment of `netprobe_app/app/src/main/AndroidManifest.xml` plus the `USB_DEVICE_ATTACHED` intent-filter on `UsbAttachActivity`; stale line cite, re-anchored 2026-09-10 — the old line was the `package=` attribute).
 
 ---
 
@@ -36,13 +46,35 @@ dialog included (`netprobe_app/app/src/main/AndroidManifest.xml:19`).
 The app runs **on the AP host**, so client isolation never applies to it — see
 [`01_FINDINGS.md`](01_FINDINGS.md) §2.
 
-**Box-side `airplayd`/`rx-connect` are not gated off, and that is deliberate for now.** With
-`wifi_ap:false` there is no `wlan0`, so nothing on the vehicle subnet can reach them; they start, latch
-"A/V layer up," and are otherwise inert. An explicit `AV_DISABLED` gate that stops them from spawning at
-all does not exist yet (`ccpa_custom/tools/session_supervisor.sh:769`); pointing their launch env at a
-no-op binary was tried and rejected because the health-check's `pid_alive` requires `argv[0]` to equal
-the full binary path, which no shell script or immediately-exiting binary satisfies
-(`session_supervisor.sh:760-764`).
+**Box-side `airplayd`/`rx-connect` are not gated off, and that is deliberate for now.** They start,
+latch "A/V layer up," and carry no media for us. An explicit `AV_DISABLED` gate that stops them from
+spawning at all does not exist yet (the `av::ensure_av_layer` call site in
+`ccpa_custom/tools/session_supervisor.sh`); pointing their launch env at a no-op binary was tried and
+rejected because the health-check's `pid_alive` requires `argv[0]` to equal the full binary path,
+which no shell script or immediately-exiting binary satisfies.
+
+> **CORRECTED 2026-09-09 — the reason this was called harmless is WRONG on one of the two boxes.**
+> This paragraph used to argue: "With `wifi_ap:false` there is no `wlan0`, so nothing on the vehicle
+> subnet can reach them." That premise is chipset-dependent, and it does not hold on the
+> Realtek-WLAN box.
+>
+> Both adapters run **identical `ccpa_custom` OCBM firmware on identical hardware except the WLAN
+> chipset** — one NXP IW416, one Realtek RTL8822CS — and the firmware's `radio_caps` layer abstracts
+> the difference. On the Realtek part that abstraction reports `RADIO_BT_AFTER_WLAN=1`: the WLAN
+> driver **must be insmod'd before Bluetooth can attach at all** (`[radio_hal] chipset requires the
+> WLAN driver before BT attach - loading it (driver only, no AP)` → `insmod /tmp/88x2cs.ko
+> if2name=sta0` → `WLAN interface wlan0 up - BT attach may proceed`). So `wlan0` **exists**, with
+> `wifi_ap:false` still correctly honoured — the box raises no SoftAP, but the interface is up.
+>
+> Observed consequence in the same session: `rx-connect` came up on it and advertised a **second**
+> `CarPlay._airplay._tcp` on `:5000` at `192.168.43.1`, under a different identity (`device id
+> A6:2E:60:15:A8:43`, `pi 1544acf6-…`) from the one the app advertises and the one the box presented
+> over Bluetooth. It did no harm — `192.168.43.1` is the box's own unbridged interface and the phone
+> is on `br0` — but "nothing can reach it" is now an accident of routing rather than an absence of
+> the interface, and it is a competing AirPlay endpoint with a mismatched deviceID, which is exactly
+> the class of fault Phase 5 of [`12_OBSERVED_FLOW.md`](12_OBSERVED_FLOW.md) exists to describe.
+> Treat `AV_DISABLED` as worth doing rather than cosmetic, and re-check this on any box whose WLAN
+> chipset needs the driver up for BT.
 
 ---
 
@@ -57,23 +89,23 @@ the full binary path, which no shell script or immediately-exiting binary satisf
 ### Phase 0 — the app claims the box
 
 The app claims USB `0x1314:0x2d00` (interface 0, bulk **IN `0x81` / OUT `0x01`**, 512-byte max packet;
-hardware-verified 2026-08-12 — `netprobe_app/.../ocbm/UsbBulkTransport.kt:19`). No AOA control handshake;
+hardware-verified 2026-08-12 — class KDoc of `UsbBulkTransport`, `netprobe_app/.../ocbm/UsbBulkTransport.kt`). No AOA control handshake;
 it is a raw byte pipe. Then `CT_HELLO` → `CT_HELLO_ACK`, `CT_SETTIME` (the box has no RTC battery),
-`CT_SUBSCRIBE` with the session config — including `wifi_ap: false` (`OcbmProbe.kt:84`) — and a 1 Hz
+`CT_SUBSCRIBE` with the session config — including `wifi_ap: false` (`OcbmProbe.btOnlyConfig()`) — and a 1 Hz
 `CT_HEARTBEAT`.
 
 **The app is the ignition.** The box's radios are off at boot; `ocbmd` mirrors host presence to
 `/tmp/host_present` on the `CT_SUBSCRIBE` edge, and the box's `wireless_up()` brings the radios up from
 there, reading `wifi_ap:false` out of that same config to suppress its own SoftAP
-(`session_supervisor.sh:789-790`: `BOX_WIFI_AP=0` → `"box SoftAP SUPPRESSED"`) while still bringing
+(the `BOX_WIFI_AP` test inside `wireless_up()` in `session_supervisor.sh`: `BOX_WIFI_AP=0` → `"box SoftAP SUPPRESSED"`; stale line cite, re-anchored 2026-09-10 — the old lines are now `pairing_interactive()`'s header comment) while still bringing
 up Bluetooth (`radio_hal.sh bt_on`, unconditional). If the app is not running and subscribed, no session
 can start. (Practical consequence: give the app a `device_filter.xml` +
 `ACTION_USB_DEVICE_ATTACHED` filter on `0x1314:0x2d00`, so plugging in the adapter *is* the trigger.)
 
 The box's `CT_BOX_HEALTH` (`0x1A`) report carries per-subsystem readiness bits, including
 `BH_HCI_PRESENT` (bit 0), which the box sets from `HCIGETDEVINFO` on a raw HCI socket — the same ioctl
-`hciconfig` uses to print `UP RUNNING` (ioctl def `ccpa_custom/ccpa/ocbmd/src/main.rs:1147-1204`, setter
-at `:2156`; corrected 2026-09-09, previously cited `:789-839`, which is `LogTail`/`CH_LOG` rotation code).
+`hciconfig` uses to print `UP RUNNING` (ioctl in `fn hci0_up`, `ccpa_custom/ccpa/ocbmd/src/main.rs`; the bit is set
+in `box_health_tick`; corrected 2026-09-09, previously cited `:789-839`, which is `LogTail`/`CH_LOG` rotation code).
 This is the
 signal the app's lifecycle layer (§4b) uses to know the box's radios actually came up, not just that
 `ocbmd` answered.
@@ -114,10 +146,10 @@ from the OS hotspot GUI (`com.gm.hmi.connection`'s `WifiHotspotActivity` — kee
 The app advertises `_airplay._tcp` on `br0` via **two adverts run concurrently, deliberately, not one**
 *(corrected 2026-09-09; this entry previously named `NsdManager` as the sole mechanism)*:
 `NsdManager.registerService` (primary — the one iOS has demonstrably indexed) **and** a hand-rolled,
-self-hosted `MdnsResponder` run alongside it on purpose (`CarPlayRx.kt:372-445`, "ALONGSIDE NsdManager"
-rationale at `CarPlayRx.kt:429`). The reason the second one exists: AOSP drops `NsdServiceInfo.setHost()`
+self-hosted `MdnsResponder` run alongside it on purpose (`CarPlayRx.advertise()`, "ALONGSIDE NsdManager"
+rationale in the comment block inside `advertise()`). The reason the second one exists: AOSP drops `NsdServiceInfo.setHost()`
 on registration, so `NsdManager` cannot set the SRV target, and it shares GM's `Android.local` host,
-whose Bonjour record wins the endpoint-index race whenever GM registers first (`MdnsResponder.kt:16-26`).
+whose Bonjour record wins the endpoint-index race whenever GM registers first (`MdnsResponder` class KDoc, "Why this exists").
 `MdnsResponder` answers mDNS itself, owns `gmccpa-rx.local`, and publishes exactly one address (`br0`),
 pinning a second, separately-keyed endpoint that carries the app's own deviceID — using a deviceID
 consistent with what the box presented over Bluetooth, on its own port (GM's own CarPlay service holds
@@ -125,7 +157,7 @@ consistent with what the box presented over Bluetooth, on its own port (GM's own
 
 **Discovery is bidirectional.** The accessory also *browses* `_carplay-ctrl._tcp` and dials the phone
 with `GET /ctrl-int/1/connect`; the phone then opens the **control** connection inbound
-(`CarPlayRx.kt:32,148,289,325`). The app never dials the phone for the control channel itself, but it
+(`CarPlayRx` class KDoc rule 1, the `dialsSinceInbound` KDoc, and the `ORDER IS LOAD-BEARING` comment in `CarPlayRx.start()`). The app never dials the phone for the control channel itself, but it
 does have to make that outbound nudge. Two TXT values are load-bearing: `features` must carry the
 **Car** bit (high word bit 32) or iOS answers the connect-out and never opens RTSP; `features` /
 `deviceid` / `pi` must all equal what `/info` returns or pair-verify fails. See
@@ -241,10 +273,10 @@ moment.
   down under the live session.
 - **`OcbmProbe.runAll()` returns a `LinkResult`, and callers must gate on it.** It used to return `Unit`;
   the launcher then announced "box claimed, MFi proven" with no adapter on the bus at all
-  (`OcbmProbe.kt:225-247`, device-observed 2026-08-28). `LinkResult` carries `claimed`, `helloOk`,
+  (`OcbmProbe.LinkResult` KDoc, device-observed 2026-08-28). `LinkResult` carries `claimed`, `helloOk`,
   `mfiProven`, `subscribed` as explicit fields.
 - **`CarPlayActivity.onSessionEnded()` tears the screen down on session end** — the LIVE screen does not
-  linger after the phone disconnects (`CarPlayActivity.kt:77`).
+  linger after the phone disconnects (companion `onSessionEnded` in `av/CarPlayActivity.kt`).
 - **A readiness probe must not perturb what it measures.** `CarPlayRx.selfTest()` deliberately does not
   dial `:7011` on loopback — that would enter `acceptLoop`, take a liveness slot, spin up a native core
   and fire a spurious session-down on close. Holding the bound, open `ServerSocket` is the capability

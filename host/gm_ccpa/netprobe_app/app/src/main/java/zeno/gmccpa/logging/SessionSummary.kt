@@ -1,7 +1,6 @@
 package zeno.gmccpa.logging
 
-import com.carlink.ocbm.Mfi
-import com.carlink.ocbm.Ocbm
+import zeno.gmccpa.ocbm.Ocbm
 import android.hardware.usb.UsbDevice
 import android.os.SystemClock
 import org.json.JSONArray
@@ -21,7 +20,15 @@ import java.util.concurrent.atomic.AtomicLong
  * teardown, at app death, or when a new attach supersedes it (the box was unplugged and replugged, or
  * the trampoline fired again, without this app ever seeing a clean close). [begin] returns the
  * [Session] handle; callers on the OCBM reader thread, the UI thread, and the HEVC render thread feed
- * it facts as they learn them via its setters, and [end] emits the line. A session that never reaches
+ * it facts as they learn them via its setters, and [end] emits the line.
+ *
+ * Not every session HAS an attach, though. A launcher tap, `am start`, or a task switch with the
+ * adapter already plugged in brings the link up without the trampoline ever running for it, and until
+ * 2026-09-10 those sessions produced no line at all — the whole 2026-09-09 truck capture, a complete
+ * and successful drive, holds zero `SESSION v=` lines. Such a session begins at the **first link
+ * attempt with the adapter present** ([beginLaunch], called from `OcbmProbe.runAllLocked` before it
+ * starts waiting for a claim) and says so: `origin=launch`, with every attach-only fact rendered as
+ * the explicit absent token rather than a plausible value. See [AttachInfo.origin]. A session that never reaches
  * [end] — killed by the platform, a native crash, a wedged heartbeat — is exactly the interesting case
  * for fault-hunting, so [end] is NOT the only way a line gets written: a superseding [begin] and a JVM
  * shutdown hook both flush a best-effort line for whatever the current session knew at that moment,
@@ -43,6 +50,13 @@ import java.util.concurrent.atomic.AtomicLong
  * appending fields, never by reordering or repurposing an existing key, since these lines get diffed
  * across weeks of captures.
  *
+ * Schema history:
+ *  - `v=1` (2026-08-26): the original field set, `id=` … `exit=`.
+ *  - `v=2` (2026-09-10): `origin=` appended at the end (`usb_attach` | `launch`); `perm_trampoline=`
+ *    may now read `none` (a launch-origin session had no trampoline to sample). No key moved or
+ *    changed meaning: a `v=1` reader that ignores unknown trailing keys still parses a `v=2` line, and
+ *    `perm_trampoline=none` is the same absent-token rule every other field already follows.
+ *
  * A lower-frequency `SESSION_DETAIL id=<id> ...` block (session-end only, one key per line) carries the
  * fields too long or too structured for one line: the raw phone-identity JSON and the two `MGMT_INFO`
  * bonded-device snapshots, verbatim and as parsed lists.
@@ -59,8 +73,20 @@ import java.util.concurrent.atomic.AtomicLong
  */
 object SessionSummary {
 
-    /** Bump on any field-set/order change; never reinterpret an existing key. */
-    const val SCHEMA_VERSION = 1
+    /** Bump on any field-set/order change; never reinterpret an existing key. History in the class KDoc. */
+    const val SCHEMA_VERSION = 2
+
+    /**
+     * How long a permission-dialog observation with NO open session waits for a session to claim it.
+     *
+     * The race it closes: the app is launched with the adapter absent, so no session begins; the driver
+     * plugs the box in; `OcbmProbe.awaitClaimable` polls every 2 s and can see the device, find no
+     * grant and raise the dialog BEFORE the framework has started `UsbAttachActivity` for the same
+     * attach — whose [begin] is what would have received the observation. Recorded on the session
+     * that begins within this window instead of dropped; a session beginning later than this is not
+     * plausibly the one the dialog was for, and the observation is discarded with a log line.
+     */
+    private const val PENDING_PROMPT_WINDOW_MS = 15_000L
 
     private const val MAX_SEV_HISTORY = 64
 
@@ -69,6 +95,8 @@ object SessionSummary {
     private val lock = Any()
 
     @Volatile private var current: Session? = null
+    /** elapsedRealtime of a [permissionDialogObserved] that found no open session, or 0. */
+    @Volatile private var pendingPromptAt: Long = 0L
 
     init {
         // Best-effort line for a session that dies with the process instead of calling end(): a killed
@@ -88,19 +116,80 @@ object SessionSummary {
     fun begin(attach: AttachInfo): Session {
         val s = Session(nextId.incrementAndGet(), attach)
         val prev: Session?
+        val pendingAt: Long
         synchronized(lock) {
             prev = current
             current = s
+            pendingAt = pendingPromptAt
+            pendingPromptAt = 0L
         }
         if (prev != null && !prev.closed.get()) {
-            log.w("session id=${prev.id} superseded by new attach (id=${s.id}) before a clean close")
-            emit(prev, "superseded_by_new_attach")
+            // The label names what the superseded session WAS, not just what replaced it: a
+            // launch-origin session that never got past waiting for the adapter, and was then
+            // overtaken by the real attach, is expected behaviour — not a replug or a second
+            // trampoline firing, which is what `superseded_by_new_attach` has always meant.
+            val why = if (prev.attach.origin == Origin.LAUNCH) "launch_superseded_by_attach"
+                      else "superseded_by_new_attach"
+            log.w("session id=${prev.id} (origin=${prev.attach.origin.tag}) superseded by id=${s.id} " +
+                "(origin=${attach.origin.tag}) before a clean close — exit=$why")
+            emit(prev, why)
+        }
+        if (pendingAt != 0L) {
+            val ageMs = SystemClock.elapsedRealtime() - pendingAt
+            if (ageMs <= PENDING_PROMPT_WINDOW_MS) {
+                s.permissionDialogObserved()
+                log.i("session id=${s.id} inherits a permission-dialog observation from ${ageMs}ms before it began (no session was open then)")
+            } else {
+                log.w("session id=${s.id} discarding a permission-dialog observation from ${ageMs}ms ago — older than ${PENDING_PROMPT_WINDOW_MS}ms, not plausibly this session's")
+            }
         }
         log.i(
-            "session id=${s.id} begin uid=${attach.uid} user=${attach.userId} " +
-                "perm_trampoline=${attach.hasPermissionAtTrampoline} serial=${attach.serialOutcome.tag}"
+            "session id=${s.id} begin origin=${attach.origin.tag} uid=${attach.uid} user=${attach.userId} " +
+                "perm_trampoline=${attach.hasPermissionAtTrampoline ?: "none"} serial=${attach.serialOutcome.tag}"
         )
         return s
+    }
+
+    /**
+     * [begin] for a session that has NO attach: the process was brought up by the launcher, `am start`
+     * or a task switch with the adapter already present, and `OcbmProbe.runAllLocked` is about to
+     * bring the link up without the trampoline ever having run for this session.
+     *
+     * Everything the trampoline would have measured and cannot be measured honestly here is the
+     * explicit absent token: `hasPermissionAtTrampoline` is null (rendered `perm_trampoline=none`)
+     * because sampling `hasPermission()` now would be a real fact wearing a trampoline fact's label,
+     * and `serialOutcome` is [SerialOutcome.UNKNOWN] because its `SECURITY_EXCEPTION` value is
+     * defined as "the attach-time grant did not land". The descriptor fingerprint IS taken: it is a
+     * device-identity fact, the same whenever it is read, and it is what lets a launch-origin session
+     * be compared with an attach-origin one for the same box.
+     */
+    fun beginLaunch(dev: UsbDevice): Session = begin(
+        AttachInfo(
+            origin = Origin.LAUNCH,
+            hasPermissionAtTrampoline = null,
+            uid = android.os.Process.myUid(),
+            userId = android.os.Process.myUid() / 100_000,
+            processAgeMs = SystemClock.elapsedRealtime() - android.os.Process.getStartElapsedRealtime(),
+            serialOutcome = SerialOutcome.UNKNOWN,
+            descriptorFingerprint = descriptorFingerprint(dev),
+        )
+    )
+
+    /**
+     * The USB permission dialog was just raised by this app. Recorded on the open session if there
+     * is one; otherwise held for the session that begins within [PENDING_PROMPT_WINDOW_MS] — see
+     * that constant for the launch-then-plug-in race this closes. Callers should use this rather
+     * than `current()?.permissionDialogObserved()`, which silently drops the observation in that race.
+     */
+    fun permissionDialogObserved() {
+        // Decided under the same lock begin() takes, so the observation lands on exactly one of: the
+        // session open now, or the pending slot the next begin() drains. No window in between.
+        val s: Session?
+        synchronized(lock) {
+            s = current
+            if (s == null) pendingPromptAt = SystemClock.elapsedRealtime()
+        }
+        s?.permissionDialogObserved()
     }
 
     /** The session started by the most recent [begin] that has not yet [end]ed, or null before any attach. */
@@ -131,7 +220,6 @@ object SessionSummary {
 
     private fun emit(s: Session, exitReason: String) {
         if (!s.closed.compareAndSet(false, true)) return // already flushed (race between end() and shutdown hook)
-        s.exitReason = exitReason
         val nowElapsed = SystemClock.elapsedRealtime()
         val durMs = nowElapsed - s.startElapsedMs
 
@@ -169,7 +257,7 @@ object SessionSummary {
             append(" uid=${s.attach.uid}")
             append(" user=${s.attach.userId}")
             append(" proc_age_ms=${s.attach.processAgeMs}")
-            append(" perm_trampoline=${s.attach.hasPermissionAtTrampoline}")
+            append(" perm_trampoline=${s.attach.hasPermissionAtTrampoline ?: "none"}")
             append(" serial=${s.attach.serialOutcome.tag}")
             append(" desc_fp=${sanitize(s.attach.descriptorFingerprint)}")
             append(" prompted=${s.dialogPrompted}")
@@ -191,6 +279,8 @@ object SessionSummary {
             append(" no_video=$noVideo")
             append(" reached_handoff=$reachedHandoff")
             append(" exit=${sanitize(exitReason)}")
+            // v=2: appended at the END, per the format contract — nothing above moved.
+            append(" origin=${s.attach.origin.tag}")
         }
         log.i(line)
 
@@ -231,12 +321,27 @@ object SessionSummary {
 
     // ------------------------------------------------------------------------------------------------
 
+    /** How the session came to exist. Rendered as the `origin=` token; see [AttachInfo.origin]. */
+    enum class Origin(val tag: String) {
+        /** The framework launched `UsbAttachActivity` for the adapter; every [AttachInfo] field is real. */
+        USB_ATTACH("usb_attach"),
+        /** Launcher / `am start` / task switch with the adapter already present; no trampoline ran for
+         *  this session, so the attach-only fields carry the absent token. Built by [beginLaunch]. */
+        LAUNCH("launch"),
+    }
+
     /**
-     * USB-attach-time facts, captured once at the trampoline (`UsbAttachActivity`) and immutable
-     * for the life of the session — see that class's KDoc for what each field kills.
+     * Facts about how the session began, immutable for its life. For [Origin.USB_ATTACH] they are
+     * captured once at the trampoline (`UsbAttachActivity`) — see that class's KDoc for what each
+     * field kills. For [Origin.LAUNCH] the trampoline never ran, and the fields it alone can measure
+     * are null/[SerialOutcome.UNKNOWN] rather than a value sampled elsewhere and mislabelled.
      */
     data class AttachInfo(
-        val hasPermissionAtTrampoline: Boolean,
+        val origin: Origin,
+        /** Null ONLY for [Origin.LAUNCH]: there was no trampoline to sample at. Rendered `none`. A
+         *  `false` here would satisfy `grep perm_trampoline=false` — the fault-1 query — for a session
+         *  in which no grant was ever expected at that point. */
+        val hasPermissionAtTrampoline: Boolean?,
         val uid: Int,
         val userId: Int,
         val processAgeMs: Long,
@@ -266,7 +371,6 @@ object SessionSummary {
         val startElapsedMs: Long = SystemClock.elapsedRealtime()
 
         internal val closed = AtomicBoolean(false)
-        internal var exitReason: String = "unknown"
 
         // ---- fault 1: was the USB permission dialog observed this attach? ----
         @Volatile var dialogPrompted: Boolean = false; private set

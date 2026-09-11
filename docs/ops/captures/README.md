@@ -3,7 +3,7 @@
 Real device logs kept as ground-truth reference (what the wire/state actually did), captured over the
 UART console from the box during live iPhone tests. Not code; evidence.
 
-> **Verification method (important):** these runs were driven by `ccpa/carplayd`, which for the
+> **Verification method (important):** these runs were driven by `ccpa/airplayd`, which for the
 > on-hardware validation **reused another project's CarPlay receiver — `ncm_carplayd/receiver_core`** —
 > as the harness: its proven `ControlServer` (pair-setup/verify + auth-setup) and, for the full-session
 > capture, its `AvSession` (SETUP/RECORD/stream handling). This **proves the session works on the
@@ -20,15 +20,15 @@ UART console from the box during live iPhone tests. Not code; evidence.
 
 The first time the adapter's full **stable crypto foundation** ran to completion against a real iPhone:
 iAP2 → Identified → AirPlay pair-setup → pair-verify → MFi-SAP auth-setup → derived ChaCha20 session
-key — all on the genuine **local** MFi chip, via `ccpa/carplayd` (582 KB, reusing `receiver_core`).
+key — all on the genuine **local** MFi chip, via `ccpa/airplayd` (582 KB, reusing `receiver_core`).
 
 | File | What it shows |
 |---|---|
 | `2026-07-09_iap2d_handshake.log` | `iap2d` iAP2 accessory handshake: SYN-ACK → cert/0xAA01 → sign/0xAA03 → **0xAA05 AuthSuccess** → 0x1D01 → **0x1D02 Identify**, then holds the link (post-identify 0x4E0A/0x4E0B). MFi on the local i2c chip. |
-| `2026-07-09_rx-connect.log` | `rx-connect` mDNS: advertised `_airplay._tcp 'CarPlay' :5000`; resolved the iPhone's `_carplay-ctrl` to `fe80::1c76:d88:9cb3:9036` (scope `ncm0`); **connect-out `GET /ctrl-int/1/connect` → `HTTP/1.1 200 OK`** (the fix: dial the resolved fe80:: address, not the `.local` hostname). The trailing IPv4 `169.254…` connect-out fails harmlessly (IPv6 already worked). |
-| `2026-07-09_rx-connect_session.log` | `rx-connect` from the full-session run — the mDNS advertise + connect-out that re-established the streaming session. |
-| `2026-07-09_carplayd_pairverify.log` | `carplayd` pairing server: control conn from the iPhone on `ncm0:5000` → `/pair-setup` ×3 (peer saved) → `/pair-verify` ×2 → **pair-verify OK → channel encrypted** → **`/auth-setup` MFi-SAP OK (1113 B M2, local chip)** → iPhone advanced to `SETUP` → **`*** PAIR-VERIFY COMPLETE — session secret derived ***`**. |
-| `2026-07-09_carplayd_full_session.log` | **Full live CarPlay session** with `carplayd` running receiver_core's `AvSession` (validation step — box decrypts; the committed model forwards encrypted). pair-verify → `SETUP phase1` (timing/event ports) → `RECORD` (event channel, session-focus handshake) → `SETUP phase2 screen(110)` → **`[screen] first frame decoded (Annex-B)` — VIDEO flowing** → `SETUP phase2 audio(100) 48000Hz 2ch Pcm "media"` → **audio (the Music) flowing** → `/command modesChanged/disableBluetooth` + continuous `/feedback`. The `:9001`/`:9002` "connection refused" are the IPC-seam forwards with no listener on the box (expected — that's the app/OCBM's job). Proves the whole session (pairing + video + audio + control) works on the adapter with a real streaming iPhone. |
+| `2026-07-09_rx_connect.log` | `rx_connect` mDNS: advertised `_airplay._tcp 'CarPlay' :5000`; resolved the iPhone's `_carplay-ctrl` to `fe80::1c76:d88:9cb3:9036` (scope `ncm0`); **connect-out `GET /ctrl-int/1/connect` → `HTTP/1.1 200 OK`** (the fix: dial the resolved fe80:: address, not the `.local` hostname). The trailing IPv4 `169.254…` connect-out fails harmlessly (IPv6 already worked). |
+| `2026-07-09_rx_connect_session.log` | `rx_connect` from the full-session run — the mDNS advertise + connect-out that re-established the streaming session. |
+| `2026-07-09_airplayd_pairverify.log` | `airplayd` pairing server: control conn from the iPhone on `ncm0:5000` → `/pair-setup` ×3 (peer saved) → `/pair-verify` ×2 → **pair-verify OK → channel encrypted** → **`/auth-setup` MFi-SAP OK (1113 B M2, local chip)** → iPhone advanced to `SETUP` → **`*** PAIR-VERIFY COMPLETE — session secret derived ***`**. |
+| `2026-07-09_airplayd_full_session.log` | **Full live CarPlay session** with `airplayd` running receiver_core's `AvSession` (validation step — box decrypts; the committed model forwards encrypted). pair-verify → `SETUP phase1` (timing/event ports) → `RECORD` (event channel, session-focus handshake) → `SETUP phase2 screen(110)` → **`[screen] first frame decoded (Annex-B)` — VIDEO flowing** → `SETUP phase2 audio(100) 48000Hz 2ch Pcm "media"` → **audio (the Music) flowing** → `/command modesChanged/disableBluetooth` + continuous `/feedback`. The `:9001`/`:9002` "connection refused" are the IPC-seam forwards with no listener on the box (expected — that's the app/OCBM's job). Proves the whole session (pairing + video + audio + control) works on the adapter with a real streaming iPhone. |
 
 ## 2026-07-09 — COMMITTED forward-encrypted model validated (video, Phase 2)
 
@@ -37,7 +37,7 @@ The first proof of the **committed architecture** on hardware: the box forwards 
 
 | File | What it shows |
 |---|---|
-| `2026-07-09_avdec_forward_encrypted.log` | `ocbm-host avdec` on the Mac. `carplayd` ran with `OCBM_FWD_ENC=1` so `spawn_screen` handed the per-stream key once then forwarded raw encrypted frames (`[hdr 128B][body]`) → `:9001` → `ocbmd` → `CH_VIDEO`. The host app received the per-stream session key over the OCBM seam and decrypted its own stream with ChaCha20-Poly1305 (nonce = `[0,0,0,0]‖counter_le64`, AAD = the frame header): **`468 frames decrypted on HOST, 0 failed`** → `✓ committed model validated`. The decrypted plaintext parsed as clean AVCC H.264 (2 IDR + 466 non-IDR slices, 2 823 037 B exact). |
+| `2026-07-09_avdec_forward_encrypted.log` | `ocbm-host avdec` on the Mac. `airplayd` ran with `OCBM_FWD_ENC=1` so `spawn_screen` handed the per-stream key once then forwarded raw encrypted frames (`[hdr 128B][body]`) → `:9001` → `ocbmd` → `CH_VIDEO`. The host app received the per-stream session key over the OCBM seam and decrypted its own stream with ChaCha20-Poly1305 (nonce = `[0,0,0,0]‖counter_le64`, AAD = the frame header): **`468 frames decrypted on HOST, 0 failed`** → `✓ committed model validated`. The decrypted plaintext parsed as clean AVCC H.264 (2 IDR + 466 non-IDR slices, 2 823 037 B exact). |
 
 Why this is decisive: ChaCha20-**Poly1305** is an AEAD — a wrong key/nonce/AAD fails the auth tag. 468/468
 successful decrypts is cryptographic proof the box→host key handoff + encrypted-frame framing are exact.
@@ -47,7 +47,7 @@ Key facts these pin down:
 - The genuine coprocessor returns a 945-byte MFi certificate (standard PKCS#7 DER `30 82 03 ad 06 09 2a 86 48 86 f7 0d 01 07 02 …`) and 128-byte RSA-1024 signatures during normal authentication; the same chip performs both iAP2 auth and AirPlay MFi-SAP. (No key material leaves the chip.)
 - The iPhone's CarPlay control service lives at its **IPv6 link-local** on the phone-facing NCM link;
   the box has no `.local` resolver, so dials must use the resolved address + interface scope.
-- After pair-verify, `carplayd` (running `NoSession`) acks `SETUP` with placeholders — no A/V yet; that
+- After pair-verify, `airplayd` (running `NoSession`) acks `SETUP` with placeholders — no A/V yet; that
   is **Phase 2** (forward encrypted A/V + hand the session key over OCBM to the host app).
 
 ## 2026-07-24 — wired regression test after docs/wireless/00_WIRELESS_CARPLAY.md Phase 1+2 (process/protocol fixes), live media + nav
@@ -64,8 +64,8 @@ transfers.
 | File | What it shows |
 |---|---|
 | `2026-07-24_iap2d_wired_metadata_session.log` | `iap2d` full session: SYN-ACK → cert/sign → AuthSuccess → Identify (all unchanged, local MFi chip) → `StartNowPlayingUpdates`/`StartRouteGuidanceUpdates`/`StartCallStateUpdates`/`StartCommunicationsUpdates` subscriptions → 263 live `NowPlaying` + 43 `RouteGuidance` + 31 `Maneuver` records. Confirms real content: a track (`"No More Tears"` / `"Distant Cowboy"` / `"No More Tears - Single"`, `duration_ms: 245558`) and live Apple Maps guidance (`route_state: Loading`, `nav_app: "Apple Maps"`, maneuvers with real distances e.g. `distance_text: "29"`/`Miles`). This path is the **separate physical `/dev/android_iap2` link** — untouched by this round's wireless-tunnel fixes — so its continued correct operation is the regression proof. |
-| `2026-07-24_carplayd_phase12_session.log` | `carplayd` full session with the Phase 1+2 code: pairing, SETUP phase1/phase2, RECORD, screen+audio flowing — same shape as the 2026-07-09 baseline, confirming no regression from the `ensure_av_layer()`/`events.rs` changes. |
-| `2026-07-24_rx-connect_phase12_session.log` | `rx-connect` mDNS advertise + connect-out, unchanged behavior. |
+| `2026-07-24_airplayd_phase12_session.log` | `airplayd` full session with the Phase 1+2 code: pairing, SETUP phase1/phase2, RECORD, screen+audio flowing — same shape as the 2026-07-09 baseline, confirming no regression from the `ensure_av_layer()`/`events.rs` changes. |
+| `2026-07-24_rx_connect_phase12_session.log` | `rx-connect` mDNS advertise + connect-out, unchanged behavior. |
 | `2026-07-24_session_supervisor_phase12.log` | `session_supervisor.sh` milestone scan reaching `armed=1 healthy=1 paired=1 record=1` (full STREAMING) — confirms the rewritten `wireless_owns_session()`-gated logic still drives the wired arm/health path correctly when no wireless session is active. |
 | `2026-07-24_ocbmd_phase12_session.log` | `ocbmd` session log from the box side during the live test. |
 | `2026-07-24_carplay_state_final.txt` | Final on-box state snapshot: `phase=STREAMING host_present=1 armed=1 healthy=1 stuck=0 paired=1 record=1 flaps=0 stuck_fails=0 uptime=282`. |
@@ -80,7 +80,7 @@ Phase 4 (wireless test with these fixes) and Phase 5 (wireless-Identify changes)
 
 ## 2026-07-25 — wireless metadata
 
-- `2026-07-25_SUCCESS_carplayd_wl_handshake.txt` — RCS DataStream link, MFi auth, identify (docs/carplay/05_METADATA_AND_CONTROLS.md).
+- `2026-07-25_SUCCESS_airplayd_wl_handshake.txt` — RCS DataStream link, MFi auth, identify (docs/carplay/05_METADATA_AND_CONTROLS.md).
 - `2026-07-25_SUCCESS_artwork_session2.txt` — album artwork, byte-exact reassembly (docs/carplay/05_METADATA_AND_CONTROLS.md §1.8).
 - `2026-07-25_iphone_iap2_trace_sess{2,3}.txt` — the phone's own iAP2 packet trace.
 - `2026-07-25_iphone_iapreject_requiredinfomissing.txt` — `accessoryd` naming the rejected message ids
@@ -103,7 +103,7 @@ Phase 4 (wireless test with these fixes) and Phase 5 (wireless-Identify changes)
 
 - `2026-07-25_wireless_inbound_channel_evidence.md` — inbound tunnel traffic arrives on the **CONTROL**
   connection. Archived because docs/carplay/03_SDK_GROUND_TRUTH.md §1's central claim rests on it and it previously existed only in
-  `/tmp/carplayd_wl.log` (tmpfs, lost on reboot).
+  `/tmp/airplayd_wl.log` (tmpfs, lost on reboot).
 - `2026-07-29_iphone_0x4171_listupdate.txt` — live `0x4171 ListUpdate` frames: wire evidence for the flat
   repeated-group encoding. Note the 48-byte hex-dump cap called out in its header.
 - `2026-08-10_REGRESSION_datastream130_scid_rejected.txt` — the box REFUSING iOS's RCS iAP-channel SETUP

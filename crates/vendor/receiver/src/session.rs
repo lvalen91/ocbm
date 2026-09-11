@@ -782,7 +782,7 @@ impl AvSession {
                 // anywhere. Skipping is strictly better than proceeding into guaranteed corruption, and
                 // it turns an otherwise silent failure into one line. Never observed on hardware for
                 // A/V: our own capture carries a real non-zero scid
-                // (docs/ops/captures/2026-07-24_carplayd_phase12_session.log:31).
+                // (docs/ops/captures/2026-07-24_airplayd_phase12_session.log:31).
                 //
                 // THIS IS AN ALLOWLIST, AND IT MUST STAY ONE. The condition it encodes is "scid is
                 // this stream's HKDF salt", which is true of the A/V types and nothing else, so it may
@@ -820,7 +820,7 @@ impl AvSession {
                 //      R14G17 is not an answer).
                 //   3. scid is NOT this stream's salt. Type 130 keys off `DataStream-Salt<seed>` taken
                 //      from its own SETUP request. Device-proven at
-                //      `docs/ops/captures/2026-07-25_SUCCESS_carplayd_wl_handshake.txt:25` (the request key
+                //      `docs/ops/captures/2026-07-25_SUCCESS_airplayd_wl_handshake.txt:25` (the request key
                 //      list carries no `streamConnectionID`) and `:36` (`key schedule SOLVED:
                 //      DataStream-Salt839141951896294626 (seed)`). Corroborated in the current receiver
                 //      side: `_DataStreamSessionSetup` (CarPlaySDK.framework) reads `seed` and feeds

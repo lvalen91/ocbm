@@ -12,6 +12,7 @@ import android.os.SystemClock
 import android.service.media.MediaBrowserService
 import android.view.KeyEvent
 import zeno.gmccpa.ProbeLog
+import zeno.gmccpa.logging.SessionTrace
 import zeno.gmccpa.pair.NativeCore
 import java.lang.ref.WeakReference
 import java.util.concurrent.Executors
@@ -89,6 +90,10 @@ class CarPlayMediaBrowserService : MediaBrowserService() {
             PlaybackState.ACTION_PLAY_PAUSE or PlaybackState.ACTION_SKIP_TO_NEXT or
             PlaybackState.ACTION_SKIP_TO_PREVIOUS
 
+        /** [SessionTrace.Board] entry. Bound/unbound is AAOS's decision, so the board is the only
+         *  place "is the app in the source switcher right now" is answerable from a capture. */
+        private const val BOARD = "media-browser"
+
         @Volatile private var live: WeakReference<CarPlayMediaBrowserService>? = null
 
         /**
@@ -117,14 +122,24 @@ class CarPlayMediaBrowserService : MediaBrowserService() {
          * whatever iOS reports in `playbackStatus`, never inferred from the existence of a session or
          * from bytes on the audio seam. The phone may hand us a paused player.
          */
-        fun onSessionUp() { sessionUp = true }
+        fun onSessionUp() {
+            sessionUp = true
+            // Not a fault at this instant — AAOS binds Media Center on its own schedule, routinely
+            // after RECORD — but a session that ends with this still DOWN never appeared in the
+            // source switcher, and the board is the only place that is visible.
+            if (live?.get() != null) SessionTrace.Board.up(BOARD, "bound by AAOS; session up")
+            else SessionTrace.Board.down(BOARD, "not bound by AAOS at session up — not in the source switcher until Media Center binds")
+        }
 
         /**
          * The session ended. This IS an inference we are entitled to make — the phone will never send
          * a final "stopped" record, it simply stops — so idle is asserted here. Clearing [sessionUp]
          * also drops any seam record still in flight from the dead session.
          */
-        fun onSessionDown() { sessionUp = false; last = null; live?.get()?.publishIdle() }
+        fun onSessionDown() {
+            sessionUp = false; last = null
+            live?.get()?.let { it.publishIdle(); SessionTrace.Board.up(BOARD, "bound by AAOS; session idle (card cleared)") }
+        }
     }
 
     override fun onCreate() {
@@ -144,6 +159,7 @@ class CarPlayMediaBrowserService : MediaBrowserService() {
         s.isActive = true
         last?.let { if (sessionUp) publishNow(it) }   // late bind: session was already up
         log.i("registered as an AAOS media source (session active)")
+        SessionTrace.Board.up(BOARD, "bound by AAOS; session ${if (sessionUp) "up" else "idle"}")
     }
 
     override fun onDestroy() {
@@ -152,6 +168,7 @@ class CarPlayMediaBrowserService : MediaBrowserService() {
         session = null
         artBitmap = null; artFor = null
         tx.shutdownNow()
+        SessionTrace.Board.down(BOARD, "unbound by AAOS — not in the source switcher until it re-binds")
         super.onDestroy()
     }
 
@@ -245,7 +262,7 @@ class CarPlayMediaBrowserService : MediaBrowserService() {
 
     private fun bitmapFor(jpeg: ByteArray?): Bitmap? {
         if (jpeg == null) { artBitmap = null; artFor = null; return null }
-        if (artFor === jpeg && artBitmap != null) return artBitmap   // decode once per blob
+        if (artFor === jpeg) return artBitmap   // decode once per blob, including a failed decode
         val bm = runCatching { decodeBounded(jpeg) }.getOrNull()
         if (bm == null) log.w("artwork (${jpeg.size} B) failed to decode — publishing without an image")
         artBitmap = bm; artFor = jpeg
@@ -317,7 +334,12 @@ class CarPlayMediaBrowserService : MediaBrowserService() {
         runCatching {
             tx.execute {
                 val ok = NativeCore.mediaButton(index)
-                log.i("transport: $what -> HID media $index sent=$ok")
+                // A refused send on a LIVE session is a dead event channel under a wheel button —
+                // a W. With no session it is AAOS probing the source at bind time (2026-09-09,
+                // 22:51:14.898, `play -> sent=false` four minutes before any phone) and stays I.
+                if (ok) log.i("transport: $what -> HID media $index sent=true")
+                else if (sessionUp) log.w("transport: $what -> HID media $index sent=false — the event channel refused it on a live session")
+                else log.i("transport: $what -> HID media $index sent=false (no session; nothing to send to)")
             }
         }.onFailure { log.e("transport $what dropped: ${it.message}") }
     }

@@ -5,6 +5,7 @@ import android.media.MediaFormat
 import android.os.SystemClock
 import android.view.Surface
 import zeno.gmccpa.ProbeLog
+import zeno.gmccpa.logging.SessionTrace
 import java.io.InputStream
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
@@ -28,8 +29,9 @@ import java.util.concurrent.atomic.AtomicLong
  * the next message's 4 length bytes to every trailing NAL.
  *
  * **Threading contract.** [consume] owns the codec for its whole life: it configures, feeds, drains and
- * releases on its own thread. [stop] only flips the flag and closes the stream — it never touches the
- * codec, because MediaCodec lifecycle calls racing a dequeue crash natively.
+ * releases on its own thread. [stop] only flips the flag — it neither closes the stream (the caller
+ * does, `CarPlayActivity.detachRenderer`) nor touches the codec, because MediaCodec lifecycle calls
+ * racing a dequeue crash natively.
  */
 class HevcRenderer(
     private val width: Int,
@@ -55,6 +57,15 @@ class HevcRenderer(
     private var lastKeyframeReq = 0L
     /** The VPS+SPS+PPS actually baked into the live codec's csd-0, to detect a mid-session change. */
     private var configuredCsd: ByteArray? = null
+    /**
+     * Per-CONNECTION first-frame latch, distinct from [framesRendered] `== 1`: the counters are
+     * cumulative across every producer re-dial on this instance, so the session-level "FIRST FRAME
+     * RENDERED" fires once, while [EXPECT_FIRST_FRAME] is armed and must be met per connection.
+     * Consume-thread only.
+     */
+    private var firstFrameThisConn = false
+    /** Keyframe requests issued since the last IRAP, so the seam-ended line can say how futile they were. */
+    private var keyframeReqsSinceIrap = 0
 
     private companion object {
         const val CONFIGURE_RETRY_MS = 5_000L      // don't re-attempt configure per NAL (codec-pool leak)
@@ -63,6 +74,22 @@ class HevcRenderer(
         // Match the seam's max message: a seam-legal AU in (old 2 MB, 8 MB] — most dangerously the IDR
         // itself — was silently dropped, and dropping the replacement keyframe stalls video entirely.
         const val MAX_INPUT_SIZE = MAX_MESSAGE
+        /** [SessionTrace] name for "this connection has rendered a frame". Armed in [consume]. The
+         *  `av/` scope is what `CarPlayActivity.stopSession` cancels when the AirPlay session ends. */
+        const val EXPECT_FIRST_FRAME = "av/video-first-frame"
+        /**
+         * Budget from seam connect to the first rendered frame of that connection. Measured on the
+         * 2026-09-09 truck session: `video seam connected` 22:55:22.802 → parameter sets .803 →
+         * `MediaCodec configured` .873 → `keyframe — decoding starts` .874 → `FIRST FRAME RENDERED`
+         * .947, i.e. **145 ms** on a fresh stream. The slow case is a producer re-dial (Surface
+         * re-attach): the frames in flight are P-frames from the old GOP and the IRAP is iOS's answer
+         * to our ForceKeyFrame, re-requested every [KEYFRAME_COOLDOWN_MS] while non-IRAP AUs keep
+         * arriving. Ten futile requests is when "waiting for the keyframe" has become "black screen
+         * with a live seam" — the fault the owner reported 2026-09-08 on return from the homescreen.
+         */
+        const val FIRST_FRAME_MS = 5_000L
+        /** [SessionTrace.Board] entry for the live decoder. */
+        const val BOARD_DECODER = "video-decoder"
     }
 
     fun start() {
@@ -77,12 +104,19 @@ class HevcRenderer(
      * Flag-only. The codec is released by [consume] on its own thread, and this does NOT close the
      * stream — a [consume] parked in `read` unblocks only when the caller closes the socket, which
      * [CarPlayActivity.detachRenderer] does.
+     *
+     * The summary is JUDGED, not just printed: any dropped AU is an `E`, matching the per-drop line
+     * in [feed] — the 2026-09-09 capture logged every fault at `I` and was greppable as a clean run.
+     * [why] is the caller's reason (Surface destroyed, session ended), so the line says whether this
+     * stop was expected.
      */
-    fun stop() {
+    fun stop(why: String) {
         running.set(false)
-        log.i("stopping — ${framesRendered.get()} frames, ${bytesIn.get()} bytes, ${ausDropped.get()} AUs dropped")
+        val dropped = ausDropped.get()
+        val msg = "stopping ($why) — ${framesRendered.get()} frames, ${bytesIn.get()} bytes, $dropped AUs dropped"
+        if (dropped > 0) log.e("$msg — every drop cost a corrupt GOP until the next IDR") else log.i(msg)
         zeno.gmccpa.logging.SessionSummary.current()
-            ?.onAvFinal(framesRendered.get(), ausDropped.get(), bytesIn.get())
+            ?.onAvFinal(framesRendered.get(), dropped, bytesIn.get())
     }
 
     /**
@@ -102,6 +136,14 @@ class HevcRenderer(
         // re-armed or it is dead on every reconnect. VPS/SPS/PPS are deliberately KEPT: a mid-stream
         // re-dial re-sends no VideoConfig, so the cache is the only way to configure at all.
         sawKeyframe = false
+        firstFrameThisConn = false
+        keyframeReqsSinceIrap = 0
+        // Armed per connection, on the seam thread, before the first read: a connection that never
+        // renders is the "black screen with a healthy session" fault, and until now it produced no
+        // line at all — only the absence of one. Met in [drain] on this connection's first frame.
+        SessionTrace.expect(EXPECT_FIRST_FRAME, FIRST_FRAME_MS,
+            "the video seam connected, so parameter sets, an IRAP (ours to request every " +
+            "${KEYFRAME_COOLDOWN_MS}ms) and a rendered frame should follow; measured 145ms on 2026-09-09")
         val hdr = ByteArray(4)
         try {
             while (running.get()) {
@@ -124,8 +166,20 @@ class HevcRenderer(
                 handleMessage(msg)
             }
         } finally {
-            releaseCodec()
-            log.i("seam ended — ${framesRendered.get()} frames rendered, ${ausDropped.get()} AUs dropped")
+            releaseCodec(if (running.get()) "video seam connection ended — rebuilt on the producer's re-dial"
+                         else "renderer stopped")
+            if (!firstFrameThisConn) {
+                // Not a miss: the connection ended before a frame could render. Distinct from met() so
+                // the capture never shows a frame that was not there, and from the watchdog so a
+                // deliberate detach is not an EXPECTED-MISSING.
+                SessionTrace.cancel(EXPECT_FIRST_FRAME,
+                    if (running.get()) "the producer dropped the connection first ($keyframeReqsSinceIrap keyframe request(s) unanswered)"
+                    else "renderer stopped before a frame rendered ($keyframeReqsSinceIrap keyframe request(s) unanswered)")
+            }
+            val dropped = ausDropped.get()
+            val msg = "seam ended — ${framesRendered.get()} frames rendered, $dropped AUs dropped" +
+                      (if (firstFrameThisConn) "" else "; this connection rendered NOTHING")
+            if (dropped > 0) log.e(msg) else log.i(msg)
         }
     }
 
@@ -164,7 +218,7 @@ class HevcRenderer(
                 34 -> { pps = msg.copyOfRange(i, to); sawParamSet = true; log.i("PPS (${to - i} B)") }
                 in 0..31 -> { sawVcl = true; if (type in 16..21) keyframe = true }   // 16..21 = IRAP
             }
-            i = off
+            i = to   // nextStart already walked off..to; resuming at `off` rescanned every NAL body
         }
 
         // Reconfigure if the parameter sets CHANGED mid-session (iOS re-SETUP / resolution change):
@@ -174,7 +228,7 @@ class HevcRenderer(
             val csd = vps!! + sps!! + pps!!
             if (configured && !csd.contentEquals(configuredCsd)) {
                 log.i("parameter sets changed — reconfiguring decoder")
-                releaseCodec()          // sets configured = false
+                releaseCodec("parameter sets changed — reconfiguring")          // sets configured = false
                 sawKeyframe = false
             }
             if (!configured) maybeConfigure()
@@ -192,7 +246,8 @@ class HevcRenderer(
         if (!sawKeyframe) {
             if (!keyframe) { requestKeyframe(); return }
             sawKeyframe = true
-            log.i("keyframe — decoding starts")
+            log.i("keyframe — decoding starts (after $keyframeReqsSinceIrap keyframe request(s))")
+            keyframeReqsSinceIrap = 0
         }
         feed(msg)
     }
@@ -213,15 +268,21 @@ class HevcRenderer(
         val now = SystemClock.elapsedRealtime()
         if (now - lastKeyframeReq < KEYFRAME_COOLDOWN_MS) return
         lastKeyframeReq = now
+        keyframeReqsSinceIrap++
         onKeyframeNeeded()
     }
 
-    /** Owned by the consume thread — never call from the UI thread while a dequeue may be in flight. */
-    private fun releaseCodec() {
+    /**
+     * Owned by the consume thread — never call from the UI thread while a dequeue may be in flight.
+     * [why] goes to the [SessionTrace.Board], so "decoder DOWN" always says whether it was expected.
+     */
+    private fun releaseCodec(why: String) {
         val c = codec ?: return
         codec = null; configured = false
+        // deliberate: teardown of a codec we are discarding; a throw here changes nothing we can act on.
         runCatching { c.stop() }
         runCatching { c.release() }
+        SessionTrace.Board.down(BOARD_DECODER, why)
     }
 
     private fun maybeConfigure() {
@@ -244,15 +305,18 @@ class HevcRenderer(
             configured = true
             configureFailedAt = 0L
             log.i("MediaCodec configured: video/hevc ${width}x$height csd-0=${csd.size} B (VPS+SPS+PPS), decoder=${c.name}")
+            SessionTrace.Board.up(BOARD_DECODER, "${c.name} video/hevc ${width}x$height csd-0=${csd.size}B")
         } catch (e: Throwable) {
             // Throwable, not Exception: an OutOfMemoryError while the framework allocates the input
             // buffers is an Error, and catching only Exception let it escape with the native codec
             // never released AND configureFailedAt never armed — so the next producer re-dial leaked
             // another one, walking the global codec pool down to a permanent black screen. Bare
             // release is correct HERE: stop() is invalid from the Configured state.
-            runCatching { c?.release() }
+            runCatching { c?.release() }   // deliberate: the codec is being discarded
             configureFailedAt = now
             log.e("configure failed (retry in ${CONFIGURE_RETRY_MS}ms): ${e.message}")
+            // note(), not failed(): the E above already carries the severity.
+            SessionTrace.Board.note(BOARD_DECODER, "FAILED (configure threw ${e.javaClass.simpleName} — retry in ${CONFIGURE_RETRY_MS}ms, black screen meanwhile)")
         }
     }
 
@@ -299,7 +363,7 @@ class HevcRenderer(
      * to prevent, just entered through the feed path instead of the configure path.
      */
     private fun resetCodec() {
-        releaseCodec()          // single release path; it already does stop-then-release correctly
+        releaseCodec("codec threw mid-stream — rebuilt after ${CONFIGURE_RETRY_MS}ms backoff")   // single release path; it already does stop-then-release correctly
         sawKeyframe = false
         configureFailedAt = android.os.SystemClock.elapsedRealtime()
         requestKeyframe()
@@ -308,6 +372,8 @@ class HevcRenderer(
     private fun drain(c: MediaCodec) {
         val info = MediaCodec.BufferInfo()
         while (true) {
+            // deliberate: an ISE here means the codec is in the Error state; the next feed() hits it
+            // on dequeueInputBuffer, logs "codec in error state" and resets. Reporting it twice adds nothing.
             val outIdx = try { c.dequeueOutputBuffer(info, 0) } catch (e: IllegalStateException) { return }
             when {
                 outIdx >= 0 -> {
@@ -315,6 +381,11 @@ class HevcRenderer(
                     c.releaseOutputBuffer(outIdx, info.size != 0)
                     if (info.size != 0) {
                         val n = framesRendered.incrementAndGet()
+                        if (!firstFrameThisConn) {
+                            // Per-connection latch: one branch per frame, one met() per connection.
+                            firstFrameThisConn = true
+                            SessionTrace.met(EXPECT_FIRST_FRAME)
+                        }
                         if (n == 1L) {
                             log.i("FIRST FRAME RENDERED")
                             // Time-to-first-frame is the one A/V number that separates "the session

@@ -12,11 +12,9 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.MediaStore
 import zeno.gmccpa.ProbeLog
-import java.io.BufferedReader
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
-import java.io.InputStreamReader
 import java.io.OutputStream
 import java.security.MessageDigest
 import java.security.SecureRandom
@@ -27,7 +25,7 @@ import java.util.concurrent.Executors
 
 /**
  * Gets [LogCapture]'s rotated files off the head unit and onto a USB stick, because `run-as` is
- * blocked here (see `AvSink.kt:23`) and this app cannot be pulled with `adb pull` either — export
+ * blocked here (see the `MainActivity` class KDoc) and this app cannot be pulled with `adb pull` either — export
  * is the ONLY retrieval path for an untethered drive capture.
  *
  * ## The ladder
@@ -317,7 +315,6 @@ object LogExport {
                 false // dir not associated with a known volume
             }
             if (!removable) continue
-            @Suppress("DEPRECATION")
             val mounted = Environment.getExternalStorageState(dir) == Environment.MEDIA_MOUNTED
             if (!mounted) continue
             if (!dir.exists() && !dir.mkdirs()) continue
@@ -330,6 +327,15 @@ object LogExport {
 
     private data class WriteOutcome(val bytesWritten: Long, val filesIncluded: Int, val counts: Map<RedactionCategory, Long>)
 
+    /** Counts bytes as they reach the sink so the caller gets an exact total without re-encoding every line. */
+    private class CountingOutputStream(out: OutputStream) : java.io.FilterOutputStream(out) {
+        var count = 0L; private set
+        override fun write(b: Int) { out.write(b); count++ }
+        // FilterOutputStream's default forwards this one byte at a time; override so the buffered writer's
+        // 8 KB flushes go through as one write(2).
+        override fun write(b: ByteArray, off: Int, len: Int) { out.write(b, off, len); count += len }
+    }
+
     /**
      * Streams every [LogCapture.logFiles] file into [out], oldest first, one line at a time —
      * mandatory, because these files run to hundreds of MB and reading one whole into memory would
@@ -339,28 +345,23 @@ object LogExport {
     private fun writeArtifact(context: Context, out: OutputStream, options: Options): WriteOutcome {
         val files = LogCapture.logFiles(context)
         val redactor = if (options.redact) Redactor() else null
-        var bytes = 0L
-        out.use { sink ->
+        val counting = CountingOutputStream(out)
+        counting.use { sink ->
             val writer = sink.bufferedWriter(Charsets.UTF_8)
             for (f in files) {
-                val marker = "##### EXPORT: ${f.name} (${f.length()} bytes) #####\n"
-                writer.write(marker); bytes += marker.toByteArray(Charsets.UTF_8).size
-                BufferedReader(InputStreamReader(f.inputStream(), Charsets.UTF_8)).use { r ->
+                writer.write("##### EXPORT: ${f.name} (${f.length()} bytes) #####\n")
+                f.bufferedReader(Charsets.UTF_8).use { r ->
                     while (true) {
                         val line = r.readLine() ?: break
-                        val out2 = redactor?.redactLine(line) ?: line
-                        writer.write(out2); writer.write("\n")
-                        bytes += out2.toByteArray(Charsets.UTF_8).size + 1
+                        writer.write(redactor?.redactLine(line) ?: line)
+                        writer.write("\n")
                     }
                 }
             }
-            if (redactor != null) {
-                val trailer = redactor.summaryLine()
-                writer.write(trailer); bytes += trailer.toByteArray(Charsets.UTF_8).size
-            }
+            if (redactor != null) writer.write(redactor.summaryLine())
             writer.flush()
         }
-        return WriteOutcome(bytes, files.size, redactor?.counts() ?: emptyMap())
+        return WriteOutcome(counting.count, files.size, redactor?.counts() ?: emptyMap())
     }
 
     private fun artifactName(options: Options): String =
@@ -395,7 +396,7 @@ object LogExport {
  * 4. **IPV4** — every dotted-quad with valid octets, EXCEPT the four ranges below, which are
  *    fixed/well-known rather than vehicle-identifying and are left readable because a redacted
  *    `127.0.0.1` helps nobody debugging this project's own seams:
- *    - `127.0.0.0/8` — loopback; `AvSink.kt` and its 9001-9005 seam live here.
+ *    - `127.0.0.0/8` — loopback; the receiver's A/V seams (:9001-9004) live here.
  *    - `169.254.0.0/16` — IPv4 link-local (RFC 3927), identical on every device.
  *    - `192.168.43.0/24` — Android's own tethering default AP subnet (`MdnsInspect.kt:15`).
  *    - `192.168.5.0/24` — this project's fixed CarPlay/AirPlay accessory subnet
@@ -482,8 +483,16 @@ private class Redactor {
     /** Replaces only capture group [group], keeping the rest of the match (e.g. the `key=`) intact. */
     private fun sub(s: String, re: Regex, group: Int, cat: LogExport.RedactionCategory): String =
         re.replace(s) { m ->
-            val g = m.groupValues[group]
-            if (g.isEmpty()) m.value else m.value.replaceFirst(g, placeholderFor(cat, g))
+            val g = m.groups[group]
+            if (g == null || g.value.isEmpty()) {
+                m.value
+            } else {
+                // Splice by the group's own range, never by searching for its text: a value that is a
+                // substring of the key (`passphrase=phrase`, `psk="k"`) would otherwise hit the key
+                // first and leave the secret in the output.
+                val off = m.range.first
+                m.value.replaceRange(g.range.first - off, g.range.last + 1 - off, placeholderFor(cat, g.value))
+            }
         }
 
     /** Like [sub] but for a two-value match (a lat,long pair) — both numbers get their own placeholder. */

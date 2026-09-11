@@ -26,7 +26,7 @@ class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
         val log = ProbeLog.sub("cap")
-        val started = runCatching { LogCapture.start(context, CapturePrefs.config(context, "4.0")) }
+        val started = runCatching { LogCapture.start(context, CapturePrefs.config(context)) }
             .onFailure { log.e("boot start failed: ${it.message}") }
             .getOrDefault(false)
         log.i("BOOT_COMPLETED — capture start=$started scope=${CapturePrefs.scope(context)}")

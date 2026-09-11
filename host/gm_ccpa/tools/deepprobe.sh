@@ -5,7 +5,23 @@ mkdir -p "$GM_ROOT/logs"
 
 ADB=~/Library/Android/sdk/platform-tools/adb
 OUT="$GM_ROOT/logs"/radio_deepprobe_$(date +%Y%m%d_%H%M%S).txt
+# Packages are PER ANDROID USER and `pm list packages` with no --user means the calling user — user 0
+# from adb shell — while this app installs `--user 10`. The 2026-09-09 bundle read user 0 only and
+# made user-10 packages look uninstalled. Every package query names its user in the output.
+USERS="${USERS:-0 10}"
 sh() { echo; echo "----- $1 -----"; shift; "$ADB" shell "$@" 2>&1; }
+# Per-user variant: runs "$2 --user <u>" for each user, labels every line "[user <u>]", and prints an
+# explicit "(none on user <u>)" instead of a blank.  $3 is an optional filter pipeline.
+sh_users() {
+  echo; echo "----- $1 (per user: $USERS) -----"
+  local cmd="$2" filt="${3:-cat}"
+  for u in $USERS; do
+    # One device-side invocation per user; the output is captured there so "empty" is decided on
+    # the same run that is printed (a second run could differ).
+    "$ADB" shell "out=\$($cmd --user $u 2>&1 | $filt); if [ -n \"\$out\" ]; then printf '%s
+' \"\$out\" | sed 's/^/[user $u] /'; else echo '[user $u] (none on user $u)'; fi" 2>&1
+  done
+}
 
 {
 echo "==== DEEP RADIO PROBE $(date) ===="
@@ -44,10 +60,14 @@ echo; echo "##### F. AUDIO ROUTING (receiver audio) #####"
 sh "audio devices/output" "dumpsys audio 2>/dev/null | grep -iE 'Devices:|out_devices|Stream|- STREAM_|BUS|usage' | head -40"
 sh "car audio zones" "dumpsys car_service 2>/dev/null | grep -iE 'CarAudioZone|BUS|context|address=bus' | head -30"
 
-echo; echo "##### G. PACKAGES: full + enabled state of key ones #####"
-sh "carplay/connection/tether/vending enabled state" "for p in com.gm.hmi.applecarplay com.gm.hmi.connection com.gm.hmi.androidauto com.android.vending com.android.networkstack.tethering.inprocess com.google.android.gms; do echo -n \"\$p: \"; dumpsys package \$p 2>/dev/null | grep -m1 -iE 'enabled=|enabledSetting' || echo MISSING; done"
-sh "total package count" "pm list packages 2>/dev/null | wc -l; echo disabled:; pm list packages -d 2>/dev/null | wc -l"
-sh "any apple/airplay/projection packages" "pm list packages 2>/dev/null | grep -iE 'apple|airplay|projection|cinemo|carlink'"
+echo; echo "##### G. PACKAGES: full + enabled state of key ones (PER USER — see USERS above) #####"
+sh "android users" "pm list users 2>&1"
+# The 'User N:' lines carry installed= and enabled= per user; the first 'enabled=' hit alone (the old
+# form) came from whichever user dumpsys printed first and said nothing about the other.
+sh "carplay/connection/tether/vending/zeno.gmccpa per-user install+enabled state" "for p in com.gm.hmi.applecarplay com.gm.hmi.connection com.gm.hmi.androidauto com.android.vending com.android.networkstack.tethering.inprocess com.google.android.gms zeno.gmccpa; do echo \"== \$p\"; dumpsys package \$p 2>/dev/null | grep -E '^ *User [0-9]+:' | sed 's/^ *//' | grep . || echo '   MISSING on every user (dumpsys has no User N: line)'; done"
+sh_users "total package count (installed / disabled)" "pm list packages" "wc -l | sed 's/^ *//;s/$/ installed/'"
+sh_users "disabled package count" "pm list packages -d" "wc -l | sed 's/^ *//;s/$/ disabled/'"
+sh_users "any apple/airplay/projection packages" "pm list packages" "grep -iE 'apple|airplay|projection|cinemo|carlink'"
 
 echo; echo "##### H. DISTRACTION / DISPLAY / OCCUPANT #####"
 sh "driving state + speed" "dumpsys car_service 2>/dev/null | grep -iE 'DrivingState|Current Driving|SafetyRegion|PERF_VEHICLE_SPEED|speed' | head"

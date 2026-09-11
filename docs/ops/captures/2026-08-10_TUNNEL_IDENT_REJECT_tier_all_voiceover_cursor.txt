@@ -2,7 +2,7 @@
 and the phone names exactly which message ids it refuses.
 ================================================================================================
 
-Source: /tmp/carplayd_wl.log on the box, live wireless session, iPhone on iOS 27.
+Source: /tmp/airplayd_wl.log on the box, live wireless session, iPhone on iOS 27.
 Pushed config at the time: `metadata: {tier: all}` (the app's Settings value, persisted).
 
 WHY THIS CAPTURE EXISTS

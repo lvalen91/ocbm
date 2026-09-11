@@ -12,16 +12,38 @@
 #   ./adb_radio_probe.sh                 # probe the only/attached device
 #   ANDROID_SERIAL=<serial> ./adb_radio_probe.sh
 #   APP=zeno.gmccpa ./adb_radio_probe.sh    # also introspect a sideloaded app's grants
+#   USERS="0 10" ./adb_radio_probe.sh       # which Android users to enumerate packages for
+#
+# Packages are PER ANDROID USER. `pm list packages` with no --user reports the CALLING user, which
+# for adb shell is user 0 — and this app installs `--user 10` (the driver's user on gminfo37, see
+# docs/06 §86). The 2026-09-09 bundle was read with that default and made several user-10 packages,
+# this app included, look uninstalled when all it established was "not on user 0". Every package
+# query below therefore names its user in the output, so the distinction survives into the capture.
 
 set -u
 ADB="${ADB:-adb}"
 APP="${APP:-zeno.gmccpa}"
+USERS="${USERS:-0 10}"
 STAMP="$(date +%Y%m%d_%H%M%S)"
 OUT="$(cd "$(dirname "$0")" && pwd)/radio_probe_${STAMP}.txt"
 
 # Run an adb shell command, labeled, tee'd. Never aborts the script on failure.
 sh() { echo; echo "----- $1 -----"; shift; $ADB shell "$@" 2>&1; }
 have() { $ADB shell "command -v $1 >/dev/null 2>&1 && echo yes || echo no" 2>/dev/null; }
+# Same as sh(), but runs the command once per Android user with `--user <u>` appended and a
+# `[user <u>]` label on every line. `$1` label, `$2` the pm command (without --user), `$3` optional
+# filter pipeline. Empty output for a user prints "(none on user <u>)" — an explicit absence, not
+# a blank that could be mistaken for a probe that did not run.
+sh_users() {
+  echo; echo "----- $1 (per user: $USERS) -----"
+  local cmd="$2" filt="${3:-cat}"
+  for u in $USERS; do
+    # One device-side invocation per user; the output is captured there so "empty" is decided on
+    # the same run that is printed (a second run could differ).
+    $ADB shell "out=\$($cmd --user $u 2>&1 | $filt); if [ -n \"\$out\" ]; then printf '%s
+' \"\$out\" | sed 's/^/[user $u] /'; else echo '[user $u] (none on user $u)'; fi" 2>&1
+  done
+}
 
 {
 echo "=================================================================="
@@ -40,9 +62,10 @@ sh "GM / gmcable / harman props" "getprop | grep -iE 'gm\.|harman|gmcable|ota|dc
 sh "verified boot / AVB" "getprop | grep -iE 'verifiedboot|avb|veritymode'"
 
 echo; echo "##### 2. CARPLAY / PROJECTION / PLAY COMPONENTS #####"
-sh "packages matching carplay/projection/auto/gearhead" "pm list packages -f | grep -iE 'carplay|projection|gearhead|android.car|auto|mirror' "
-sh "Play / GMS present" "pm list packages | grep -iE 'com.android.vending|com.google.android.gms|gsf'"
-sh "GM apps" "pm list packages | grep -iE 'com.gm'"
+sh "android users (packages are per user; adb shell defaults to user 0)" "pm list users"
+sh_users "packages matching carplay/projection/auto/gearhead" "pm list packages -f" "grep -iE 'carplay|projection|gearhead|android.car|auto|mirror'"
+sh_users "Play / GMS present" "pm list packages" "grep -iE 'com.android.vending|com.google.android.gms|gsf'"
+sh_users "GM apps" "pm list packages" "grep -iE 'com.gm'"
 sh "who holds the projection permissions" "dumpsys package | grep -iE 'gm.permission.(READ|WRITE)_PROJECTION_INFO' | head"
 sh "GMCarPlay package detail (uid / sharedUser / installer)" "dumpsys package com.gm.hmi.applecarplay | grep -iE 'userId=|sharedUser|installerPackageName|versionName|codePath' | head"
 
@@ -80,7 +103,8 @@ sh "user restrictions" "dumpsys user 2>&1 | grep -iE 'restriction|no_install|no_
 sh "verify adb installs" "settings get global verifier_verify_adb_installs 2>&1; settings get global package_verifier_enable 2>&1"
 
 echo; echo "##### 8. SIDELOADED APP INTROSPECTION ($APP) #####"
-sh "$APP installed?" "pm list packages | grep -F $APP"
+sh_users "$APP installed?" "pm list packages" "grep -F $APP"
+sh "$APP per-user install/enabled state (dumpsys 'User N:' lines)" "dumpsys package $APP 2>&1 | grep -E '^ *User [0-9]+:' | sed 's/^ *//'"
 sh "$APP install source + uid" "dumpsys package $APP 2>&1 | grep -iE 'userId=|installerPackageName=|installInitiator|firstInstallTime|versionName|codePath|primaryCpuAbi' | head"
 sh "$APP granted permissions" "dumpsys package $APP 2>&1 | grep -iE 'granted=true' | head -40"
 sh "$APP appops (overlay etc.)" "cmd appops get $APP 2>&1 | head -30"

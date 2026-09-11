@@ -7,9 +7,12 @@ import android.hardware.usb.UsbManager
 import android.os.Bundle
 import android.os.Process
 import android.os.SystemClock
+import zeno.gmccpa.ocbm.Ocbm
 import zeno.gmccpa.logging.CapturePrefs
 import zeno.gmccpa.logging.LogCapture
 import zeno.gmccpa.logging.SessionSummary
+import zeno.gmccpa.logging.SessionTrace
+import zeno.gmccpa.ocbm.OcbmExpect
 import zeno.gmccpa.ocbm.UsbBulkTransport
 
 /**
@@ -20,10 +23,17 @@ import zeno.gmccpa.ocbm.UsbBulkTransport
  * This class used to be `android.car.usb.handler.UsbHostManagementActivity`, and the app used to
  * install under that package name, because GM's framework-res sets
  * `config_UsbDeviceConnectionHandling_component` to that exact component and then STRIPS the
- * package — so squatting the name made the framework grant USB permission to our UID silently on
- * every attach, with no dialog (device-proven 2026-08-17). It worked, but only about half the time
- * in the field (see the logging rationale below), and it made the app impersonate a platform
- * component for a benefit that was never reliable.
+ * package — so the theory was that squatting the name would make the framework grant USB permission
+ * to our UID silently, with no dialog.
+ *
+ * **IT DID NOT WORK (owner, 2026-09-10).** This KDoc used to say the squat "made the framework grant
+ * USB permission to our UID silently on every attach, with no dialog (device-proven 2026-08-17)" and
+ * that "it worked, but only about half the time". That is too generous and is the kind of note that
+ * gets a bad idea re-attempted: **the app still needed the user to grant permission for the
+ * adapter.** The squat did not remove the permission requirement, which was its whole purpose. The
+ * old wording also contradicted itself — "every attach, device-proven" against "about half the time
+ * in the field" — and the owner's account is which of the two to believe. It made the app
+ * impersonate a platform component for a benefit that never materialised.
  *
  * The app is back to `zeno.gmccpa`, so the fixed-handler path no longer resolves to us at all and
  * the ORDINARY attach resolver is the only route in: the `<intent-filter>` +
@@ -36,10 +46,15 @@ import zeno.gmccpa.ocbm.UsbBulkTransport
  * every one of them is equally the right evidence for a dialog that does not appear, a grant that
  * does not land, or a box that comes back with a different descriptor.
  *
- * ## Why this logs so much (2026-08-26)
- * The squat works maybe half the time in the field: some days every attach is silent, other days the
- * permission dialog returns for days on end. It is never reproducible with a Mac attached, so the
- * fault has never been captured. This is the EARLIEST code we control on an attach — the framework
+ * ## Why this logs so much (2026-08-26; premise corrected 2026-09-10)
+ * Written when the squat's behaviour was thought to be intermittent rather than absent. The fields
+ * are still exactly the right evidence — for a dialog that does not appear, a grant that does not
+ * land, or a box that returns under a different descriptor — so they are kept verbatim; only the
+ * premise below was wrong. As recorded: some days every attach seemed silent, other days
+ * the permission dialog returned for days on end. It was never reproducible with a Mac attached, so
+ * the fault was never captured. (Tense corrected 2026-09-10: this paragraph still read as if the
+ * squat were live, two days after it was reverted. The question it poses — grant landed or not, and
+ * why — is unchanged under the ordinary resolver; only the mechanism that was supposed to grant is.) This is the EARLIEST code we control on an attach — the framework
  * launches it for every device whether or not the grant landed — so it is the right place to record
  * the state that separates the competing explanations. Every field below exists to kill one
  * hypothesis; none of it is decoration:
@@ -69,12 +84,12 @@ class UsbAttachActivity : Activity() {
         // the only place a capture can be armed ahead of the faults we are hunting. It is idempotent
         // and non-blocking, and because the engine drains logcat's ring buffer BACKWARDS on start, an
         // attach-time start still recovers the minutes that preceded the app being alive at all.
-        runCatching { LogCapture.start(applicationContext, CapturePrefs.config(applicationContext, "4.0")) }
+        runCatching { LogCapture.start(applicationContext, CapturePrefs.config(applicationContext)) }
             .onFailure { ProbeLog.sub("cap").e("capture start failed at attach: ${it.message}") }
         try {
             val dev = intentDevice()
             if (dev == null) {
-                ProbeLog.banner("USB HANDLER launched with no device — nothing to forward")
+                ProbeLog.banner("USB ATTACH TRAMPOLINE launched with no device — nothing to forward")
                 logIdentity(null)
                 return
             }
@@ -83,18 +98,33 @@ class UsbAttachActivity : Activity() {
             // Read the grant ONCE and reuse it: the banner and the session summary must not be able
             // to disagree about the single fact this whole exercise exists to attribute.
             val held = usbManager().hasPermission(dev)
+            // Wording (2026-09-10): this banner used to read "USB HANDLER (fixed-handler squat) ...
+            // silent grant held=", which described the package squat reverted 2026-09-08 (see the
+            // class KDoc). A fresh capture carrying that text would tell its reader the squat is still
+            // in place. Same fields, same order — nothing greps the old text (tools, docs and
+            // evidence/ checked) — only the mechanism it names is corrected: `held` is now whether the
+            // ORDINARY resolver's attach-time grant (or a remembered "always open") is in effect.
             ProbeLog.banner(
-                "USB HANDLER (fixed-handler squat) 0x%04x:0x%04x — silent grant held=%b, ccpa=%b"
+                "USB ATTACH TRAMPOLINE 0x%04x:0x%04x — permission held=%b, ccpa=%b"
                     .format(dev.vendorId, dev.productId, held, isCcpaOcbm)
             )
             val serialOutcome = logIdentity(dev)
             if (!isCcpaOcbm) return // not our adapter — do not raise any UI; grant already fired
+            // Degraded, and worth a WARN here rather than only in the claim loop later: the attach
+            // resolver is SUPPOSED to grant before launching us, so a missing grant at this point
+            // means either the cold-start race (young process — see the class KDoc) or a dialog the
+            // driver is about to get. The claim loop polls either way; this line dates the fact.
+            if (!held) ProbeLog.sub("usb").w(
+                "USB permission NOT held at the trampoline (process_age=%dms, serial=%s) — the attach resolver's grant did not land or has not committed yet; the claim loop will poll and may raise the dialog"
+                    .format(SystemClock.elapsedRealtime() - Process.getStartElapsedRealtime(), serialOutcome)
+            )
 
             // A session begins at the adapter attach, not at first video: everything we are hunting
             // happens before a session is "up" in any user-visible sense. begin() also closes out any
             // prior session that never ended cleanly, which is itself a fault worth a summary line.
             SessionSummary.begin(
                 SessionSummary.AttachInfo(
+                    origin = SessionSummary.Origin.USB_ATTACH,
                     hasPermissionAtTrampoline = held,
                     uid = Process.myUid(),
                     userId = Process.myUid() / 100_000,
@@ -104,6 +134,17 @@ class UsbAttachActivity : Activity() {
                 )
             )
 
+            // What must happen next, and by when. MainActivity.handleAttachIntent submits a link
+            // attempt to its single command executor as soon as the forwarded intent lands, and
+            // OcbmProbe.runAllLocked meets this at its first line. If it does not arrive, the
+            // executor is wedged behind an earlier task (an old awaitClaimable, a stop that never
+            // returned) and the app is "attached but doing nothing" — the case nothing logged before.
+            // Budget: Ocbm.HEARTBEAT_GRACE_MS, the protocol's own "a peer that has said nothing for
+            // this long is gone" window; the hop itself is a startActivity plus one executor submit
+            // and completes in well under a second when the executor is free. No number of its own
+            // exists for this hop, and inventing one would be worse than borrowing that one.
+            SessionTrace.expect(OcbmExpect.LINK_ATTEMPT, Ocbm.HEARTBEAT_GRACE_MS,
+                "the attach trampoline forwarded 0x1314:0x2d00 to MainActivity (permission held=$held), whose attach handler submits a link attempt at once")
             // Forward into MainActivity's existing ACTION_USB_DEVICE_ATTACHED handler. Same UID, so the
             // grant carries; MainActivity is singleTask and reads EXTRA_DEVICE in onCreate/onNewIntent.
             startActivity(
@@ -145,10 +186,11 @@ class UsbAttachActivity : Activity() {
             outcome = SessionSummary.SerialOutcome.SECURITY_EXCEPTION
             "<SecurityException: ${e.message}> — USB permission NOT held for this device"
         }
-        log.i(
-            "attach dev: name=${dev.deviceName} id=${dev.deviceId} serial=$serial " +
-                "mfr=${dev.manufacturerName} product=${dev.productName}"
-        )
+        val devLine = "attach dev: name=${dev.deviceName} id=${dev.deviceId} serial=$serial " +
+            "mfr=${dev.manufacturerName} product=${dev.productName}"
+        // The SecurityException IS the finding (grant not held), so that variant is a WARN; the
+        // other two are inventory.
+        if (outcome == SessionSummary.SerialOutcome.SECURITY_EXCEPTION) log.w(devLine) else log.i(devLine)
         log.i(
             "attach dev: class=${dev.deviceClass}/${dev.deviceSubclass}/${dev.deviceProtocol} " +
                 "configs=${dev.configurationCount} ifaces=${dev.interfaceCount}"

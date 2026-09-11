@@ -54,8 +54,35 @@ import kotlin.concurrent.withLock
  *      **fork time**. After a grant, the already-running process still lacks the gid:
  *      `checkSelfPermission` says GRANTED while logd still filters output to our own uid. So the
  *      permission check alone is not proof, and [Session.verifyScope] additionally checks whether
- *      any captured line carries a pid other than ours, warning with the exact `am force-stop`
- *      command when it does not.
+ *      any captured line carries a pid other than ours. When it does not, that is an ERROR (since
+ *      2026-09-10; it was a WARN): the whole-OS half of the capture — GM's CarPlay service,
+ *      `wpa_supplicant`, the USB stack, the permission dialog — is silently absent for the rest of
+ *      the process's life, which is precisely the evidence that scope exists to collect.
+ *
+ * ## Self-healing the degraded state (2026-09-10)
+ *
+ * The condition is permanent for the process (no unprivileged call can add a gid) and, until now,
+ * nothing carried the knowledge forward: the next process start went through the same 15 s
+ * verification with no memory of the last one. [ScopeMarker] persists what was learned — the
+ * grant exists, this pid at this start time could not use it, how many fresh processes have failed
+ * the same check — so the next start ([Session.resolveScope]) can:
+ *
+ *  - in a FRESH process with the grant still held and WHOLE_OS requested: say that it is re-verifying
+ *    whole-OS because the previous process was stale, and clear the marker the moment a foreign
+ *    pid is seen (the heal);
+ *  - in the SAME process (a capture restart from the UI): skip the 15 s pretence and go straight
+ *    to own-process, saying that only a re-fork can fix it;
+ *  - with the grant held but OWN_PROCESS chosen by the operator: say that whole-OS is available.
+ *    The operator's choice is respected — [CapturePrefs] is theirs — this is a hint, not an override;
+ *  - if a FRESH process fails the check again: say so at ERROR with a DIFFERENT message, because the
+ *    fork-time explanation has then been refuted for this unit and the operator must look at the
+ *    grant itself (made for the right user? — the app runs as user 10, and `pm grant` without
+ *    `--user` targets user 0) or at the platform's READ_LOGS -> gid mapping, not at force-stop.
+ *
+ * That last case is not hypothetical. In the 2026-09-09 reference session the degraded process
+ * (pid 3461) had been forked at boot, 9 s BEFORE its capture started and with the grant already
+ * persisted from an earlier day — so "the grant does not reach a process that was already running"
+ * cannot be the whole story on that unit. The marker is what will settle it on the next start.
  *
  * Whole-OS degrades to own-process automatically when the permission is not held, with the exact
  * `pm grant` line in the log. It never silently captures nothing.
@@ -179,6 +206,19 @@ object LogCapture {
     /** @see grantCmd */
     fun grantCmd(pkg: String): String = "adb shell pm grant $pkg android.permission.READ_LOGS"
 
+    /**
+     * The same grant, pinned to the Android user this process runs as. `pm grant` without `--user`
+     * targets user 0, and on this head unit the app runs as user 10 (`u10a…` in `Start proc`), where
+     * runtime/development permission state is per-user. Printed only on the refuted-fork path in
+     * [Session.verifyScope], where "did the grant land for the right user" is the next question.
+     * The user id is `uid / 100000`, the same arithmetic the framework uses; nothing is hard-coded.
+     */
+    fun grantCmdForUser(ctx: Context): String =
+        "adb shell pm grant --user ${android.os.Process.myUid() / 100_000} ${ctx.packageName} android.permission.READ_LOGS"
+
+    /** [SessionTrace.Board] entry for the capture engine itself; written by [Session] only. */
+    internal const val BOARD_NAME = "log-capture"
+
     /** …and the half everyone forgets: the `log` gid is only picked up by a freshly forked process. */
     fun forceStopCmd(ctx: Context): String = forceStopCmd(ctx.packageName)
 
@@ -275,7 +315,8 @@ object LogCapture {
     /**
      * Every capture file on disk, oldest first, across sessions and scopes. Names sort
      * chronologically. For the later SAF/USB export task — `run-as` is blocked on this head unit
-     * (see the comment at `AvSink.kt:23`), so this list is the only handle an exporter gets.
+     * and the app's files are not reachable by adb (see the `MainActivity` class KDoc), so this list
+     * is the only handle an exporter gets.
      */
     fun logFiles(context: Context): List<File> =
         logsDir(context)
@@ -284,6 +325,67 @@ object LogCapture {
 }
 
 // =================================================================================================
+
+/**
+ * The engine's own persisted memory of a READ_LOGS degradation. See the "Self-healing" section of
+ * [LogCapture]'s KDoc for what each start does with it.
+ *
+ * Its own preferences file, NOT [CapturePrefs]'s: that file is the operator's one knob (which scope
+ * to run at), read by the boot receiver and the UI, and it says so — "the one persisted knob the
+ * capture engine needs". This is engine state the operator never sets, and it must survive the
+ * operator flipping scope back and forth. A process is identified by pid AND
+ * `Process.getStartElapsedRealtime()`: a pid can be reused within a boot, and across a reboot the
+ * pid space starts over, but no two processes share both.
+ */
+private object ScopeMarker {
+    private const val FILE = "capture_engine"
+    private const val K_PID = "readlogs_degraded_pid"
+    private const val K_PROC_START = "readlogs_degraded_proc_start_ms"
+    private const val K_AT = "readlogs_degraded_at_ms"
+    private const val K_FRESH_FAILS = "readlogs_fresh_fork_failures"
+    /** Written alongside the rest: "the grant existed" is the fact the next start needs first. */
+    private const val K_GRANT_SEEN = "readlogs_grant_seen"
+
+    data class Degraded(
+        val pid: Int,
+        /** `Process.getStartElapsedRealtime()` of the degraded process. */
+        val procStart: Long,
+        /** Wall clock of the degradation, for the log lines. */
+        val atMs: Long,
+        /** How many FRESH processes (not the same pid/start) have failed the verification since. */
+        val freshForkFailures: Int,
+    )
+
+    private fun prefs(ctx: Context) =
+        ctx.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE)
+
+    fun load(ctx: Context): Degraded? = runCatching {
+        val p = prefs(ctx)
+        if (!p.getBoolean(K_GRANT_SEEN, false)) return null
+        Degraded(
+            pid = p.getInt(K_PID, -1),
+            procStart = p.getLong(K_PROC_START, -1L),
+            atMs = p.getLong(K_AT, 0L),
+            freshForkFailures = p.getInt(K_FRESH_FAILS, 0),
+        )
+    }.getOrNull()
+
+    fun save(ctx: Context, d: Degraded) {
+        runCatching {
+            prefs(ctx).edit()
+                .putBoolean(K_GRANT_SEEN, true)
+                .putInt(K_PID, d.pid)
+                .putLong(K_PROC_START, d.procStart)
+                .putLong(K_AT, d.atMs)
+                .putInt(K_FRESH_FAILS, d.freshForkFailures)
+                .apply()
+        }
+    }
+
+    fun clear(ctx: Context) {
+        runCatching { prefs(ctx).edit().clear().apply() }
+    }
+}
 
 /**
  * One capture run. Created by [LogCapture.start], discarded by [LogCapture.stop]; never reused.
@@ -299,6 +401,10 @@ private class Session(private val ctx: Context, private val cfg: LogCapture.Conf
     // --- immutable-after-init, published to other threads via the LogFiles lock (volatile anyway) --
     @Volatile private var effectiveScope = cfg.scope
     @Volatile private var readLogsGranted = false
+    /** What the last degraded process left behind, if anything. Read once in [resolveScope]. */
+    @Volatile private var prior: ScopeMarker.Degraded? = null
+    /** True when [prior] describes THIS process — a capture restart, not a re-fork. */
+    @Volatile private var priorSameProcess = false
     /** Set once [resolveScope] has run; the two fields above are pre-probe defaults until then. */
     @Volatile private var scopeResolved = false
     @Volatile private var buffersOk: List<String> = emptyList()
@@ -405,6 +511,7 @@ private class Session(private val ctx: Context, private val cfg: LogCapture.Conf
         drain()
         files.close()
         log.i("stopped — ${linesWritten.get()} lines, ${droppedLines.get()} dropped, ${restarts.get()} restarts")
+        SessionTrace.Board.down(LogCapture.BOARD_NAME, "stopped — ${linesWritten.get()} lines written, ${droppedLines.get()} dropped")
     }
 
     fun flush() = drain()
@@ -433,16 +540,21 @@ private class Session(private val ctx: Context, private val cfg: LogCapture.Conf
         resolveBuffers()
         if (buffersOk.isEmpty()) {
             log.e("no readable logcat buffer — capture aborted")
+            SessionTrace.Board.failed(LogCapture.BOARD_NAME, "no readable logcat buffer — nothing is being captured to disk")
             running.set(false)
             return
         }
         if (!files.open()) {
+            SessionTrace.Board.failed(LogCapture.BOARD_NAME, "could not open a capture file — nothing is being captured to disk")
             running.set(false)
             return
         }
         exec.scheduleWithFixedDelay(::drainQuietly, FLUSH_MS, FLUSH_MS, TimeUnit.MILLISECONDS)
         exec.scheduleWithFixedDelay(::sweepQuietly, SWEEP_MS, SWEEP_MS, TimeUnit.MILLISECONDS)
         log.i("capturing requested=${cfg.scope} effective=$effectiveScope read_logs=$readLogsGranted buffers=${buffersOk.joinToString(",")} -> ${files.currentFileName()}")
+        SessionTrace.Board.up(LogCapture.BOARD_NAME,
+            "effective=$effectiveScope (requested ${cfg.scope}, READ_LOGS=$readLogsGranted) buffers=${buffersOk.joinToString(",")}" +
+                (if (effectiveScope == LogCapture.Scope.WHOLE_OS) " — verifying foreign pids" else ""))
         verifyDeadlineMs = SystemClock.elapsedRealtime() + VERIFY_MS
 
         var backoffMs = BACKOFF_MIN_MS
@@ -580,17 +692,42 @@ private class Session(private val ctx: Context, private val cfg: LogCapture.Conf
     private fun verifyScope(line: String) {
         if (effectiveScope != LogCapture.Scope.WHOLE_OS) { verified = true; return }
         val pid = pidOf(line)
-        if (pid != -1 && pid != android.os.Process.myPid()) {
+        val myPid = android.os.Process.myPid()
+        if (pid != -1 && pid != myPid) {
             verified = true
+            // The heal: a fresh process with the grant sees other pids. Forget the degradation so
+            // the next start does not keep announcing a fault that is over.
+            prior?.let { p ->
+                log.i("whole-OS capture verified in pid $myPid (foreign pid $pid seen) — the degradation recorded for pid ${p.pid} at ${isoLocal(p.atMs)} is cleared: that process was forked before the grant took effect")
+                ScopeMarker.clear(ctx)
+                prior = null
+            }
+            SessionTrace.Board.up(LogCapture.BOARD_NAME, "WHOLE_OS verified — foreign pids visible, buffers=${buffersOk.joinToString(",")}")
             return
         }
         if (SystemClock.elapsedRealtime() < verifyDeadlineMs) return
         verified = true
         effectiveScope = LogCapture.Scope.OWN_PROCESS
-        val why = "READ_LOGS reports granted but only our own pid is visible — the `log` gid is " +
-            "assigned at fork, so the grant does not reach a process that was already running. " +
-            "Restart the app: ${LogCapture.forceStopCmd(ctx)}"
-        log.w(why)
+        val p = prior
+        val freshFork = p != null && !priorSameProcess
+        val freshFails = (p?.freshForkFailures ?: 0) + (if (freshFork) 1 else 0)
+        val why = if (freshFork) {
+            // The fork-time explanation predicts that a re-forked process passes. It did not.
+            "READ_LOGS reports granted, this process (pid $myPid, forked at boot+${android.os.Process.getStartElapsedRealtime() / 1000}s) is NOT the one that degraded before (pid ${p!!.pid} at ${isoLocal(p.atMs)}), and logd STILL shows only our own pid — " +
+                "the fork-time explanation is refuted on this unit ($freshFails fresh process(es) in a row). The grant is not reaching logd: check it was made for THIS user (${LogCapture.grantCmdForUser(ctx)}) " +
+                "and that the platform maps READ_LOGS to gid log; another force-stop will not change this"
+        } else {
+            "READ_LOGS reports granted but only our own pid is visible. Usual cause: the `log` gid is assigned at fork and this process predates the grant. " +
+                "Restart the app (${LogCapture.forceStopCmd(ctx)}); the next start re-verifies whole-OS by itself and will say if a fresh process fails too"
+        }
+        log.e(why)
+        ScopeMarker.save(ctx, ScopeMarker.Degraded(
+            pid = myPid,
+            procStart = android.os.Process.getStartElapsedRealtime(),
+            atMs = System.currentTimeMillis(),
+            freshForkFailures = freshFails,
+        ))
+        SessionTrace.Board.failed(LogCapture.BOARD_NAME, "degraded to OWN_PROCESS — the system half of the capture is MISSING for the life of pid $myPid")
         enqueue(marker("SCOPE DEGRADED — $why"), critical = true)
     }
 
@@ -621,6 +758,32 @@ private class Session(private val ctx: Context, private val cfg: LogCapture.Conf
     private fun resolveScope() {
         readLogsGranted =
             ctx.checkSelfPermission(android.Manifest.permission.READ_LOGS) == PackageManager.PERMISSION_GRANTED
+        // What the last degraded process left behind — see the class KDoc, "Self-healing".
+        val p = ScopeMarker.load(ctx)
+        prior = p
+        if (p != null) {
+            val myPid = android.os.Process.myPid()
+            priorSameProcess = p.pid == myPid && p.procStart == android.os.Process.getStartElapsedRealtime()
+            val since = isoLocal(p.atMs)
+            when {
+                !readLogsGranted -> {
+                    log.w("READ_LOGS was granted when pid ${p.pid} degraded at $since and is NOT held now — the grant was lost (full uninstall?); forgetting that record")
+                    ScopeMarker.clear(ctx)
+                    prior = null
+                }
+                cfg.scope != LogCapture.Scope.WHOLE_OS ->
+                    log.i("READ_LOGS is granted (known since $since) but the requested scope is OWN_PROCESS — whole-OS capture is available: capture_whole_os")
+                priorSameProcess -> {
+                    // No 15 s pretence: this pid already proved it cannot see other pids, and a
+                    // restart of the capture cannot change its gids. Go straight to own-process.
+                    effectiveScope = LogCapture.Scope.OWN_PROCESS
+                    log.e("READ_LOGS: still pid $myPid, the process that could not see other pids at $since — restarting capture cannot recover the `log` gid; capturing own process only until the process is re-forked: ${LogCapture.forceStopCmd(ctx)}")
+                }
+                else ->
+                    log.i("READ_LOGS: pid ${p.pid} (degraded $since) could not see other pids; this process (pid $myPid) is a fresh fork, so whole-OS is requested again and re-verified" +
+                        (if (p.freshForkFailures > 0) " — ${p.freshForkFailures} fresh process(es) have already failed that check on this unit" else ""))
+            }
+        }
         if (cfg.scope == LogCapture.Scope.WHOLE_OS && !readLogsGranted) {
             effectiveScope = LogCapture.Scope.OWN_PROCESS
             log.w("READ_LOGS not held — capturing own process only. To capture the whole OS:")

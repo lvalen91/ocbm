@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# VERIFICATION NOTE: these logs were produced by ccpa/carplayd, which for the
+# VERIFICATION NOTE: these logs were produced by ccpa/airplayd, which for the
 # on-hardware validation REUSES ANOTHER PROJECT’S CarPlay receiver as the harness —
 # ncm_carplayd/receiver_core (its proven ControlServer for pair-setup/verify + auth-setup,
 # and, for the full-session capture, its AvSession for SETUP/RECORD/stream handling).
@@ -8,14 +8,14 @@
 # decode/IPC). MFi is our own LocalMfiSigner on the genuine local i2c chip. See ./README.md.
 # ─────────────────────────────────────────────────────────────────────────────
 
-[carplayd] pairing server on [::]:5000 · device 'CarLink' (AA:BB:CC:DD:EE:01) · setup 3939
-[carplayd] ── control connection from [fe80::1c76:d88:9cb3:9036%9]:60836 ──
+[airplayd] pairing server on [::]:5000 · device 'CarLink' (AA:BB:CC:DD:EE:01) · setup 3939
+[airplayd] ── control connection from [fe80::1c76:d88:9cb3:9036%9]:60836 ──
 [receiver] POST /pair-verify (plain, 37 B body)
 [receiver] POST /pair-verify (plain, 125 B body)
 [receiver] POST /pair-setup (plain, 6 B body)
 [receiver] POST /pair-setup (plain, 457 B body)
 [receiver] POST /pair-setup (plain, 159 B body)
-[carplayd] pair-setup: peer saved (36-byte id)
+[airplayd] pair-setup: peer saved (36-byte id)
 [receiver] POST /pair-verify (plain, 37 B body)
 [receiver] POST /pair-verify (plain, 125 B body)
 [receiver] pair-verify OK → control channel encrypted

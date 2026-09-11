@@ -3,9 +3,19 @@
   Install package is zeno.gmccpa, matching the source package.
 
   It used to be android.car.usb.handler — a deliberate squat on the stock component GM points its
-  USB fixed-handler at, which earned a silent per-UID USB grant on every attach with no dialog
-  (device-proven 2026-08-17). Reverted 2026-09-08: the grant only landed about half the time in the
-  field, and impersonating a platform component is a large thing to carry for an unreliable benefit.
+  config_UsbDeviceConnectionHandling_component at, on the theory that squatting the name would earn a
+  silent per-UID USB grant with no dialog.
+
+  IT DID NOT WORK (owner, 2026-09-10). This comment used to claim the squat "earned a silent per-UID
+  USB grant on every attach with no dialog (device-proven 2026-08-17)" and was reverted only because
+  the grant "landed about half the time". That overstates it in a way that could tempt someone to
+  re-attempt the squat: THE APP STILL NEEDED THE USER TO GRANT PERMISSION FOR THE ADAPTER. The squat
+  did not remove the permission requirement, which was the entire reason for doing it. Note the old
+  wording was self-contradictory on its face — "on every attach, device-proven" and "about half the
+  time in the field" cannot both be true; the owner's account resolves it.
+
+  Reverted 2026-09-08. Impersonating a platform component is a large thing to carry for a benefit
+  that never materialised.
   The ordinary attach resolver is now the only route in — UsbAttachActivity's intent-filter plus
   res/xml/device_filter.xml — so the standard USB permission dialog appears once per device and
   "always open" retires it. UsbBulkTransport polls hasPermission() rather than trusting the grant
@@ -15,10 +25,14 @@
   resolve correctly again), but they are unambiguous and it keeps the diff off every component line.
   adb/am commands take zeno.gmccpa again — see README and docs/06.
 -->
+<!-- NO versionCode/versionName here, deliberately (2026-09-11). `aapt2 link` honours its
+     version-code/version-name flags only when the manifest declares NEITHER, so tools/build_apk.sh
+     owns them: the code is the git commit count (monotonic on this single-branch repo) and the name
+     is "4.0+<sha>". They were pinned at 7/"4.0" for the whole hardening run, which meant nothing on
+     the device could say which build was installed and a stale APK installed `-r` over a newer one
+     in silence. Re-adding them here does not override those flags, it disables them. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="zeno.gmccpa"
-    android:versionCode="7"
-    android:versionName="4.0">
+    package="zeno.gmccpa">
 
     <!-- Network + discovery. All are normal/dangerous perms an ordinary app UID can hold;
          none are signature/privileged. Grant the dangerous ones via `adb shell pm grant` (see README). -->
@@ -88,8 +102,20 @@
     <!-- USB host mode: how the app claims the CCPA adapter at 0x1314:0x2d00 and speaks OCBM. -->
     <uses-feature android:name="android.hardware.usb.host" android:required="false"/>
 
+    <!-- allowBackup is OFF, and set explicitly because the default is true and Lint's AllowBackup
+         check is silent at targetSdk >= 31, so nothing would ever have flagged the omission.
+         filesDir/logs/ holds whole-OS logcat captures — wpa_supplicant and Bluetooth lines included
+         once READ_LOGS is granted — and that must not be eligible for cloud backup.
+         What this attribute does NOT cover is device-to-device migration: on API 32 (the only
+         platform this app ships to — the gminfo3.7 unit, permanently) BackupEligibilityRules ignores
+         allowBackup for OperationType.MIGRATION, so a D2D transfer would still copy filesDir.
+         Excluding that needs android:dataExtractionRules with a <device-transfer> exclusion, and the
+         owner's decision is that a second rules surface is more than the threat warrants on a head
+         unit that is never the source of a phone-style migration. Not an oversight; do not add it
+         without re-opening that decision. -->
     <application
         android:label="GM CCPA"
+        android:allowBackup="false"
         android:usesCleartextTraffic="true"
         android:theme="@android:style/Theme.DeviceDefault">
 

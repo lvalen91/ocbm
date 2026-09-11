@@ -61,7 +61,7 @@ object NativeCore {
      * — a feed error, a panic, or a stale/superseded generation — and the caller must close it.
      */
     fun feed(handle: Long, input: ByteArray): ByteArray? {
-        if (handle == 0L) return null
+        if (handle <= 0L) return null   // 0 = no core, BUSY (-1) = never installed: nothing to feed
         return nativeFeed(handle, input)
     }
 
@@ -119,11 +119,11 @@ object NativeCore {
     fun setNightMode(night: Boolean): Boolean = available && nativeSetNightMode(night)
 
     /** True once pair-verify has completed and the channel flipped to ChaCha20-Poly1305. */
-    fun isEncrypted(handle: Long): Boolean = handle != 0L && nativeIsEncrypted(handle)
+    fun isEncrypted(handle: Long): Boolean = handle > 0L && nativeIsEncrypted(handle)
 
     /** Destroy connection [handle]'s core. No-ops if [handle] is a superseded generation. */
     fun destroy(handle: Long) {
-        if (handle != 0L) nativeDestroy(handle)
+        if (handle > 0L) nativeDestroy(handle)
     }
 
     private external fun nativeInit(
@@ -145,9 +145,10 @@ object NativeCore {
  * runs inside MFi-SAP on the control path, where the phone is waiting on an HTTP reply, so there must
  * be no coroutine boundary here.
  *
- * This build runs d8 with no shrinking (minifyEnabled=false), and proguard-rules.pro already carries
-     * the matching keep rules for when that changes, so the method names survive. If R8/ProGuard is ever
- * introduced these need a keep rule — `call_method` resolves them by name and would fail at runtime.
+ * This build runs d8 with no shrinking (minifyEnabled=false), so nothing renames or strips these
+ * today; proguard-rules.pro already carries the matching keep rules (`-keep interface
+ * zeno.gmccpa.**MfiRelay*`, `-keep class * implements zeno.gmccpa.**MfiRelay*`) for the day that
+ * changes — `call_method` resolves them by name and would fail at runtime without them.
  */
 interface MfiRelay {
     fun copyCertificate(): ByteArray

@@ -49,7 +49,7 @@ an iPhone-side role/timeout behavior triggered by the box being wholly absent du
 ## Apple-protocol angle (why in-band commands don't help a hung state)
 - **`iap_role_switch` (Apple USB vendor request `0x51`)** performs the standard device→host role switch; it is a control request sent while the iPhone is still enumerated as a USB device — unusable when `05ac` is absent.
 - **Accessory-initiated teardown** (RTSP / `AirPlayReceiverSessionTearDown`) needs a live control channel.
-- **Negative result:** merely dropping the control connection (killing `carplayd`) does NOT make the iPhone
+- **Negative result:** merely dropping the control connection (killing `airplayd`) does NOT make the iPhone
   revert — it keeps the host role. A clean revert needs an explicit protocol "exit accessory mode," not a
   socket close.
 - So in a fully hung wedge (iPhone not a device + control channel dead) there is no reachable in-band Apple

@@ -41,7 +41,8 @@ apk/*-dirty.apk
 
 # Convenience symlink rewritten by every build — tracking it made every build dirty the
 # tree, which made build_apk.sh stamp -dirty on clean checkouts and rendered the flag useless.
-apk/netprobe-debug-latest.apk
+# No 'latest' symlink is produced any more (see tools/build_apk.sh) — install the
+# sha-stamped path the build prints.
 
 # Bench instrument build output. ocbm-probe is built out-of-tree (CARGO_TARGET_DIR=/tmp) so it
 # never dirties the APK sha stamp, but guard against an in-tree build anyway.

@@ -527,7 +527,7 @@ NowPlaying, RouteGuidance, CallState and album artwork all operate over this cha
 > and the code that produced the 07-25 result was never committed in that form. Read §8 before
 > trusting any claim about what currently runs. [../ops/06_CORRECTIONS_LEDGER.md](../ops/06_CORRECTIONS_LEDGER.md) `R-45-1`.
 
-Evidence: `captures/2026-07-25_SUCCESS_carplayd_wl_handshake.txt`,
+Evidence: `captures/2026-07-25_SUCCESS_airplayd_wl_handshake.txt`,
 `captures/2026-07-25_SUCCESS_artwork_session2.txt`,
 `captures/2026-07-25_iphone_iap2_trace_sess{2,3}.txt`.
 
@@ -975,7 +975,7 @@ must yield a response entry with a non-zero `streamID`; a type-110 with scid 0 m
 
 **Evidence.** `docs/ops/captures/2026-08-10_REGRESSION_datastream130_scid_rejected.txt` — 33 rejections in
 one session, the SYN → reject → resent-SYN causal sequence, and the before/after contrast against
-`2026-07-25_SUCCESS_carplayd_wl_handshake.txt:25,36` (same `scid=0`, accepted, `seed` salt solved).
+`2026-07-25_SUCCESS_airplayd_wl_handshake.txt:25,36` (same `scid=0`, accepted, `seed` salt solved).
 
 **⚠️ The fix is not hardware-validated, and the arm behind it has ZERO hardware hours.** At the last
 07-25 commit (`c1c5901`) `session.rs` had no 130 arm, no scid guard and no key probe, and

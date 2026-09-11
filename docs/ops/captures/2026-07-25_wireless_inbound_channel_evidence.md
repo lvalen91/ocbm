@@ -1,19 +1,19 @@
 # 2026-07-25 — inbound tunnel traffic arrives on the CONTROL connection (live capture)
 
 Archived because `docs/carplay/03_SDK_GROUND_TRUTH.md` §1's central claim rests on it, and a review correctly flagged it as
-unverifiable while it existed only in `/tmp/carplayd_wl.log` on the box (tmpfs — lost on reboot).
+unverifiable while it existed only in `/tmp/airplayd_wl.log` on the box (tmpfs — lost on reboot).
 
 **Session:** the first successful wireless CarPlay session after the BT pairing fix (docs/wireless/01_BT_AND_RADIO.md). Box
 `CarLink-b0df`, iPhone `64:31:35:8C:29:69`, HEVC video + audio streaming normally throughout
 (`video ok=3964 fail=0, audio ok=5526 fail=0` at time of capture).
 
-**Deployed binaries at capture time:** `carplayd 3ce47fbde4b0a1baadeb3fa36bad71a0`,
+**Deployed binaries at capture time:** `airplayd 3ce47fbde4b0a1baadeb3fa36bad71a0`,
 `ocbmd 52ae8bf981e09ebc33f3cdb73b8e4bba`, `iap2d 3a9eb1a1057702b07844231d729e6ad1`,
-`btd 6a9574bc8ffae0cf1cc621e9f316e80c`.
+`carplay-wireless 6a9574bc8ffae0cf1cc621e9f316e80c`.
 
 ## The evidence
 
-`grep -E "iPhone POST /command type=|iap-tunnel|^\[events\]" /tmp/carplayd_wl.log`:
+`grep -E "iPhone POST /command type=|iap-tunnel|^\[events\]" /tmp/airplayd_wl.log`:
 
 ```
 [events] encrypted command channel ready

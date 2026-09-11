@@ -1,11 +1,11 @@
 [uplink] control-in listening 127.0.0.1:9112 (mic PCM in / uplink back-channel out)
-[carplayd] peerstore: loaded 1 known device(s) from /etc/carplay_peers.bin
-[carplayd] pairing server on [::]:5000 · device 'CarLink' (AA:BB:CC:DD:EE:01) · setup 3939 · config /tmp/carplay_cfg.yaml (per-connection)
-[carplayd] HID input ingest on 127.0.0.1:9110 (task #20)
+[airplayd] peerstore: loaded 1 known device(s) from /etc/carplay_peers.bin
+[airplayd] pairing server on [::]:5000 · device 'CarLink' (AA:BB:CC:DD:EE:01) · setup 3939 · config /tmp/carplay_cfg.yaml (per-connection)
+[airplayd] HID input ingest on 127.0.0.1:9110 (task #20)
 [uplink] control-in connected from 127.0.0.1:34075
-[carplayd] ── control connection from [fe80::c92:ff0b:1701:492%5]:61820 ──
-[carplayd] cfg: /tmp/carplay_cfg.yaml (1482 B) → 1920×720@60 hevc=true dpad=false viewAreas=false safe=None
-[carplayd] control keepalive armed (3s/3s/3 → ~12s dead-link detect)
+[airplayd] ── control connection from [fe80::c92:ff0b:1701:492%5]:61820 ──
+[airplayd] cfg: /tmp/carplay_cfg.yaml (1482 B) → 1920×720@60 hevc=true dpad=false viewAreas=false safe=None
+[airplayd] control keepalive armed (3s/3s/3 → ~12s dead-link detect)
 [receiver] POST /pair-verify (plain, 37 B body)
 [receiver] POST /pair-verify (plain, 125 B body)
 [receiver] pair-verify OK → control channel encrypted

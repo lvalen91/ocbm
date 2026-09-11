@@ -199,7 +199,7 @@ pub(crate) fn u64v(val: &[u8]) -> Option<u64> {
 /// `sizeFor2DArray`), add it alongside `u16_array` rather than flattening.
 #[allow(dead_code)]
 pub(crate) fn u16_array(val: &[u8]) -> Vec<u16> {
-    val.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect()
+    val.as_chunks::<2>().0.iter().map(|&c| u16::from_be_bytes(c)).collect()
 }
 
 /// Signed 16-bit big-endian (Apple iAP2 `int16`, e.g. VehicleStatusUpdate OutsideTemperature in

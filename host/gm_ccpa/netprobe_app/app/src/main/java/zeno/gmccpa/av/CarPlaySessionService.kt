@@ -6,7 +6,6 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
-import android.os.Build
 import android.os.IBinder
 import zeno.gmccpa.ProbeLog
 
@@ -48,14 +47,12 @@ class CarPlaySessionService : Service() {
 
     private fun buildNotification(): Notification {
         val mgr = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        if (Build.VERSION.SDK_INT >= 26) {
-            val ch = NotificationChannel(CHANNEL_ID, "CarPlay session", NotificationManager.IMPORTANCE_LOW)
-            ch.setShowBadge(false)
-            mgr.createNotificationChannel(ch)
-        }
-        val b = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, CHANNEL_ID)
-                else @Suppress("DEPRECATION") Notification.Builder(this)
-        return b.setContentTitle("CarPlay active")
+        // minSdk 26: channels are mandatory and createNotificationChannel is idempotent.
+        mgr.createNotificationChannel(
+            NotificationChannel(CHANNEL_ID, "CarPlay session", NotificationManager.IMPORTANCE_LOW).apply { setShowBadge(false) },
+        )
+        return Notification.Builder(this, CHANNEL_ID)
+            .setContentTitle("CarPlay active")
             .setContentText("Wireless CarPlay session running")
             .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
             .setOngoing(true)
@@ -67,8 +64,7 @@ class CarPlaySessionService : Service() {
         private const val NOTIF_ID = 1001
 
         fun start(ctx: Context) {
-            val i = Intent(ctx, CarPlaySessionService::class.java)
-            if (Build.VERSION.SDK_INT >= 26) ctx.startForegroundService(i) else ctx.startService(i)
+            ctx.startForegroundService(Intent(ctx, CarPlaySessionService::class.java))
         }
 
         fun stop(ctx: Context) {

@@ -96,11 +96,14 @@ internal class LogFiles(
     private var currentBytes = 0L
     private var seq = 0
     private var closed = false
+    private var opened = false
     private var degradedSinceMs = 0L
     private var lastSyncMs = 0L
 
-    /** True once [open] has succeeded and before [close]; writes before that are silently dropped. */
-    fun isOpen(): Boolean = lock.withLock { out != null }
+    /** True once [open] has succeeded and before [close]. A degraded sink (write failed, stream closed,
+     *  reopen pending) is still open in this sense: [write] must keep being called so its backoff
+     *  retry can run. The caller uses this to drop writes before [open]. */
+    fun isOpen(): Boolean = lock.withLock { opened && !closed }
 
     fun currentFileName(): String? = lock.withLock { current?.name }
 
@@ -115,7 +118,8 @@ internal class LogFiles(
             return@withLock false
         }
         rotateLocked(initial = true)
-        out != null
+        opened = out != null
+        opened
     }
 
     /**
@@ -129,7 +133,7 @@ internal class LogFiles(
         if (out == null) {
             // Degraded: retry the open on a slow timer, but throw this batch away — buffering it
             // would reintroduce the unbounded growth the queue cap exists to prevent.
-            val now = System.currentTimeMillis()
+            val now = android.os.SystemClock.elapsedRealtime()
             if (now - degradedSinceMs < REOPEN_BACKOFF_MS) return@withLock
             rotateLocked(initial = true)
             if (out == null) return@withLock
@@ -147,7 +151,7 @@ internal class LogFiles(
         } catch (e: IOException) {
             log.e("write failed (${e.message}) — degrading, retry in ${REOPEN_BACKOFF_MS / 1000}s")
             closeStreamLocked()
-            degradedSinceMs = System.currentTimeMillis()
+            degradedSinceMs = android.os.SystemClock.elapsedRealtime()
         }
     }
 
@@ -250,19 +254,25 @@ internal class LogFiles(
             log.e("cannot open ${f.name}: ${e.message}")
             closeStreamLocked()
             current = null
-            degradedSinceMs = System.currentTimeMillis()
+            degradedSinceMs = android.os.SystemClock.elapsedRealtime()
         }
     }
 
     private fun closeStreamLocked() {
+        val fos = out
+        out = null
+        currentBytes = 0L
+        if (fos == null) return
         try {
-            out?.fd?.sync()
-            out?.close()
+            fos.fd.sync()
+        } catch (e: IOException) {
+            log.w("sync on close: ${e.message}")
+        }
+        try {
+            fos.close()
         } catch (e: IOException) {
             log.w("close: ${e.message}")
         }
-        out = null
-        currentBytes = 0L
     }
 
     private fun mb(b: Long) = b / (1024 * 1024)

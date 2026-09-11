@@ -1,9 +1,9 @@
 # Album artwork over the RCS DataStream — verified 2026-07-25
 
-Box: carplayd c1db72bea1c8aa0756d9a44d7f33a612 (RCS reassembly + completeness guard).
+Box: airplayd c1db72bea1c8aa0756d9a44d7f33a612 (RCS reassembly + completeness guard).
 Visually confirmed in the host app's Media window.
 
-## Box (/tmp/carplayd_wl.log)
+## Box (/tmp/airplayd_wl.log)
 ```
 [art] setup id=0x81 size=102411 — accepting
 [art] complete id=0x81 102411 B (expected 102411)

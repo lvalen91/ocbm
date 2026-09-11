@@ -14,6 +14,7 @@ import zeno.gmccpa.pair.MfiRelay
 import zeno.gmccpa.pair.NativeCore
 import zeno.gmccpa.pair.SrpServer
 import zeno.gmccpa.pair.Tlv8
+import zeno.gmccpa.logging.SessionTrace
 import java.security.SecureRandom
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -76,6 +77,16 @@ class CarPlayRx(
      * ever dialling back. Argument is the dial count. See [noteDialAccepted] for what this means.
      */
     var onStalled: ((Int) -> Unit)? = null,
+    /**
+     * Fired once when [acceptLoop] gives up on the listener while the receiver is still running —
+     * the accept thread has retired and closed the ServerSocket, so :7011 now refuses instead of
+     * filling the kernel backlog. Argument is the reason. This is the ONLY way the supervisor learns
+     * about it: [selfTest] does read false afterwards, but nothing polls it — reportReceiverHealth
+     * runs once after start() and again only when the driver presses Recover — so without this edge
+     * the receiver would sit in RX_READY with a closed listener until someone happened to look.
+     * Runs on the accept thread: hand off, do not block.
+     */
+    var onListenerLost: ((String) -> Unit)? = null,
     /** Fired on every connect-out the phone accepts, so the supervisor can start its dial-back clock. */
     var onDialAccepted: (() -> Unit)? = null,
     /** Where controller-id -> Ed25519 LTPK pairings persist across runs. */
@@ -189,6 +200,22 @@ class CarPlayRx(
     /** One SRP-6a exchange per control connection. */
     private var srp: SrpServer? = null
 
+    /**
+     * The newest native generation started, so a superseded pump's `finally` does not mark the
+     * Board's `native-core`/`ctrl-conn` entries down underneath the hijacking connection that
+     * replaced it. Only the pump whose handle equals this may take those entries down.
+     */
+    @Volatile private var latestGen = 0L
+
+    /**
+     * `addr:port` of the last peer announced as DETECTED. NsdManager re-resolves on every 12 s
+     * discovery restart and the "resolved" line already narrates each one; the DETECTED line and the
+     * Board's `peer-iphone` entry are for the CHANGE — a new phone, or the same phone on a new port
+     * (which iOS rotates every session). Cleared by `onServiceLost` so a phone that leaves and
+     * returns is announced again.
+     */
+    @Volatile private var lastDetectedKey: String? = null
+
     companion object {
         /**
          * The identity the CCPA derives for itself, which the app's Bonjour advert MUST match — iOS
@@ -247,7 +274,6 @@ class CarPlayRx(
         const val SRCVERS = "320.17"
         /** Car(32) | CarPlayControl(37) | HKPairing(38) — the production CCPA value. */
         const val FEATURES = "0x44440B80,0x61"
-        /** How long before the same peer is nudged again. NsdManager re-resolves often. */
         /**
          * Re-nudge cooldown. Was 20 s, when a wasted dial was expensive because the only address we
          * had came from NsdManager's cache and a miss cost the whole window. Dials are now aimed by
@@ -261,7 +287,6 @@ class CarPlayRx(
          * the driver is told something before they give up.
          */
         private const val STALL_DIALS = 6
-        /** How long the advert must be live before the first dial. iOS indexes asynchronously. */
         /**
          * Settle after the advert is CONFIRMED registered — not after we asked for it.
          *
@@ -274,6 +299,58 @@ class CarPlayRx(
         private const val ADVERT_SETTLE_MS = 2_500L
         /** How long a connect-out waits for `onServiceRegistered` before giving this cycle up. */
         private const val ADVERT_WAIT_MS = 30_000L
+
+        // ---- SessionTrace budgets. Each is derived from a measurement, not chosen. ----------------
+        /**
+         * Inbound control connection accepted -> `NativeCore.isEncrypted` (pair-verify M4 sent).
+         *
+         * Measured 57 ms on the 2026-09-09 reference session (already-paired phone, pair-verify
+         * only). A first-time pairing adds pair-setup M1..M6 in front: two SRP-3072 modexps and the
+         * Ed25519 exchange, with NO human in the loop — the CarPlay setup code is fixed (3939) and
+         * MFi stands in for user confirmation — so it is sub-second on this SoC, not tens of seconds.
+         * 10 s is >100x the observed verify-only path and comfortably above any pair-setup, and it is
+         * a third of the pump's 30 s `soTimeout`: a connection that is still open but unencrypted
+         * after 10 s is a phone that is talking and not pairing, which is the fault worth a line.
+         */
+        private const val PAIR_VERIFY_MS = 10_000L
+        /**
+         * Encrypted -> `POST /auth-setup` (observed here as the FIRST MFi chip op the native core asks
+         * the relay for). Measured 6 ms after the ENCRYPTED milestone on 2026-09-09. iOS issues it
+         * unconditionally on the CarPlay path once the channel is up, so anything beyond a few
+         * hundred ms is iOS having changed its mind about us; 10 s leaves no room for a false alarm.
+         */
+        private const val AUTH_SETUP_REQUEST_MS = 10_000L
+        /**
+         * First chip op requested -> both `createSignature` and `copyCertificate` returned, which is
+         * the instant the native core can answer `/auth-setup` (reference: "auth-setup (MFi-SAP) OK"
+         * lands in the same millisecond the certificate returns). Measured 1.63 s on 2026-09-09.
+         * The bound is the relay's own: each op may legitimately take ~12 s on the box and times out
+         * at 15 s (`mfiSign`), so two slow-but-successful ops are ~30 s. 35 s is that plus margin —
+         * tighter would flag a session the relay itself still considers healthy.
+         */
+        private const val AUTH_SETUP_CHIP_MS = 35_000L
+        /**
+         * accept() failure budget for [acceptLoop]. A throw from accept() while the receiver is still
+         * running and the socket still open is not a shutdown — it is the process failing to hand us
+         * a socket, and the case that actually happens in a long-lived process is EMFILE ("Too many
+         * open files") from an fd leak somewhere else, or an OOM allocating the Socket. That is
+         * transient when a burst of closes lands a moment later and permanent when the leak is real;
+         * 40 x 250 ms = 10 s of retrying separates the two without letting a hard failure spin the
+         * accept thread hot. Same shape as UsbBulkTransport's read loop: count consecutive failures
+         * with a pause between them, and only after a sustained run declare the component dead.
+         */
+        private const val ACCEPT_RETRY_MS = 250L
+        private const val ACCEPT_FAILURES_FATAL = 40
+
+        // ---- SessionTrace.Board entry names, so a capture is greppable per component ---------------
+        private const val B_LISTENER = "rx-listener"
+        private const val B_ADVERT_NSD = "advert-nsd"
+        private const val B_ADVERT_SELF = "advert-self"
+        private const val B_BROWSE = "browse-ctrl"
+        private const val B_PEER = "peer-iphone"
+        private const val B_CORE = "native-core"
+        private const val B_CTRL = "ctrl-conn"
+        private const val X_ADVERT = "advert-registered"
         private val INTERESTING = setOf(
             "content-type", "content-length", "user-agent", "cseq", "x-apple-device-id",
             "active-remote", "dacp-id", "airplay-receiver-device-id", "connection"
@@ -281,6 +358,7 @@ class CarPlayRx(
     }
 
     fun start() {
+        if (stopped) { log.e("start() on a stopped receiver — construct a new CarPlayRx instead"); return }
         if (!running.compareAndSet(false, true)) { log.i("already running"); return }
         // Every caller is already off the main thread, and the bind below must stay that way. Say so
         // if that ever stops being true rather than letting it surface as a NetworkOnMainThread.
@@ -307,11 +385,14 @@ class CarPlayRx(
         val srv = try {
             ServerSocket().apply { reuseAddress = true; bind(InetSocketAddress(port)) }
         } catch (t: Throwable) {
-            log.e("listen bind FAILED on :$port — ${t.javaClass.simpleName}: ${t.message}"); null
+            log.e("listen bind FAILED on :$port — ${t.javaClass.simpleName}: ${t.message}")
+            SessionTrace.Board.failed(B_LISTENER, "bind :$port ${t.javaClass.simpleName}")
+            null
         }
         server = srv
         if (srv != null) {
             log.i("listening on :$port")
+            SessionTrace.Board.up(B_LISTENER, ":$port")
             pool.execute { acceptLoop(srv) }
         }
         // NOT set here. This is the request, not the confirmation — starting the settle clock now
@@ -339,7 +420,10 @@ class CarPlayRx(
         // BEFORE anything else: from here on this instance speaks to nobody. See [stopped].
         stopped = true
         running.set(false)
+        // Nothing this receiver was waiting for can arrive now, and its absence is not a fault.
+        SessionTrace.cancel(X_ADVERT, "receiver stopped")
         try { server?.close() } catch (_: Throwable) {}
+        SessionTrace.Board.down(B_LISTENER, "receiver stopped")
         // Close the live control socket so its pump thread unblocks, breaks, and destroys its own
         // native generation in the finally. Without this, stop() left the native core running and the
         // pump blocked in read() for up to 30 s — a zombie session that collides with the next instance.
@@ -351,6 +435,11 @@ class CarPlayRx(
         selfMdns = null
         discListener?.let { try { nsd?.stopServiceDiscovery(it) } catch (_: Throwable) {} }
         discListener = null
+        SessionTrace.Board.down(B_ADVERT_NSD, "receiver stopped")
+        SessionTrace.Board.down(B_ADVERT_SELF, "receiver stopped")
+        SessionTrace.Board.down(B_BROWSE, "receiver stopped")
+        // Only if a phone was ever announced — otherwise this would register the entry just to mark it down.
+        if (lastDetectedKey != null) SessionTrace.Board.down(B_PEER, "receiver stopped — no longer browsing")
         pool.shutdownNow()   // every sleep site returns on InterruptedException
         // WAIT for the pumps to unwind before returning.
         //
@@ -396,18 +485,36 @@ class CarPlayRx(
             override fun onServiceRegistered(s: NsdServiceInfo) {
                 log.i("advertise _airplay._tcp:$listenPort REGISTERED as '${s.serviceName}'")
                 advertisedAt = System.currentTimeMillis()
+                SessionTrace.met(X_ADVERT)
+                SessionTrace.Board.up(B_ADVERT_NSD, "'${s.serviceName}' _airplay._tcp:$listenPort")
             }
             override fun onRegistrationFailed(s: NsdServiceInfo, c: Int) {
                 // Latch it. advertisedAt is stamped only by onServiceRegistered, so without this the
                 // connect-out waits on an event that is never coming.
                 advertFailed = true
                 log.e("advertise FAILED code=$c")
+                // Resolved, not missing: the failure is the answer, and Board.failed is its E line.
+                SessionTrace.cancel(X_ADVERT, "NsdManager reported onRegistrationFailed code=$c")
+                SessionTrace.Board.failed(B_ADVERT_NSD, "onRegistrationFailed code=$c")
             }
-            override fun onServiceUnregistered(s: NsdServiceInfo) {}
-            override fun onUnregistrationFailed(s: NsdServiceInfo, c: Int) {}
+            override fun onServiceUnregistered(s: NsdServiceInfo) {
+                SessionTrace.Board.down(B_ADVERT_NSD, "unregistered")
+            }
+            override fun onUnregistrationFailed(s: NsdServiceInfo, c: Int) {
+                log.w("advert unregister FAILED code=$c — NsdManager may keep '${s.serviceName}' published")
+            }
         }
         regListener = l
         nsd?.registerService(info, NsdManager.PROTOCOL_DNS_SD, l)
+        // Requested is not registered. The record is live only on onServiceRegistered (55 ms after
+        // the request on 2026-09-09); ADVERT_WAIT_MS is already the app's own definition of "too
+        // long" — a connect-out abandons itself after that — so a registration that has not arrived
+        // by then is missing by the receiver's own rules, whether or not a dial happened to be waiting.
+        SessionTrace.Board.down(B_ADVERT_NSD, "registerService requested — awaiting onServiceRegistered")
+        SessionTrace.expect(X_ADVERT, ADVERT_WAIT_MS,
+            "registerService('$ACCESSORY_NAME' _airplay._tcp:$listenPort) was requested and no " +
+            "onServiceRegistered/onRegistrationFailed callback has arrived — iOS cannot index an " +
+            "advert that is not live, so no connect-out can succeed")
 
         // ---- second advert, on a hostname WE own -------------------------------------------------
         // iOS keys its Wi-Fi CarPlay endpoint index by HOST, one endpoint per host, and whichever
@@ -442,9 +549,20 @@ class CarPlayRx(
         selfMdns = null
         runCatching {
             val r = MdnsResponder(SELF_HOSTED_NAME, "_airplay._tcp", listenPort, txtRecord(), log)
-            if (r.start()) { selfMdns = r; log.i("self-hosted advert up: $SELF_HOSTED_NAME.local -> br0:$listenPort") }
-            else log.w("self-hosted advert did not start — NsdManager advert stands alone")
-        }.onFailure { log.w("self-hosted advert threw: ${it.javaClass.simpleName}: ${it.message}") }
+            if (r.start()) {
+                selfMdns = r
+                log.i("self-hosted advert up: $SELF_HOSTED_NAME.local -> br0:$listenPort")
+                SessionTrace.Board.up(B_ADVERT_SELF, "$SELF_HOSTED_NAME.local -> br0:$listenPort")
+            } else {
+                // Degraded, not failed: the NsdManager advert has demonstrably produced an iOS
+                // endpoint on its own before, so this is W and a DOWN with the reason, not an E.
+                log.w("self-hosted advert did not start — NsdManager advert stands alone")
+                SessionTrace.Board.down(B_ADVERT_SELF, "did not start — NsdManager advert stands alone")
+            }
+        }.onFailure {
+            log.w("self-hosted advert threw: ${it.javaClass.simpleName}: ${it.message}")
+            SessionTrace.Board.down(B_ADVERT_SELF, "threw ${it.javaClass.simpleName}")
+        }
     }
 
     /** The TXT set, byte-identical to carplayd's (`fn run` in `ccpa/carplayd/src/discovery.rs`, the `("deviceid", …)…("srcvers", …)` tuple list). */
@@ -494,14 +612,27 @@ class CarPlayRx(
 
     private fun browseForPhone() {
         val l = object : NsdManager.DiscoveryListener {
-            override fun onDiscoveryStarted(t: String) = log.i("browsing _carplay-ctrl._tcp ...")
+            override fun onDiscoveryStarted(t: String) {
+                log.i("browsing _carplay-ctrl._tcp ...")
+                // Value is constant across the 12 s rediscover restarts, so the Board only logs the
+                // first time — the restart itself is already narrated by rediscoverLoop.
+                SessionTrace.Board.up(B_BROWSE, "_carplay-ctrl._tcp")
+            }
             override fun onServiceFound(s: NsdServiceInfo) {
                 log.i("found _carplay-ctrl peer '${s.serviceName}' — resolving")
                 resolve(s)
             }
-            override fun onServiceLost(s: NsdServiceInfo) { log.w("lost _carplay-ctrl peer '${s.serviceName}'"); lastDial.clear() }
+            override fun onServiceLost(s: NsdServiceInfo) {
+                log.w("lost _carplay-ctrl peer '${s.serviceName}'")
+                lastDial.clear()
+                lastDetectedKey = null   // so its return is announced as a fresh DETECTED
+                SessionTrace.Board.down(B_PEER, "'${s.serviceName}' left the link (mDNS goodbye or TTL expiry)")
+            }
             override fun onDiscoveryStopped(t: String) {}
-            override fun onStartDiscoveryFailed(t: String, c: Int) = log.e("browse FAILED code=$c")
+            override fun onStartDiscoveryFailed(t: String, c: Int) {
+                log.e("browse FAILED code=$c")
+                SessionTrace.Board.failed(B_BROWSE, "onStartDiscoveryFailed code=$c — the phone cannot be found, so it will never be nudged")
+            }
             override fun onStopDiscoveryFailed(t: String, c: Int) {}
         }
         discListener = l
@@ -520,6 +651,15 @@ class CarPlayRx(
                 val host = withScope(raw)
                 val key = "${host.hostAddress}:${si.port}"
                 log.i("resolved '${si.serviceName}' -> $key")
+                // The one unambiguous "an iPhone is here" line. A phone on br0 is NOT enough on its
+                // own (the hotspot is an ordinary saved network — see SessionSupervisor.onBtPhase);
+                // a resolvable _carplay-ctrl record is the phone saying it is ready for CarPlay.
+                if (key != lastDetectedKey) {
+                    lastDetectedKey = key
+                    val iface = host.hostAddress?.substringAfter('%', "")?.takeIf { it.isNotEmpty() } ?: "the hotspot link"
+                    log.i("*** iPhone DETECTED on $iface: '${si.serviceName}' at $key (_carplay-ctrl._tcp resolved)")
+                    SessionTrace.Board.up(B_PEER, "'${si.serviceName}' $key")
+                }
                 // Re-dial on a cooldown rather than once ever: the phone needs a fresh nudge after
                 // each Bluetooth handoff, and dialing exactly once meant a second handoff in the same
                 // app session was never followed up.
@@ -541,7 +681,14 @@ class CarPlayRx(
                     return
                 }
                 lastDial[key] = now
-                pool.execute { connectOutWithRetry(si.serviceName, host, si.port) }
+                if (!running.get()) return   // stop() has run; the pool is shut down
+                try {
+                    pool.execute { connectOutWithRetry(si.serviceName, host, si.port) }
+                } catch (t: java.util.concurrent.RejectedExecutionException) {
+                    // stop() raced this resolve. Same guard acceptLoop and reannounce() carry: this
+                    // callback runs on NsdManager's own HandlerThread, where an uncaught throw is fatal.
+                    log.i("   (receiver stopped — not dispatching the connect-out)")
+                }
             }
         })
     }
@@ -708,14 +855,16 @@ class CarPlayRx(
         // pairing the cached address with a known-good live port beats using both cached values.
         val cachedPort = live?.port?.takeIf { it > 0 } ?: nsdPort
         val cached = withScope(nsdHost) to cachedPort
-        if (out.none { it == cached }) out.add(cached)
+        out.add(cached)
         return out.toList()
     }
 
     private fun connectOut(host: InetAddress, peerPort: Int): Boolean {
+        var connected = false
         try {
             Socket().use { s ->
                 s.connect(InetSocketAddress(host, peerPort), 3000)   // carplayd `connect_out`: connect_timeout 3 s
+                connected = true
                 s.soTimeout = 2000                                    // carplayd `connect_out`: set_read_timeout 2 s
                 // A bare IPv6 literal with a zone id and a port glued on is not a parseable Host
                 // header. Brackets, and the zone belongs to the socket, not the header.
@@ -765,7 +914,7 @@ class CarPlayRx(
             // behaviour the comment above says turned the most likely real outcome into nine more
             // dials. A CONNECT timeout is different and is still a failure; distinguish by whether
             // the socket ever connected.
-            if (t.message?.contains("failed to connect", true) == true) {
+            if (!connected) {
                 log.w("connect-out to ${host.hostAddress}:$peerPort — connect timed out")
                 return false
             }
@@ -781,9 +930,45 @@ class CarPlayRx(
 
     /** [s] is bound by [start] before this is dispatched — see the note there. */
     private fun acceptLoop(s: ServerSocket) {
+        var acceptFailures = 0
+        // Set only when the loop is leaving with the receiver still running — the listener retired by
+        // a fault rather than by stop(). The finally turns it into the B_LISTENER FAILED line.
+        var fault: String? = null
         try {
             while (running.get()) {
-                val c = try { s.accept() } catch (t: Throwable) { if (running.get()) log.w("accept ended: ${t.message}"); break }
+                val c = try {
+                    s.accept()
+                } catch (t: Throwable) {
+                    // Ordinary teardown: stop() flips `running` BEFORE it closes the socket, so a throw
+                    // that finds `running` false is the close we asked for. Exit silently.
+                    if (!running.get()) break
+                    // A throw with `running` still true is NOT a reason to leave. This used to `break`
+                    // unconditionally, and the outer handler closed nothing — so one throw (in a
+                    // process this long-lived, realistically EMFILE from an fd leak elsewhere, or an
+                    // OOM allocating the Socket) retired the accept thread while the ServerSocket
+                    // stayed bound and open. The kernel kept completing handshakes on :7011 into a
+                    // backlog nobody drained: the phone's control connection "connected", then hung
+                    // with no RTSP answer, and iOS had no failure to react to. Worse, selfTest()'s
+                    // `listening` check is exactly `running && bound && !closed`, which stayed TRUE,
+                    // so the supervisor kept reporting a healthy receiver. Retry with a pause instead,
+                    // and if the failure is sustained give up THROUGH the finally, so the socket really
+                    // closes and the health check goes red. Do not simplify this back to a `break`.
+                    if (s.isClosed) {
+                        // Only stop() and the finally below close `s`, so this should be unreachable —
+                        // but accept() on a closed socket can never succeed, so do not spend the
+                        // retry budget finding that out.
+                        fault = "socket closed while running — ${t.javaClass.simpleName}: ${t.message}"
+                        break
+                    }
+                    if (++acceptFailures >= ACCEPT_FAILURES_FATAL) {
+                        fault = "$acceptFailures consecutive accept failures — last: ${t.javaClass.simpleName}: ${t.message}"
+                        break
+                    }
+                    log.w("accept failed ($acceptFailures/$ACCEPT_FAILURES_FATAL) — ${t.javaClass.simpleName}: ${t.message}; retrying in $ACCEPT_RETRY_MS ms")
+                    try { Thread.sleep(ACCEPT_RETRY_MS) } catch (_: InterruptedException) { return }
+                    continue
+                }
+                acceptFailures = 0
                 log.i(">>> INBOUND CONTROL CONNECTION from ${c.inetAddress?.hostAddress}:${c.port}")
                 dialsSinceInbound.set(0)
                 // Claim the liveness slot HERE, before anything else — specifically before the
@@ -823,7 +1008,27 @@ class CarPlayRx(
                     if (liveConnections.decrementAndGet() == 0) fireSessionDown()
                 }
             }
-        } catch (t: Throwable) { log.e("acceptLoop: ${t.javaClass.simpleName}: ${t.message}") }
+        } catch (t: Throwable) {
+            // Not logged here: Board.failed below emits the E line, and two lines per fault would
+            // break the count (see its KDoc).
+            fault = "acceptLoop threw ${t.javaClass.simpleName}: ${t.message}"
+        } finally {
+            // However the loop ends, the listener must not outlive it. After stop() this is a no-op
+            // (already closed). After a fault it is the line that makes selfTest()'s `listening` read
+            // false — `srv.isClosed` — so the next readiness check says RX_UNHEALTHY instead of
+            // vouching for a bound socket nobody is accepting on.
+            try { s.close() } catch (_: Throwable) {}
+            fault?.let {
+                // Gate on `running`: if stop() raced the fault it has already marked the slot DOWN, and
+                // a FAILED on top would be a spurious E line on a teardown the user asked for.
+                if (running.get()) {
+                    SessionTrace.Board.failed(B_LISTENER, "retired: $it")
+                    // The Board line is for the capture; this is for the supervisor, which otherwise
+                    // never re-reads selfTest() and would keep showing SEARCHING over a closed port.
+                    onListenerLost?.let { cb -> fenced("onListenerLost") { cb(it) } }
+                } else log.w("acceptLoop ended during stop: $it")
+            }
+        }
     }
 
     private fun handle(c: Socket) {
@@ -840,6 +1045,7 @@ class CarPlayRx(
                 // turn a recoverable redial into a guaranteed failed session. See [NativeCore.BUSY].
                 log.w("native core BUSY — closing so the phone redials into a free generation")
                 try { c.close() } catch (_: Throwable) {}
+                if (currentSocket === c) currentSocket = null
                 return
             }
             if (h != 0L) { handleNative(c, h); return }
@@ -878,28 +1084,98 @@ class CarPlayRx(
         // not an edge case. connectOut() already brackets correctly (the `hostHdr` construction) — these must stay in step.
         val raw = c.inetAddress?.hostAddress?.substringBefore('%') ?: ""
         val addr = if (raw.contains(':')) "[$raw]:${c.port}" else "$raw:${c.port}"
-        val h = NativeCore.start(pi, edSeed, info, peers, addr, relay)
+        // The relay is the only place Kotlin can SEE /auth-setup: the request itself is inside the
+        // encrypted channel, but the native core must come back out to the relay for the two chip
+        // ops, and those calls are the step. See [TracedRelay].
+        val traced = TracedRelay(relay)
+        val h = NativeCore.start(pi, edSeed, info, peers, addr, traced)
         if (h == NativeCore.BUSY) return h   // the caller closes; do NOT report a session up
         if (h != 0L) {
+            traced.gen = h
+            latestGen = h
             log.i("native receiver core started for $addr gen=$h (/info ${info.size}B)")
+            SessionTrace.Board.up(B_CORE, "gen=$h peer=$addr")
             // Stand the A/V consumers up NOW, not when the phone asks. Streams are SETUP within
             // ~300 ms of RECORD and the producer dials the seam per access unit, so anything not
             // already listening loses frames outright.
             onSessionUp?.let { cb -> fenced("onSessionUp") { cb() } }
-        } else log.e("native core failed to start")
+        } else {
+            log.e("native core failed to start")
+            SessionTrace.Board.failed(B_CORE, "NativeCore.start returned 0 for $addr")
+        }
         return h
+    }
+
+    /**
+     * The MFi relay with the two `/auth-setup` chip ops made visible to [SessionTrace].
+     *
+     * `handleNative` is a byte pump and, past pair-verify, every byte is ChaCha20 — so Kotlin cannot
+     * see `POST /auth-setup` on the wire. What it CAN see is the native core calling back into this
+     * relay for the certificate and the signature, which it does only while answering that request
+     * (chip calls #3 and #4). The first call is therefore "auth-setup arrived", and both having
+     * returned is "auth-setup can be answered" — on 2026-09-09 `auth-setup (MFi-SAP) OK` landed in
+     * the same millisecond the certificate came back. Order is not assumed: the reference shows
+     * signature first, certificate second, and nothing here depends on that.
+     *
+     * The `Fast` variants are the iAP2 tunnel's, not `/auth-setup`'s, and pass straight through.
+     * [gen] is stamped after `NativeCore.start` returns; no chip op can be requested before the core
+     * has been fed its first bytes, so it is always set by the time it is read.
+     */
+    private inner class TracedRelay(private val inner: MfiRelay) : MfiRelay {
+        @Volatile var gen = 0L
+        private val seen = AtomicBoolean(false)
+        @Volatile private var sigDone = false
+        @Volatile private var certDone = false
+
+        private fun xRequest() = "auth-setup gen=$gen"
+        private fun xChipOps() = "auth-setup chip ops gen=$gen"
+
+        private fun <T> traced(op: String, body: () -> T): T {
+            if (seen.compareAndSet(false, true)) {
+                SessionTrace.met(xRequest())
+                log.i("/auth-setup in progress on gen=$gen — MFi $op requested via the relay")
+                SessionTrace.expect(xChipOps(), AUTH_SETUP_CHIP_MS,
+                    "POST /auth-setup arrived on gen=$gen (the native core asked the relay for the MFi " +
+                    "$op); the box's chip has ~15 s per op and iOS is holding the request open")
+            }
+            val r = try { body() } catch (t: Throwable) {
+                log.e("MFi $op via the relay threw on gen=$gen: ${t.javaClass.simpleName}: ${t.message} — /auth-setup will fail")
+                SessionTrace.cancel(xChipOps(), "relay $op threw — reported above")
+                throw t
+            }
+            if (op == "signature") sigDone = true else certDone = true
+            if (sigDone && certDone) {
+                SessionTrace.met(xChipOps())
+                log.i("*** MILESTONE: /auth-setup MFi chip ops complete on gen=$gen — RECORD is next")
+            }
+            return r
+        }
+
+        override fun copyCertificate(): ByteArray = traced("certificate") { inner.copyCertificate() }
+        override fun createSignature(digest: ByteArray): ByteArray = traced("signature") { inner.createSignature(digest) }
+        override fun copyCertificateFast(): ByteArray = inner.copyCertificateFast()
+        override fun createSignatureFast(digest: ByteArray): ByteArray = inner.createSignatureFast(digest)
     }
 
     /** Raw byte pump into ControlServer::feed() — the sans-IO seam. [handle] is this connection's gen. */
     private fun handleNative(c: Socket, handle: Long) {
         // No liveConnections bookkeeping here — acceptLoop increments, handle()'s finally decrements.
+        val peer = "${c.inetAddress?.hostAddress}:${c.port}"
+        val xVerify = "pair-verify gen=$handle"
+        var wasEncrypted = false
+        // Per-generation names, so a superseded pump's cancel in its finally cannot drop the
+        // expectation the hijacking connection just armed under the same step name.
+        SessionTrace.Board.up(B_CTRL, "$peer gen=$handle plaintext — pair-verify pending")
+        SessionTrace.expect(xVerify, PAIR_VERIFY_MS,
+            "inbound control connection from $peer was accepted and native core gen=$handle started; " +
+            "iOS opens with pair-verify (or pair-setup then pair-verify) and the channel should be " +
+            "encrypted within ~60 ms")
         try {
             c.soTimeout = 30000
             c.tcpNoDelay = true
             val ins = c.getInputStream()
             val out = c.getOutputStream()
             val buf = ByteArray(16384)
-            var wasEncrypted = false
             while (running.get()) {
                 // 30 s SO_RCVTIMEO matches the reference (`set_read_timeout(30 s)` just before `arm_keepalive` in
                 // `run_pairing_server`'s per-connection path, `ccpa/carplayd/src/main.rs`). Breaking on timeout
@@ -914,7 +1190,9 @@ class CarPlayRx(
                 //     java.net.Socket cannot express but android.system.Os.setsockoptInt can.
                 // Until av_idle_ms is exported, an unconditional `continue` here would match no
                 // reference state at all and would leak sessions on silent link loss.
-                val n = try { ins.read(buf) } catch (t: Throwable) { -1 }
+                val n = try { ins.read(buf) } catch (t: Throwable) {
+                    log.i("read ended (gen=$handle): ${t.javaClass.simpleName}: ${t.message}"); -1
+                }
                 if (n <= 0) break
                 // null reply = the core signalled close (feed error, panic, or this generation was
                 // superseded by a hijacking reconnect). Either way, end this connection.
@@ -924,8 +1202,16 @@ class CarPlayRx(
                 // The flip is the milestone worth calling out: pair-verify completed.
                 if (!wasEncrypted && NativeCore.isEncrypted(handle)) {
                     wasEncrypted = true
-                    log.w("*** MILESTONE: control channel is ENCRYPTED — pair-verify completed")
-                    log.w("*** next on the wire: POST /auth-setup (MFi-SAP, chip calls #3 and #4)")
+                    // A success marker is narration, not a warning. Three of these were W and made
+                    // `NETPROBE:W` useless as a problem filter (2026-09-09 capture).
+                    log.i("*** MILESTONE: control channel is ENCRYPTED — pair-verify completed (gen=$handle)")
+                    log.i("*** next on the wire: POST /auth-setup (MFi-SAP, chip calls #3 and #4)")
+                    SessionTrace.met(xVerify)
+                    SessionTrace.Board.up(B_CTRL, "$peer gen=$handle ENCRYPTED")
+                    SessionTrace.expect("auth-setup gen=$handle", AUTH_SETUP_REQUEST_MS,
+                        "control channel gen=$handle is encrypted (pair-verify completed) and iOS sends " +
+                        "POST /auth-setup next — 6 ms later on 2026-09-09; observed as the first MFi chip " +
+                        "op the native core requests from the relay")
                 }
             }
         } catch (t: Throwable) {
@@ -937,6 +1223,18 @@ class CarPlayRx(
             // the fresh session.
             NativeCore.destroy(handle)
             if (currentSocket === c) currentSocket = null
+            // Ending unencrypted is a fault in its own right — the phone connected and never got
+            // through pair-verify — and the line that says so is here, not the watchdog's. Whatever
+            // was still armed for this generation is then moot: dropped, not missing.
+            if (!wasEncrypted) log.w("control connection gen=$handle from $peer ended BEFORE pair-verify completed")
+            SessionTrace.cancel(xVerify, if (wasEncrypted) "connection ended" else "connection ended unencrypted — reported above")
+            SessionTrace.cancel("auth-setup gen=$handle", "connection gen=$handle ended")
+            SessionTrace.cancel("auth-setup chip ops gen=$handle", "connection gen=$handle ended")
+            // Only the newest generation owns the Board entries. See [latestGen].
+            if (latestGen == handle) {
+                SessionTrace.Board.down(B_CTRL, "gen=$handle from $peer ended" + if (wasEncrypted) "" else " unencrypted")
+                SessionTrace.Board.down(B_CORE, "gen=$handle destroyed with its connection")
+            }
         }
     }
 
@@ -986,6 +1284,10 @@ class CarPlayRx(
      * declining to connect.
      */
     private fun noteDialAccepted() {
+        // The accepted-dial -> inbound-connection deadline is deliberately NOT armed here. The
+        // supervisor already owns it (`INBOUND_TIMEOUT_MS` in `SessionSupervisor.onDialAccepted`,
+        // fed by this callback) and logs its expiry; a second clock on the same step would report
+        // one fault twice with two different budgets.
         onDialAccepted?.let { cb -> fenced("onDialAccepted") { cb() } }
         if (liveConnections.get() > 0) { dialsSinceInbound.set(0); return }
         val n = dialsSinceInbound.incrementAndGet()
@@ -1014,7 +1316,9 @@ class CarPlayRx(
      * Deliberately does NOT dial :7011 on loopback. That would land in [acceptLoop], take a liveness
      * slot, spin up a native core and then fire a spurious session-down when it closed — a readiness
      * check must not perturb the thing it is measuring. Holding the bound, open ServerSocket is the
-     * capability that matters and it is directly observable.
+     * capability that matters and it is directly observable — PROVIDED the socket is closed whenever
+     * nobody is accepting on it, which is what [acceptLoop]'s finally guarantees; without it a dead
+     * accept thread left this check green over a listener that only ever filled the kernel backlog.
      */
     fun selfTest(): List<Check> {
         val out = ArrayList<Check>(6)
@@ -1096,9 +1400,9 @@ class CarPlayRx(
             p.startsWith("/auth-setup") ->
                 log.w("*** /auth-setup reached — this is where the proven CH_MFI relay plugs in.")
             r.method == "SETUP" ->
-                log.w("*** MILESTONE: SETUP — this is A/V stream negotiation. Body above is the stream dict.")
+                log.i("*** MILESTONE: SETUP — this is A/V stream negotiation. Body above is the stream dict.")
             r.method == "RECORD" ->
-                log.w("*** MILESTONE: RECORD — the session is starting.")
+                log.i("*** MILESTONE: RECORD — the session is starting.")
             r.method == "ANNOUNCE" || r.method == "FLUSH" || r.method == "TEARDOWN" ->
                 log.i("*** RTSP ${r.method}")
         }
@@ -1139,10 +1443,6 @@ class CarPlayRx(
     }
 
     /**
-     * `features` here MUST equal the TXT value or pair-verify fails. 0x44440B80,0x61 as one integer
-     * is (0x61 << 32) | 0x44440B80.
-     */
-    /**
      * pair-setup, states M1..M4 (SRP-6a). Ported from `pairing/src/setup.rs`.
      *
      * M1{State=1,Method}            -> M2{State=2,Salt,PublicKey=B}
@@ -1182,8 +1482,8 @@ class CarPlayRx(
                     log.e("*** pair-setup M3 PROOF MISMATCH — setup code wrong, or SRP not wire-compatible")
                     return Tlv8.error(4, Tlv8.ERR_AUTHENTICATION)
                 }
-                log.w("*** MILESTONE: SRP-6a PROOF VERIFIED against a real iPhone — M4 going out")
-                log.w("*** This closes the gap pairing/src/setup.rs calls unprovable offline.")
+                log.i("*** MILESTONE: SRP-6a PROOF VERIFIED against a real iPhone — M4 going out")
+                log.i("*** This closes the gap pairing/src/setup.rs calls unprovable offline.")
                 Tlv8.encode(listOf(Tlv8.STATE to byteArrayOf(4), Tlv8.PROOF to m2))
             }
             5 -> {
@@ -1220,7 +1520,11 @@ class CarPlayRx(
                       body: ByteArray, version: String = "HTTP/1.1") {
         // Echo the REQUEST's protocol version. iOS sends RTSP verbs on this same socket, and
         // answering an RTSP/1.0 request with an HTTP/1.1 status line ends the session.
-        val reason = if (code == 200) "OK" else "Not Implemented"
+        val reason = when (code) {
+            200 -> "OK"
+            500 -> "Internal Server Error"
+            else -> "Not Implemented"
+        }
         val sb = StringBuilder("$version $code $reason\r\n")
         sb.append("Server: AirTunes/$SRCVERS\r\n")
         if (cseq != null) sb.append("CSeq: $cseq\r\n")

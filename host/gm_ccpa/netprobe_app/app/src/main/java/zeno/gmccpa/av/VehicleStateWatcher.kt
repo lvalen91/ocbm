@@ -3,7 +3,6 @@ package zeno.gmccpa.av
 import android.car.Car
 import android.car.VehicleGear
 import android.car.VehiclePropertyIds
-import android.car.drivingstate.CarUxRestrictions
 import android.car.drivingstate.CarUxRestrictionsManager
 import android.car.hardware.CarPropertyValue
 import android.car.hardware.property.CarPropertyManager
@@ -12,6 +11,7 @@ import android.content.res.Configuration
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import zeno.gmccpa.ProbeLog
+import zeno.gmccpa.logging.SessionTrace
 import zeno.gmccpa.pair.NativeCore
 
 /**
@@ -95,6 +95,9 @@ class VehicleStateWatcher(private val ctx: Context) {
     /** True once a session is live; commands before that are pointless (no event channel). */
     @Volatile private var sessionUp = false
 
+    /** Which signal each lever is fed from, fixed at [start]; the [SessionTrace.Board] shows it. */
+    @Volatile private var sources = "not started"
+
     /**
      * Shared by the change callback and the initial seed read.
      *
@@ -163,6 +166,9 @@ class VehicleStateWatcher(private val ctx: Context) {
     fun start() {
         uiNight = isNight(ctx.resources.configuration)
         log.i("night(uiMode)=$uiNight at start")
+        var gearOk = false
+        var nightOk = false
+        var uxrOk = false
         try {
             val c = Car.createCar(ctx) ?: throw IllegalStateException("Car.createCar returned null")
             car = c
@@ -170,6 +176,7 @@ class VehicleStateWatcher(private val ctx: Context) {
                 val ok = pm.registerCallback(
                     gearCb, VehiclePropertyIds.GEAR_SELECTION, CarPropertyManager.SENSOR_RATE_ONCHANGE,
                 )
+                gearOk = ok
                 // Seed from the current value: ONCHANGE only fires on the next shift, so without this
                 // the app sits with no opinion until the driver happens to move the lever.
                 if (ok) {
@@ -177,39 +184,58 @@ class VehicleStateWatcher(private val ctx: Context) {
                         .onSuccess { applyGear(it) }
                         .onFailure { log.w("gear seed read failed: ${it.javaClass.simpleName}: ${it.message}") }
                 }
-                log.i("GEAR_SELECTION subscribe=${if (ok) "OK" else "REFUSED"} (CAR_POWERTRAIN is `normal`)")
+                // REFUSED is a W: the only fallback for the driving restriction is then UXR, which
+                // answers a policy question rather than a gear one. Until 2026-09-10 both outcomes
+                // printed at I and the refusal was greppable only by knowing the string.
+                if (ok) log.i("GEAR_SELECTION subscribe=OK (CAR_POWERTRAIN is `normal`)")
+                else log.w("GEAR_SELECTION subscribe=REFUSED (CAR_POWERTRAIN is `normal`) — limitedUI falls back to UXR only")
 
                 // NIGHT_MODE (0x11200407), gated by CAR_EXTERIOR_ENVIRONMENT — also `prot=normal`.
                 // This is the REAL day/night source on this head unit; see desiredNight().
                 val nOk = pm.registerCallback(
                     nightCb, VehiclePropertyIds.NIGHT_MODE, CarPropertyManager.SENSOR_RATE_ONCHANGE,
                 )
+                nightOk = nOk
                 if (nOk) {
                     runCatching { pm.getBooleanProperty(VehiclePropertyIds.NIGHT_MODE, 0) }
                         .onSuccess { applyNightProp(it) }
                         .onFailure { log.w("NIGHT_MODE seed read failed: ${it.javaClass.simpleName}: ${it.message}") }
                 }
-                log.i("NIGHT_MODE subscribe=${if (nOk) "OK" else "REFUSED"} (CAR_EXTERIOR_ENVIRONMENT is `normal`)")
+                if (nOk) log.i("NIGHT_MODE subscribe=OK (CAR_EXTERIOR_ENVIRONMENT is `normal`)")
+                else log.w("NIGHT_MODE subscribe=REFUSED (CAR_EXTERIOR_ENVIRONMENT is `normal`) — night follows uiMode, which GM does not drive on this unit")
             }
             uxr = (c.getCarManager(Car.CAR_UX_RESTRICTION_SERVICE) as? CarUxRestrictionsManager)?.also { m ->
                 m.registerListener(uxrCb)
-                runCatching { m.currentCarUxRestrictions }.getOrNull()?.let { uxrCb.onUxRestrictionsChanged(it) }
+                uxrOk = true
+                // A failed seed read used to vanish: with gear also refused, the app then had NO
+                // opinion on the restriction until the next shift — the case that matters most.
+                runCatching { m.currentCarUxRestrictions }
+                    .onSuccess { r -> r?.let { uxrCb.onUxRestrictionsChanged(it) } }
+                    .onFailure { log.w("UXR seed read failed: ${it.javaClass.simpleName}: ${it.message} — no restriction opinion until the next change") }
                 log.i("CarUxRestrictions listener attached (no permission required)")
             }
+            sources = "gear=${if (gearOk) "GEAR_SELECTION" else "REFUSED"} uxr=${if (uxrOk) "attached" else "absent"} " +
+                      "night=${if (nightOk) "NIGHT_MODE" else "uiMode"}"
+            SessionTrace.Board.up(BOARD, "$sources; session idle")
         } catch (t: Throwable) {
             // NoClassDefFoundError when android.car is absent, SecurityException, or car service not
             // up yet. Night mode does not depend on any of it, so degrade rather than fail.
             log.w("Car API unavailable (${t.javaClass.simpleName}: ${t.message}) — night mode only")
+            sources = "DEGRADED night-only via uiMode — Car API unavailable (${t.javaClass.simpleName})"
+            SessionTrace.Board.up(BOARD, "$sources; session idle")
         }
     }
 
     fun stop() {
+        sessionUp = false   // nothing may be asserted from a stopped watcher
+        // deliberate, all four: teardown of managers we are discarding.
         runCatching { props?.unregisterCallback(gearCb) }
         runCatching { props?.unregisterCallback(nightCb) }
         runCatching { uxr?.unregisterListener() }
         runCatching { car?.disconnect() }
         props = null; uxr = null; car = null
         io.shutdown()
+        SessionTrace.Board.down(BOARD, "stopped — MainActivity destroyed")
     }
 
     /** Theme changed. Call from `onConfigurationChanged`, which fires without recreating the activity. */
@@ -227,9 +253,11 @@ class VehicleStateWatcher(private val ctx: Context) {
      * channel — so state is NOT persisted across sessions and has to be pushed fresh here.
      */
     fun onSessionUp() {
+        if (io.isShutdown) { log.w("onSessionUp on a stopped watcher — ignored (stale Activity capture?)"); return }
         sessionUp = true
         sentLimited = null
         sentNight = null
+        SessionTrace.Board.up(BOARD, "$sources; session up — asserting levers")
         reassert("session-up")
     }
 
@@ -237,6 +265,7 @@ class VehicleStateWatcher(private val ctx: Context) {
         sessionUp = false
         sentLimited = null
         sentNight = null
+        SessionTrace.Board.up(BOARD, "$sources; session idle")
     }
 
     /** Gear wins when it has an opinion; otherwise the permission-free UXR signal. */
@@ -258,42 +287,53 @@ class VehicleStateWatcher(private val ctx: Context) {
 
     private fun reassert(why: String, attempt: Int = 0) {
         if (!sessionUp) return
-        io.execute {
-            if (!sessionUp) return@execute
-            val wantLimited = desiredLimited()
-            val wantNight = desiredNight()
-            var refused = false
+        try {
+            io.execute {
+                if (!sessionUp) return@execute
+                val wantLimited = desiredLimited()
+                val wantNight = desiredNight()
+                var refused = false
 
-            if (wantLimited != null && wantLimited != sentLimited) {
-                if (NativeCore.setLimitedUI(wantLimited)) {
-                    sentLimited = wantLimited
-                    log.i("setLimitedUI($wantLimited) sent [$why]")
-                } else {
-                    refused = true
+                if (wantLimited != null && wantLimited != sentLimited) {
+                    if (NativeCore.setLimitedUI(wantLimited)) {
+                        sentLimited = wantLimited
+                        log.i("setLimitedUI($wantLimited) sent [$why]")
+                    } else {
+                        refused = true
+                    }
                 }
-            }
-            if (wantNight != sentNight) {
-                if (NativeCore.setNightMode(wantNight)) {
-                    sentNight = wantNight
-                    log.i("setNightMode($wantNight) sent [$why]")
-                } else {
-                    refused = true
+                if (wantNight != sentNight) {
+                    if (NativeCore.setNightMode(wantNight)) {
+                        sentNight = wantNight
+                        log.i("setNightMode($wantNight) sent [$why]")
+                    } else {
+                        refused = true
+                    }
                 }
-            }
 
-            // RETRY, because "session up" and "event channel usable" are NOT the same instant.
-            // Device-measured 2026-09-08: the supervisor logged `awaiting dial-back -> CarPlay live`
-            // at 12:52:07.779 and BOTH commands were refused at 12:52:07.833 — 54 ms later. State was
-            // only recovered because the driver happened to shift gear afterwards. Start a session
-            // already in Drive, never touch the lever, and the restriction would never be asserted at
-            // all — which is the failure that actually matters.
-            if (refused) {
-                if (attempt < RETRY_MAX) {
-                    io.schedule({ reassert(why, attempt + 1) }, RETRY_DELAY_MS, TimeUnit.MILLISECONDS)
+                // RETRY, because "session up" and "event channel usable" are NOT the same instant.
+                // Device-measured 2026-09-08: the supervisor logged `awaiting dial-back -> CarPlay live`
+                // at 12:52:07.779 and BOTH commands were refused at 12:52:07.833 — 54 ms later. State was
+                // only recovered because the driver happened to shift gear afterwards. Start a session
+                // already in Drive, never touch the lever, and the restriction would never be asserted at
+                // all — which is the failure that actually matters.
+                if (refused) {
+                    if (attempt < RETRY_MAX) {
+                        io.schedule({ reassert(why, attempt + 1) }, RETRY_DELAY_MS, TimeUnit.MILLISECONDS)
+                    } else {
+                        // E, not W: sessionUp is still true here (onSessionDown short-circuits above), so
+                        // this is a LIVE session whose event channel refused every command for ~8 s —
+                        // and a vehicle in Drive with no limitedUI is the failure that actually matters.
+                        log.e("gave up asserting vehicle state [$why] after $RETRY_MAX tries — no event channel; " +
+                              "limitedUI=${wantLimited ?: "no opinion"} night=$wantNight were NOT delivered to iOS")
+                        SessionTrace.Board.note(BOARD, "FAILED ($sources; levers refused $RETRY_MAX times on a live session — event channel unusable)")
+                    }
                 } else {
-                    log.w("gave up asserting vehicle state [$why] after $RETRY_MAX tries — no event channel")
+                    SessionTrace.Board.up(BOARD, "$sources; sent limitedUI=${sentLimited ?: "no opinion"} night=$sentNight")
                 }
             }
+        } catch (_: java.util.concurrent.RejectedExecutionException) {
+            log.w("reassert [$why] after stop() — dropped")
         }
     }
 
@@ -301,6 +341,8 @@ class VehicleStateWatcher(private val ctx: Context) {
         /** ~8 s of cover at 400 ms — comfortably past the observed 54 ms gap without spinning. */
         const val RETRY_MAX = 20
         const val RETRY_DELAY_MS = 400L
+        /** [SessionTrace.Board] entry. */
+        const val BOARD = "vehicle-state"
 
         fun isNight(cfg: Configuration): Boolean =
             (cfg.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES

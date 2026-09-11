@@ -80,12 +80,13 @@ is only safe because `wifi_ap: false` means no `hostapd` ever runs from it.
 
 ```bash
 bash tools/build_apk.sh
-# -> apk/netprobe-debug-<sha>.apk, with apk/netprobe-debug-latest.apk symlinked to it.
-# versionCode is pinned, so the SHA in the filename is the only thing that changes build-to-build —
-# always install the symlink, not a literal old filename.
-adb install -r -g --user 10 apk/netprobe-debug-latest.apk
+# -> apk/gmccpa-debug-<sha>.apk. The build prints the full path AND a ready-made install line;
+# copy that. There is NO "latest" symlink (removed 2026-09-10) — versionCode is pinned at 7, so a
+# stale symlink left behind by a FAILED build installs over `-r` with no downgrade rejection and the
+# truck runs code you did not build. The SHA is the only tie between a binary and its sources.
+adb install -r -g --user 10 apk/gmccpa-debug-<sha>.apk
 # on the truck, install Play-attributed so the in-motion path stays eligible:
-adb install -i com.android.vending -r -g --user 10 apk/netprobe-debug-latest.apk
+adb install -i com.android.vending -r -g --user 10 apk/gmccpa-debug-<sha>.apk
 ```
 
 The app installs as package `zeno.gmccpa` (the GM USB fixed-handler squat, `android.car.usb.handler`,
@@ -94,8 +95,10 @@ was reverted 2026-09-08 — TRUCK-VERIFIED; this is now just the app's own packa
 `zeno.gmccpa.*`, so activity components are `zeno.gmccpa/zeno.gmccpa.<Activity>`.
 
 `--user 10` is mandatory: a user-0 install does not get the attach dialog and
-`ACTION_USB_DEVICE_ATTACHED` routing to fire. There is no silent USB grant anymore — the ordinary
-attach resolver and its one-time permission dialog handle it on user 10.
+`ACTION_USB_DEVICE_ATTACHED` routing to fire. The ordinary attach resolver and its one-time
+permission dialog handle it on user 10. **Expect to grant adapter permission once per device** —
+and note the `android.car.usb.handler` squat never avoided that either (corrected 2026-09-10), so
+there is nothing to go back to.
 
 ### Run (scriptable — no tapping)
 
@@ -112,8 +115,7 @@ adb logcat -d -s NETPROBE
 ```
 
 Other `--es run` verbs (`MainActivity.handleRunExtra`): `full` (BT handoff + Wi-Fi endpoint together —
-the real end-to-end sequence, §7.1), `carplay_ui`, `av_sink`, `av_stats`, `display`, `dump_setup`,
-`mdns_self`, `carplay_stop`, `ocbm_state`, `ocbm_disconnect`, `ocbm_forget`, `ocbm_stop`,
+the real end-to-end sequence, §7.1), `carplay_ui`, `mdns_self`, `carplay_stop`, `ocbm_state`, `ocbm_disconnect`, `ocbm_forget`, `ocbm_stop`,
 `capture_status`, `capture_whole_os`, `capture_own`, `export_log`, `export_log_raw` (§7.2).
 
 The passphrase cannot be read programmatically on the head unit; read it from Settings ▸ Hotspot
@@ -423,7 +425,7 @@ GM's own receiver owns `:7000` (`0x1B58`) under uid `1001000` — as of 2026-08-
 coexistence is the live condition, not a hypothetical.
 
 Do not leave `nc -l -p 9001` running from manual probing: it steals the seam port from the app and the
-receiver's forwarder then connects to `nc` instead of `AvSink`.
+receiver's forwarder then connects to `nc` instead of the CarPlay screen's decoders.
 
 ---
 
@@ -471,10 +473,11 @@ Expect, within a second:
 ### 3. Watch it
 ```bash
 adb logcat -d -s NETPROBE | grep -E "\[hevc \]|\[aac  \]|\[cpui \]"
-adb shell am start -n zeno.gmccpa/.MainActivity --es run av_stats
 ```
 `MainActivity` commands are safe during a live session — they detach the video renderer while audio and
-the seams keep running; `carplay_ui` reattaches it
+the seams keep running; `carplay_ui` reattaches it. (The `av_sink`/`av_stats` diagnostic sink that
+used to be listed here was removed 2026-09-11: it bound the same :9001/:9002 the real decoders need,
+and the running counts it printed are in the `[hevc ]`/`[aac  ]` lines above.)
 (`~/Documents/carlink/old/gm_ccpa/evidence/session_2026-08-05/WORKING_SESSION.md`
 §5).
 
@@ -502,7 +505,7 @@ adb shell "cat /proc/net/tcp6" | awk -v u="$((1000000 + APPID))" '$8==u && $4=="
 |---|---|---|
 | App dials, phone answers `HTTP/1.1 200 OK`, no inbound on `:7011` | Stale iOS endpoint cache. iOS logs `carManager_handlePendingAutoconnect: No matching endpoint found for deviceID …` then `-6753 kConnectionErr` | Forget the vehicle on the iPhone (Settings → General → CarPlay) and re-pair over Bluetooth. Confirmed fix — not caused by GM's `:7000` |
 | Black screen, session otherwise healthy | video seam bound but no frames | check `[hevc]` lines; `first frame decoded (0 B Annex-B)` means the sample-description unwrap regressed (`01_FINDINGS` §8b) |
-| `bind :9001 … EADDRINUSE` | a stale `AvSink` or `nc` holds the seam | `carplay_ui` stops `AvSink` first; kill any manual `nc -l -p 9001` |
+| `bind :9001 … EADDRINUSE` | a stale CarPlayActivity generation or a manual `nc` holds the seam | the seam bind retries across TIME_WAIT on its own; kill any manual `nc -l -p 9001` |
 | No `[hevc]`/`[aac ]` lines at all and no app logs | logcat is dead (§7) | `setprop persist.log.tag V`, `logcat -G 16M` |
 | Nothing after a reboot | GM's `CarplayService` self-restarts and re-claims `:7000` | coexistence must be verified live each time — see §6 |
 
@@ -610,7 +613,7 @@ which is `signature|privileged|development` — it can never be obtained by decl
 `pm grant` rejects a permission the package does not request.
 
 ```bash
-adb shell pm grant zeno.gmccpa android.permission.READ_LOGS
+adb shell pm grant --user 10 zeno.gmccpa android.permission.READ_LOGS
 adb shell am force-stop zeno.gmccpa       # NOT optional — see below
 ```
 
@@ -658,9 +661,53 @@ redactor's known gaps are listed in `LogExport.kt`'s KDoc — read them before t
 
 ### 8.3 What to grep
 
-Every session emits one `SESSION v=1 …` line plus a `SESSION_DETAIL` block. That is the point: a drive
+**Start from a plain `adb logcat > logcat.log`.** Capture everything, filter afterwards — the
+unfiltered file is what tells you the fault was NOT the app, and that is worth more than a tidy one.
+
+```bash
+grep NETPROBE logcat.log                                    # the app's own narrative
+PID=$(grep -m1 'IDENTITY pid=' logcat.log | grep -o 'pid=[0-9]*' | cut -d= -f2)
+awk -v p="$PID" '$3==p' logcat.log                          # + every framework line the app caused
+grep -E 'EXPECTED-MISSING|EXPECTED-LATE' logcat.log         # steps that did not happen, or nearly
+grep '## STATUS' logcat.log                                 # standing state, nearest block to any offset
+grep ' E NETPROBE' logcat.log                               # faults — E means fault since 6c6ec79
+grep -E 'iPhone DETECTED|INBOUND CONTROL|MILESTONE' logcat.log
+```
+
+**Both filters are needed, and the second is the non-obvious one.** In the 2026-09-09 capture the
+app's PID emitted ~250 lines under OTHER tags — `CCodec` 68, `CCodecConfig` 55, `CCodecBuffers` 45,
+`BufferQueueProducer` 17, `MediaCodec` 11, `ViewRootImpl[CarPlayActivity]` 8, `SurfaceUtils` 7 —
+and those are exactly the lines that separate an app decode fault from a platform one. `grep
+NETPROBE` throws all of them away. The `IDENTITY` anchor exists so the PID filter is constructible;
+before `6c6ec79` the PID reached logcat only on the USB-attach path, so a launcher start left
+nothing to key on.
+
+`IDENTITY` also carries the build SHA, stamped into `assets/build_sha` at build time — the SHA is in
+the APK filename and `pm install` discards it, so without the asset a capture cannot be tied to the
+sources that produced it.
+
+
+
+Every session emits one `SESSION v=2 …` line plus a `SESSION_DETAIL` block. That is the point: a drive
 capture in `evidence/` can run into gigabytes, and reading it is not a diagnostic strategy — diffing one
 line per session is.
+
+**Schema v=2 (2026-09-10) — and "every session" only became true with it.** Before v=2 the line was
+emitted ONLY for a session that began at a USB attach, because `SessionSummary.begin()` was called
+only from `UsbAttachActivity`. A launcher tap or an `am start` produced **no summary at all** — the
+whole 2026-09-09 capture, a complete and successful session, contains zero `SESSION v=` lines. v=2
+adds a launch origin, so:
+
+- `origin=` is appended at the END of the line (`usb_attach` | `launch`). The field set and order are
+  a versioned contract — grow it by bumping the version and appending, never by reordering, because
+  these lines are diffed across weeks of captures.
+- `perm_trampoline=none` and `serial=unknown` on a launch-origin session. These are **deliberately
+  not fabricated**: there was no trampoline to sample, and `serial=sec_exception` is *defined* as
+  "the attach-time grant did not land", so a launch-time read would mislabel itself. `grep
+  perm_trampoline=false` therefore still matches only sessions where a trampoline really did see a
+  missing grant, which is the fault-1 query.
+- A launch-origin session superseded by a real attach closes as `exit=launch_superseded_by_attach`,
+  distinct from `superseded_by_new_attach`.
 
 | Question | Grep |
 |---|---|

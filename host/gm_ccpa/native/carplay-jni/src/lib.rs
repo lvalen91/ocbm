@@ -365,8 +365,16 @@ pub extern "system" fn JNI_OnLoad(vm: JavaVM, _reserved: *mut libc::c_void) -> j
     // or the declaration and the echo desynchronise — the failure mode this whole bug turned out to be.
     std::env::set_var("CARPLAY_SESSION_MGMT", "1");
     // Screen-path diagnostics: the on-box decrypt branch is the one the proven wireless capture never
-    // takes (it runs OCBM_FWD_ENC), and it is currently yielding a 0 B VideoConfig. This dumps the raw
-    // opcode-1 body so the codec (avcC vs hvcC) and the empty-parse cause are both visible.
+    // takes (it runs OCBM_FWD_ENC). This dumps the raw opcode-1 body so the codec (avcC vs hvcC) is
+    // visible in every capture before any parsing touches it.
+    //
+    // Left ON deliberately, and the volume is bounded at the consumer, not here: session.rs guards
+    // the dump with `screen_dump && frames < 6`, so a session logs at most SIX `[screen] DUMP
+    // frame#N` lines (~200 B each) and then nothing — the 2026-09-09 truck capture carries exactly
+    // six. Reviewed 2026-09-10 against a proposal to gate it default-off as "per-frame log volume on
+    // the A/V path"; it is not per-frame, and the six lines are the only in-band codec identity a
+    // capture has. (This comment used to add "it is currently yielding a 0 B VideoConfig" — that
+    // was the 2026-08 bug the dump was added for and has been fixed; the claim was stale.)
     std::env::set_var("CARPLAY_SCREEN_DUMP", "1");
     // (OCBM_FWD_ENC is set to "0" above — see that block. It used to be left unset; the ccpa_custom
     // default flip at @273aed1 means unset now selects forward-encrypted, so it must be set here.)
@@ -471,6 +479,33 @@ pub extern "system" fn Java_zeno_gmccpa_pair_NativeCore_nativeInit<'l>(
         let relay = env.new_global_ref(mfi_relay).map_err(|e| e.to_string())?;
         let peer: String = env.get_string(&peer_addr).map_err(|e| e.to_string())?.into();
 
+        // Take the slot FIRST, bounded (see INIT_LOCK_BUDGET), before anything with a Drop side
+        // effect exists. `AvSession::drop` -> `reset()` -> `events::clear()` + `clear_sinks()` act on
+        // PROCESS-GLOBAL state (receiver session.rs:498-515, events.rs:428), so a session built here
+        // and then dropped on the BUSY return would clear the INCUMBENT's live event channel and A/V
+        // sinks — the mirror image of the deferred-drop bug described at CORE. Same reason
+        // `set_remote_signer` below now waits: a generation that never installs must not replace the
+        // signer the live incumbent's tunnel is still using.
+        let deadline = Instant::now() + INIT_LOCK_BUDGET;
+        let mut slot = loop {
+            match CORE.try_lock() {
+                Ok(g) => break g,
+                Err(std::sync::TryLockError::Poisoned(e)) => break e.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    if Instant::now() >= deadline {
+                        eprintln!(
+                            "[jni] init BUSY: the incumbent generation held CORE for {:?} (it is \
+                             inside ControlServer::feed, most likely MFi) — telling the caller to \
+                             close this connection and let the phone redial",
+                            INIT_LOCK_BUDGET
+                        );
+                        return Ok(INIT_BUSY);
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+        };
+
         // CARPLAY_SETUP_DUMP is deliberately NOT set. It writes one file per SETUP with a monotonic
         // counter and no cleanup, and SETUPs arrive throughout a session (05 §6 records 15 audio
         // SETUPs in one 30-minute run), so it grows without bound in the app's private dir — which is
@@ -485,7 +520,7 @@ pub extern "system" fn Java_zeno_gmccpa_pair_NativeCore_nativeInit<'l>(
         // for the tunnel alike, has to cross OCBM `CH_MFI` to the box. The tunnel used to call
         // /dev/i2c-1 directly and fail on every attempt, which cost the metadata/controls channel
         // entirely (gm_ccpa docs/12 Failure Point 6, docs/11 T5.3).
-        // Installed BEFORE the core goes into the slot, and deliberately not generation-gated —
+        // Installed once the CORE slot above is HELD, and deliberately not generation-gated —
         // `REMOTE_SIGNER` is a bare process-global in the receiver crate with no notion of our
         // generation token. That is safe ONLY because every generation's signer wraps the SAME
         // Kotlin relay object: `MainActivity` holds one process-lifetime `OcbmProbe`, and
@@ -509,6 +544,10 @@ pub extern "system" fn Java_zeno_gmccpa_pair_NativeCore_nativeInit<'l>(
             RemoteMfiSigner { relay, fast: false },
             info,
         )
+        // verbose: control-plane only — one line per HTTP request plus the pair-setup/pair-verify/
+        // auth-setup verdicts (server.rs `if self.verbose`). Tens of lines per session, nothing on
+        // the A/V path, and `auth-setup (MFi-SAP) OK` / `FAILED` is the receiver-side verdict on the
+        // CH_MFI relay. Reviewed 2026-09-10 alongside CARPLAY_SCREEN_DUMP and kept for that reason.
         .verbose(true);
 
         // Attach the A/V session delegate. Without it the server holds `NoSession`, SETUP has
@@ -524,38 +563,12 @@ pub extern "system" fn Java_zeno_gmccpa_pair_NativeCore_nativeInit<'l>(
         }
         let server = server.session(Box::new(av));
 
-        // Install into the single slot, dropping any incumbent under the lock (see CORE), and return
+        // Install into the already-held slot, dropping any incumbent (see CORE above), and return
         // the generation token as the handle. A stale token can no longer be dereferenced — it is
         // just an integer that no longer matches the slot.
         let gen = NEXT_GEN.fetch_add(1, Ordering::SeqCst);
-        // BOUNDED install (see INIT_LOCK_BUDGET). Everything above is done; all that is left is to
-        // drop the incumbent under the lock. Spin on try_lock rather than block, so a hijack behind
-        // an incumbent stuck in MFi fails fast and explicitly instead of starving silently.
-        let deadline = Instant::now() + INIT_LOCK_BUDGET;
-        loop {
-            match CORE.try_lock() {
-                Ok(mut slot) => {
-                    *slot = Some((gen, Native { server }));
-                    break;
-                }
-                Err(std::sync::TryLockError::Poisoned(e)) => {
-                    *e.into_inner() = Some((gen, Native { server }));
-                    break;
-                }
-                Err(std::sync::TryLockError::WouldBlock) => {
-                    if Instant::now() >= deadline {
-                        eprintln!(
-                            "[jni] init BUSY: the incumbent generation held CORE for {:?} (it is \
-                             inside ControlServer::feed, most likely MFi) — telling the caller to \
-                             close this connection and let the phone redial",
-                            INIT_LOCK_BUDGET
-                        );
-                        return Ok(INIT_BUSY);
-                    }
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-            }
-        }
+        *slot = Some((gen, Native { server }));
+        drop(slot);
         println!("[jni] ControlServer ready — pi={pi} (AvSession attached, gen {gen})");
         Ok(gen as jlong)
     }));
@@ -783,7 +796,7 @@ pub extern "system" fn Java_zeno_gmccpa_pair_NativeCore_nativeForceKeyFrame(
     _class: JClass,
 ) -> jni::sys::jboolean {
     u8::from(
-        std::panic::catch_unwind(|| receiver::events::send_force_key_frame()).unwrap_or(false),
+        std::panic::catch_unwind(receiver::events::send_force_key_frame).unwrap_or(false),
     )
 }
 

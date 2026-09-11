@@ -57,7 +57,7 @@ that tree is archived at `~/Documents/carlink/old/ncm_carplayd`, docs/carplay/00
    "release phone-side ncm0 owner"), and the old `ncm_carplayd` Pi topology this sequence came from,
    whose ACTIVITY_LOG and `tools/cold_start2.sh:62` both say `ncm1`. On the OCBM path the host-facing
    gadget presents `accessory` only, so the phone-facing link is `ncm0` — `tools/cold_start_airplay.sh`,
-   `docs/ops/captures/2026-07-09_carplayd_pairverify.log`, and §"Where CarPlay A/V goes" below.)
+   `docs/ops/captures/2026-07-09_airplayd_pairverify.log`, and §"Where CarPlay A/V goes" below.)
 6. Run **`iap2d /dev/android_iap2`** — the iAP2 accessory L3 daemon.
 
 Each fresh cold-start needs a **physical replug** (steps 4–5 must fire while the iPhone is a device);

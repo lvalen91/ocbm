@@ -97,8 +97,8 @@ which is why the role flag (§11 B3) is load-bearing rather than cosmetic.
   against `/dev/i2c-1`.
 - **`MfiAuthClient` no longer exists** (removed as audit Fix #19 — corrected 2026-09-09, was
   previously described here as dead code worth copying). `crates/vendor/mfi/src/auth_client.rs` now
-  contains only the `MfiSigner` trait (`auth_client.rs:9-15`); the removal is recorded in the file's
-  own header comment (`auth_client.rs:3-4`). There is no surviving struct whose wire-format shape can
+  contains only the `MfiSigner` trait (`pub trait MfiSigner`, `auth_client.rs`); the removal is recorded in the file's
+  own `//!` module header (`auth_client.rs`). There is no surviving struct whose wire-format shape can
   be copied — `RemoteMfiSigner` is new work against the `MfiSigner` trait shape, full stop.
 
 **The app runs `ControlServer<_, RemoteMfiSigner>`**, where `RemoteMfiSigner` relays `copy_certificate`
@@ -139,9 +139,9 @@ crypto/protocol across the six crates §10 relocates.
 
 `wifi_handoff.rs` is not an unfinished scaffold — its module header says so but the code contradicts
 it. The `0x5703` path is already wired: `read_hostapd_ap_config()` (parses `/etc/hostapd.conf`) is
-dispatched from `crates/vendor/wireless/src/bt_driver.rs:417` on the `0x5702` request (corrected
+dispatched from the `0x5702` arm of `fn process_one` in `crates/vendor/wireless/src/bt_driver.rs` (corrected
 2026-09-09; was misquoted as `bt_driver.rs:245`), inside the same `0x5702` handler that calls
-`build_accessory_wifi_configuration_information` at `bt_driver.rs:426` to build `0x5703`, and writes
+`build_accessory_wifi_configuration_information` (same arm of `process_one`) to build `0x5703`, and writes
 it on control session 1.
 
 The `0x5703` builder is generic and reusable as-is:
@@ -150,7 +150,7 @@ The `0x5703` builder is generic and reusable as-is:
 build_accessory_wifi_configuration_information(&AccessoryWiFiConfig { ssid, passphrase, security_type, channel })
 ```
 
-**Change:** replace the `read_hostapd_ap_config()` call at `crates/vendor/wireless/src/bt_driver.rs:417`
+**Change:** replace the `read_hostapd_ap_config()` call in the `0x5702` arm of `fn process_one` (`crates/vendor/wireless/src/bt_driver.rs`)
 with a source fn that
 builds `AccessoryWiFiConfig` from app-supplied vehicle creds handed up over OCBM (`myChevrolet 32D4` +
 user passphrase + WPA2 + 5 GHz channel), reusing the same `has_wpa && !pass.is_empty() →

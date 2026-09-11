@@ -176,7 +176,7 @@ class MdnsResponder(
         var wantPtr = false; var wantSrv = false; var wantTxt = false; var wantA = false
         var wantNsec = false
         for (i in 0 until qd) {
-            val (name, after) = readName(data, pos, len)
+            val (name, after) = dnsReadName(data, pos, len)
             if (after + 4 > len) return
             val qtype = u16(after)
             pos = after + 4
@@ -301,29 +301,35 @@ class MdnsResponder(
         return b.toByteArray()
     }
 
-    private fun readName(data: ByteArray, start: Int, len: Int): Pair<String, Int> {
-        val sb = StringBuilder(); var pos = start; var jumped = false; var after = start; var guard = 0
-        while (pos < len && guard++ < 128) {
-            val b = data[pos].toInt() and 0xFF
-            if (b == 0) { if (!jumped) after = pos + 1; break }
-            if (b and 0xC0 == 0xC0) {
-                if (pos + 1 >= len) break
-                val ptr = ((b and 0x3F) shl 8) or (data[pos + 1].toInt() and 0xFF)
-                if (!jumped) after = pos + 2
-                pos = ptr; jumped = true; continue
-            }
-            pos += 1
-            if (pos + b > len) break
-            if (sb.isNotEmpty()) sb.append('.')
-            sb.append(String(data, pos, b, Charsets.UTF_8)); pos += b
-        }
-        return Pair(sb.toString(), after)
-    }
-
     private fun br0(): NetworkInterface? = try {
         NetworkInterface.getNetworkInterfaces()?.toList()?.firstOrNull {
             it.isUp && it.name.startsWith("br") && it.supportsMulticast() &&
                 it.inetAddresses.toList().any { a -> a is Inet4Address }
         }
     } catch (t: Throwable) { null }
+}
+
+/**
+ * Decode a DNS name at [start] in [data] (bounded by [len]), following at most one compression
+ * pointer chain. Shared by [MdnsResponder] and [MdnsInspect] so the wire-format edge cases —
+ * notably the bounds check on a truncated compression pointer's second byte — are not duplicated
+ * and cannot diverge between the two copies again.
+ */
+internal fun dnsReadName(data: ByteArray, start: Int, len: Int): Pair<String, Int> {
+    val sb = StringBuilder(); var pos = start; var jumped = false; var after = start; var guard = 0
+    while (pos < len && guard++ < 128) {
+        val b = data[pos].toInt() and 0xFF
+        if (b == 0) { if (!jumped) after = pos + 1; break }
+        if (b and 0xC0 == 0xC0) {
+            if (pos + 1 >= len) break
+            val ptr = ((b and 0x3F) shl 8) or (data[pos + 1].toInt() and 0xFF)
+            if (!jumped) after = pos + 2
+            pos = ptr; jumped = true; continue
+        }
+        pos += 1
+        if (pos + b > len) break
+        if (sb.isNotEmpty()) sb.append('.')
+        sb.append(String(data, pos, b, Charsets.UTF_8)); pos += b
+    }
+    return Pair(sb.toString(), after)
 }

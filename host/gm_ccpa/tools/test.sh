@@ -58,19 +58,23 @@ fi
 # structural stops them drifting: the constants are hand-maintained on both sides, and a value that
 # disagrees is not a compile error anywhere — it is a frame the other end misreads at runtime.
 #
-# ccpa_custom's checker parses ocbm-proto as canonical and diffs every client against it. A value
-# disagreement is an error; a constant this app has not defined is a GAP and only fails for the core
-# set (channel ids, CT_* opcodes, frame flags). The 57 gaps reported today are correct and expected:
-# gm_ccpa defines no INPUT_*/NAV_*/TOUCH_* because its phone is on WiFi and touch goes direct over
-# AirPlay HID via nativeTouch, never through the box's CH_INPUT; and no IP_* because it does not drive
-# the CH_IP stream mux.
+# ccpa_custom's checker parses ocbm-proto as canonical and diffs every client against it — this app's
+# OcbmProto.kt is an app-owned fork (2026-09-11, no longer a symlink into CarlinkAndroid), so it is a
+# real third client and the checker covers it with no arguments. A value disagreement is an error; a
+# constant this app has not defined is a GAP and only fails for the core set (channel ids, CT_*
+# opcodes, frame flags). The 2 gaps reported for THIS client today are correct and expected:
+# CMD_VIEW_AREA (0x11) is a box-side opcode this app never drives — its view areas are requested by
+# iOS directly over AirPlay (CarPlayActivity "requestViewArea"), never through the box's CH_INPUT —
+# and F_BOTH is a client-side convenience alias for F_SOM|F_EOM that ocbm-proto has no need to name.
+# (The pre-fork count quoted here was 57, from back when this path resolved through CarlinkAndroid's
+# copy and the checker's totals covered every client at once.)
 #
-# SKIPPED, not failed, when the sibling checkout is absent: this repo must stay buildable without it.
+# SKIPPED, not failed, when the checker is absent (a gm_ccpa subtree exported on its own must stay
+# buildable). No root argument: the checker rejects one since 2026-09-11.
 PROTO_CHECK="$CCPA_ROOT/tools/proto_check.py"
 if [ -x "$PROTO_CHECK" ]; then
     echo "=== Tier-0: OCBM protocol conformance ==="
-    REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-    if ! python3 "$PROTO_CHECK" "$REPO_ROOT" > /tmp/proto_check.out 2>&1; then
+    if ! python3 "$PROTO_CHECK" > /tmp/proto_check.out 2>&1; then
         echo "[Tier-0] FAIL: OCBM client disagrees with crates/ocbm-proto."
         grep -E "^(error|ERROR)" /tmp/proto_check.out | head -20
         echo "  Full output: /tmp/proto_check.out"

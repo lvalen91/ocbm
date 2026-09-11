@@ -20,7 +20,7 @@
 # only recoverable retroactively (unplug the phone, plug it into the Mac, pull the archive — 02_TESTING).
 #
 # The two traps the wireless harness documents, carried forward so they are not reintroduced:
-#   1. `-pn carplayd` phone-log filter hid the lockout banner (rendered by CarPlay's UI process). Not
+#   1. `-pn airplayd` phone-log filter hid the lockout banner (rendered by CarPlay's UI process). Not
 #      applicable here — there is no phone log at all — which is why the LOCKOUT verdict is taken
 #      from the pixels of the armed rect instead.
 #   2. The app-restart dwell must be 12 s, not 3: the supervisor's teardown SIGTERM lands ~6 s after
@@ -341,7 +341,7 @@ run_one() { # PW PH AW AH LABEL
   if [ -z "$VERDICT" ]; then
     # TRIGGER=auto|request|tap. `auto` prefers the deterministic door and falls back to the Dock
     # button. Force `tap` when the APP has the door but the BOX has not been updated: the app answers
-    # {"ok":true} as soon as it has SENT CMD_VIEW_AREA 0x11, and an carplayd that predates that opcode
+    # {"ok":true} as soon as it has SENT CMD_VIEW_AREA 0x11, and a carplayd that predates that opcode
     # logs "unknown INPUT_COMMAND 0x11 — dropped". The trigger then looks accepted, nothing moves, and
     # every case scores INCONCLUSIVE at TRANSITION_TIMEOUT instead of falling back here.
     if [ "${TRIGGER_MODE:-auto}" = "tap" ]; then r='{"ok":false,"reason":"TRIGGER_MODE=tap"}'

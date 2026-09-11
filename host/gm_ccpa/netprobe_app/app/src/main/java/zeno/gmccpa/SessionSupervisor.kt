@@ -1,6 +1,7 @@
 package zeno.gmccpa
 
-import com.carlink.ocbm.Ocbm
+import zeno.gmccpa.ocbm.Ocbm
+import zeno.gmccpa.logging.SessionTrace
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
@@ -58,6 +59,14 @@ enum class RxPhase(val label: String) {
     BOX_LOST_SESSION_UP("box gone, session live"),
     /** Discovered, answering, refusing to connect. Needs the driver. */
     STALLED("stalled");
+
+    /**
+     * The phases that mean "something is wrong", as opposed to "not there yet". A transition INTO one
+     * of these is logged at E with its detail and put on the Board as FAILED, so `grep ' E NETPROBE'`
+     * finds it; every other phase is narration. [STALLED] is the terminal "the driver must act"
+     * state and used to read like any other line.
+     */
+    val isFailure: Boolean get() = this == RX_UNHEALTHY || this == BOX_UNHEALTHY || this == STALLED
 }
 
 /**
@@ -159,6 +168,19 @@ class SessionSupervisor(private val act: Actions) {
          * `MGMT_RESTART_WIRELESS` look inevitable.
          */
         const val RADIO_SETTLE_MS = 10_000L
+
+        /**
+         * Same idea as [RADIO_SETTLE_MS], for the driver's Restart Wi-Fi button (`MGMT_RESTART_WIRELESS`).
+         *
+         * Longer because the chain is longer: ocbmd ACKs at once and only writes a flag; the box
+         * supervisor picks it up on its next tick (~1 s), runs `wireless_down`, waits 4 s, then
+         * `wireless_up`, and the BT controller re-attaches over HCI ~8 s after that — so
+         * `BH_HCI_PRESENT` returns ~12 s after the press (tools/session_supervisor.sh, the
+         * `WIRELESS_RESTART_FLAG` / `wireless_rebring_at` pair). The regression lands inside that
+         * window and belongs to the button, not to a fault. Without this claim the ladder climbed on
+         * top of the box's own restart — the app answering a restart with a second restart.
+         */
+        const val WIRELESS_RESTART_SETTLE_MS = 20_000L
     }
 
     private val log = ProbeLog.sub("sup")
@@ -208,9 +230,29 @@ class SessionSupervisor(private val act: Actions) {
     // ---- event intake ---------------------------------------------------------------------------
     // All of these are safe to call from any thread; they only queue work onto the scheduler.
 
+    /**
+     * The receiver's readiness probe reported.
+     *
+     * `ok=true` may only move the machine FORWARD into [RxPhase.RX_READY]. That phase means "receiver
+     * proven, box not up yet", and every later phase already has the receiver proven — so from any of
+     * them a good report is confirmation, not a transition. Re-entering RX_READY from a later phase
+     * asserted that the box was down when it was not, and `to()` acts on that assertion: it RESUMES
+     * discovery, so the 12 s rediscover loop redialled a live control connection (the hijack
+     * [onBtPhase] documents), and [escalate]'s SESSION_UP guard no longer saw SESSION_UP, so rung 0
+     * ran and rung 1 cycled the box's radios 20 s later under streaming CarPlay. In GRACE the same
+     * drop threw away the hold the grace window exists to provide. The one caller that reaches here
+     * with a live receiver is the Recover button ([userRecover] via `MainActivity.userRecover`), which
+     * re-runs the probe first — so pressing Recover during a live session knocked the session over.
+     *
+     * `ok=false` is deliberately NOT guarded: a listener that retired under a live session is a real
+     * fault the phase must reflect, whatever it was.
+     */
     fun onReceiverReady(ok: Boolean, detail: String) = post {
-        if (ok) to(RxPhase.RX_READY, detail)
-        else to(RxPhase.RX_UNHEALTHY, "receiver NOT ready: $detail")
+        if (!ok) { to(RxPhase.RX_UNHEALTHY, "receiver NOT ready: $detail"); return@post }
+        when (phase) {
+            RxPhase.IDLE, RxPhase.RX_UNHEALTHY, RxPhase.RX_READY -> to(RxPhase.RX_READY, detail)
+            else -> log.i("receiver re-checked OK while ${phase.label} — the phase stands ($detail)")
+        }
     }
 
     /**
@@ -269,10 +311,11 @@ class SessionSupervisor(private val act: Actions) {
         val wasMissing = BH_REQUIRED_BRIDGE and was.inv()
         if (missing == wasMissing) return@post
         val detail = "adapter is missing ${Ocbm.bhString(missing)} (has ${Ocbm.bhString(flags)})"
-        // Rung 1 takes the box's radios down and back up; the controller going missing across that
-        // edge is the rung working, not a new fault. See [RADIO_SETTLE_MS].
+        // Rung 1 and the driver's Restart Wi-Fi both take the box's radios down and back up; the
+        // controller going missing across that edge is the action working, not a new fault. See
+        // [RADIO_SETTLE_MS] and [WIRELESS_RESTART_SETTLE_MS].
         if (System.currentTimeMillis() < radioSettleUntil) {
-            log.i("box health regressed inside the rung 1 radio cycle — self-inflicted — not acting ($detail)")
+            log.i("box health regressed inside a radio cycle we started (rung 1 or Restart Wi-Fi) — self-inflicted — not acting ($detail)")
             return@post
         }
         log.w("box health regressed: $detail")
@@ -472,10 +515,85 @@ class SessionSupervisor(private val act: Actions) {
      */
     fun userRecover() = post {
         log.w("=== driver-requested recovery ===")
+        // Nothing to recover FROM. The ladder is guarded against these phases (see [escalate]), but
+        // `cancelAllTimers` and the rung reset below are not, and the driver deserves an answer
+        // rather than silence. Restart Session is the button for a session that is up but stuck.
+        if (phase == RxPhase.SESSION_UP || phase == RxPhase.BOX_LOST_SESSION_UP) {
+            log.i("recovery requested with a live session — nothing to recover")
+            act.report(phase, "CarPlay is live — nothing to recover (use Restart Session if it is stuck)")
+            return@post
+        }
+        // Hold the grace window. Recovering here would cancel the grace timer and then run the ladder
+        // with the phase still GRACE, which suspends discovery — the exact stranding [onSessionDown]'s
+        // timer callback exists to avoid — and the phone usually comes back inside these 10 s anyway.
+        // The automatic path escalates on expiry, so the driver loses nothing by waiting for it.
+        if (phase == RxPhase.GRACE) {
+            log.i("recovery requested inside the grace window — holding it; the ladder runs on expiry")
+            act.report(phase, "session ended moments ago — holding for the iPhone to return; recovery starts on its own if it does not")
+            return@post
+        }
         cancelAllTimers()
         rung = 0
         java.util.Arrays.fill(lastRungAt, 0L)   // an explicit request is not rate-limited
+        // Acknowledge on screen. The phase stands (nothing about the world changed), and escalate()
+        // only logs, so without this the press had no visible effect — previously it was "seen" only
+        // because onReceiverReady dropped the label to RECEIVER READY, which was the defect.
+        act.report(phase, "recovering — re-announcing first, then the adapter's radios if the phone stays silent")
         escalate("the driver asked for a recovery")
+    }
+
+    /**
+     * Restart Session has just re-SUBSCRIBEd the box. Give ARMED the deadline it otherwise lacks.
+     *
+     * ARMED carries no clock of its own on purpose: on an ordinary bring-up the receiver waits for a
+     * phone for the whole drive, and a phone that is simply not there is not a fault. After a driver
+     * restart the phone IS there — it was in or near a session moments ago — and its silence means it
+     * never re-initiated Bluetooth. Left alone the machine would sit in ARMED forever saying "waiting
+     * for the phone". This is a REPORT, not the ladder: the ladder's rungs (re-announce, CT_RADIO,
+     * MGMT_RESTART_WIRELESS) cannot make a phone dial Bluetooth, and a second restart on top of a
+     * fresh bring-up is the 2026-09-08 collapse. Rides the `handoffTimer` slot so genuine BT progress
+     * ([onBtPhase] -> [armHandoffWatchdog]) replaces it and any teardown cancels it.
+     *
+     * Ordering hazard the guard below exists for: this is posted from the command thread AFTER
+     * `runAll` returns, while BT phases are posted from the read thread as they arrive — so a real
+     * `BTP_LINK_UP` can land first, arm the genuine watchdog, and would then be REPLACED by this timer,
+     * whose body does nothing outside ARMED/BOX_LINKED. Verifier-measured 2026-09-11: BT_PAIRING with
+     * no deadline anywhere. So the slot is taken only while the phase still warrants it, or when it is
+     * empty (a replayed phase moves the label but arms nothing).
+     *
+     * Also fires in BOX_LINKED: `subscribed` is our write, ARMED is the box's SEV_HOST_PRESENT. A box
+     * that never sends it leaves the restart on CLAIMING forever, and this button's contract is a
+     * definite outcome either way.
+     */
+    fun onRestartSubscribed() = post {
+        if (phase != RxPhase.ARMED && phase != RxPhase.BOX_LINKED && handoffTimer != null) {
+            log.i("restart: Bluetooth already progressed to ${phase.label} with its own deadline — not arming the restart deadline")
+            return@post
+        }
+        handoffTimer = arm(handoffTimer, HANDOFF_TIMEOUT_MS) {
+            when (phase) {
+                RxPhase.ARMED -> {
+                    log.w("restart: still ARMED ${HANDOFF_TIMEOUT_MS / 1000}s after re-subscribing — the iPhone never re-initiated Bluetooth")
+                    to(RxPhase.STALLED, "restarted, but the iPhone did not reconnect Bluetooth — reconnect from the iPhone")
+                }
+                RxPhase.BOX_LINKED -> {
+                    log.e("restart: still BOX_LINKED ${HANDOFF_TIMEOUT_MS / 1000}s after CT_SUBSCRIBE — the adapter never confirmed the host present, so its radios were never told to come up")
+                    to(RxPhase.STALLED, "restarted, but the adapter never confirmed the host present — no radio bring-up; press Restart Session again, or replug the adapter")
+                }
+                else -> Unit
+            }
+        }
+    }
+
+    /**
+     * The driver is about to press Restart Wi-Fi (`MGMT_RESTART_WIRELESS`). Own the health regression
+     * it will cause — see [WIRELESS_RESTART_SETTLE_MS]. Called BEFORE the verb is sent, as rung 1
+     * does, so the first regression cannot arrive unowned; if the verb is then refused the cost is
+     * 20 s of not reacting to a health regression, which is the lesser error.
+     */
+    fun onManualWirelessRestart() = post {
+        radioSettleUntil = maxOf(radioSettleUntil, System.currentTimeMillis() + WIRELESS_RESTART_SETTLE_MS)
+        log.i("driver-requested wireless restart — box health regressions are self-inflicted for the next ${WIRELESS_RESTART_SETTLE_MS / 1000}s")
     }
 
     /**
@@ -624,7 +742,18 @@ class SessionSupervisor(private val act: Actions) {
      * able to answer when it does.
      */
     private fun to(next: RxPhase, detail: String) {
-        if (next != phase) log.i("${phase.label} -> ${next.label}  ($detail)")
+        if (next != phase) {
+            val line = "${phase.label} -> ${next.label}  ($detail)"
+            if (next.isFailure) log.e(line) else log.i(line)
+            // The phase is the one piece of standing state a capture most needs at a random
+            // offset, so it lives on the Board alongside the listener, adverts and core. FAILED for
+            // the failure phases (Board.failed is its own E line and leaves the dump reading
+            // "FAILED", not "UP stalled"); the four anchoring phases also dump the whole board so
+            // "what was up when it went live / when it gave up" is one block, not a reconstruction.
+            if (next.isFailure) SessionTrace.Board.failed("phase", "${next.label}: $detail")
+            else SessionTrace.Board.up("phase", next.label)
+            if (next.isFailure || next == RxPhase.SESSION_UP) SessionTrace.Board.dump("phase ${next.label}")
+        }
         phase = next
         val quiet = next == RxPhase.SESSION_UP || next == RxPhase.BOX_LOST_SESSION_UP || next == RxPhase.GRACE
         runCatching { if (quiet) act.pauseDiscovery() else act.resumeDiscovery() }

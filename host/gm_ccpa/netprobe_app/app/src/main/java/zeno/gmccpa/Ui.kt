@@ -67,6 +67,8 @@ enum class LinkState(val label: String, val color: Int) {
     PAIRING       ("PAIRING",            Palette.PHONE),
     STARTING      ("CARPLAY STARTING",   Palette.PHONE),
     LIVE          ("CARPLAY RUNNING",    Palette.LIVE),
+    /** Restart Session is tearing down and re-claiming. Amber: in flight, not failed, not idle. */
+    RESTARTING    ("RESTARTING SESSION", Palette.WORKING),
     STOPPED       ("STOPPED",            Palette.IDLE),
     FAILED        ("FAILED",             Palette.FAILED),
 }
@@ -110,7 +112,7 @@ enum class LogAction(val label: String) {
 fun Context.dp(v: Int): Int = (v * resources.displayMetrics.density + 0.5f).toInt()
 
 /** Rounded-rectangle background, used for the pill buttons and the credential chip. */
-private fun pillBg(ctx: Context, fill: Int, stroke: Int, radiusPx: Int, strokePx: Int) =
+private fun pillBg(fill: Int, stroke: Int, radiusPx: Int, strokePx: Int) =
     GradientDrawable().apply {
         shape = GradientDrawable.RECTANGLE
         cornerRadius = radiusPx.toFloat()
@@ -136,6 +138,14 @@ class LauncherUi(private val act: Activity) {
      * situation a driver actually finds themselves in.
      */
     var onRecover: () -> Unit = {}
+    /**
+     * Restart Session: drop the phone, release the box, wait, re-claim — the one action that fixed
+     * things in the old app, and the one a driver needs when they cannot force-stop the app or reach
+     * the adapter. Primary-sized on its own row: a fourth pill in the Start/Stop/Recover row measured
+     * within ~5 % of the reference width, and a clipped button in a moving vehicle is worse than a
+     * second row.
+     */
+    var onRestart: () -> Unit = {}
     /** Fired when the credentials dialog is confirmed, so the caller can push them into the probe. */
     var onCredentials: (ssid: String, pass: String, chan: String) -> Unit = { _, _, _ -> }
     /** Fired by the secondary row; the caller decides whether there is a link to send it on. */
@@ -157,6 +167,9 @@ class LauncherUi(private val act: Activity) {
     private val credSummary = TextView(act)
 
     private lateinit var actions: LinearLayout
+    private lateinit var restartRow: LinearLayout
+    /** Kept so [setRestartBusy] can relabel it; the only pill whose text changes. */
+    private lateinit var restartPill: Button
     private lateinit var boxRow: LinearLayout
     private lateinit var logRow: LinearLayout
     private lateinit var column: LinearLayout
@@ -248,6 +261,12 @@ class LauncherUi(private val act: Activity) {
         actions.addView(pill("Recover", Palette.PHONE, filled = false, baseSp = 26f) { onRecover() })
         column.addView(actions, LinearLayout.LayoutParams(-2, -2))
 
+        // --- restart, primary-sized on its own row (see onRestart) --------------------------------
+        restartRow = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL }
+        restartPill = pill(RESTART_LABEL, Palette.WORKING, filled = false, baseSp = 26f) { onRestart() }
+        restartRow.addView(restartPill)
+        column.addView(restartRow, LinearLayout.LayoutParams(-2, -2))
+
         // --- adapter control, secondary ---------------------------------------------------------
         boxRow = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL }
         for (a in BoxAction.values()) {
@@ -330,11 +349,12 @@ class LauncherUi(private val act: Activity) {
         (pairText.layoutParams as LinearLayout.LayoutParams).topMargin = px(24f)
 
         (actions.layoutParams as LinearLayout.LayoutParams).topMargin = px(56f)
+        (restartRow.layoutParams as LinearLayout.LayoutParams).topMargin = px(20f)
         (boxRow.layoutParams as LinearLayout.LayoutParams).topMargin = px(28f)
+        (logRow.layoutParams as LinearLayout.LayoutParams).topMargin = px(16f)
         (credSummary.layoutParams as LinearLayout.LayoutParams).topMargin = px(40f)
 
-        for ((i, entry) in pills.withIndex()) {
-            val (b, baseSp) = entry
+        for ((b, baseSp) in pills) {
             val primary = baseSp >= 20f
             b.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(baseSp))
             // The primary pair is sized for a glance-and-stab while moving; this Activity is declared
@@ -348,15 +368,15 @@ class LauncherUi(private val act: Activity) {
             val fill = b.tag as Int
             val accent = if (fill != Color.TRANSPARENT) fill else
                 if (primary) Palette.TEXT_DIM else Palette.LINE
-            b.background = pillBg(act, fill, accent, h / 2, px(2f))
-            // pills[0..1] are Start/Stop, pills[2..] the adapter row; the first button of each row
-            // carries no left margin so both rows stay centred.
+            b.background = pillBg(fill, accent, h / 2, px(2f))
+            // The first button of each row carries no left margin so every row stays centred.
+            val firstInRow = (b.parent as? ViewGroup)?.getChildAt(0) === b
             (b.layoutParams as? ViewGroup.MarginLayoutParams)?.leftMargin =
-                if (i == 0 || i == 2) 0 else px(if (primary) 24f else 12f)
+                if (firstInRow) 0 else px(if (primary) 24f else 12f)
         }
 
         credSummary.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(19f))
-        credSummary.background = pillBg(act, Color.TRANSPARENT, Palette.LINE, px(32f), px(2f))
+        credSummary.background = pillBg(Color.TRANSPARENT, Palette.LINE, px(32f), px(2f))
         credSummary.setPadding(px(32f), px(16f), px(32f), px(16f))
 
         column.requestLayout()
@@ -452,5 +472,18 @@ class LauncherUi(private val act: Activity) {
     /** Free-form message shown in the detail line without disturbing the state word. */
     fun setDetail(detail: String) = act.runOnUiThread {
         if (!act.isFinishing) detailText.text = detail
+    }
+
+    /**
+     * Relabel the restart pill while a restart is in flight. The pill stays enabled: a repeat press
+     * is rejected by `MainActivity.requestRestart` with its own detail line, and a disabled pill on a
+     * dark dash reads as missing rather than busy.
+     */
+    fun setRestartBusy(busy: Boolean) = act.runOnUiThread {
+        if (!act.isFinishing) restartPill.text = if (busy) "Restarting…" else RESTART_LABEL
+    }
+
+    private companion object {
+        const val RESTART_LABEL = "Restart Session"
     }
 }

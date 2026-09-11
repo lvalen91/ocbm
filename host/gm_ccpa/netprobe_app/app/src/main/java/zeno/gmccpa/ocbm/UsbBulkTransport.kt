@@ -11,6 +11,7 @@ import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
 import android.os.Build
 import java.util.concurrent.atomic.AtomicBoolean
+import zeno.gmccpa.logging.SessionTrace
 
 /**
  * The OCBM accessory over Android USB host mode.
@@ -19,6 +20,17 @@ import java.util.concurrent.atomic.AtomicBoolean
  * IN 0x81 / OUT 0x01 at 512-byte max packet (hardware-verified 2026-08-12; older docs said
  * 0x83/0x02 — the code is immune either way because it walks the interface). It is a RAW BYTE PIPE: there is no AOA control
  * handshake (51/52/53) to perform — claim interface 0 and start moving bytes. All framing is OCBM's.
+ *
+ * ## Standing state on the [SessionTrace.Board]
+ *
+ * Two entries, so a `## STATUS` block answers "is the adapter claimed and is anyone reading it":
+ *  - [OcbmBoard.USB_CLAIM] — the interface: UP with iface/endpoints/mps from [open], DOWN when
+ *    [stop] releases it, FAILED when a claim was attempted and refused. The *waiting* states before
+ *    a claim (adapter absent, permission not held) are written under the same name by
+ *    `OcbmProbe.awaitClaimable`, which owns that wait; one entry, one history.
+ *  - [OcbmBoard.USB_READ] — the `ocbm-read` thread. FAILED on the two transport-dead exits in
+ *    [readLoop]; those were already the only `E` lines in this class, and the Board entry is what
+ *    keeps them visible in every later status block rather than only at the instant they happened.
  */
 class UsbBulkTransport(
     private val ctx: Context,
@@ -41,7 +53,6 @@ class UsbBulkTransport(
     // holding one here leaks it for the whole session.
     private val appCtx = ctx.applicationContext
     private val usb = appCtx.getSystemService(Context.USB_SERVICE) as UsbManager
-    @Volatile private var device: UsbDevice? = null
     @Volatile private var conn: UsbDeviceConnection? = null
     @Volatile private var iface: UsbInterface? = null
     @Volatile private var epIn: UsbEndpoint? = null
@@ -54,16 +65,19 @@ class UsbBulkTransport(
     @Volatile
     var lastError: String? = null
         private set
+    /**
+     * True once [stop] found the read thread still inside `bulkTransfer` and left the interface
+     * claimed. Sticky on purpose: the caller reads it AFTER stop() to explain why its next claim
+     * fails ("another process holds it" — it is this one), and a second stop() must not clear it.
+     */
+    @Volatile var releaseDeferred = false; private set
 
     /** Consecutive write failures. The write path is the unambiguous liveness signal, not reads. */
     @Volatile
     var writeFailures = 0
         private set
 
-    /**
-     * Same selection as [find] with no logging — for poll loops. [find] dumps the entire device list
-     * on every call, which at a 2 s poll would bury the log in minutes.
-     */
+    /** The OCBM accessory by VID/PID, or null. No logging: this is polled every 2 s by `OcbmProbe.awaitClaimable`. */
     fun findQuiet(): UsbDevice? {
         val all = usb.deviceList.values
         return all.firstOrNull { it.vendorId == VID_CARLINKIT && it.productId == PID_OCBM }
@@ -97,7 +111,16 @@ class UsbBulkTransport(
      */
     fun open(dev: UsbDevice): Boolean {
         val c = usb.openDevice(dev)
-        if (c == null) { lastError = "openDevice returned null (permission?)"; log.w("claim FAILED: $lastError"); return false }
+        if (c == null) {
+            // A fault, not a degradation: the caller only gets here with the device present and
+            // hasPermission() true, so a null connection is the framework refusing an open it said
+            // it would allow.
+            lastError = "openDevice returned null (permission?)"
+            log.e("claim FAILED: $lastError")
+            SessionTrace.Board.failed(OcbmBoard.USB_CLAIM, "${dev.deviceName}: $lastError")
+            return false
+        }
+        var refused = 0
         for (i in 0 until dev.interfaceCount) {
             val itf = dev.getInterface(i)
             var inEp: UsbEndpoint? = null
@@ -111,17 +134,26 @@ class UsbBulkTransport(
             if (inEp != null && outEp != null) {
                 if (!c.claimInterface(itf, true)) {
                     log.w("claimInterface(${itf.id}) FAILED — another process may hold it")
+                    refused++
                     continue
                 }
-                conn = c; iface = itf; epIn = inEp; epOut = outEp; device = dev
+                conn = c; iface = itf; epIn = inEp; epOut = outEp
+                val detail = "iface=%d class=0x%02x IN=0x%02x OUT=0x%02x mps=%d"
+                    .format(itf.id, itf.interfaceClass, inEp.address, outEp.address, inEp.maxPacketSize)
                 log.i("claimed interface ${itf.id} (class 0x%02x) IN=0x%02x OUT=0x%02x mps=%d"
                     .format(itf.interfaceClass, inEp.address, outEp.address, inEp.maxPacketSize))
                 log.i("no AOA control handshake performed — OCBM is a raw byte pipe")
+                SessionTrace.Board.up(OcbmBoard.USB_CLAIM, "${dev.deviceName} $detail")
                 return true
             }
         }
-        lastError = "no interface with a bulk IN+OUT pair"
-        log.w("claim FAILED: $lastError")
+        // Name the real reason. Before 2026-09-10 a bulk-pair interface that claimInterface()
+        // REFUSED fell through to "no interface with a bulk IN+OUT pair", which sent the operator
+        // looking at descriptors when the fault was another process holding the interface.
+        lastError = if (refused > 0) "claimInterface refused on $refused bulk-pair interface(s) — another process holds it"
+                    else "no interface with a bulk IN+OUT pair"
+        log.e("claim FAILED: $lastError")
+        SessionTrace.Board.failed(OcbmBoard.USB_CLAIM, "${dev.deviceName}: $lastError")
         c.close()
         return false
     }
@@ -134,6 +166,7 @@ class UsbBulkTransport(
         t.isDaemon = true
         readThread = t
         t.start()
+        SessionTrace.Board.up(OcbmBoard.USB_READ, "ocbm-read thread, ${READ_BUF}B reads, ${READ_TIMEOUT_MS}ms timeout")
     }
 
     private fun readLoop() {
@@ -162,14 +195,22 @@ class UsbBulkTransport(
                 } else {
                     val elapsedMs = (System.nanoTime() - t0) / 1_000_000
                     if (elapsedMs < 10) {
-                        if (++rapidMinusOne >= 50) { log.e("read: rapid -1 x$rapidMinusOne — device gone, stopping"); break }
+                        if (++rapidMinusOne >= 50) {
+                            log.e("read: rapid -1 x$rapidMinusOne — device gone, stopping")
+                            SessionTrace.Board.failed(OcbmBoard.USB_READ, "rapid -1 x$rapidMinusOne — device gone (ENODEV): adapter unplugged, box rebooted, or gadget stalled")
+                            break
+                        }
                         Thread.sleep(20)
                     } else { rapidMinusOne = 0; Thread.sleep(1) }
                 }
             } catch (t: Throwable) {
                 log.e("read loop error (continuing): ${t.javaClass.simpleName}: ${t.message}")
                 readFailures++
-                if (readFailures >= 20) { log.e("read: too many consecutive errors — stopping"); break }
+                if (readFailures >= 20) {
+                    log.e("read: too many consecutive errors — stopping")
+                    SessionTrace.Board.failed(OcbmBoard.USB_READ, "$readFailures consecutive read-loop errors — last: ${t.javaClass.simpleName}: ${t.message}")
+                    break
+                }
             }
         }
         log.i("read loop ended")
@@ -191,9 +232,14 @@ class UsbBulkTransport(
             var off = 0
             while (off < data.size) {
                 val len = minOf(WRITE_CHUNK, data.size - off)
-                val chunk = if (off == 0 && len == data.size) data else data.copyOfRange(off, off + len)
-                val n = try { c.bulkTransfer(ep, chunk, len, WRITE_TIMEOUT_MS) } catch (t: Throwable) { -1 }
-                if (n < 0) { writeFailures++; lastError = "bulkTransfer OUT failed at offset $off"; log.w("write FAILED: $lastError (consecutive=$writeFailures)"); return false }
+                var thrown: Throwable? = null
+                val n = try { c.bulkTransfer(ep, data, off, len, WRITE_TIMEOUT_MS) } catch (t: Throwable) { thrown = t; -1 }
+                if (n < 0) {
+                    writeFailures++
+                    lastError = "bulkTransfer OUT failed at offset $off" + (thrown?.let { ": ${it.javaClass.simpleName}: ${it.message}" } ?: "")
+                    log.w("write FAILED: $lastError (consecutive=$writeFailures)")
+                    return false
+                }
                 off += n
                 if (n == 0) { lastError = "bulkTransfer OUT wrote 0 bytes"; return false }
             }
@@ -215,15 +261,21 @@ class UsbBulkTransport(
         // the connection can be closed with native bulk I/O still in flight on it. On this gadget
         // that is exactly the stall that needs a power cycle.
         synchronized(writeLock) {
+            val hadClaim = conn != null
             if (readAlive) {
                 // The read thread is still parked in a bulkTransfer (gadget stall). Closing the
                 // connection under a live native transfer is the exact power-cycle stall — defer the
                 // release and just drop our refs. Leaks one fd until process exit; far better than a
                 // wedged USB gadget.
                 log.w("read thread did not exit in 1500ms — deferring interface release to avoid closing under a live transfer")
+                releaseDeferred = true
+                if (hadClaim) SessionTrace.Board.down(OcbmBoard.USB_CLAIM, "release DEFERRED — read thread stuck in a native transfer; one fd leaked until process exit")
+                SessionTrace.Board.down(OcbmBoard.USB_READ, "stop requested but the thread is still inside bulkTransfer")
             } else {
                 try { iface?.let { conn?.releaseInterface(it) } } catch (_: Throwable) {}
                 try { conn?.close() } catch (_: Throwable) {}
+                if (hadClaim) SessionTrace.Board.down(OcbmBoard.USB_CLAIM, "released")
+                if (rt != null) SessionTrace.Board.down(OcbmBoard.USB_READ, "stopped")
             }
             conn = null; iface = null; epIn = null; epOut = null
         }

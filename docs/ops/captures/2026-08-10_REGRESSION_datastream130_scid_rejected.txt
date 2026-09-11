@@ -1,7 +1,7 @@
 2026-08-10 — REGRESSION CAPTURE: the box refuses iOS's RCS iAP-channel SETUP (stream type 130)
 ===============================================================================================
 
-Source box file: /tmp/carplayd_wl.log (tmpfs), pulled over the root UART console during a live
+Source box file: /tmp/airplayd_wl.log (tmpfs), pulled over the root UART console during a live
 wireless session with an iPhone on iOS 27, Apple Music PLAYING. Excerpted by grep with original
 line numbers preserved (the "N:" prefix is the line number in the source log).
 
@@ -38,7 +38,7 @@ SESSION-LEVEL FACTS (measured on the box, same session)
   * A/V over the same 10 minutes .............. mainVideo 32-37 fps, altVideo 31-40 fps,
                                                 decryptFail=0, gaps=0 — the metadata plane died
                                                 alone, which is exactly why this went unnoticed.
-  * carplayd /proc/<pid>/environ carries CARPLAY_WIRELESS_METADATA=1 — the env gate at
+  * airplayd /proc/<pid>/environ carries CARPLAY_WIRELESS_METADATA=1 — the env gate at
     session.rs:881 was OPEN. The stream was killed BEFORE reaching that arm, by the scid guard.
 
 THE CAUSAL SEQUENCE (note lines 28 -> 32 -> 44)
@@ -87,7 +87,7 @@ THE CAUSAL SEQUENCE (note lines 28 -> 32 -> 44)
 
 CONTRAST — the last known-good session, BEFORE the guard existed
 ----------------------------------------------------------------
-docs/ops/captures/2026-07-25_SUCCESS_carplayd_wl_handshake.txt:25,36 —
+docs/ops/captures/2026-07-25_SUCCESS_airplayd_wl_handshake.txt:25,36 —
 
   [session] SETUP phase2 DataStream(130) scid=0 channelID="5E:F7:F7:A9:CB:CD-RCS-1"
       clientTypeUUID="E9459FD0-BCAD-4C45-820F-1E72447EF2F2" controlType=2

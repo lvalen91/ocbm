@@ -136,6 +136,7 @@ class NowPlayingState {
         // album and duration alive beside the new title. playbackStatus carries across because it
         // describes the PLAYER, not the item.
         val base = if (trackChanged) Snapshot(playbackStatus = prev.playbackStatus) else prev
+        val artworkId = json.optIntOrNull("artworkId") ?: base.artworkId
         val next = Snapshot(
             title = incomingTitle ?: base.title,
             artist = json.optStringOrNull("artist") ?: base.artist,
@@ -147,10 +148,11 @@ class NowPlayingState {
             elapsedMs = json.optLongOrNull("elapsedMs") ?: base.elapsedMs,
             trackNumber = json.optIntOrNull("trackNumber") ?: base.trackNumber,
             trackCount = json.optIntOrNull("trackCount") ?: base.trackCount,
-            artworkId = json.optIntOrNull("artworkId") ?: base.artworkId,
-            // Old art is dropped NOW on a track change even though the new JPEG arrives later over the
-            // file transfer: a brief blank cover is honest, the previous album beside a new title is not.
-            artwork = base.artwork,
+            artworkId = artworkId,
+            // A JPEG is only valid for the id it arrived under. Drop it when the id moves — on a track
+            // change (base is blank, so this is the existing behaviour) AND when iOS swaps art under
+            // the same title. A brief blank cover is honest; the previous cover under a new id is not.
+            artwork = if (artworkId == base.artworkId) base.artwork else null,
             playbackStatus = json.optIntOrNull("playbackStatus") ?: base.playbackStatus,
         )
         snapshot = next

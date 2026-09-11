@@ -4,8 +4,11 @@
 // installable, and PAIRING-INCAPABLE. These Gradle files exist for Android Studio editing/indexing
 // only. If you must build with Gradle: (a) the jniLibs.srcDirs below expects the .so to have been
 // built first by `cargo build --release --target x86_64-linux-android` in native/carplay-jni; and
-// (b) versionCode/versionName are kept in sync with AndroidManifest.xml (7 / "4.0") so a Gradle
-// build is not a silent downgrade that `adb install -r` rejects.
+// (b) the versionCode below is a STUB. Since 2026-09-11 the manifest declares no version at all and
+// build_apk.sh injects the real one at link time (code = git commit count, name = "4.0+<sha>"), so a
+// Gradle-built APK always carries a LOWER code than a canonically-built one. That is deliberate: it
+// means a Studio build cannot be mistaken for a shipping artifact, and `adb install -r` will reject
+// it over a real build rather than silently putting unpackaged-native code on the truck.
 // =============================================================================================
 plugins {
     id 'com.android.application'
@@ -20,8 +23,8 @@ android {
         applicationId "zeno.gmccpa"
         minSdk 26          // safe floor for AAOS units
         targetSdk 32       // Android 12 (GM Info 3.7 / API 32)
-        versionCode 7      // MUST match AndroidManifest.xml — kept constant across hardening
-        versionName "4.0"  // so install -r never rejects a rollback as a downgrade
+        versionCode 7        // stub, Studio-only — build_apk.sh injects the real code (commit count)
+        versionName "4.0-ide" // marked so a Gradle artifact is identifiable in `dumpsys package`
     }
 
     sourceSets {

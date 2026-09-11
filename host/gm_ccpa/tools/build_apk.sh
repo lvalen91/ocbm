@@ -36,7 +36,7 @@ PROJ="$GM_ROOT/netprobe_app"
 SRCDIR="$PROJ/app/src/main/java"
 MAN="$PROJ/app/src/main/AndroidManifest.xml"
 
-WORK="$(mktemp -d -t netprobe_build)"
+WORK="$(mktemp -d -t gmccpa_build)"
 echo "[build] work dir: $WORK"
 mkdir -p "$WORK/classes" "$WORK/dex"
 
@@ -61,10 +61,41 @@ if [ -d "$RES" ]; then
     LINK_RES=("$WORK/res.zip")
 fi
 ASSETS="$PROJ/app/src/main/assets"
+# Stamp the build SHA into an asset so the RUNNING app can print it.
+# It is otherwise unreachable at runtime: the sha lives only in the APK FILENAME, and `pm install`
+# discards the filename, while this Gradle-free build generates no BuildConfig. Without it a
+# logcat from the truck cannot be tied to the sources that produced it — which is the whole point
+# of stamping the filename in the first place. Written into a COPY of the assets dir so the source
+# tree stays clean and a dirty asset never shows up in `git status`.
+STAMP_SHA="$(cd "$GM_ROOT" && git rev-parse --short HEAD 2>/dev/null || echo nogit)"
+(cd "$GM_ROOT" && git diff --quiet HEAD 2>/dev/null) || STAMP_SHA="$STAMP_SHA-dirty"
 ASSET_ARG=()
-[ -d "$ASSETS" ] && ASSET_ARG=(-A "$ASSETS")
+if [ -d "$ASSETS" ]; then
+    cp -R "$ASSETS" "$WORK/assets"
+    printf '%s\n' "$STAMP_SHA" > "$WORK/assets/build_sha"
+    ASSET_ARG=(-A "$WORK/assets")
+    echo "    stamped assets/build_sha = $STAMP_SHA"
+fi
+# versionCode/versionName are INJECTED here, not written in the manifest — `aapt2 link` only honours
+# --version-code when the manifest carries none, so the attributes were removed from AndroidManifest.xml
+# on 2026-09-11 to hand this script the authority. The code is the commit count, which is monotonic
+# because this repo has one linear branch (see ccpa_custom/CLAUDE.md "One branch: main"), needs no
+# state file, and cannot collide. The name carries the sha so `dumpsys package zeno.gmccpa` names the
+# exact sources on the unit — which a pinned 7/"4.0" never could.
+#
+# COST, accepted deliberately: older artifacts in apk/ are all versionCode 7, and this APK is NOT
+# debuggable, so `adb install -d` cannot roll back to one. Rolling back needs
+# `adb uninstall -k zeno.gmccpa` first — the -k matters, a plain uninstall wipes carplay_peers.bin and
+# leaves the box's BR/EDR bond asserting a pairing the app no longer has (the split brain
+# BoxAction.FORGET_PHONE exists to repair). Do not "fix" this by marking the app debuggable: on API 32
+# `adb backup` eligibility for a non-privileged app is decided by FLAG_DEBUGGABLE, not allowBackup, so
+# that would re-open the log-extraction surface the manifest just closed.
+VCODE="$(cd "$GM_ROOT" && git rev-list --count HEAD 2>/dev/null || echo 7)"
+VNAME="4.0+$STAMP_SHA"
+echo "    versionCode=$VCODE versionName=$VNAME"
 "$BT/aapt2" link -o "$WORK/base.apk" -I "$ANDJAR" \
     --manifest "$MAN" --min-sdk-version 26 --target-sdk-version 32 \
+    --version-code "$VCODE" --version-name "$VNAME" \
     "${ASSET_ARG[@]+${ASSET_ARG[@]}}" \
     --auto-add-overlay ${LINK_RES[@]+"${LINK_RES[@]}"}
 
@@ -138,33 +169,44 @@ echo "[6/6] apksigner (debug key)"
     --ks "$HOME/.android/debug.keystore" \
     --ks-pass pass:android --key-pass pass:android \
     --ks-key-alias androiddebugkey \
-    --out "$WORK/netprobe-debug.apk" \
+    --out "$WORK/gmccpa-debug.apk" \
     "$WORK/app-aligned.apk"
 
 # Verify to a file first: piping into head makes the pipeline exit status head's, so a FAILED
 # verification would look like a successful build.
-"$BT/apksigner" verify --print-certs "$WORK/netprobe-debug.apk" > "$WORK/verify.txt"
+"$BT/apksigner" verify --print-certs "$WORK/gmccpa-debug.apk" > "$WORK/verify.txt"
 head -3 "$WORK/verify.txt"
 
 # Stamp the artifact with the git sha so a new build can never clobber the frozen golden APK
-# (apk/netprobe-debug-v4.0.apk = baseline-2026-08-05-working, the rollback target). Also refresh a
-# stable "latest" symlink for convenience. versionCode is held constant across hardening so any of
-# these installs `-r` over another without a downgrade rejection (preserves carplay_peers.bin).
+# Artifacts are named for the app (gmccpa-debug-*), renamed from netprobe-debug-* 2026-09-10: the
+# app stopped being "NetProbe" in 2026-08 and installs as zeno.gmccpa / "GM CCPA". The FROZEN GOLDEN
+# build keeps its historical name, apk/netprobe-debug-v4.0.apk = baseline-2026-08-05-working — it is
+# a real file in the standalone archive and must not be renamed. versionCode was held constant at 7
+# across hardening so any of these installed `-r` over another without a downgrade rejection
+# (preserving carplay_peers.bin); since 2026-09-11 it is the commit count instead, so a rollback to
+# one of those older artifacts needs `adb uninstall -k zeno.gmccpa` first.
+#
+# NO "latest" SYMLINK (removed 2026-09-10, owner's call). There used to be a gmccpa-debug-latest.apk
+# convenience link and the docs told you to always install it. It is a footgun on exactly the rig
+# this project runs on: a symlink survives a FAILED build pointing at the last SUCCESSFUL one, and
+# versionCode was pinned at 7, so `adb install -r` accepted the stale artifact without a downgrade
+# rejection and the truck silently ran code you did not just build. The commit-count versionCode now
+# rejects that case on its own, but the SHA in the filename is still what ties a binary to its
+# sources; installing by name forces you to look at it.
 REPO="$GM_ROOT"
 SHA="$(cd "$REPO" && git rev-parse --short HEAD 2>/dev/null || echo nogit)"
 # A dirty tree produces a binary the SHA does not describe. Without this suffix two different
 # artifacts land on the same filename and one silently overwrites the other — after which nothing on
 # the device, in logcat or in the file tree says which sources an APK came from, and a bisect over
-# apk/*.apk compares the wrong binaries. versionCode is pinned at 7, so the filename is the ONLY
-# discriminator among same-version builds.
+# apk/*.apk compares the wrong binaries. A dirty build shares its commit count with the clean commit
+# it sits on, so among those the filename is still the ONLY discriminator.
 if ! (cd "$REPO" && git diff --quiet HEAD 2>/dev/null); then SHA="$SHA-dirty"; fi
 # apk/ is BUILD OUTPUT and is not tracked — the historical sha-stamped builds and the golden APK
 # stayed behind in the standalone gm_ccpa checkout when this project moved under ccpa_custom/host.
 # Create it on demand so a fresh clone builds without a manual step.
 mkdir -p "$REPO/apk"
-OUT="$REPO/apk/netprobe-debug-$SHA.apk"
-cp "$WORK/netprobe-debug.apk" "$OUT"
-ln -sf "netprobe-debug-$SHA.apk" "$REPO/apk/netprobe-debug-latest.apk"
+OUT="$REPO/apk/gmccpa-debug-$SHA.apk"
+cp "$WORK/gmccpa-debug.apk" "$OUT"
 echo "[done] $OUT ($(stat -f%z "$OUT") bytes)"
-echo "[done] apk/netprobe-debug-latest.apk -> netprobe-debug-$SHA.apk"
+echo "[install] adb install -i com.android.vending -r -g --user 10 $OUT"
 echo "WORKDIR=$WORK"

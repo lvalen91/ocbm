@@ -10,6 +10,7 @@ import android.view.SurfaceView
 import android.view.View
 import android.view.WindowManager
 import zeno.gmccpa.ProbeLog
+import zeno.gmccpa.logging.SessionTrace
 import zeno.gmccpa.pair.NativeCore
 import java.net.InetAddress
 import java.net.InetSocketAddress
@@ -120,6 +121,42 @@ class CarPlayActivity : Activity() {
         /** Displacement sent before a cancelled gesture's UP, as a fraction of the view width. ~2% is
          *  comfortably past iOS's tap allowable-movement and still an imperceptible drag. */
         private const val CANCEL_SLOP_N = 0.02f
+
+        /**
+         * [SessionTrace] name for "the producer dialled :9001". ONE name, armed from two edges that
+         * both mean "a video connection is now owed":
+         *
+         *  - the first `/command` plist of a generation ([onCommandPlist]) with no video connection
+         *    live — iOS sends it on the event channel accepted at RECORD, and SETUPs the screen
+         *    stream right after (2026-09-09: RECORD 22:55:22.072, first `modesChanged` .100, SETUP
+         *    type-110 .299, `video seam connected` .802 — **730 ms**). Budget [VIDEO_CONNECT_MS].
+         *  - a live :9001 connection bounced by [attachRenderer], after which forward.rs re-dials on
+         *    its next frame and the ForceKeyFrame just sent produces one. Budget [VIDEO_REDIAL_MS].
+         *
+         * NOT armed from the Activity launch itself: `launchCarPlayUi` also runs from the bench
+         * `carplay_ui` command and from `onResume`, and the reference session shows this screen up
+         * from 22:51:14 with no phone until 22:55:20 — a launch-anchored expectation would fire on
+         * every bench start. Nor from the metadata seam connect, whose producer is not proven to be
+         * post-RECORD on every transport. The plist is byte-proven post-RECORD.
+         *
+         * `av/`-scoped: [stopSession] drops it with the rest when the AirPlay session ends.
+         */
+        private const val EXPECT_VIDEO_CONNECT = "av/video-seam-connect"
+        /** 730 ms measured; the screen SETUP is iOS-initiated immediately after RECORD, unlike the
+         *  type-102 media stream (8.5 s later in the same session, on demand — deliberately NOT armed). */
+        private const val VIDEO_CONNECT_MS = 10_000L
+        /** One `connect_timeout(2 s)` ceiling plus a frame from the requested IDR, with margin. */
+        private const val VIDEO_REDIAL_MS = 5_000L
+        /** [SessionTrace.Board] names for the four seams and the Surface-scoped renderer. */
+        private const val BOARD_VIDEO = "seam-video"
+        private const val BOARD_MEDIA = "seam-media"
+        private const val BOARD_VOICE = "seam-voice"
+        private const val BOARD_META = "seam-meta"
+        private const val BOARD_RENDERER = "video-renderer"
+
+        private fun boardFor(label: String): String = when (label) {
+            "video" -> BOARD_VIDEO; "audio" -> BOARD_MEDIA; "voice" -> BOARD_VOICE; else -> BOARD_META
+        }
     }
 
     private lateinit var surfaceView: SurfaceView
@@ -147,6 +184,12 @@ class CarPlayActivity : Activity() {
      */
     private var generation: AtomicBoolean? = null
 
+    /** Per generation: [EXPECT_VIDEO_CONNECT] is armed from the first `/command` plist at most once.
+     *  Written on `cp-meta` and the UI thread (reset in [startSession]); volatile is enough. */
+    @Volatile private var videoConnectArmed = false
+    /** Latched so a dead event channel logs one W per run of refused ForceKeyFrames, not one per request. */
+    @Volatile private var keyframeReqFailed = false
+
     /** Touch must not run on the UI thread: a send can block on the event-channel lock for seconds. */
     private var touchThread: HandlerThread? = null
     private var touchHandler: Handler? = null
@@ -168,7 +211,7 @@ class CarPlayActivity : Activity() {
         root = android.widget.FrameLayout(this)
         root.addView(surfaceView, android.widget.FrameLayout.LayoutParams(DISPLAY_W, DISPLAY_H))
         setContentView(root)
-        goImmersive()
+        applySystemUi()
 
         touchThread = HandlerThread("cp-touch").also { it.start(); touchHandler = Handler(it.looper) }
 
@@ -235,12 +278,11 @@ class CarPlayActivity : Activity() {
             else 0
     }
 
-    private fun goImmersive() = applySystemUi()
-
     private fun startSession() {
         if (generation != null) { log.i("session already started"); return }
         val gen = AtomicBoolean(true)
         generation = gen
+        videoConnectArmed = false
 
         // Pin the process to foreground priority so backgrounding (GM dialog / reverse gear / app
         // switch) can't let LMK reclaim the live session. See CarPlaySessionService for the scope limit.
@@ -268,7 +310,9 @@ class CarPlayActivity : Activity() {
 
         // Bind BEFORE returning so a failure is visible and retryable, not swallowed on a thread.
         val vs = bindOrNull(9001) ?: run { failStart("video"); return }
+        SessionTrace.Board.up(BOARD_VIDEO, "bound :9001, listening")
         val aus = bindOrNull(9002) ?: run { vs.close(); failStart("audio"); return }
+        SessionTrace.Board.up(BOARD_MEDIA, "bound :9002, listening")
         servers.add(vs); servers.add(aus)
 
         // The video seam is served whether or not a Surface exists, and the connection is HELD either
@@ -306,10 +350,13 @@ class CarPlayActivity : Activity() {
         val vos = bindOrNull(9003)
         if (vos != null) {
             servers.add(vos)
+            SessionTrace.Board.up(BOARD_VOICE, "bound :9003, listening")
             serve(gen, vos, "voice") { ins -> voiceRouter?.consume(ins) }
         } else {
             log.e("voice seam :9003 could not be bound — Siri/telephony/nav audio is discarded AND the "
                 + "producer will log a failed connect per packet; continuing without it")
+            // note(), not failed(): the E above is the severity.
+            SessionTrace.Board.note(BOARD_VOICE, "FAILED (bind :9003 refused — Siri/call/nav audio discarded this session)")
         }
         // :9004 carries now-playing metadata and album art as `[u32 BE "META"][u32 BE len][marker]
         // [payload]`. Bound here rather than in CarPlaySessionService because the service is
@@ -327,6 +374,7 @@ class CarPlayActivity : Activity() {
         val mts = bindOrNull(9004)
         if (mts != null) {
             servers.add(mts)
+            SessionTrace.Board.up(BOARD_META, "bound :9004, listening")
             val seam = MetadataSeam(ProbeLog.sub("meta")) { m, pl ->
                 // /command plists are a different plane from now-playing; keep NowPlayingState purely
                 // about media rather than teaching it about view areas.
@@ -335,6 +383,7 @@ class CarPlayActivity : Activity() {
             serve(gen, mts, "meta") { ins -> seam.consume(gen, ins) }
         } else {
             log.e("metadata seam :9004 could not be bound — the now-playing card stays empty; continuing")
+            SessionTrace.Board.note(BOARD_META, "FAILED (bind :9004 refused — now-playing card empty, view-area and modesChanged commands lost this session)")
         }
 
         log.i("session up: seams listening on :9001 (HEVC), :9002 (AAC-LC), :9003 (voice, routed), "
@@ -354,9 +403,18 @@ class CarPlayActivity : Activity() {
         zeno.gmccpa.logging.SessionSummary.current()?.avCountersSource =
             { longArrayOf(r.framesRendered.get(), r.ausDropped.get(), r.bytesIn.get()) }
         log.i("renderer attached to Surface")
+        SessionTrace.Board.up(BOARD_RENDERER, "Surface attached — decoding ${DISPLAY_W}x$DISPLAY_H into it")
         // Any seam connection already open belongs to the previous renderer; drop it so the producer
         // re-dials into this one and sends a fresh IDR.
-        liveSockets.filter { it.localPort == 9001 }.forEach { runCatching { it.close() } }
+        val bounced = liveSockets.filter { it.localPort == 9001 }
+        bounced.forEach { runCatching { it.close() } }   // deliberate: the bounce IS the close
+        if (bounced.isNotEmpty()) {
+            // A connection WAS live, so the producer is demonstrably dialling and owes us a re-dial —
+            // this is the only in-file precondition strong enough to arm on (see EXPECT_VIDEO_CONNECT).
+            SessionTrace.expect(EXPECT_VIDEO_CONNECT, VIDEO_REDIAL_MS,
+                "the Surface came back and the live :9001 connection was bounced, so forward.rs " +
+                "should re-dial on its next frame (a ForceKeyFrame is going out now to produce one)")
+        }
         // ASK iOS for the IDR rather than waiting to be given one.
         //
         // A fresh codec cannot render anything until an IDR arrives, so every re-attach — the driver
@@ -384,10 +442,11 @@ class CarPlayActivity : Activity() {
         renderer = null
         // Drop the sampling closure before stop(); stop()'s own push stays the clean-path value.
         zeno.gmccpa.logging.SessionSummary.current()?.avCountersSource = null
-        r.stop()
+        r.stop("Surface destroyed")
         // Unblock the consume thread parked in read(); it releases the codec on its own thread.
-        liveSockets.filter { it.localPort == 9001 }.forEach { runCatching { it.close() } }
+        liveSockets.filter { it.localPort == 9001 }.forEach { runCatching { it.close() } }   // deliberate: the unblock IS the close
         log.i("renderer detached — audio and seams stay up")
+        SessionTrace.Board.down(BOARD_RENDERER, "Surface destroyed — audio and seams stay up; frames are discarded until a Surface returns")
     }
 
     /**
@@ -410,6 +469,7 @@ class CarPlayActivity : Activity() {
      */
     private fun discardUntilRenderer(gen: AtomicBoolean, ins: java.io.InputStream) {
         log.i("video seam connected with no Surface — holding open, discarding until one returns")
+        SessionTrace.Board.up(BOARD_VIDEO, "connected :9001, no Surface — discarding frames")
         val hdr = ByteArray(4)
         val sink = ByteArray(32 * 1024)
         var msgs = 0L
@@ -428,6 +488,9 @@ class CarPlayActivity : Activity() {
         log.i("discarded $msgs frames ($bytes B) with no Surface")
     }
 
+    // deliberate (both readers): on the discard path a read exception is the close that
+    // [attachRenderer] issues to make the producer re-dial — the designed heal, not a fault; the
+    // discard summary line and the serve loop's next accept say what happened.
     private fun readFully(ins: java.io.InputStream, dst: ByteArray, n: Int): Boolean {
         var off = 0
         while (off < n) {
@@ -452,23 +515,27 @@ class CarPlayActivity : Activity() {
 
     private fun failStart(which: String) {
         log.e("$which seam could not be bound after $BIND_RETRIES attempts — no A/V; finishing")
-        stopSession()
+        // note(), not failed(): the E above is the severity.
+        SessionTrace.Board.note(boardFor(which), "FAILED (bind refused after $BIND_RETRIES attempts — no A/V, screen finishing)")
+        stopSession("$which seam bind failed")
         runOnUiThread { finish() }
     }
 
     /**
      * Bind loopback with SO_REUSEADDR and a bounded retry. We perform the active close on the accepted
-     * sockets, so the listener tuple can sit in TIME_WAIT across a quick stop/start; and AvSink or a
-     * stale generation may still hold the port for a moment.
+     * sockets, so the listener tuple can sit in TIME_WAIT across a quick stop/start; and a stale
+     * generation may still hold the port for a moment.
      */
     private fun bindOrNull(port: Int): ServerSocket? {
         repeat(BIND_RETRIES) { attempt ->
+            var ss: ServerSocket? = null
             try {
-                return ServerSocket().apply {
-                    reuseAddress = true
-                    bind(InetSocketAddress(InetAddress.getByName("127.0.0.1"), port), 4)
-                }
+                ss = ServerSocket()
+                ss.reuseAddress = true
+                ss.bind(InetSocketAddress(InetAddress.getByName("127.0.0.1"), port), 4)
+                return ss
             } catch (e: Exception) {
+                runCatching { ss?.close() }   // deliberate: discarding a socket whose bind failed
                 log.e("bind :$port attempt ${attempt + 1}/$BIND_RETRIES failed: ${e.message}")
                 try { Thread.sleep(BIND_BACKOFF_MS) } catch (_: InterruptedException) { return null }
             }
@@ -477,6 +544,8 @@ class CarPlayActivity : Activity() {
     }
 
     private fun serve(gen: AtomicBoolean, srv: ServerSocket, label: String, body: (java.io.InputStream) -> Unit) {
+        val port = srv.localPort
+        val board = boardFor(label)
         Thread({
             try {
                 while (gen.get()) {
@@ -485,34 +554,50 @@ class CarPlayActivity : Activity() {
                     }
                     liveSockets.add(s)
                     log.i("$label seam connected")
+                    SessionTrace.Board.up(board, "connected :$port")
+                    if (label == "video") SessionTrace.met(EXPECT_VIDEO_CONNECT)
                     // Catch Throwable, not Exception: an 8 MB per-message allocation can throw
                     // OutOfMemoryError (an Error), which would otherwise escape to the outer finally
                     // and permanently close this listener — a black screen with a live session. Only
                     // this one connection should die; the listener must keep accepting.
                     try { body(s.getInputStream()) } catch (e: Throwable) { log.e("$label: ${e.javaClass.simpleName}: ${e.message}") }
-                    finally { liveSockets.remove(s); runCatching { s.close() } }
+                    finally {
+                        liveSockets.remove(s); runCatching { s.close() }   // deliberate: teardown
+                        if (gen.get()) SessionTrace.Board.up(board, "bound :$port, listening (producer disconnected)")
+                    }
                 }
             } finally {
-                runCatching { srv.close() }   // never leave a bound socket behind
+                runCatching { srv.close() }   // deliberate: never leave a bound socket behind
             }
         }, "cp-$label").apply { isDaemon = true }.start()
     }
 
-    private fun stopSession() {
+    /**
+     * The single teardown choke point — [failStart], [onDestroy] and [endSession] all come through
+     * here — and therefore the owner of the `av/` expectation scope: every expectation the A/V
+     * components armed is moot once the AirPlay session is gone, and left armed each would fire as an
+     * `EXPECTED-MISSING` a few seconds after a phone that simply walked away. Scoped, not
+     * [SessionTrace.cancelAll]: the phone leaving does not end the OCBM link, and a box-side
+     * expectation in flight at that moment must survive.
+     *
+     * [why] is threaded into every component's `stop` and every board entry, so a capture answers
+     * "was this teardown expected" from the lines themselves.
+     */
+    private fun stopSession(why: String) {
         val gen = generation ?: return
         generation = null
         gen.set(false)
-        renderer?.stop(); renderer = null
-        player?.stop()
+        renderer?.stop(why); renderer = null
+        player?.stop(why)
         // Flag-only, like the player: VoiceRouter releases its codecs/tracks on the consume thread.
         // Skipping this strands up to four AudioTracks AND their focus requests, and an unabandoned
         // USAGE_VOICE_COMMUNICATION request keeps the hardware volume keys pinned to the call group
         // for the rest of the session.
-        voiceRouter?.stop()
-        micUplink?.stop()
+        voiceRouter?.stop(why)
+        micUplink?.stop(why)
         // Closing the accepted socket is the only reliable way to unblock a consumer parked in read().
-        liveSockets.forEach { runCatching { it.close() } }; liveSockets.clear()
-        servers.forEach { runCatching { it.close() } }; servers.clear()
+        liveSockets.forEach { runCatching { it.close() } }; liveSockets.clear()   // deliberate: teardown
+        servers.forEach { runCatching { it.close() } }; servers.clear()           // deliberate: teardown
         player = null
         voiceRouter = null
         micUplink = null
@@ -520,33 +605,106 @@ class CarPlayActivity : Activity() {
         // Clear AND publish the cleared picture: a card still showing the last track over a dead
         // session is the metadata twin of the frozen-frame bug onSessionEnded exists to prevent.
         nowPlaying.clear()
-        log.i("session stopped")
+        for (b in listOf(BOARD_VIDEO, BOARD_MEDIA, BOARD_VOICE, BOARD_META)) SessionTrace.Board.down(b, "session stopped — $why")
+        SessionTrace.Board.down(BOARD_RENDERER, "session stopped — $why")
+        // After the components' own stop(): those that could cancel synchronously have, with a more
+        // specific reason; what remains is on threads still unwinding, and the session reason is
+        // the honest one for it. A later per-name cancel from those threads is then a silent no-op.
+        SessionTrace.cancelScope("av/", "A/V session stopped — $why")
+        log.i("session stopped — $why")
     }
 
-    /** Ask iOS for a fresh IDR. Off the UI thread — it rides the same blocking event channel. */
+    /**
+     * Ask iOS for a fresh IDR. Off the UI thread — it rides the same blocking event channel.
+     *
+     * The result used to be discarded. A refused ForceKeyFrame is a dead event channel under a
+     * black screen — the one symptom that has no other line. Once per run of refusals, not per
+     * request: [HevcRenderer.requestKeyframe] re-issues every 500 ms while non-IRAP AUs arrive.
+     */
     private fun requestKeyframe() {
-        touchHandler?.post { NativeCore.forceKeyFrame() }
+        touchHandler?.post {
+            if (NativeCore.forceKeyFrame()) {
+                keyframeReqFailed = false
+            } else if (!keyframeReqFailed) {
+                keyframeReqFailed = true
+                log.w("ForceKeyFrame refused by the event channel — no IDR is coming; the screen stays black until it recovers")
+            }
+        }
     }
 
     /**
      * An inbound `/command` plist off the `:9004` seam.
      *
-     * Only `requestViewArea` is acted on. Everything else (`modesChanged`, `setNightMode`,
-     * `duckAudio`, …) is ignored rather than half-handled — the receiver already acts on the ones
-     * that matter to the session, and a partially-implemented command plane is worse than none.
+     * Two commands are acted on. `requestViewArea` lays the surface out. `modesChanged` is decoded
+     * for its Speech app state and handed to [VoiceRouter.onModes] (A11): iOS states "Siri is up /
+     * Siri is done" on this channel ~400 ms before the first voice AU and ~3.3 s before the energy
+     * gate can infer the end. This seam is best-effort — `emit_command_plist` try_locks and drops
+     * under a now-playing or artwork write — so the router treats it as a hint over its energy gate,
+     * never as the only truth. Everything else (`setNightMode`, `duckAudio`, …) is ignored rather than
+     * half-handled; `duckAudio` in particular did not arrive once in the 2026-09-09 session.
      *
-     * Runs on the `cp-meta` seam thread; the layout change is posted to the UI thread.
+     * Runs on the `cp-meta` seam thread and must not block: volatile writes into the router, and the
+     * layout change posted to the UI thread.
      */
     private fun onCommandPlist(payload: ByteArray) {
         val root = BPlist.parse(payload) ?: return
-        if (BPlist.str(root, "type") != "requestViewArea") return
-        val idx = BPlist.int(root, "params", "viewAreaIndex")?.toInt() ?: return
-        if (idx !in VIEW_AREAS.indices) {
-            log.w("requestViewArea index=$idx outside the ${VIEW_AREAS.size} declared areas — ignoring")
-            return
+        val type = BPlist.str(root, "type")
+        if (!videoConnectArmed && generation?.get() == true) {
+            // First /command of this generation: iOS is past RECORD, so the screen stream is owed.
+            // Armed only if no video connection is already live (a re-attach mid-session may have
+            // beaten this plist); once per generation either way. See EXPECT_VIDEO_CONNECT.
+            videoConnectArmed = true
+            if (liveSockets.none { it.localPort == 9001 }) {
+                SessionTrace.expect(EXPECT_VIDEO_CONNECT, VIDEO_CONNECT_MS,
+                    "iOS sent its first /command plist (type=$type) on the event channel accepted at " +
+                    "RECORD, so it should SETUP the screen stream and forward.rs should dial :9001 " +
+                    "(730ms after RECORD on 2026-09-09)")
+            }
         }
-        log.i("requestViewArea index=$idx -> laying the surface out at ${VIEW_AREAS[idx]}")
-        runOnUiThread { applyViewArea(idx) }
+        when (type) {
+            "modesChanged" -> onModesChanged(root, payload.size)
+            "requestViewArea" -> {
+                val idx = BPlist.int(root, "params", "viewAreaIndex")?.toInt() ?: return
+                if (idx !in VIEW_AREAS.indices) {
+                    log.w("requestViewArea index=$idx outside the ${VIEW_AREAS.size} declared areas — ignoring")
+                    return
+                }
+                log.i("requestViewArea index=$idx -> laying the surface out at ${VIEW_AREAS[idx]}")
+                runOnUiThread { applyViewArea(idx) }
+            }
+        }
+    }
+
+    /**
+     * Decode `params.appStates[]{appStateID, entity, speechMode}` out of a `modesChanged`.
+     *
+     * The shape is byte-proven, not documented: every frame in
+     * `docs/ops/captures/2026-07-24_carplay_cmd_capture.bin` carries exactly this plus
+     * `resources[]{resourceID, entity, permanentEntity}`, and appStateID 1 is the one entry that
+     * carries `speechMode` — Apple's Speech app state. `-1` is NotApplicable; in Apple's writer it is
+     * the frame's only 8-byte integer, and its departure is the whole of the 287 B → 277 B bracket
+     * around the Siri turn in the 2026-09-09 capture. appStateID 2/3 are believed to be
+     * PhoneCall/TurnByTurn (AirPlayCommon.h order, unverified in this checkout) and are passed for
+     * logging only. `BPlist` decodes arrays to `List` and dicts to `Map<String, Any?>` with `Long`
+     * integers, which is what this destructures; an unexpected shape yields `-1`, i.e. "not
+     * applicable", i.e. today's energy-gate behaviour.
+     */
+    @Suppress("UNCHECKED_CAST")
+    private fun onModesChanged(root: Any?, size: Int) {
+        val params = (root as? Map<String, Any?>)?.get("params") as? Map<String, Any?> ?: return
+        val states = params["appStates"] as? List<Any?> ?: return
+        var speechMode = -1L; var speechEntity = 0L; var phoneEntity = 0L; var turnsEntity = 0L
+        for (s in states) {
+            val d = s as? Map<String, Any?> ?: continue
+            val id = d["appStateID"] as? Long ?: continue
+            val ent = d["entity"] as? Long ?: 0L
+            when (id) {
+                1L -> { speechEntity = ent; speechMode = d["speechMode"] as? Long ?: -1L }
+                2L -> phoneEntity = ent
+                3L -> turnsEntity = ent
+            }
+        }
+        voiceRouter?.onModes(speechMode, speechEntity, phoneEntity, turnsEntity, size)
     }
 
     /**
@@ -710,8 +868,12 @@ class CarPlayActivity : Activity() {
     private fun send(phase: Int, nx: Float, ny: Float) {
         val sent = NativeCore.touch(phase, nx, ny, DISPLAY_W, DISPLAY_H)
         // Log every DOWN/UP and every failure — a dying event channel is otherwise invisible mid-drag.
-        if (phase != 1 || !sent) {
-            log.i("touch ${phaseName(phase)} n=(%.3f, %.3f) sent=$sent".format(nx, ny))
+        // A refused send is a W: it IS the dying event channel, and at I it was indistinguishable
+        // from a healthy tap in a grep for problems.
+        if (!sent) {
+            log.w("touch ${phaseName(phase)} n=(%.3f, %.3f) sent=false — the event channel refused it".format(nx, ny))
+        } else if (phase != 1) {
+            log.i("touch ${phaseName(phase)} n=(%.3f, %.3f) sent=true".format(nx, ny))
         }
     }
 
@@ -719,7 +881,7 @@ class CarPlayActivity : Activity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus) goImmersive()
+        if (hasFocus) applySystemUi()
     }
 
     override fun onDestroy() {
@@ -727,7 +889,7 @@ class CarPlayActivity : Activity() {
         // published itself (launch of the replacement can precede this teardown), and clearing it
         // unconditionally would leave the LIVE screen unreachable from [onSessionEnded].
         if (live?.get() === this) live = null
-        stopSession()
+        stopSession("activity destroyed")
         touchThread?.quitSafely(); touchThread = null; touchHandler = null
         super.onDestroy()
     }
@@ -740,7 +902,7 @@ class CarPlayActivity : Activity() {
      */
     private fun endSession(why: String) {
         log.i("CarPlay session ended ($why) — stopping A/V and closing the screen")
-        stopSession()
+        stopSession(why)
         runOnUiThread { if (!isFinishing) finish() }
     }
 }

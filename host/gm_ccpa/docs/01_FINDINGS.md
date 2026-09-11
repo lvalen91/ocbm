@@ -48,9 +48,17 @@ exercised here — but transport, HTTP and RTSP framing are identical either way
 confirmed live (`12_OBSERVED_FLOW.md` Phase 4–6).
 
 **`AirPlayRx.kt` is historical** — it was deleted (`11_HARDENING_PLAN.md` T6.1, LANDED). Its successor
-is `CarPlayRx.kt`, which defaults to port **7011**, not 7010 (`CarPlayRx.kt:46`), and — unlike the probe
-above — DOES implement SRP-6a `pair-setup`/`pair-verify` (`CarPlayRx.kt:1153,1170`). "No pairing
-implemented" describes the 2026-07-31 probe only, not the current receiver.
+is `CarPlayRx.kt`, which defaults to port **7011**, not 7010 (the `port` constructor default of `class CarPlayRx`, `CarPlayRx.kt`), and — unlike the probe
+above — does implement pairing. **Scoped precisely 2026-09-10; this sentence used to claim
+`CarPlayRx.kt` implements "SRP-6a `pair-setup`/`pair-verify`", which overstates the Kotlin side.**
+What `CarPlayRx` itself implements is SRP-6a **`pair-setup` M1–M4 only** (`CarPlayRx.handlePairSetup`,
+dispatched from the `/pair-setup` arm of `CarPlayRx.respond`); `handlePairSetup`'s own KDoc records
+that M5/M6, the Ed25519 LTPK exchange, are not implemented there, and `respond` routes only
+`/pair-setup` and `/info` — everything else, **`/pair-verify` included**, falls to its deliberate 501
+arm. Pair-verify on the shipping path is done by the JNI'd Rust core via `CarPlayRx.handleNative`,
+which is the whole reason the core exists (API 32 exposes no X25519/Ed25519). The Kotlin stub is a
+fallback that cannot complete a session. "No pairing implemented" describes the 2026-07-31 probe
+only, not the current receiver.
 
 What this probe did **not** establish, since it matters for read order: `pair-setup` and `pair-verify`
 are chipless SRP-6a / Curve25519 — the MFi coprocessor is not touched until `auth-setup`, two steps
@@ -81,6 +89,25 @@ readings and shapes the whole design.
 - The app runs on the AP host, so client isolation is moot: isolation blocks client↔client, never
   host↔client.
 
+> **Reading `/system/etc/iptables.rules` alone — methodology trap, found 2026-09-10.** That file is
+> **IPv4 only**. Its `INPUT` chain is default-`DROP` with no unicast allow for `:7011` (this app's
+> control port) or any other app port on `br0` — reading it in isolation looks like the control
+> session should never reach the app at all. It's the wrong table. The phone's control connection
+> arrives over its **IPv6 link-local** address (`fe80::…%br0` — see the addressing already logged
+> throughout this doc and `12_OBSERVED_FLOW.md`, and stated outright in code:
+> `CarPlayRx.kt` — "The phone is ALWAYS IPv6 link-local on this rig"), which is governed by the
+> **separate** `/system/etc/ip6tables.rules`. That table's `INPUT` chain carries one blanket rule,
+> `-A INPUT -i br0 -s fe80::/64 -j ACCEPT`, that passes any link-local-sourced packet on `br0`
+> regardless of destination port — no per-port allowlist needed on v6 at all. A live capture
+> (`~/Downloads/logcat.log`, 2026-09-09 session) confirms it end to end: `>>> INBOUND CONTROL
+> CONNECTION from fe80::1ce2:543a:822d:2fb2%br0:50341` followed by a normal pair-verify → `/auth-setup`
+> → encrypted-control-channel sequence. **Always check both `iptables.rules` and `ip6tables.rules`
+> before concluding a port is unreachable on this platform** — the app's own IPv4 vs IPv6 behavior is
+> not symmetric, and the code already tells you which one the phone actually uses. Separately, `netd`
+> logs `OemIptablesHook: OEM iptable hook installed` at boot — a GM-native hook beyond the two static
+> rule files — not needed to explain this case, but a reminder that even both static files together
+> are not guaranteed to be the full runtime picture on this platform.
+
 ---
 
 ## 3. Port :7000 and GM's own CarPlay receiver
@@ -98,6 +125,23 @@ readings and shapes the whole design.
   hostname `Android.local`, and iOS folds them into one endpoint keyed by host); it is now a **solved**
   coexistence problem — see `12_OBSERVED_FLOW.md` Phase 5 for the mechanism and the fix (a self-hosted
   mDNS advert on a hostname the app owns). GM's service stays running and untouched.
+- **Re-confirmed end to end 2026-09-09.** The shipping configuration is now: OE GM CarPlay still
+  latched onto its port and coexisted with, every *other* GM CarPlay/projection component disabled or
+  uninstalled, and a full A/V session nonetheless achieved on **our own** radio software, our own
+  ports and the box's Bluetooth + MFi. The capture bears this out — `com.gm.domain.server.delayed` is
+  present and untouched, of all `com.gm.hmi.*` only `com.gm.hmi.settings` survives on user 0, and the
+  session ran pair-verify → `/auth-setup` → SETUP 130/110/102 → HEVC first frame with GM live
+  throughout. This is the coexistence claim's strongest evidence to date; it is no longer inference
+  from a single 2026-08-12 run.
+
+> **Reading `packages.txt` from a probe bundle — methodology trap, found 2026-09-09.** The recon
+> script runs `adb shell pm list packages -f` with **no `--user`**, so it enumerates **user 0 only**.
+> This app installs to user 10 and is therefore absent from its own probe's package list. Do NOT
+> conclude "package X was removed" from that file: on the 2026-09-09 bundle it makes
+> `com.android.vending`, `com.gm.hmi.connection`, `com.gm.updater` and others look uninstalled when
+> the only thing established is that they are not on user 0. Use `pm list packages --user 10` (and
+> `--user 0`) explicitly, or `dumpsys package <pkg>` and read the per-`User N: installed=` lines, as
+> `pkg_detail.txt` does correctly for `zeno.gmccpa`. Fix the recon script before the next capture.
 
 ---
 
@@ -111,7 +155,7 @@ readings and shapes the whole design.
   (`i2c_device`) are world `crw-rw-rw-` at DAC, but SELinux (Enforcing) denies the app's `untrusted_app`
   domain → `EACCES`. adb cannot relabel an app's SELinux domain without root. ⇒ MFi stays on the CCPA,
   reached over USB/OCBM (endpoints IN `0x81` / OUT `0x01`, hardware-confirmed and interface-discovered
-  — `native/carplay-jni`, `netprobe_app/.../ocbm/UsbBulkTransport.kt:19`).
+  — `native/carplay-jni`, the class KDoc of `UsbBulkTransport`, `netprobe_app/.../ocbm/UsbBulkTransport.kt`).
 - **In-motion display** requires Play-attributed install (`adb install -i com.android.vending`) *and*
   `distractionOptimized` on the activity. The shell override (`cmd car_service`) is blocked on this
   `user` build (`SecurityException: requires non-user build`), so this is the only path. Both
@@ -136,8 +180,32 @@ readings and shapes the whole design.
 `blocks-per-second` 972000 ⇒ 1080p60 with headroom, 4K30. Render target is the panel's 2400×960@60, so
 the decoders are never the bottleneck.
 
-**Audio:** AAC-LC and AAC-ELD (profile 39) decode *and* encode — CarPlay's audio codec and the
-mic-uplink codec, both native. No ALAC, no Dolby decoder of any kind. Neither matters: CarPlay's audio
+**Audio — CORRECTED 2026-09-09: there is NO hardware audio codec on this unit, for any format.**
+This section previously said AAC-LC and AAC-ELD decode and encode were "both native", which reads as
+hardware. They are not. A full `dumpsys media.player` enumeration
+(`gmccpa_probe_20260909_225421/codecs.txt`) lists every audio decoder on the unit as the AOSP
+software set — `c2.android.{aac,mp3,flac,opus,vorbis,amrnb,amrwb,g711,raw}.decoder` plus their
+`OMX.google.*` twins — and every audio encoder likewise. The only vendor codec XMLs in the firmware
+are `media_codecs_google_audio.xml` and `media_codecs_google_video.xml`; the hardware entries in
+`media_codecs.xml` are **video only** (`OMX.Intel.hw_vd.h264/h265/vp8/vp9`). Confirmed in a live
+session: both AAC-LC media and AAC-ELD Siri decoded on `c2.android.aac.decoder`.
+
+Three consequences, all load-bearing:
+
+- There is also **no compressed-audio offload**. The only output flags in
+  `/vendor/etc/audio_policy_configuration.xml` are `AUDIO_OUTPUT_FLAG_PRIMARY` and
+  `AUDIO_OUTPUT_FLAG_DIRECT|AUDIO_OUTPUT_FLAG_VOIP_RX`; there is no `COMPRESS_OFFLOAD` mixPort, so a
+  bitstream can never reach the DSP. Every CarPlay sample is CPU-decoded, and the 16 kHz mono voice
+  streams are CPU-resampled to the 48 kHz stereo the buses declare
+  ([`13_AUDIO_ROUTING.md`](13_AUDIO_ROUTING.md) §1).
+- The hardware that does exist is the **Harman DSP behind the audio HAL, and it is strictly
+  post-PCM**: bus summing, HAL ducking (`Use hal ducking signals true`), EQ. It never sees a frame.
+- The mic uplink's AAC-ELD **encoder** therefore cannot come from the platform — `c2.android.aac.encoder`
+  has no ELD profile. That is why the JNI `.so` cross-builds and statically links libfdk-aac
+  (`13_AUDIO_ROUTING.md` §4); it is a requirement, not an optimisation.
+
+What was right in the original claim: **no ALAC and no Dolby decoder of any kind.** Neither matters:
+CarPlay's audio
 ceiling is stereo AAC-LC 48 kHz, a wire-format limit set by Apple's `kAirPlayAudioFormat_*` bitmask
 (flat codec × rate × channels, no entry above 2ch, no ALAC/AC-3/E-AC-3/object-based). Across all five
 CarPlay WWDC sessions (2016 ×2, 2017, 2019, 2023) there are zero mentions of Atmos, spatial, surround,
@@ -178,7 +246,7 @@ desync between the two. HEVC was ruled out separately: it gates on three indepen
 satisfied.
 
 **Fix, confirmed on hardware:** `CARPLAY_SESSION_MGMT=1` set unconditionally in `JNI_OnLoad`
-(`native/carplay-jni/src/lib.rs:366`), with `/info` regenerated under that same env — a static asset
+(the `std::env::set_var("CARPLAY_SESSION_MGMT", "1")` call in `JNI_OnLoad`, `native/carplay-jni/src/lib.rs`), with `/info` regenerated under that same env — a static asset
 built under a different env than the running server is exactly the hazard this bug was.
 
 **Structural gaps still open on the Kotlin/Android path** (not blocking): `arm_keepalive` TCP 3/3/3
@@ -199,7 +267,12 @@ with `fn load_device_config` (`ccpa/carplayd/src/main.rs`) called per control co
 was wrong about the reference; the rows now read correctly. They are tracked as OPEN rows N13-N15 in
 `11_HARDENING_PLAN.md` (the `CarPlayRx.kt` comment's stale pointer to §8 of this doc is tracked as N16).
 
-The `NOT YET IMPLEMENTED` wording in the `CarPlayRx.kt:906-908` comment carries the same error and
+**RESOLVED 2026-09-10 — this paragraph was stale.** It used to say the `NOT YET IMPLEMENTED` wording
+in the `CarPlayRx.handleNative` comment block (`CarPlayRx.kt`, search `arm_keepalive`) carried the same
+error and needed a source fix. It was fixed in `8cadba4`: the block now says "both are real gaps"
+scoped to the Kotlin path, and cites rows N13–N16 of `11_HARDENING_PLAN.md` plus `fn arm_keepalive`
+(`ccpa/carplayd/src/main.rs`) by symbol. Row N16 records it LANDED. The former text follows for
+history only —
 still needs a source fix.
 
 ### 6b. Wireless VideoConfig is a QuickTime sample-description box, not a bare `avcC`/`hvcC` record
@@ -313,10 +386,20 @@ for u in 0 10; do
 done
 ```
 
-Section 5 also wrote `share_hotspot_data_status 0` and `soft_ap_timeout_enabled 1`; their stock values
-were never recorded, so they are not in the recipe — if the hotspot still misbehaves after the above,
-`settings get global` both and compare against a unit that never ran the script. Reboot afterwards:
-the tethering packages are what start `hostapd` at boot.
+Section 5 also wrote `share_hotspot_data_status 0` and `soft_ap_timeout_enabled 1`. **Their stock
+values are now recorded (2026-09-09), from a unit with a working hotspot
+(`gmccpa_probe_20260909_225421/settings.txt`):**
+
+```
+share_hotspot_data_status=0      # SAME as what the script wrote — never a factor
+soft_ap_timeout_enabled=0        # the script wrote 1; this is the one that needs reverting
+```
+
+So the recipe above is complete except for one line — add `adb shell settings put global
+soft_ap_timeout_enabled 0`. The same capture confirms the four settings the recipe already covers are
+at their working values on this unit (`tether_supported=1`, `tethering_allow=1`,
+`fid_hotspot_disable_status=0`, `wifi_ap_enabled` absent/unset with the hotspot up). Reboot
+afterwards: the tethering packages are what start `hostapd` at boot.
 
 ---
 

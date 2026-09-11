@@ -66,10 +66,12 @@ Needs the Android SDK + NDK. Build output goes to `~/.cache`, never into this tr
 
 ```bash
 bash tools/test.sh                 # Tier-0 gate: host cargo tests + OCBM proto conformance
-bash tools/build_apk.sh            # -> apk/netprobe-debug-<sha>.apk
+bash tools/build_apk.sh            # -> apk/gmccpa-debug-<sha>.apk, and prints the install command
 
+# Install the sha-stamped path the build just printed — there is deliberately no "latest" symlink,
+# because versionCode is pinned and `-r` would happily install a stale one after a failed build.
 # Play-attributed install keeps the in-motion path eligible; -g grants runtime perms; user 10 is foreground
-adb install -i com.android.vending -r -g --user 10 apk/netprobe-debug-latest.apk
+adb install -i com.android.vending -r -g --user 10 apk/gmccpa-debug-<sha>.apk
 adb shell appops set zeno.gmccpa SYSTEM_ALERT_WINDOW allow
 
 # Logging boots effectively dead on this unit, and silence looks like a dead app

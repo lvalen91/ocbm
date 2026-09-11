@@ -27,32 +27,35 @@ hand in another language:
 |---|---|
 | box daemons (Rust) | `crates/ocbm-proto/src/lib.rs` — **canonical** |
 | macOS host app (Swift) | `host/MacHost/carlink_macOS/OCBM/OCBMFraming.swift` |
-| Android host app (Kotlin) | `host/CarlinkAndroid/app/src/main/kotlin/com/carlink/ocbm/OcbmProto.kt` |
-| gm_ccpa client (Kotlin) | **symlink** to this repo's Kotlin file (see below) |
+| CarlinkAndroid host app (Kotlin, dormant) | `host/CarlinkAndroid/app/src/main/kotlin/com/carlink/ocbm/OcbmProto.kt` |
+| gm_ccpa client (Kotlin) | `host/gm_ccpa/netprobe_app/app/src/main/java/zeno/gmccpa/ocbm/OcbmProto.kt` — app-owned fork (see below) |
 
-`tools/proto_check.py` verifies them against the canonical table. Run it before committing a protocol
-change, and pass the sibling checkout to include it:
+`tools/proto_check.py` verifies all three against the canonical table. Run it before committing a
+protocol change; it takes no arguments, every client is in-tree:
 
-    tools/proto_check.py ~/Documents/carlink/gm_ccpa
+    tools/proto_check.py
 
 A value that disagrees is an error: two ends of one link mean different things by the same byte. A
 constant a client has not defined yet is reported as a gap, and is an error only for the core set —
 channel ids, `CT_*` opcodes, frame flags — which every client must be able to name even where it does
 not act on the opcode. `--strict` promotes every gap to an error.
 
-**gm_ccpa shares the Kotlin file rather than copying it.** As of 2026-08-31
-`gm_ccpa/netprobe_app/app/src/main/java/zeno/gmccpa/ocbm/OcbmProto.kt` is a relative symlink to
-`host/CarlinkAndroid/app/src/main/kotlin/com/carlink/ocbm/OcbmProto.kt` here, so the protocol is
-edited once. The file declares `package com.carlink.ocbm` and gm_ccpa's consumers import it; Kotlin
-does not require package to match directory. This adds no new coupling — gm_ccpa's `carplay-jni`
-already takes `receiver`, `pairing` and `mfi` as cargo path deps into this checkout.
+**gm_ccpa's Kotlin file is an app-owned fork, not a symlink (since 2026-09-11).** From 2026-08-31 to
+2026-09-11 `host/gm_ccpa/.../ocbm/OcbmProto.kt` was a relative symlink into CarlinkAndroid's copy, from
+the days when gm_ccpa was a separate checkout and the protocol was "edited once, in the main project".
+That inverted the actual ownership: CarlinkAndroid is dormant and behind the current protocol, while
+gm_ccpa and the macOS host are the implementations that ship. The link was replaced with a real file
+(byte-identical to the CarlinkAndroid original except `package zeno.gmccpa.ocbm`), so the Kotlin clients
+are per-app exactly as the Swift client already was. The wire contract does not move: `crates/ocbm-proto`
+stays canonical and `tools/proto_check.py` is the seam — it now checks gm_ccpa's file by default, where
+before it did so only when handed a root path, and then only by reading the same file twice.
 
-**Only the protocol file is shared.** The two Android apps serve different roles — gm_ccpa is the GM
-head-unit bridge, this repo's app targets Pi AAOS — so `OcbmClient`, `VoiceRouter`, `AacPlayer`,
-`MicUplink` and the transports stay separate implementations and are allowed to differ. What must not
-differ is what a byte means, and that is what the checker enforces. Deployment policy stays in the
-app: gm_ccpa's `BH_REQUIRED_BRIDGE` lives in its `SessionSupervisor`, not in the shared file, because
-it deliberately does not require `BH_WLAN_AP` in a role where the head unit owns Wi-Fi.
+**Only what a byte means is shared.** The two Android apps serve different roles — gm_ccpa is the GM
+head-unit bridge, CarlinkAndroid targets Pi AAOS — so `OcbmClient`, `VoiceRouter`, `AacPlayer`,
+`MicUplink` and the transports are separate implementations and are allowed to differ, and now so are
+the protocol files, within what the checker enforces. Deployment policy stays in the app: gm_ccpa's
+`BH_REQUIRED_BRIDGE` lives in its `SessionSupervisor`, not in the protocol file, because it deliberately
+does not require `BH_WLAN_AP` in a role where the head unit owns Wi-Fi.
 
 **Why this exists.** `CT_PROJ_MODE`, `CT_BOX_HEALTH`, the `BH_*` health bits, `F_REPLAY` and the whole
 `CH_FILE` opcode set were added to the box and picked up by the gm_ccpa client, while this repo's own

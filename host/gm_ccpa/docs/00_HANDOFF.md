@@ -1,6 +1,6 @@
 # SESSION HANDOFF — gm_ccpa (resume here)
 
-**Last updated: 2026-09-08.** This is the "where we left off" doc, kept short on purpose (see
+**Last updated: 2026-09-10.** This is the "where we left off" doc, kept short on purpose (see
 [Document policy](#document-policy) below). For what the system **is**, read
 [`04_SYSTEM_MODEL.md`](04_SYSTEM_MODEL.md) — canonical, outranks every architecture blurb elsewhere.
 Then [`05_SESSION_FLOW.md`](05_SESSION_FLOW.md) (wire-level session buildup, read §8 before writing any
@@ -13,6 +13,65 @@ Project root: `~/Documents/carlink/ccpa_custom/host/gm_ccpa` (this project was m
 on 2026-09-08 — see §9). The `evidence/` archive is NOT under this root: it lives in the standalone
 checkout at `~/Documents/carlink/old/gm_ccpa/evidence/`. Every bare `evidence/...` path in this doc set
 resolves there.
+
+
+## START HERE (2026-09-10): a full session was captured, and the truck is running OLD code
+
+**1. The 2026-09-09 capture is the new reference session.** Bundle
+`gmccpa_probe_20260909_225421` (+ `logcat.log`) carries the whole stack end to end with GM's own
+CarPlay service live throughout: pair-verify (57 ms), `/auth-setup` (1.69 s), SETUP 130/110/102,
+HEVC **first frame at 2.598 s from inbound**, 1358 frames / 0 AUs dropped, AAC-LC media, the iAP2
+metadata tunnel authenticating and Identifying, album art, mic uplink, touch, clean teardown.
+Canonical write-up and all the numbers: [`12_OBSERVED_FLOW.md`](12_OBSERVED_FLOW.md). It retires
+several "not yet exercised" claims — most importantly **T5.3's iAP2-tunnel MFi relay is now
+device-confirmed**, and the `:9004` metadata seam is live rather than deferred.
+
+**2. The truck is on `7c92000`; HEAD is `3e37616`.** Everything in `8cadba4` — six code fixes, the
+debloat reconciliation, the comment and doc corrections — has never run on hardware. Three FABLE
+verification passes on 2026-09-10 read the whole delta and found it **correct and
+behaviour-preserving** (`AacPlayer` publish/duck/stop rework; `SessionSupervisor` ladder trim and the
+`OcbmProbe`/`OcbmClient` self-test fix; the `LogCapture` package-derivation fix). So the next truck
+visit is a **deploy-and-verify** visit. Do not mark any ledger row device-verified from the
+2026-09-09 capture — it was taken from the older build.
+
+**3. Two adapters, interchangeable, one chipset difference.** Both run identical `ccpa_custom` OCBM
+firmware on identical hardware except the WLAN part — NXP IW416 and Realtek RTL8822CS — abstracted by
+the firmware's `radio_caps`. Nothing in this app is chipset-aware. Consequences worth knowing before
+debugging: the Realtek box must load its WLAN driver before Bluetooth will attach, so `wlan0` exists
+even with `wifi_ap:false` (which invalidated an old safety argument — see
+[`04_SYSTEM_MODEL.md`](04_SYSTEM_MODEL.md) §2), and the two boxes derive different identities
+(`CarLink-626a` / `CarLink-f867`), so a phone bonded to one holds no key for the other.
+
+**4. Nine new open items were filed from the capture**, all in
+[`11_HARDENING_PLAN.md`](11_HARDENING_PLAN.md): **A6–A9** (audio — 17 % of Siri AUs dropped, the duck
+pumping within one Siri turn, the rate-blind media buffer taking 6 underruns, and every voice sink
+built at a rate the HAL does not serve) and **N17–N21** (`av_idle_ms` not exported; an `ocbmd`
+restart between the MFi cert and sign leaving the new daemon nonce-less; MFi timeouts missing from
+`SessionSummary`; **no `SESSION v=1` line emitted at all** for a non-USB-attach launch; the stale
+`fixed-handler squat` banner). T6.4 is **closed, not open**: `CARPLAY_SCREEN_DUMP` is bounded to six lines
+per session by `frames < 6` in the receiver, so there was nothing to gate — an earlier claim in
+this doc set that it writes a line per video frame was wrong and is retracted.
+
+**5. Logging now reports absence, and a plain `adb logcat` is the intended capture.** `6c6ec79`
+added `logging/SessionTrace.kt`: `!! EXPECTED-MISSING` at ERROR when a step that should have
+followed an observed precondition does not arrive, `## STATUS` blocks carrying the standing state of
+~20 components, and severity that is judged rather than decorative — the 2026-09-09 session logged
+634 `I` / 7 `W` / **0 `E`** while containing a 15 s MFi timeout, 42 dropped Siri AUs and 6
+underruns. **Filter with two greps, not one**: `grep NETPROBE` for our narrative AND
+`awk '$3==<pid>'` for the ~250 framework lines the app causes under `CCodec`/`MediaCodec`/
+`BufferQueueProducer`, which are what separate an app fault from a platform one. The `IDENTITY`
+anchor line exists to make that PID filter constructible. Recipe in
+[`06_BRINGUP_RUNBOOK.md`](06_BRINGUP_RUNBOOK.md) §8.3.
+
+**6. `crates/` and `ccpa/` Rust is STATIC — do not change it** (owner, 2026-09-10). It is proven on
+the box and in the macOS host and this app is one of three consumers. Where the honest fix is
+upstream, record it and solve it in Kotlin or not at all. N17 is now blocked by this rather than
+merely open; A11 landed Kotlin-only because of it.
+
+**7. One methodology fix before the next capture.** The recon script runs `pm list packages -f` with
+no `--user`, so it enumerates user 0 only and this app — installed to user 10 — is absent from its
+own probe. Do not read package removals from it; see the trap note in
+[`01_FINDINGS.md`](01_FINDINGS.md) §3.
 
 
 ## CarPlay dynamic resize + AAOS display modes (2026-09-08) — DEVICE-PROVEN
@@ -45,7 +104,7 @@ Both rects are static constants for this panel — nothing measured or awaited a
 3. **Crop, do not scale; toggle visibility, not layout.** Both failure modes are written up in §4d
    with the exact symptoms (59%-and-mispositioned, and the 377,236 offset). The 377,236 case was
    misdiagnosed three times by inference before the device evidence already in this repo settled it —
-   `evidence/drive_20260818-132220/headunit.log:5762` and `06_BRINGUP_RUNBOOK.md:352-354` had the
+   `evidence/drive_20260818-132220/headunit.log:5762` and the `mAppBounds` / system-bar-inset rows of the `06_BRINGUP_RUNBOOK.md` §6.4 geometry table had the
    answer the whole time.
 
 ### Still open on this feature
@@ -90,8 +149,11 @@ What landed:
   since 2026-09-03 the box no longer auto-accepts in numeric-comparison mode — it waits 55 s for this
   and gives up. Without it, switching pairing modes is impossible.
 - **Package squat reverted**: `android.car.usb.handler` -> `zeno.gmccpa`, and
-  `UsbHostManagementActivity` -> `zeno.gmccpa.UsbAttachActivity`. Owner's call. The silent per-UID USB
-  grant is gone; the ordinary attach resolver and its one-time permission dialog replace it.
+  `UsbHostManagementActivity` -> `zeno.gmccpa.UsbAttachActivity`. Owner's call. **Corrected
+  2026-09-10: the squat never delivered what it was for.** This entry used to say "the silent
+  per-UID USB grant is gone", implying the squat had been providing one. It was not — the app still
+  needed the user to grant permission for the adapter, so nothing was lost by reverting. The
+  ordinary attach resolver and its one-time "always open" dialog are now the only route in.
 
 Proven on the head unit (gminfo37, `W231E-Y181.3.2`, API 32) 2026-09-08: fresh BT pair, iAP2 Identify,
 `0x5703` handoff, phone onto the vehicle SoftAP, pair-verify, `/auth-setup`, 4 MFi ops relayed over
@@ -126,7 +188,7 @@ restored-session path put the box's mirrors and the supervisor's transitions in 
 
 ### Still open after this session
 
-- `Ui.kt:149-151` hard-codes the vehicle SSID and passphrase, and the unattended start now depends on
+- `Ui.kt` hard-codes the vehicle SSID and passphrase (the `LauncherUi.ssid` / `LauncherUi.pass` defaults), and the unattended start now depends on
   it. Move to a stored preference.
 - The box advertises `Hands-Free` and `Headset` SDP records on every wireless bring-up (2026-09-03).
   iOS enumerated both without hijacking telephony in this session, but a real call is untested. The
@@ -134,15 +196,22 @@ restored-session path put the box's mirrors and the supervisor's transitions in 
 - `tools/test.sh` still never compiles Kotlin; Kotlin regressions surface only at packaging time.
 
 
-## OcbmProto.kt is now a symlink into ccpa_custom (2026-08-31)
+## OcbmProto.kt is app-owned again (forked 2026-09-11; was a symlink 2026-08-31 .. 2026-09-11)
 
-`netprobe_app/app/src/main/java/zeno/gmccpa/ocbm/OcbmProto.kt` is a relative symlink to
-`ccpa_custom/host/CarlinkAndroid/app/src/main/kotlin/com/carlink/ocbm/OcbmProto.kt`. Owner's call:
-the protocol is edited once, in the main project. Consequences for anyone working here:
+`netprobe_app/app/src/main/java/zeno/gmccpa/ocbm/OcbmProto.kt` is a regular file in `package
+zeno.gmccpa.ocbm`. From 2026-08-31 it was a relative symlink into
+`ccpa_custom/host/CarlinkAndroid/app/src/main/kotlin/com/carlink/ocbm/OcbmProto.kt` ("edit the protocol
+once, in the main project"), which made sense when gm_ccpa was a separate checkout and did not once it
+was in-tree: CarlinkAndroid is dormant and behind the current OCBM protocol, and this app and the macOS
+host are the implementations that ship — the link pointed ownership the wrong way. The fork was born
+byte-identical to the CarlinkAndroid copy except the package line, so any later divergence is a
+deliberate edit here. Consequences for anyone working here:
 
-- The file declares `package com.carlink.ocbm`, so the six consumers import it explicitly
-  (`OcbmFraming`, `OcbmProbe`, `OcbmClient`, `logging/SessionSummary`, `MainActivity`,
-  `SessionSupervisor`). Kotlin does not require package to match directory.
+- `crates/ocbm-proto` is still canonical for the wire; `ccpa_custom/tools/proto_check.py` now checks
+  this file by default (no root argument — it rejects one) and `tools/test.sh` Tier-0 runs it.
+- Same-package now, so `OcbmFraming`, `OcbmProbe` and `OcbmClient` no longer import it; the consumers
+  outside the package (`logging/SessionSummary`, `MainActivity`, `SessionSupervisor`,
+  `UsbAttachActivity`) import `zeno.gmccpa.ocbm.Ocbm`.
 - `BH_REQUIRED_BRIDGE` moved OUT of the protocol file into `SessionSupervisor.kt`, where it belongs:
   it is this deployment's policy (no `BH_WLAN_AP` required in the bridge role), not protocol.
 - The shared file is a superset of what this app previously had — verified with kotlinc + javap on the
@@ -151,9 +220,10 @@ the protocol is edited once, in the main project. Consequences for anyone workin
 - The MFi correlation tag is now in the canonical Rust (`MFI_TAG_LEN`), in `ocbmd`, and in the shared
   Kotlin (`Mfi.certRequest(tag)`, `signRequest(digest, tag)`, `Response.tag`, tag-aware `parse`), with
   null defaults so untagged callers are unaffected.
-- **Verified:** `tools/build_apk.sh` builds clean against the symlink (2,626,224 B APK, all app
-  sources compiled against android.jar API 32 and dexed), and `tools/test.sh` Tier-0 is green
-  including its OCBM conformance step. To undo: restore the file from git and drop the six imports.
+- Pending content fixes to this file (the `Mfi.parse` length guard, `META_SEAM_MAGIC` mutability, the
+  stale airplayd comments, the `bhString` label, RETIRED markers on `LOG_SRC_RX_CONNECT/_WL`) were
+  blocked by the link and are unblocked by the fork; they are a separate decision and were NOT folded
+  into it, so the fork commit is reviewable as a pure move.
 
 ## 0. What this is
 
@@ -211,11 +281,11 @@ now `ASSISTANT_HOLD_MS + 1` sweep period. `reclaimFocus()` covers the separate *
    `/etc/hostapd.conf`, **re-assert `/tmp/no_escalate`** (tmpfs, self-clears on reboot — the first flap
    re-arms the reboot ladder). Record GM `CarplayService`/`:7000` state — coexistence is solved (§6), so
    it being held is expected, not a blocker.
-2. **T-REG the golden APK first** to prove the rig, *then* `apk/netprobe-debug-latest.apk`. The golden
+2. **T-REG the golden APK first** to prove the rig, *then* the sha-stamped build the compile printed. The golden
    build is not in this tree — install it from the archive:
    `adb install -r ../../../gm_ccpa/apk/netprobe-debug-v4.0.apk` (tag `baseline-2026-08-05-working`,
    which likewise exists only in that repo — see §9). Acceptance: `FIRST FRAME RENDERED`, `FIRST
-   AUDIO FRAME PLAYED`, a touch `sent=true`, `av_stats` detach/reattach, 60 s soak, 4–5 ESTABLISHED
+   AUDIO FRAME PLAYED`, a touch `sent=true`, a renderer detach/reattach, 60 s soak, 4–5 ESTABLISHED
    sockets, 0 AUs dropped at teardown.
 3. **Truck-test the remaining audio paths**: the **alert** sink, **mic uplink** end to end, the
    duck-and-return interplay, and the `onSessionEnded`/`reclaimFocus` fixes. (Media, Siri, call and nav
@@ -250,10 +320,11 @@ now `ASSISTANT_HOLD_MS + 1` sweep period. `reclaimFocus()` covers the separate *
    the canonical build (`tools/build_apk.sh`) is a raw `kotlinc` compile that generates no
    BuildConfig, and the module does not set `buildFeatures { buildConfig true }`. **The operator can
    copy-paste what the app prints again.** Remaining `android.car.usb.handler` hits in the tree are
-   deliberate historical comments (manifest header, `UsbAttachActivity.kt`, `build_apk.sh:33`).
+   deliberate historical comments (manifest header, `UsbAttachActivity.kt`, the `SRCDIR` header comment in `build_apk.sh`).
    Verified by a green `tools/build_apk.sh` only — compilation, not on-device behaviour.
-5. **Archive `--es run dump_setup` hex into the standalone checkout's `evidence/`** on first contact
-   (`evidence/` is gitignored here — see §9).
+5. ~~Archive `--es run dump_setup` hex into `evidence/`~~ — dropped 2026-09-11 with the verb: the
+   native core never sets `CARPLAY_SETUP_DUMP`, so there were no files to read, and the feature
+   tokens the phone proposes are in the SETUP phase2 log lines (`carplay-jni/src/lib.rs`).
 
 Universal fallback: reinstall the golden APK (`versionCode` unchanged across R0–R4, pairing survives).
 
@@ -286,9 +357,9 @@ further action.
   (`gmccpa-rx.local`, `MdnsResponder.kt`) — detail in `12_OBSERVED_FLOW.md` Failure Point 3.
 - **The app installs as `zeno.gmccpa`** (labelled "GM CCPA"). The package squat on the GM USB
   fixed-handler name (`android.car.usb.handler`) was reverted (2026-09-08) — TRUCK-VERIFIED; `zeno.gmccpa`
-  is now the app's real installed package, not just the source-code package, and there is no longer a
-  silent USB-permission grant — the app goes through the ordinary attach resolver and its one-time
-  permission dialog. `am`/`appops`/`pm
+  is now the app's real installed package, not just the source-code package. The app goes through the
+  ordinary attach resolver and its one-time permission dialog — as it effectively did under the squat
+  too, since **the squat did not actually remove the permission requirement** (owner, 2026-09-10). `am`/`appops`/`pm
   grant`/`force-stop`/`uninstall`/`dumpsys package` all take `zeno.gmccpa`. Install to
   **user 10** (a user-0 install does not get the attach dialog / `ACTION_USB_DEVICE_ATTACHED` routing):
   `adb install -i com.android.vending -r -g --user 10 <apk>`.
@@ -408,8 +479,13 @@ shim, a separate HEVC renderer (the salvage app is H.264-only PCM).
   `30.0.15729638`, target `x86_64-linux-android` (the head unit is x86_64, not arm64), **not**
   `cargo-ndk` (panics on this workspace) — recipe in `06` §5d. Use `~/.cargo/bin/cargo`; Homebrew's
   cargo shadows rustup and cannot add cross-targets.
-- **APKs:** `tools/build_apk.sh` emits `apk/netprobe-debug-<sha>.apk` and repoints
-  `apk/netprobe-debug-latest.apk`. `apk/` is gitignored here and starts empty on a fresh clone. The
+- **APKs:** `tools/build_apk.sh` emits `apk/gmccpa-debug-<sha>.apk` and repoints
+  no "latest" symlink — it prints the exact path and a ready-made `adb install` line instead
+  (the symlink was removed 2026-09-10: pinned `versionCode` + a link surviving a failed build meant
+  `-r` could silently install stale code on the truck). **Renamed from `netprobe-debug-*` on 2026-09-10** — the app stopped
+  being "NetProbe" in 2026-08 and installs as `zeno.gmccpa` / "GM CCPA", so the artifact name was the
+  last place the old identity survived. The frozen golden build keeps its historical name (below):
+  it is a real file in the archive, not a generated one. `apk/` is gitignored here and starts empty on a fresh clone. The
   frozen golden build `netprobe-debug-v4.0.apk` (tag `baseline-2026-08-05-working`) lives only in the
   standalone `gm_ccpa` archive — see §9. `versionCode` stays 7 through R0–R4 so rollback is a plain
   `adb install -r` that keeps `carplay_peers.bin` (existing pairing).
@@ -459,7 +535,7 @@ docs/                      reading order: 04 -> 05 -> evidence/session_2026-08-0
 netprobe_app/              the Kotlin app: ocbm/ · pair/ · av/ · CarPlayRx · MainActivity (instrument)
 native/carplay-jni/        the Rust core — JNI over ccpa_custom's receiver/pairing/mfi crates
 apk/                       gitignored build output, empty on a fresh clone:
-                           netprobe-debug-latest.apk (symlink) · -<sha>.apk builds.
+                           gmccpa-debug-<sha>.apk builds; no 'latest' symlink.
                            v4.0 = GOLDEN / rollback target — in the archive, not here.
 tools/                     build_apk.sh (canonical, android-32) · test.sh (Tier-0 gate) ·
                            adb_radio_probe.sh · deepprobe.sh · tri_capture.sh

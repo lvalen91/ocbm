@@ -1,6 +1,5 @@
 package zeno.gmccpa.ocbm
 
-import com.carlink.ocbm.Ocbm
 /**
  * OCBM framing — a byte-faithful port of the `Header` / `frame()` / `Reassembler` trio in
  * `ccpa_custom/crates/ocbm-proto/src/lib.rs`.

@@ -85,9 +85,9 @@ US
  3899    05:54:56 sh -c cd /data/local/tmp && /apex/com.android.hardware.wifi.hostapd.rpi/bin/hw/hostapd -dd hostapd_5g.conf
  3901    05:54:56 hostapd -dd hostapd_5g.conf
  7081    04:38:04 apdhcpd --iface wlan0
-25114       21:58 sh -c cd /data/local/tmp && CARPLAY_HCI_BACKEND=native CARPLAY_RFCOMM_BACKEND=userspace CARPLAY_MFI_ADDR=192.168.50.2:7789 CARPLAY_HOSTAPD_CONF=/data/local/tmp/hostapd_5g.conf CARPLAY_STATE_DIR=/data/local/tmp/carplay PEERSTORE_PATH=/data/local/tmp/carplay/carplay_peers.bin CARPLAY_CFG_FILE=/data/user/10/com.carlink.projection/files/carplay_cfg.yaml AIRPLAYD_BIN=/data/local/tmp/carplayd RX_CONNECT_BIN=/data/local/tmp/rx-connect nohup ./btd > /data/local/tmp/wireless.log 2>&1 < /dev/null &
-25115       21:58 btd
-25136       21:49 carplayd
+25114       21:58 sh -c cd /data/local/tmp && CARPLAY_HCI_BACKEND=native CARPLAY_RFCOMM_BACKEND=userspace CARPLAY_MFI_ADDR=192.168.50.2:7789 CARPLAY_HOSTAPD_CONF=/data/local/tmp/hostapd_5g.conf CARPLAY_STATE_DIR=/data/local/tmp/carplay PEERSTORE_PATH=/data/local/tmp/carplay/carplay_peers.bin CARPLAY_CFG_FILE=/data/user/10/com.carlink.projection/files/carplay_cfg.yaml AIRPLAYD_BIN=/data/local/tmp/airplayd RX_CONNECT_BIN=/data/local/tmp/rx-connect nohup ./carplay-wireless > /data/local/tmp/wireless.log 2>&1 < /dev/null &
+25115       21:58 carplay-wireless
+25136       21:49 airplayd
 25148       21:48 rx-connect
 
 ## listening sockets
@@ -100,9 +100,9 @@ LISTEN      0      2       [::ffff:127.0.0.1]:9003                     *:*
 LISTEN      0      2       [::ffff:127.0.0.1]:9001                     *:*                  
 
 ## deployed binaries
--rwxr-xr-x 1 root root 1677248 2026-08-16 15:43 /data/local/tmp/carplayd
+-rwxr-xr-x 1 root root 1677248 2026-08-16 15:43 /data/local/tmp/airplayd
 -rwxr-xr-x 1 root root  301240 2026-08-16 11:27 /data/local/tmp/apdhcpd
--rwxr-xr-x 1 root root  472600 2026-08-16 15:43 /data/local/tmp/btd
+-rwxr-xr-x 1 root root  472600 2026-08-16 15:43 /data/local/tmp/carplay-wireless
 -rwxr-xr-x 1 root root  539128 2026-08-16 10:56 /data/local/tmp/rx-connect
 
 ## bonded phones

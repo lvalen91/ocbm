@@ -106,7 +106,7 @@ object MdnsInspect {
 
             // The verdict that matters: does the published set include the hotspot bridge address,
             // and does it ALSO include addresses the phone cannot route to?
-            val br0 = brIface()?.inetAddresses?.toList()?.mapNotNull { it.hostAddress?.substringBefore('%') } ?: emptyList()
+            val br0 = br0Addrs()
             val onBr0 = addrs.any { a -> br0.any { it == a } }
             val strays = addrs.filter { a -> br0.none { it == a } }
             log.i("br0 addresses: ${br0.joinToString(", ")}")
@@ -219,7 +219,7 @@ object MdnsInspect {
         val out = ArrayList<String>()
         for (i in 0 until an) {
             if (pos >= len) break
-            val (nm, after) = readName(data, pos, len)
+            val (nm, after) = dnsReadName(data, pos, len)
             val type = u16(after); val rdlen = u16(after + 8); val rd = after + 10
             if (nm.equals(want, true)) {
                 if (type == 1 && rdlen == 4) out.add("%d.%d.%d.%d".format(
@@ -271,10 +271,10 @@ object MdnsInspect {
         val addrs = ArrayList<Pair<String, String>>()
         for (i in 0 until an) {
             if (pos >= len) break
-            val (nm, after) = readName(data, pos, len)
+            val (nm, after) = dnsReadName(data, pos, len)
             val type = u16(after); val rdlen = u16(after + 8); val rd = after + 10
             when (type) {
-                33 -> if (nm.equals(want, true)) { srvPort = u16(rd + 4); srvTarget = readName(data, rd + 6, len).first }
+                33 -> if (nm.equals(want, true)) { srvPort = u16(rd + 4); srvTarget = dnsReadName(data, rd + 6, len).first }
                 1 -> if (rdlen == 4) addrs.add(nm to "%d.%d.%d.%d".format(
                     data[rd].toInt() and 0xFF, data[rd + 1].toInt() and 0xFF,
                     data[rd + 2].toInt() and 0xFF, data[rd + 3].toInt() and 0xFF))
@@ -299,21 +299,4 @@ object MdnsInspect {
         return pos
     }
 
-    private fun readName(data: ByteArray, start: Int, len: Int): Pair<String, Int> {
-        val sb = StringBuilder(); var pos = start; var jumped = false; var after = start; var guard = 0
-        while (pos < len && guard++ < 128) {
-            val b = data[pos].toInt() and 0xFF
-            if (b == 0) { if (!jumped) after = pos + 1; break }
-            if (b and 0xC0 == 0xC0) {
-                val ptr = ((b and 0x3F) shl 8) or (data[pos + 1].toInt() and 0xFF)
-                if (!jumped) after = pos + 2
-                pos = ptr; jumped = true; continue
-            }
-            pos += 1
-            if (pos + b > len) break
-            if (sb.isNotEmpty()) sb.append('.')
-            sb.append(String(data, pos, b, Charsets.UTF_8)); pos += b
-        }
-        return Pair(sb.toString(), after)
-    }
 }

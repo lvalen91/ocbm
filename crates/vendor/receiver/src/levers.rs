@@ -397,10 +397,14 @@ mod tests {
     fn view_area_anim_ms_clamps_to_nearest_bound_and_passes_in_range() {
         assert_eq!(VIEW_AREA_ANIM_MS_DEFAULT, 3000, "absent-key wire must stay 3000");
         assert_eq!(clamp_view_area_anim_ms(3000), 3000);
-        assert_eq!(clamp_view_area_anim_ms(0), 0);
+        // FLOOR IS 1000, not 0 — raised by the owner 2026-09-09 (see VIEW_AREA_ANIM_MS_RANGE).
+        // These four assertions still expected the old 0 floor and were left behind by that
+        // change, which is what turned Tier-0 red from f836a2b onward (found 2026-09-10).
+        assert_eq!(clamp_view_area_anim_ms(1000), 1000, "the floor itself passes through");
+        assert_eq!(clamp_view_area_anim_ms(0), 1000);
         assert_eq!(clamp_view_area_anim_ms(10_000), 10_000);
-        assert_eq!(clamp_view_area_anim_ms(-1), 0);
-        assert_eq!(clamp_view_area_anim_ms(i64::MIN), 0);
+        assert_eq!(clamp_view_area_anim_ms(-1), 1000);
+        assert_eq!(clamp_view_area_anim_ms(i64::MIN), 1000);
         assert_eq!(clamp_view_area_anim_ms(10_001), 10_000);
         assert_eq!(clamp_view_area_anim_ms(i64::MAX), 10_000);
         // The setter reports what it stored, and the getter reads the same (clamped) cell.

@@ -1889,7 +1889,8 @@ metadata:
         assert_eq!(null.view_area_anim_ms(), 3000, "explicit null must behave as absent");
         let set = VehicleConfig::from_yaml(b"name: X\nview_area_anim_ms: 1000\n").unwrap();
         assert_eq!(set.view_area_anim_ms(), 1000);
-        // In-range bounds pass through untouched.
+        // The CONFIG carries any integer verbatim — clamping is the lever's job, not the parser's —
+        // so 0 still round-trips here even though the lever floor is now 1000 (owner, 2026-09-09).
         assert_eq!(VehicleConfig::from_yaml(b"view_area_anim_ms: 0\n").unwrap().view_area_anim_ms(), 0);
         assert_eq!(
             VehicleConfig::from_yaml(b"view_area_anim_ms: 10000\n").unwrap().view_area_anim_ms(),
@@ -1902,7 +1903,9 @@ metadata:
         assert_eq!(crate::levers::clamp_view_area_anim_ms(big.view_area_anim_ms()), 10000);
         let neg = VehicleConfig::from_yaml(b"view_area_anim_ms: -5\n").unwrap();
         assert_eq!(neg.view_area_anim_ms(), -5);
-        assert_eq!(crate::levers::clamp_view_area_anim_ms(neg.view_area_anim_ms()), 0);
+        // Clamps UP to the 1000 ms floor, not to 0 — this assertion was left behind when the floor
+        // was raised on 2026-09-09 and is the second half of the Tier-0 red found 2026-09-10.
+        assert_eq!(crate::levers::clamp_view_area_anim_ms(neg.view_area_anim_ms()), 1000);
         // A non-integer is a TYPE error: the whole document is rejected, exactly like a mistyped
         // Apple key, and carplayd falls back to its built-in default config (loudly).
         assert!(VehicleConfig::from_yaml(b"view_area_anim_ms: fast\n").is_err());

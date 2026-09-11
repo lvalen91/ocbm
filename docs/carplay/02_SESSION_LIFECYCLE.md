@@ -1438,7 +1438,7 @@ Harness: `tools/capture_iphone_carplay.v2.sh` — the committed successor to thi
 `scratchpad/capture_iphone_carplay.sh` (path updated 2026-08-16; docs/carplay/05_METADATA_AND_CONTROLS.md §6 and docs/ops/02_TESTING.md gate 4 use the
 same tool). It streams the filtered set live, then pulls a full
 `.logarchive` via `idevicesyslog archive`, which is queryable offline with
-`log show --archive … --predicate 'process == "carplayd"' --info --debug`.
+`log show --archive … --predicate 'process == "airplayd"' --info --debug`.
 
 **Known limitation:** ~34% of lines carry `<private>` redaction under the default configuration.
 
@@ -1847,7 +1847,7 @@ Facts are marked **[observed]** (seen directly in logs/state) vs **[inferred]** 
 ### What was NOT the cause
 
 - **The `connect-out` failures were symptoms, not the bug.** The working capture
-  (`docs/ops/captures/2026-07-09_rx-connect.log`) shows the *same code* connecting via IPv6 link-local and
+  (`docs/ops/captures/2026-07-09_rx_connect.log`) shows the *same code* connecting via IPv6 link-local and
   returning `HTTP/1.1 200 OK`; the trailing IPv4 `169.254.x` `ENETUNREACH` is documented there as failing
   *harmlessly* because IPv6 already succeeded. The errors reflected the flapping `ncm0` (down / ifindex
   churn), not a missing `169.254` address, absent `zcip`, or rx-connect scope handling.
