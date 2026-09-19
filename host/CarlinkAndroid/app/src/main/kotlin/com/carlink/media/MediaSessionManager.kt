@@ -9,6 +9,8 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.view.KeyEvent
+import androidx.core.content.IntentCompat
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
@@ -267,7 +269,19 @@ class MediaSessionManager(
         fun onSkipToNext()
 
         fun onSkipToPrevious()
+
+        /** KEYCODE_MEDIA_PLAY_PAUSE — the dedicated toggle; the phone owns which half it means. */
+        fun onPlayPause() {}
+
+        /** A SHORT KEYCODE_HEADSETHOOK press. The consumer decides (answer a ringing call, else toggle). */
+        fun onHeadsetHook() {}
+
+        /** Headset-hook long-press or an explicit voice-assist key: trigger the phone's assistant. */
+        fun onVoiceAssist() {}
     }
+
+    /** Raw media-button decoder; touched only on the session's application thread (main). */
+    private val keyDecoder = MediaKeyDecoder()
 
     private var player: UsbAdapterPlayer? = null
     private var mediaSession: MediaLibrarySession? = null
@@ -658,6 +672,35 @@ class MediaSessionManager(
             }
 
             /**
+             * Raw media-button KeyEvents — how a steering wheel or a headset button arrives once
+             * this session is the active one (the 3P substitute for a projection key handler).
+             *
+             * Handled here rather than left to Media3's default mapping for two reasons:
+             * PLAY_PAUSE must reach iOS as the dedicated HID toggle (Media3 would split it into
+             * play() or pause() from a mirrored `playWhenReady` that lags the phone), and the
+             * HEADSETHOOK hold / VOICE_ASSIST keys have no Player command at all. Keys the
+             * decoder does not own fall through to the default.
+             */
+            override fun onMediaButtonEvent(
+                session: MediaSession,
+                controller: MediaSession.ControllerInfo,
+                intent: Intent,
+            ): Boolean {
+                val ev =
+                    IntentCompat.getParcelableExtra(intent, Intent.EXTRA_KEY_EVENT, KeyEvent::class.java)
+                        ?: return super.onMediaButtonEvent(session, controller, intent)
+                return when (val d = keyDecoder.decode(ev.keyCode, ev.action, ev.repeatCount, ev.isLongPress)) {
+                    MediaKeyDecoder.Decoded.Unhandled -> super.onMediaButtonEvent(session, controller, intent)
+                    MediaKeyDecoder.Decoded.Ignore -> true
+                    is MediaKeyDecoder.Decoded.Fire -> {
+                        log("[MEDIA_SESSION] media key ${ev.keyCode} from ${controller.packageName} -> ${d.action}")
+                        dispatchKey(d.action)
+                        true
+                    }
+                }
+            }
+
+            /**
              * Defensive sink for "play from media id" requests routed through Media3's
              * legacy bridge. On Silverado AAOS 12 the cluster's steering-wheel favorite
              * button (keycodes 137/138) reaches `GMMediaKeyService` which may dispatch
@@ -729,6 +772,19 @@ class MediaSessionManager(
      * Callback runs on the main thread per SimpleBasePlayer's contract; we forward
      * synchronously so CarlinkManager's sendKey() sees main-thread callbacks as before.
      */
+    private fun dispatchKey(action: MediaKeyAction) {
+        val cb = sharedControlCallback ?: return
+        when (action) {
+            MediaKeyAction.PLAY -> cb.onPlay()
+            MediaKeyAction.PAUSE -> cb.onPause()
+            MediaKeyAction.PLAY_PAUSE -> cb.onPlayPause()
+            MediaKeyAction.NEXT -> cb.onSkipToNext()
+            MediaKeyAction.PREVIOUS -> cb.onSkipToPrevious()
+            MediaKeyAction.HEADSET_HOOK -> cb.onHeadsetHook()
+            MediaKeyAction.VOICE_ASSIST -> cb.onVoiceAssist()
+        }
+    }
+
     private val playerCallback =
         object : UsbAdapterPlayer.Callback {
             override fun onPlay() {
@@ -923,14 +979,9 @@ class MediaSessionManager(
      * @param albumArt raw JPEG/PNG bytes from the adapter (nullable)
      * @param duration total track duration in ms (0 if unknown)
      */
-    fun updateMetadata(
-        title: String?,
-        artist: String?,
-        album: String?,
-        appName: String?,
-        albumArt: ByteArray?,
-        duration: Long = 0L,
-    ) {
+    fun updateMetadata(info: NowPlayingInfo) {
+        val albumArt = info.albumArt
+        val duration = info.durationMs
         // Hold sessionLock across the entire read+decide+publish so release()
         // cannot null out player/mediaSession in the middle. The lock is reentrant;
         // the inner publishMediaMetadata's synchronized(sessionLock) re-acquisition
@@ -947,22 +998,7 @@ class MediaSessionManager(
             // session showed the "Not connected" placeholder for the rest of the drive.
             // Cheap no-op when already active (see UsbAdapterPlayer.requestedSessionActive).
             if (!placeholderForced) p.setSessionActive(true)
-            // Identity-cached content hash: contentHashCode() is O(n) over the full JPEG
-            // (tens-hundreds of KB) and this runs on the USB read thread for EVERY frame
-            // that carries cover bytes — the adapter typically re-delivers the same array.
-            val hash =
-                albumArt?.let {
-                    when {
-                        it.isEmpty() -> 0
-                        it === lastHashedArtRef -> lastHashedArtValue
-                        else -> {
-                            val h = it.contentHashCode()
-                            lastHashedArtRef = it
-                            lastHashedArtValue = h
-                            h
-                        }
-                    }
-                } ?: 0
+            val hash = artHash(albumArt)
             currentDurationMs = if (duration > 0) duration else 0L
 
             // PRIMARY carrier: raw ByteArray for MediaMetadata.setArtworkData.
@@ -986,77 +1022,81 @@ class MediaSessionManager(
 
             publishMetadata(
                 player = p,
-                title = title,
-                artist = artist,
-                album = album,
-                appName = appName,
-                duration = duration,
+                info = info,
                 artBytes = artBytesForNow,
                 artUri = artUriForNow,
             )
 
-            // ADDITIVE carrier: off-main file write → URI published once verified.
-            // Cancellation caveat (unchanged from legacy): lastArtJob?.cancel() stops
-            // the coroutine mid-flight, but a mainHandler.post already queued still
-            // runs. All fields used inside the post are captured at launch time, so
-            // the stale post publishes a CONSISTENT older-song tuple — never a
-            // mismatched hash/URI/text pair. Relies on single-producer (USB read
-            // thread).
-            if (albumArt != null && hash != lastArtHash) {
-                lastArtJob?.cancel()
-                val generation = ++artGeneration
-                val titleCapture = title
-                val artistCapture = artist
-                val albumCapture = album
-                val appNameCapture = appName
-                val durationCapture = duration
-                val bytesCapture = artBytesForNow
-                // artDispatcher (single-threaded): serializes put() calls — cancel() can't
-                // stop a blocking put mid-flight, and on the IO pool two jobs could write
-                // the same cache file concurrently and complete out of order.
-                lastArtJob =
-                    scope.launch(artDispatcher) {
-                        val uri =
-                            try {
-                                albumArtCache.put(albumArt)
-                            } catch (e: Exception) {
-                                log("[MEDIA_SESSION] AlbumArtCache.put failed: ${e.message}")
-                                null
-                            }
-                        if (uri == null) return@launch // Inline bytes already render; skip URI publish.
-                        mainHandler.post {
-                            synchronized(sessionLock) {
-                                // Superseded: a newer track's art request (or setInactive/
-                                // release) invalidated this one. Committing anyway used to pin
-                                // the OLD track's captured text+art for the entire new track
-                                // and revoke the new track's live URI mid-fetch.
-                                if (generation != artGeneration) return@synchronized
-                                val p2 = player ?: return@synchronized
-                                // Revoke the previous art's grants before replacing — any
-                                // already-issued controllers will re-resolve through the new
-                                // URI on the metadata update that publishMetadata will fire.
-                                lastArtUri?.takeIf { it != uri }?.let { revokeUriFromConsumers(it) }
-                                lastArtHash = hash
-                                lastArtUri = uri
-                                publishMetadata(
-                                    player = p2,
-                                    title = titleCapture,
-                                    artist = artistCapture,
-                                    album = albumCapture,
-                                    appName = appNameCapture,
-                                    duration = durationCapture,
-                                    artBytes = bytesCapture,
-                                    artUri = uri,
-                                )
-                            }
-                        }
-                    }
-            }
+            // ADDITIVE carrier: see scheduleArtUri.
+            if (albumArt != null && hash != lastArtHash) scheduleArtUri(info, albumArt, hash, artBytesForNow)
             log(
-                "[MEDIA_SESSION] Metadata updated: $title - $artist " +
+                "[MEDIA_SESSION] Metadata updated: ${info.title} - ${info.artist} " +
                     "(inlineBytes=${artBytesForNow != null}, uriPending=${albumArt != null && hash != lastArtHash})",
             )
         }
+    }
+
+    /**
+     * Identity-cached content hash: contentHashCode() is O(n) over the full JPEG (tens-hundreds
+     * of KB) and this runs on the USB read thread for EVERY frame that carries cover bytes — the
+     * adapter typically re-delivers the same array. Caller holds [sessionLock].
+     */
+    private fun artHash(albumArt: ByteArray?): Int {
+        if (albumArt == null || albumArt.isEmpty()) return 0
+        if (albumArt === lastHashedArtRef) return lastHashedArtValue
+        val h = albumArt.contentHashCode()
+        lastHashedArtRef = albumArt
+        lastHashedArtValue = h
+        return h
+    }
+
+    /**
+     * ADDITIVE art carrier: off-main file write, then the URI is published once verified. Caller
+     * holds [sessionLock]; `scope.launch` only enqueues.
+     *
+     * Cancellation caveat (unchanged from legacy): `lastArtJob?.cancel()` stops the coroutine
+     * mid-flight, but a mainHandler.post already queued still runs. Everything used inside the
+     * post is captured at launch time, so a stale post publishes a CONSISTENT older-song tuple —
+     * never a mismatched hash/URI/text pair. Relies on single-producer (USB read thread).
+     */
+    private fun scheduleArtUri(
+        info: NowPlayingInfo,
+        albumArt: ByteArray,
+        hash: Int,
+        artBytes: ByteArray?,
+    ) {
+        lastArtJob?.cancel()
+        val generation = ++artGeneration
+        // artDispatcher (single-threaded): serializes put() calls — cancel() can't stop a
+        // blocking put mid-flight, and on the IO pool two jobs could write the same cache file
+        // concurrently and complete out of order.
+        lastArtJob =
+            scope.launch(artDispatcher) {
+                val uri =
+                    try {
+                        albumArtCache.put(albumArt)
+                    } catch (e: Exception) {
+                        log("[MEDIA_SESSION] AlbumArtCache.put failed: ${e.message}")
+                        null
+                    }
+                if (uri == null) return@launch // Inline bytes already render; skip URI publish.
+                mainHandler.post {
+                    synchronized(sessionLock) {
+                        // Superseded: a newer track's art request (or setInactive/release)
+                        // invalidated this one. Committing anyway used to pin the OLD track's
+                        // captured text+art for the entire new track and revoke the new track's
+                        // live URI mid-fetch.
+                        if (generation != artGeneration) return@synchronized
+                        val p2 = player ?: return@synchronized
+                        // Revoke the previous art's grants before replacing — already-issued
+                        // controllers re-resolve through the new URI on the metadata update.
+                        lastArtUri?.takeIf { it != uri }?.let { revokeUriFromConsumers(it) }
+                        lastArtHash = hash
+                        lastArtUri = uri
+                        publishMetadata(player = p2, info = info, artBytes = artBytes, artUri = uri)
+                    }
+                }
+            }
     }
 
     /**
@@ -1071,14 +1111,15 @@ class MediaSessionManager(
      */
     private fun publishMetadata(
         player: UsbAdapterPlayer,
-        title: String?,
-        artist: String?,
-        album: String?,
-        appName: String?,
-        duration: Long,
+        info: NowPlayingInfo,
         artBytes: ByteArray?,
         artUri: Uri?,
     ) {
+        val title = info.title
+        val artist = info.artist
+        val album = info.album
+        val appName = info.appName
+        val duration = info.durationMs
         synchronized(sessionLock) {
             try {
                 val builder =
@@ -1099,6 +1140,15 @@ class MediaSessionManager(
                         .setArtist(artist ?: "Unknown")
                         .setAlbumTitle(album ?: "")
                         .setSubtitle(appName ?: "Carlink")
+                        // The source app, in the slot AAOS Media Center labels as the station /
+                        // source line; harmless where it is not rendered.
+                        .setStation(appName)
+                        .setGenre(info.genre)
+                        .setComposer(info.composer)
+                        .setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC)
+                        .setIsPlayable(true)
+                if (info.trackNumber > 0) builder.setTrackNumber(info.trackNumber)
+                if (info.trackCount > 0) builder.setTotalTrackCount(info.trackCount)
                 if (duration > 0) {
                     builder.setDurationMs(duration)
                 }

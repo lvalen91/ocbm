@@ -10,6 +10,10 @@ import com.carlink.audio.MicrophoneCaptureManager
 import com.carlink.av.AacPlayer
 import com.carlink.av.HevcRenderer
 import com.carlink.av.VoiceRouter
+import com.carlink.callui.CallNotificationHost
+import com.carlink.callui.CallRoster
+import com.carlink.callui.CallState
+import com.carlink.car.AppFocusClaimer
 import com.carlink.car.DriveStateMonitor
 import com.carlink.device.KnownDevice
 import com.carlink.device.KnownDeviceSnapshot
@@ -23,6 +27,7 @@ import com.carlink.logging.logInfo
 import com.carlink.logging.logWarn
 import com.carlink.media.CarlinkMediaBrowserService
 import com.carlink.media.MediaSessionManager
+import com.carlink.media.NowPlayingInfo
 import com.carlink.ocbm.BinaryPlist
 import com.carlink.ocbm.Ocbm
 import com.carlink.ocbm.OcbmAvLanes
@@ -36,7 +41,9 @@ import com.carlink.protocol.AdapterConfig
 import com.carlink.protocol.MessageSerializer
 import com.carlink.protocol.MultiTouchAction
 import com.carlink.protocol.PhoneType
+import com.carlink.util.DisplayProfile
 import com.carlink.util.LogCallback
+import com.carlink.util.PanelGeometry
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -98,13 +105,32 @@ class CarlinkManager(
      * new token, leaving the homescreen Media card blank until a reinstall.
      */
     injectedMediaSessionManager: MediaSessionManager? = null,
+    /**
+     * The panel as detected at launch ([DisplayProfile.detect]) — the source of truth for the CarPlay
+     * config's geometry, frame rate and safe area. Null only in tests / on a host with no window;
+     * [config] then supplies the legacy width/height/fps.
+     */
+    val displayProfile: DisplayProfile? = null,
 ) {
     private var config: AdapterConfig = initialConfig
 
     /** Configured WiFi/Bluetooth name the adapter advertises (shown on the dashboard). */
     val adapterName: String get() = config.boxName
 
+    init {
+        live = this
+    }
+
     companion object {
+        /**
+         * The manager currently driving a session, for entry points that have no reference to it:
+         * the voice-interaction session (hardware PTT) is bound by the system, not by this app.
+         * Set in the constructor, compare-and-cleared in [release] so a stale manager can never
+         * clobber a newer one.
+         */
+        @Volatile var live: CarlinkManager? = null
+            private set
+
         private const val USB_WAIT_PERIOD_MS = 3000L
 
         private const val MAX_RECONNECT_ATTEMPTS = 5
@@ -209,7 +235,69 @@ class CarlinkManager(
 
         /** Called when the adapter's paired device list changes. */
         fun onDeviceListChanged(devices: List<DeviceInfo>) {}
+
+        /**
+         * Box-side session state: which transport owns the box (`Ocbm.PM_*`) and its subsystem
+         * liveness (`Ocbm.BH_*` mask; [healthKnown] false until the first CT_BOX_HEALTH). Main thread.
+         */
+        fun onBoxStatusChanged(
+            projMode: Byte,
+            health: Int,
+            healthKnown: Boolean,
+        ) {}
     }
+
+    /**
+     * Observer for iPhone call state (iAP2 `callState` records reduced by [CallRoster]). Multiple can
+     * be registered; fires on the main thread. This is the hook the call-audio path uses to arbitrate
+     * focus against the media lane — see the seam note in OCBMANDROID.md.
+     */
+    fun interface CallStateListener {
+        fun onCallPresentation(presentation: CallRoster.Presentation)
+    }
+
+    private val callStateListeners = mutableListOf<CallStateListener>()
+
+    fun addCallStateListener(listener: CallStateListener) {
+        synchronized(callStateListeners) { callStateListeners.add(listener) }
+    }
+
+    fun removeCallStateListener(listener: CallStateListener) {
+        synchronized(callStateListeners) { callStateListeners.remove(listener) }
+    }
+
+    /** Last raw `callState` record seen this session (null = none / idle). */
+    @Volatile var callState: CallState? = null
+        private set
+
+    /** The reduced call view the notification currently shows. */
+    val callPresentation: CallRoster.Presentation get() = callNotificationHost?.presentation ?: CallRoster.Presentation.None
+
+    /** Dashboard observer for [boxStatusText]. Multiple can be registered; fires on the main thread. */
+    fun interface BoxStatusListener {
+        fun onBoxStatus(text: String)
+    }
+
+    private val boxStatusListeners = mutableListOf<BoxStatusListener>()
+
+    fun addBoxStatusListener(listener: BoxStatusListener) {
+        synchronized(boxStatusListeners) { boxStatusListeners.add(listener) }
+    }
+
+    fun removeBoxStatusListener(listener: BoxStatusListener) {
+        synchronized(boxStatusListeners) { boxStatusListeners.remove(listener) }
+    }
+
+    /** Which transport owns the box (CT_PROJ_MODE). `PM_NONE` until told. */
+    @Volatile var projectionMode: Byte = Ocbm.PM_NONE
+        private set
+
+    /** Box subsystem liveness (CT_BOX_HEALTH). Meaningful only when [boxHealthKnown]. */
+    @Volatile var boxHealth: Int = 0
+        private set
+
+    @Volatile var boxHealthKnown: Boolean = false
+        private set
 
     /**
      * Listener for device management events. Unlike [Callback], multiple can be registered.
@@ -348,6 +436,12 @@ class CarlinkManager(
     /** AAOS drive-state source. Null off automotive; see [DriveStateMonitor]. */
     private var driveMonitor: DriveStateMonitor? = null
 
+    /** NAVIGATION app-focus claim, edge-driven from route guidance. Null off automotive. */
+    private var appFocusClaimer: AppFocusClaimer? = null
+
+    /** CallStyle notification for iPhone calls; answer/decline/hang-up route to [sendTelephony]. */
+    private var callNotificationHost: CallNotificationHost? = null
+
     /**
      * This host session's identity on the wire, sent in every CT_HELLO this manager's clients make.
      *
@@ -440,6 +534,10 @@ class CarlinkManager(
     private var lastMediaArtistName: String? = null
     private var lastMediaAlbumName: String? = null
     private var lastMediaAppName: String? = null
+    private var lastMediaGenre: String? = null
+    private var lastMediaComposer: String? = null
+    private var lastTrackNumber: Int = 0
+    private var lastTrackCount: Int = 0
     private var lastAlbumCover: ByteArray? = null
     private var lastDuration: Long = 0L
     private var lastPosition: Long = 0L
@@ -512,6 +610,10 @@ class CarlinkManager(
         lastMediaArtistName = null
         lastMediaAlbumName = null
         lastMediaAppName = null
+        lastMediaGenre = null
+        lastMediaComposer = null
+        lastTrackNumber = 0
+        lastTrackCount = 0
         lastAlbumCover = null
         lastDuration = 0L
         lastPosition = 0L
@@ -664,6 +766,8 @@ class CarlinkManager(
                 m.onDriveStateChanged = { driving -> setLimitedUI(driving) }
                 m.start()
             }
+        appFocusClaimer = AppFocusClaimer(context).also { it.start() }
+        callNotificationHost = CallNotificationHost(context) { idx -> sendTelephony(idx) }
 
         microphoneManager =
             MicrophoneCaptureManager(context, logCallback).also { mgr ->
@@ -708,6 +812,27 @@ class CarlinkManager(
 
                     override fun onSkipToPrevious() {
                         sendMediaButton(Ocbm.MEDIA_BTN_PREV)
+                    }
+
+                    override fun onPlayPause() {
+                        sendMediaButton(Ocbm.MEDIA_BTN_PLAY_PAUSE)
+                    }
+
+                    /**
+                     * Headset-hook short press is call-aware, the way Android's own dispatcher
+                     * treats it: answer a ringing call, otherwise toggle playback. It never ENDS a
+                     * call — a mis-press hanging up is worse than one pausing music.
+                     */
+                    override fun onHeadsetHook() {
+                        if (callPresentation is CallRoster.Presentation.Incoming) {
+                            sendTelephony(Ocbm.TEL_ANSWER)
+                        } else {
+                            sendMediaButton(Ocbm.MEDIA_BTN_PLAY_PAUSE)
+                        }
+                    }
+
+                    override fun onVoiceAssist() {
+                        requestSiri()
                     }
                 }
             attachedMediaControlCallback = transportCallback
@@ -828,18 +953,31 @@ class CarlinkManager(
      * Derived from [config] so the decoder, the box's `/info` advertisement and the coordinate
      * space the box scales touch into all come from ONE number and cannot drift.
      */
-    private fun vehicleConfigSpec(): VehicleConfigSpec =
-        VehicleConfigSpec(
-            name = config.boxName,
-            width = config.width,
-            height = config.height,
-            maxFps = if (config.fps >= 60) 60 else 30,
-            // The OEM icon is the CarPlay home-screen tile that returns the driver here; its tap
-            // comes back as an inbound `requestUI` (see onCommandPlist). Rendered once and cached:
-            // it is three PNG encodes, and this runs on the connect path.
-            oemIconImages = oemIconImages,
-            oemIconLabel = context.getString(R.string.app_name),
-        )
+    private fun vehicleConfigSpec(): VehicleConfigSpec {
+        // Detected panel first (DisplayProfile.geometry, already clamped and legalised); the stored
+        // AdapterConfig only fills in when no profile exists. The spec's own checks are a backstop.
+        val g = displayProfile?.geometry ?: PanelGeometry.fromConfig(config)
+        val spec =
+            VehicleConfigSpec(
+                name = config.boxName,
+                width = g.width,
+                height = g.height,
+                maxFps = g.maxFps,
+                safeOriginX = g.safe.x,
+                safeOriginY = g.safe.y,
+                safeWidth = g.safe.width,
+                safeHeight = g.safe.height,
+                dpi = g.dpi,
+                diagonalInches = g.diagonalInches,
+                // The OEM icon is the CarPlay home-screen tile that returns the driver here; its tap
+                // comes back as an inbound `requestUI` (see onCommandPlist). Rendered once and cached:
+                // it is three PNG encodes, and this runs on the connect path.
+                oemIconImages = oemIconImages,
+                oemIconLabel = context.getString(R.string.app_name),
+            )
+        logInfo("[CONFIG] ${g.describe()}", tag = Logger.Tags.ADAPTR)
+        return spec
+    }
 
     /** Lazily rendered once per manager; the launcher icon cannot change under a running process. */
     private val oemIconImages: List<OemIcon.Image> by lazy { OemIcon.render(context) }
@@ -881,6 +1019,7 @@ class CarlinkManager(
         codecDeferred = true
         callback?.onPhoneTypeChanged(PhoneType.UNKNOWN)
         clearCachedMediaMetadata()
+        clearSessionUiState()
         stopMicrophoneCapture()
 
         if (reboot) {
@@ -1089,6 +1228,99 @@ class CarlinkManager(
         scope.launch(Dispatchers.IO) { c.sendMediaButton(index) }
     }
 
+    // ==================== Siri / telephony (3P shell) ====================
+
+    /**
+     * Trigger Siri: the `CMD_SIRI_DOWN`/`CMD_SIRI_UP` hold pair as one tap, exactly what the macOS
+     * host's `siriPress()` sends (the bare `CMD_REQUEST_SIRI` is deprecated; iOS ignores it).
+     * Non-blocking; false when no subscribed session exists. Any thread.
+     */
+    fun requestSiri(): Boolean {
+        val c = client ?: return false
+        val ok = c.sendSiriPress()
+        logInfo("[SIRI] press -> ${if (ok) "sent" else "dropped (not subscribed)"}", tag = Logger.Tags.ADAPTR)
+        return ok
+    }
+
+    /** Press-and-hold form for an in-app button: DOWN on touch, [siriUp] on release. */
+    fun siriDown(): Boolean = client?.sendSiriDown() ?: false
+
+    fun siriUp(): Boolean = client?.sendSiriUp() ?: false
+
+    /**
+     * `[INPUT_TELEPHONY][index]` on CH_INPUT — one tap of the uid-5 telephony HID (`Ocbm.TEL_*`;
+     * DTMF digit d = `TEL_DIGIT0 + d`). The call-audio path drives this for answer / end / mute and
+     * keypad; the CallStyle notification's actions land here too. Non-blocking (tx queue offer);
+     * false = dropped because no subscribed session exists or the queue is full. Any thread.
+     */
+    fun sendTelephony(index: Byte): Boolean {
+        val c = client ?: return false
+        val ok = c.sendTelephony(index)
+        logInfo("[TEL] button $index -> ${if (ok) "sent" else "dropped"}", tag = Logger.Tags.PHONE)
+        return ok
+    }
+
+    /** Main thread. Reduce one iOS call record into the notification and fan it out. */
+    private fun onCallState(cs: CallState) {
+        callState = if (cs.isEnded) null else cs
+        logInfo(
+            "[CALL_STATE] ${CallState.statusName(cs.status)} dir=${cs.direction} ${cs.displayLine}" +
+                (cs.label?.let { " ($it)" } ?: ""),
+            tag = Logger.Tags.PHONE,
+        )
+        val host = callNotificationHost ?: return
+        val before = host.presentation
+        host.onCallState(cs)
+        val after = host.presentation
+        if (after != before) notifyCallListeners(after)
+    }
+
+    private fun notifyCallListeners(p: CallRoster.Presentation) {
+        val snapshot = synchronized(callStateListeners) { callStateListeners.toList() }
+        snapshot.forEach { it.onCallPresentation(p) }
+    }
+
+    /**
+     * Session-scoped UI state that every teardown path must drop: no session means no call, no
+     * route, and the box's last PROJ_MODE/HEALTH words are stale (it re-emits both on SUBSCRIBE).
+     * Posts to main because the notification host and the focus claimer are main-thread objects
+     * and the teardown paths run on IO under the lifecycle mutex.
+     */
+    private fun clearSessionUiState() {
+        scope.launch {
+            callState = null
+            callNotificationHost?.let { h ->
+                val before = h.presentation
+                h.clear()
+                if (before != CallRoster.Presentation.None) notifyCallListeners(CallRoster.Presentation.None)
+            }
+            appFocusClaimer?.setNavigating(false)
+            onBoxStatus(Ocbm.PM_NONE, 0, false)
+        }
+    }
+
+    /** Main thread. */
+    private fun onBoxStatus(
+        mode: Byte,
+        health: Int,
+        known: Boolean,
+    ) {
+        if (mode == projectionMode && health == boxHealth && known == boxHealthKnown) return
+        projectionMode = mode
+        boxHealth = health
+        boxHealthKnown = known
+        callback?.onBoxStatusChanged(mode, health, known)
+        val text = boxStatusText()
+        synchronized(boxStatusListeners) { boxStatusListeners.toList() }.forEach { it.onBoxStatus(text) }
+    }
+
+    /** One line for the dashboard: "WIRED_CP · HCI|iap2d|airplayd", or "" before the box has said anything. */
+    fun boxStatusText(): String {
+        val mode = if (projectionMode == Ocbm.PM_NONE && !boxHealthKnown) "" else Ocbm.pmName(projectionMode)
+        val health = if (boxHealthKnown) Ocbm.bhString(boxHealth) else ""
+        return listOf(mode, health).filter { it.isNotEmpty() }.joinToString(" · ")
+    }
+
     /**
      * Send a multi-touch event.
      *
@@ -1153,6 +1385,7 @@ class CarlinkManager(
         currentWifi = null
         callback?.onPhoneTypeChanged(PhoneType.UNKNOWN)
         clearCachedMediaMetadata()
+        clearSessionUiState()
         setState(State.DISCONNECTED)
         setStatusText("Adapter rebooting (~50 s)...")
     }
@@ -1173,6 +1406,11 @@ class CarlinkManager(
 
         driveMonitor?.stop()
         driveMonitor = null
+        appFocusClaimer?.stop()
+        appFocusClaimer = null
+        callNotificationHost?.release()
+        callNotificationHost = null
+        if (live === this) live = null
 
         // Every mutation is written through, so this only drains a queued last delta — the history
         // itself is already on disk.
@@ -1417,6 +1655,12 @@ class CarlinkManager(
             else -> null
         }
 
+    /** CT_PROJ_MODE / CT_BOX_HEALTH — both re-emitted by the box on every fresh SUBSCRIBE, so nothing caches across reconnects. */
+    private fun wireBoxStatus(c: OcbmClient) {
+        c.onProjMode = { mode -> scope.launch { if (client === c) onBoxStatus(mode, boxHealth, boxHealthKnown) } }
+        c.onBoxHealth = { flags -> scope.launch { if (client === c) onBoxStatus(projectionMode, flags, true) } }
+    }
+
     /**
      * Wire [c]'s callbacks. Every one of them fires on the OCBM read thread or a client-owned
      * thread, never main — so anything touching Android state hops through [scope].
@@ -1487,11 +1731,13 @@ class CarlinkManager(
         // stopImpl had already passed — a hot mic surviving into the next session, where
         // onMicGate would early-return on the stale flag and uplink at the WRONG rate. The
         // identity check closes the same window from the other side.
-        c.onUplinkGate = { on, rate, ch ->
-            scope.launch { if (client === c) onMicGate(on, rate, ch) }
+        c.onUplinkGate = { on, rate, ch, codec ->
+            scope.launch { if (client === c) onMicGate(on, rate, ch, codec) }
         }
 
         c.onPhoneIdentity = { json -> scope.launch { onPhoneIdentity(json) } }
+
+        wireBoxStatus(c)
 
         c.onMetadata = { marker, payload -> onMetadata(marker, payload) }
 
@@ -1560,11 +1806,19 @@ class CarlinkManager(
         on: Boolean,
         rate: Int,
         channels: Int,
+        codec: Int,
     ) {
         if (on) {
+            // A renegotiation (CVSD -> mSBC keeps the rate at 16 kHz) must restart capture: the
+            // early-return in startMicrophoneCapture would otherwise leave a PCM uplink running on
+            // a wideband SCO socket — silent corruption with no local symptom.
+            if (isMicrophoneCapturing && microphoneManager?.matchesFormat(rate, channels, codec) == false) {
+                logInfo("[MIC] uplink format changed (${rate}Hz ${channels}ch codec=$codec) — restarting capture", tag = Logger.Tags.MIC)
+                stopMicrophoneCapture()
+            }
             micRate = rate
             micChannels = channels
-            startMicrophoneCapture(rate, channels)
+            startMicrophoneCapture(rate, channels, codec)
         } else {
             stopMicrophoneCapture()
         }
@@ -1573,19 +1827,27 @@ class CarlinkManager(
     private fun startMicrophoneCapture(
         rate: Int,
         channels: Int,
+        codec: Int,
     ) {
         if (isMicrophoneCapturing) return
         val mgr = microphoneManager ?: return
 
-        if (!mgr.start(captureProfileFor(rate, channels))) {
+        // mSBC captures 16 kHz mono whatever the gate said (MicProfile.captureFormatFor); log a
+        // disagreement rather than silently encode pitch-shifted speech.
+        val (r, c) = MicProfile.captureFormatFor(rate, channels, codec)
+        if (r != rate || c != channels) {
+            logWarn("[MIC] gate said ${rate}Hz ${channels}ch but codec $codec captures ${r}Hz ${c}ch", tag = Logger.Tags.MIC)
+        }
+        if (!mgr.start(captureProfileFor(r, c), codec)) {
             logError("[MIC] Capture failed to start", tag = Logger.Tags.MIC)
             return
         }
         isMicrophoneCapturing = true
 
-        // 20 ms of PCM per tick, matching the box's own RTP packetization. The cadence and the
-        // chunk size must change together or the stream underruns.
-        val chunkSize = MicProfile.chunkBytes(rate, channels)
+        // 20 ms of PCM per tick, matching the box's own RTP packetization (PCM); for mSBC up to a
+        // few whole 60-byte packets per tick with the ring buffer carrying the 7.5 ms remainder.
+        // The cadence and the drain size must change together or the stream underruns.
+        val chunkSize = MicProfile.uplinkDrainBytes(rate, channels, codec)
         val generation = micSendGeneration.incrementAndGet()
         micSendFuture?.cancel(false)
         var failures = 0
@@ -1603,7 +1865,7 @@ class CarlinkManager(
                 }
             }, 0, MicProfile.TICK_MS.toLong(), java.util.concurrent.TimeUnit.MILLISECONDS)
 
-        logInfo("[MIC] Capture started at ${rate}Hz ${channels}ch (chunk ${chunkSize}B)", tag = Logger.Tags.MIC)
+        logInfo("[MIC] Capture started at ${r}Hz ${c}ch codec=$codec (drain ${chunkSize}B/tick)", tag = Logger.Tags.MIC)
     }
 
     /**
@@ -1638,11 +1900,11 @@ class CarlinkManager(
 
     private fun sendMicrophoneData(chunkSize: Int) {
         if (!isMicrophoneCapturing) return
-        val data = microphoneManager?.readChunk(maxBytes = chunkSize) ?: return
-        // S16LE straight out to CH_MIC — the box converts to the big-endian the iPhone wants.
+        // PCM: S16LE straight out to CH_MIC — the box converts to the big-endian the iPhone wants.
         // Do NOT "symmetry-fix" this against the big-endian DOWNLINK: a swapped uplink reaches
-        // Siri as noise with no local symptom.
-        if (data.isNotEmpty()) client?.sendMicPcm(data)
+        // Siri as noise with no local symptom. mSBC: each callback is one 60-byte eSCO packet, one
+        // CH_MIC message each (MIC_CHUNK = 16384 never splits it).
+        microphoneManager?.drainUplink(chunkSize) { client?.sendMicPcm(it) }
     }
 
     // ==================== Metadata ====================
@@ -1761,7 +2023,14 @@ class CarlinkManager(
                 val obj = runCatching { JSONObject(String(payload, Charsets.UTF_8)) }.getOrNull() ?: return
                 when (obj.optString("kind")) {
                     "nowPlaying" -> scope.launch { processNowPlaying(obj) }
-                    "callState" -> logInfo("[CALL_STATE] ${obj.optString("label")} ${obj.optString("service")}", tag = Logger.Tags.PHONE)
+                    "callState" -> CallState.fromJson(obj)?.let { cs -> scope.launch { onCallState(cs) } }
+                    // 0 = no route. Claiming NAVIGATION app focus is the 3P way to tell AAOS the
+                    // phone is now the navigator; a native maps app mid-route is told it lost it.
+                    "routeGuidance" ->
+                        if (obj.has("routeGuidanceState")) {
+                            val active = obj.optInt("routeGuidanceState") != 0
+                            scope.launch { appFocusClaimer?.setNavigating(active) }
+                        }
                     else -> Unit
                 }
             }
@@ -1812,15 +2081,23 @@ class CarlinkManager(
     private fun attachArtwork(id: Int) {
         val jpeg = synchronized(artworkById) { artworkById[id] } ?: return
         lastAlbumCover = jpeg
-        mediaSessionManager?.updateMetadata(
+        mediaSessionManager?.updateMetadata(nowPlayingInfo())
+    }
+
+    /** The cached track as one value for the session. Main thread (all `lastMedia*` writers are). */
+    private fun nowPlayingInfo(): NowPlayingInfo =
+        NowPlayingInfo(
             title = lastMediaSongName,
             artist = lastMediaArtistName,
             album = lastMediaAlbumName,
             appName = lastMediaAppName,
-            albumArt = jpeg,
-            duration = lastDuration,
+            genre = lastMediaGenre,
+            composer = lastMediaComposer,
+            trackNumber = lastTrackNumber,
+            trackCount = lastTrackCount,
+            durationMs = lastDuration,
+            albumArt = lastAlbumCover,
         )
-    }
 
     /**
      * Consume one `nowPlaying` record.
@@ -1846,6 +2123,10 @@ class CarlinkManager(
             lastMediaSongName = null
             lastMediaArtistName = null
             lastMediaAlbumName = null
+            lastMediaGenre = null
+            lastMediaComposer = null
+            lastTrackNumber = 0
+            lastTrackCount = 0
             lastAlbumCover = null
             lastDuration = 0L
             lastPosition = 0L
@@ -1853,7 +2134,7 @@ class CarlinkManager(
         }
 
         newSongName?.let { lastMediaSongName = it }
-        val textChanged = mergeTextFields(obj, previousArtist, previousAlbum, previousAppName)
+        val textChanged = mergeTextFields(obj, previousArtist, previousAlbum, previousAppName) or mergeTrackFields(obj)
         val albumCover = mergeArtwork(obj)
         val duration = if (obj.has("durationMs")) obj.optLong("durationMs") else lastDuration
         val position = if (obj.has("elapsedMs")) obj.optLong("elapsedMs") else lastPosition
@@ -1874,14 +2155,7 @@ class CarlinkManager(
                 (duration > 0 && duration != previousDuration)
 
         if (metadataChanged) {
-            mediaSessionManager?.updateMetadata(
-                title = lastMediaSongName,
-                artist = lastMediaArtistName,
-                album = lastMediaAlbumName,
-                appName = lastMediaAppName,
-                albumArt = lastAlbumCover,
-                duration = duration,
-            )
+            mediaSessionManager?.updateMetadata(nowPlayingInfo())
             CarlinkMediaBrowserService.updateNowPlaying(lastMediaSongName, lastMediaArtistName)
         }
 
@@ -1928,6 +2202,30 @@ class CarlinkManager(
         obj.optString("appName").takeIf { it.isNotEmpty() }?.let {
             lastMediaAppName = it
             if (it != previousAppName) changed = true
+        }
+        return changed
+    }
+
+    /** Genre / composer / track position — the rest of what the macOS host renders. Delta-merged like the text. */
+    private fun mergeTrackFields(obj: JSONObject): Boolean {
+        var changed = false
+        obj.optString("genre").takeIf { it.isNotEmpty() }?.let {
+            if (it != lastMediaGenre) changed = true
+            lastMediaGenre = it
+        }
+        obj.optString("composer").takeIf { it.isNotEmpty() }?.let {
+            if (it != lastMediaComposer) changed = true
+            lastMediaComposer = it
+        }
+        if (obj.has("trackNumber")) {
+            val n = obj.optInt("trackNumber")
+            if (n != lastTrackNumber) changed = true
+            lastTrackNumber = n
+        }
+        if (obj.has("trackCount")) {
+            val n = obj.optInt("trackCount")
+            if (n != lastTrackCount) changed = true
+            lastTrackCount = n
         }
         return changed
     }
@@ -2146,6 +2444,7 @@ class CarlinkManager(
         codecDeferred = true
         callback?.onPhoneTypeChanged(PhoneType.UNKNOWN)
         clearCachedMediaMetadata()
+        clearSessionUiState()
         stopMicrophoneCapture()
 
         retireVideoEpoch("session error")

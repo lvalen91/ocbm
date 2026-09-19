@@ -545,6 +545,19 @@ The exact pixel grid CarPlay renders and streams for this panel (e.g. 1920×1080
 [E] `pixelDimensions:{width,height}` in every template; `ConfigSize`; `/info` `widthPixels/heightPixels` (doc 13 §4, Class A).
 **App envelope (host `PanelRule`, corrected 2026-09-07):** orientation-agnostic — each side 480–3840 px, and the product floor by the panel's own aspect (800×480 landscape / 480×800 portrait, the same `ViewArea2Rule` floor a view area gets). Portrait is a first-class case (Apple's own `Portrait.yaml` template is 900×1200); 3840×2160 is device-proven on the wire and the 3840 ceiling tracks no measured iOS limit. Until 2026-09-07 the app clamped per axis (W 800–3840, H 480–2160) and silently rewrote a 2160×3840 panel to 2160×2160 — the wired portrait view-area sweep measured nothing for five cases as a result. Any clamp the app applies is now reported (`VehicleConfigModel.clampNotes`, the Settings panel field, and the control socket's `set`/`save`/`get viewarea` replies).
 
+**Android client, 2026-09-18 (client capability catching up to this same envelope, box unchanged):**
+`PanelRule`/`ViewAreaRule` (`host/CarlinkAndroid/app/src/main/kotlin/com/carlink/ocbm/VehicleConfigYaml.kt`)
+are a port of the macOS rules above — same floor-by-own-aspect, no per-axis clamp, same legality
+checks refusing an illegal panel or safe area before it reaches the wire. What `pixelDimensions`
+actually carries changed, though: it is now the **content area**, not the physical panel — see
+`safeArea` below for the three-rectangle distinction and the measured numbers; the wire shape and
+schema are unchanged, this is purely what the client chooses to put in the field. Verified to ACCEPT
+a real 800×1280 portrait panel (floors to 480×800 by its own aspect, no
+clamp) and iOS rendered a 4-column portrait CarPlay home on it. The client also now **detects** the
+panel at launch (size, density, refresh rate snapped to 30/60) instead of reading a stored setting,
+and re-detects on any configuration change, including a system-bar/inset change with an unchanged
+physical panel — a bar toggling on its own no longer requires a panel resize to be reflected.
+
 #### alt resolution (alt panel pixelDimensions)
 Pixel resolution of a secondary panel (e.g. cluster).
 Same meaning as the main resolution but for an `altDisplayPanels[]`/`altVideoStreams[]` entry — typically a smaller instrument-cluster screen (e.g. 640×480). Only present on multi-display configs; omit for single-screen head units.
@@ -554,6 +567,16 @@ Same meaning as the main resolution but for an `altDisplayPanels[]`/`altVideoStr
 Physical size of the display in millimeters (optional).
 Real-world width/height in mm, used so iOS knows the pixel density / physical scale. `0/0` or unset = unknown, and CarPlay falls back to defaults. Cosmetic-scale hint, not a resolution.
 [E] `DisplayPanelConfig.physicalDimensions: ConfigSize?`; `/info` `widthPhysical/heightPhysical` (doc 13 §4).
+
+**Android client, 2026-09-18 — `dpi`/`diagonalInches` detected, deliberately NOT emitted.** The
+Android client's `DisplayProfile` (`host/CarlinkAndroid/app/src/main/kotlin/com/carlink/util/
+WindowMetricsCompat.kt`) reads and logs both at launch, but `VehicleConfigYaml`/`VehicleConfigSpec`
+has no slot to put them on the wire: `crates/vendor/receiver`'s `vehicle_config.rs` has no field for
+either, `/info`'s `widthPhysical` is hardcoded to `0` box-side regardless of what a client sends (see
+`physicalDimensions` above), and the macOS host's own field help for `diagonalInches` already says it
+is "not sent to either phone" (`dpi` is an Android Auto field, not a CarPlay one). Recorded here so
+neither value is re-proposed for the CarPlay wire without first giving `vehicle_config.rs` a slot —
+this is a client decision, not a protocol gap.
 
 #### displayProperties
 Special roles for this panel.
@@ -606,6 +629,29 @@ The rectangle of the screen CarPlay may draw into.
 Inner rectangle guaranteed free of obstructions.
 The region inside the view area where important UI won't be clipped by bezels/rounded corners. iOS keeps controls within it. Usually equals the view area unless the display has cutouts.
 [E] `safeArea:{…}` in templates; `/info` `safeArea{originXPixels…}` (doc 13 §4).
+
+**Android client, 2026-09-18 — what `pixelDimensions`/`viewArea` are measured from: the CONTENT
+AREA, not the physical panel (client capability, box/wire unchanged).** Three rectangles exist and
+`DisplayProfile`/`PanelGeometry` (`host/CarlinkAndroid/app/src/main/kotlin/com/carlink/util/
+WindowMetricsCompat.kt`) never conflate them:
+- the **physical panel** (`maximumWindowMetrics`);
+- the **app window** (`currentWindowMetrics` — equal to the panel only when the app is fullscreen);
+- the **content area** — the window minus the stable insets of whichever system bars the user's
+  `DisplayModePreference` leaves visible.
+
+The content area is what actually gets pushed as `pixelDimensions`/`viewArea` on `CT_SUBSCRIBE`
+(`VehicleConfigYaml.videoStreams` renders `s.width`/`s.height` straight into both), what the video
+decoder is sized to, and what `INPUT_TOUCH`'s 0..65535 normalisation is computed against — pushing the
+physical panel while system bars are visible would mis-scale the video into a smaller drawn region and
+offset every touch by the bar height. Safe-area/cutout geometry is likewise computed relative to the
+content area, not the panel. Measured on the live box: 2400×960 fullscreen → content 2400×960;
+2400×960 with system bars visible → content **2400×788**; 800×1280 portrait with bars → content
+800×1150. The panel is detected once at launch and re-detected on any configuration change,
+including a bar/inset change with the physical panel unchanged, and each re-detection that changes
+the pushed size rebuilds the session (a fresh `CT_SUBSCRIBE`, same as a real panel resize). This
+closes a long-standing gap where the app computed `viewAreaData`/`safeAreaData` and never put them on
+the wire — see `../carplay/06_AV_PIPELINE.md` §6 for the audio-side counterpart of "client capability
+catching up to a box that already spoke this."
 
 #### safeAreaDisabled
 Ignore the safe area for this view: on = draw edge-to-edge.

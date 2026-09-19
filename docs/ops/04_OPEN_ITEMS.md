@@ -1197,6 +1197,63 @@ still open is §4 of this file, not this list.
   [`../host/01_ANDROID_AND_AAOS.md`](../host/01_ANDROID_AND_AAOS.md).
   Adapter side needs no change (the `0x1314:0x2d00` identity is already correct — docs/carplay/00_ARCHITECTURE.md).
 
+### Android host app (`host/CarlinkAndroid`) — 2026-09-18 session
+
+The box is STATIC this session — nothing below is a box or protocol change, only Android client
+capability. `:app:assembleDebug :app:testDebugUnitTest :app:detekt :app:ktlintCheck` PASS and
+`python3 tools/proto_check.py` OK gate this batch; see `docs/ops/06_CORRECTIONS_LEDGER.md` for the
+per-claim corrections this session produced and retracted.
+
+CLOSED or materially advanced (test-green; **NOT hardware-verified** unless stated):
+- **`SEAM_PKT_PLAIN` (0x03) and mSBC decode landed for the Android Auto telephony lane.**
+  `Msbc.kt` / `MsbcFramer.kt` (ported from macOS `MSBCCodec.swift`/`MSBCFramer.swift`) decode the
+  marker, and mSBC uplink encode honours the `CT_UPLINK` codec byte. Scope correction (see ledger):
+  `crates/vendor/wireless/src/sco_audio.rs:1181-1197` gates `:9112`/`:9003`→`CH_ALT_AUDIO` to
+  `ProjectionOwner::WirelessAa`/`WiredAa` only — this lane never carries CarPlay call audio, so this
+  work does **not** serve the CarPlay path this repo is otherwise scoped to; it is Android-Auto-only
+  client capability. Test-green only — no on-vehicle HFP/mSBC call has exercised it yet.
+- `CT_PROJ_MODE` and `CT_BOX_HEALTH` no longer fall into the client's unknown-type log branch —
+  both are parsed and surfaced now.
+- `CMD_VIEW_AREA = 0x11` is now defined in the Kotlin client, closing one of two `proto_check`
+  Kotlin gaps (verified: `python3 tools/proto_check.py` — CarlinkAndroid's only remaining gap is a
+  local `F_BOTH = 0x03`, absent from `ocbm-proto`, shared with `gm_ccpa`). **The mid-session
+  `CMD_VIEW_AREA` PUSH is still NOT wired** — do not read the constant landing as the feature landing.
+- Cutout/safe-area geometry now reaches the wire, computed relative to the display CONTENT area
+  rather than the app window (`app/.../ocbm/VehicleConfigYaml.kt`) — see the content-area correction
+  in the ledger for why the window measurement was wrong.
+- The voice lane no longer hardcodes AAC-ELD: it branches on the declared codec and refuses an
+  undecodable stream before any sink or audio focus exists.
+- The UI is resolution/orientation-agnostic via `WindowSizeClass` breakpoints, in place of the prior
+  single-2400x960-landscape-panel assumption — verified on 9 panel shapes and one real 800x1280/120
+  portrait AVD. **The `PanelRule`/`ViewAreaRule` portrait acceptance is a defect this exposed, not a
+  feature** — see ledger.
+
+STILL OPEN (re-checked, not newly found this session — carried forward): the host-side `mgmtLock`
+gap; `CH_MGMT` typed surface (`MgmtInfo`) and `CH_FILE` `FILE_PULL` for config readback; `META_CMD`
+only partly consumed; the FGS microphone-type issue; wireless pairing — the Android client receives
+`CT_PAIRING_CODE` (`OcbmProto.kt`, `OcbmClient.kt`) but still never answers with `CT_PAIR_CONFIRM`,
+so SSP numeric-comparison pairing cannot complete from Android.
+
+NEW open items:
+- **`:app` cannot use `CarProjectionManager`/`ProjectionStatus`, `CAR_NAVIGATION_MANAGER` cluster
+  turn-by-turn, or `ClusterHomeManager`** — all `signature|privileged`, verified on a running AAOS 15
+  image, and the app is required to stay third-party. `CH_ALT_VIDEO` on a cluster display is
+  therefore out of reach for this client, not a missing feature to schedule.
+- **`dpi`/`diagonalInches` are detected by the Android client but never emitted.**
+  `crates/vendor/receiver/src/vehicle_config.rs` has no slot for either, `/info` hardcodes
+  `widthPhysical: 0` (`VehicleConfigYaml.kt:96`, `VehicleConfigGenerator.kt:62`), and the macOS
+  host's own field help says `diagonalInches` is not sent to either phone
+  (`host/MacHost/carlink_macOS/App/SettingsWindow.swift:342`). Open question, not a defect.
+- `DisplayMode` `STATUS_BAR_HIDDEN` / `NAV_BAR_HIDDEN` are wired but not exercised on hardware —
+  only `SYSTEM_UI_VISIBLE` and `FULLSCREEN_IMMERSIVE` were.
+- No available panel has a cutout, waterfall edge or rounded corner, so those safe-area arms are
+  JVM-test-proven only, never device-proven.
+- **`host/CarlinkAndroid` ships launcher icon assets byte-identical to `carlink_native`'s** —
+  confirmed by md5 (`ic_launcher_foreground.png`, `ic_launcher_background.png` match across
+  `host/CarlinkAndroid/app/src/main/res/mipmap-xxxhdpi/` and the sibling repo's same path) despite
+  distinct `applicationId`s (`zeno.carlink.ocbm` vs. the `carlink_native` flavor id) — the two
+  installable builds are visually indistinguishable in the launcher and on the CarPlay home screen.
+
 ### Contingencies (future — if/when measurements demand it)
 
 - **Adapter-driven SETUP — ALREADY THE SHIPPED FALLBACK, not a future contingency** (corrected

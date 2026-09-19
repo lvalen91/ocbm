@@ -43,6 +43,7 @@ object Ocbm {
 
     /** App-driven SETUP relay. Inert with `appDrivenSetup: false` — the box only relays when asked. */
     const val CH_RTSP: Int = 0x0041 // lib.rs:65
+
     /** Box→host universal-log stream (`/tmp/box.log` + per-daemon logs); armed by CT_LOG_CTL. */
     const val CH_LOG: Int = 0x0042
     const val CH_ECHO: Int = 0x00FF
@@ -161,7 +162,6 @@ object Ocbm {
             else -> "SEV_0x%02x".format(s)
         }
 
-
     // ---- CT_PROJ_MODE (0x19) — which projection mode the box has selected -----------------------
     // Box->host, additive per the OCBM extensibility rules. Payload `[CT_PROJ_MODE][PM_*]`, emitted
     // on CHANGE only and re-armed on every fresh CT_SUBSCRIBE, so a re-attaching host learns the
@@ -227,15 +227,16 @@ object Ocbm {
 
     /** Human-readable bit list for a CT_BOX_HEALTH payload — the log line and the UI detail. */
     fun bhString(f: Int): String {
-        val on = buildList {
-            if (f and BH_HCI_PRESENT != 0) add("HCI")
-            if (f and BH_SSP != 0) add("SSP")
-            if (f and BH_IAP2D != 0) add("iap2d")
-            if (f and BH_AIRPLAYD != 0) add("airplayd")
-            if (f and BH_CARPLAY_WIRELESS != 0) add("btd")
-            if (f and BH_WLAN_AP != 0) add("hostapd")
-            if (f and BH_ROOTFS_OK != 0) add("rootfs-ok")
-        }
+        val on =
+            buildList {
+                if (f and BH_HCI_PRESENT != 0) add("HCI")
+                if (f and BH_SSP != 0) add("SSP")
+                if (f and BH_IAP2D != 0) add("iap2d")
+                if (f and BH_AIRPLAYD != 0) add("airplayd")
+                if (f and BH_CARPLAY_WIRELESS != 0) add("btd")
+                if (f and BH_WLAN_AP != 0) add("hostapd")
+                if (f and BH_ROOTFS_OK != 0) add("rootfs-ok")
+            }
         return if (on.isEmpty()) "none" else on.joinToString("|")
     }
 
@@ -407,6 +408,13 @@ object Ocbm {
     const val CMD_MAP_APPEARANCE: Byte = 0x0F // lib.rs:273
     const val CMD_NIGHT_MODE: Byte = 0x10 // lib.rs:274
 
+    /**
+     * `[INPUT_COMMAND][CMD_VIEW_AREA][index u8]` -> `updateViewArea {viewAreaIndex}` — the deterministic
+     * form of the CarPlay Dock resize button. The box refuses an index the pushed config did not
+     * declare. Constant only: view-area geometry is not wired in this app yet. lib.rs:493
+     */
+    const val CMD_VIEW_AREA: Byte = 0x11
+
     const val APPEARANCE_STREAM_MAIN: Byte = 0x00 // lib.rs:275
     const val APPEARANCE_STREAM_ALT: Byte = 0x01 // lib.rs:276
     const val APPEARANCE_MODE_LIGHT: Byte = 0x00 // lib.rs:277
@@ -414,15 +422,19 @@ object Ocbm {
 
     // ---- Audio seam v2 markers (CH_MEDIA_AUDIO / CH_ALT_AUDIO) ----------------------------------
     // `[u32 BE len][SEAM_MAGIC "SEAV"][marker]…`; 0x00 SEAM_KEY, 0x01 SEAM_PKT, 0x02 SEAM_FORMAT.
-    /** `[0x03][scid 8 LE][payload]` — UNENCRYPTED access unit (no RTP, no key): the Android Auto
-     *  telephony lane, HFP/SCO S16LE PCM forwarded verbatim after a PCM SEAM_FORMAT. */
+
+    /** `[0x03][scid 8 LE][payload]` — UNENCRYPTED access unit (no RTP, no key): the Bluetooth HFP
+     *  call lane (`btd`'s `sco_audio` on the voice seam), CarPlay and Android Auto alike. Under a PCM
+     *  SEAM_FORMAT it is one 20 ms frame of 8 kHz mono S16LE (LITTLE-endian — not the AirPlay PCM
+     *  downlink); under SEAM_CODEC_MSBC it is one raw eSCO read, a bitstream. lib.rs:530-547 */
     const val SEAM_PKT_PLAIN: Byte = 0x03
 
     /** SEAM_FORMAT `codec` 4 — mSBC, the HFP wideband-speech codec (HFP 1.6 §5.7.4). The payload
      *  under it is NOT PCM: each SEAM_PKT_PLAIN carries one raw transparent-eSCO read (2-byte H2
      *  header + 57-byte mSBC frame + pad), and `rate`/`bits` describe the DECODED audio (16 kHz
      *  mono S16LE). A host without an mSBC decoder must drop the stream, not play the bytes.
-     *  Decoded on macOS by carlink_macOS/Audio/MSBCCodec.swift; this client has no decoder yet. */
+     *  Decoded here by `telephony/MsbcFramer.kt` (`MsbcTelephonyDecoder`, with PLC) and encoded for
+     *  the uplink by `MsbcUplinkEncoder`; macOS uses carlink_macOS/Audio/MSBCCodec.swift. */
     const val SEAM_CODEC_MSBC: Byte = 4
 
     // ---- CH_METADATA seam markers --------------------------------------------------------------
@@ -513,7 +525,10 @@ object Mfi {
         }
 
     /** `02 00 14 <20-byte SHA-1 digest>`. */
-    fun signRequest(digest: ByteArray, tag: Byte? = null): ByteArray {
+    fun signRequest(
+        digest: ByteArray,
+        tag: Byte? = null,
+    ): ByteArray {
         require(digest.isNotEmpty() && digest.size <= 0xFFFF) { "bad digest length ${digest.size}" }
         val out = ByteArray(HDR_LEN + digest.size + if (tag == null) 0 else TAG_LEN)
         if (tag != null) out[HDR_LEN + digest.size] = tag

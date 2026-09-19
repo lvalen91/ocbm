@@ -452,7 +452,7 @@ class SeamTest {
     }
 
     @Test
-    fun `voice audio gets VoiceRouter's 11-byte tag`() {
+    fun `voice audio gets VoiceRouter's 12-byte tag with the codec carried through`() {
         val mediaPipe = SeamPipe(1 shl 20)
         val voicePipe = SeamPipe(1 shl 20)
         val seam = AudioSeam(mediaPipe, voicePipe, log)
@@ -471,7 +471,9 @@ class SeamTest {
         val au = ByteArray(20) { it.toByte() }
         seam.feedVoice(audioMsg(SeamCrypto.MARK_PKT, le64(scid) + rtp(key, au, ByteArray(8) { 3 })))
 
-        val out = ByteArray(11 + au.size)
+        // Parsed by hand, not via VoiceTag.parse, so the layout is pinned independently of the
+        // helper VoiceRouter uses: [rate u32 BE][ch u16 BE][atype u8][codec u8][len u32 BE][AU].
+        val out = ByteArray(12 + au.size)
         assertTrue(readFully(voicePipe, out))
         val rate =
             ((out[0].toInt() and 0xFF) shl 24) or ((out[1].toInt() and 0xFF) shl 16) or
@@ -479,11 +481,12 @@ class SeamTest {
         assertEquals(16000, rate)
         assertEquals(1, ((out[4].toInt() and 0xFF) shl 8) or (out[5].toInt() and 0xFF))
         assertEquals(SeamCrypto.ATYPE_TELEPHONY, out[6].toInt() and 0xFF)
+        assertEquals(SeamCrypto.CODEC_AAC_ELD, out[7].toInt() and 0xFF)
         val len =
-            ((out[7].toInt() and 0xFF) shl 24) or ((out[8].toInt() and 0xFF) shl 16) or
-                ((out[9].toInt() and 0xFF) shl 8) or (out[10].toInt() and 0xFF)
+            ((out[8].toInt() and 0xFF) shl 24) or ((out[9].toInt() and 0xFF) shl 16) or
+                ((out[10].toInt() and 0xFF) shl 8) or (out[11].toInt() and 0xFF)
         assertEquals(au.size, len)
-        assertArrayEquals(au, out.copyOfRange(11, out.size))
+        assertArrayEquals(au, out.copyOfRange(12, out.size))
     }
 
     /**

@@ -4,6 +4,48 @@
 
 The Android projection app and the AAOS integration points.
 
+## The Android app is a THIRD-PARTY app, by decision (verified 2026-09-18)
+
+`host/CarlinkAndroid` is two Gradle modules, and today's session settled which one is the AAOS
+integration route:
+
+- **`:app`** — applicationId `zeno.carlink.ocbm`. Owns the USB/OCBM transport to the CCPA adapter
+  (`ocbm/UsbBulkTransport.kt`, `ocbm/OcbmClient.kt`). **This is the product for adapter-bridged
+  CarPlay on AAOS**, and integrates as an ORDINARY third-party app — it declares zero car
+  permissions.
+- **`:projection`** (`com.carlink.projection`) — consumes a loopback TCP seam
+  (`SeamListener.kt:78`, a `ServerSocket` on `SeamContract.LOOPBACK`), not the adapter, and its AAOS
+  layer is built on `android.car.CarProjectionManager`. **That route is now rejected** — see below —
+  so `:projection`'s AAOS layer does not have a path to ship as-is.
+- `minSdk = 32`. The real target is a GM gminfo head unit on Android 12L; the AAOS emulator (API 35)
+  used for the verification below is a bench, not the target.
+
+**Verified on a running AAOS 15 image with `pm list permissions -f`:** `android.car.permission.
+CAR_PROJECTION`, `ACCESS_CAR_PROJECTION_STATUS`, `CAR_NAVIGATION_MANAGER`,
+`CAR_UX_RESTRICTIONS_CONFIGURATION`, and `CAR_DRIVING_STATE` are all `signature|privileged` —
+unobtainable by a third-party app on a locked unit (the same `/system` write / signature barrier
+recorded below for `MANAGE_USB`). `CAR_INFO` is the one exception, `normal`. Separately,
+`CarUxRestrictionsManager` listening and `CarAppFocusManager` focus claims need NO permission at
+all. The public SDK jar (`~/Library/Android/sdk/platforms/android-35/optional/android.car.jar`)
+exposes 55 classes and contains neither `CarProjectionManager` nor `ClusterHomeManager` — both are
+`@SystemApi`, which is why `car-system-stubs/` exists as a compile-only shim for `:projection` and
+was never a route to a runtime grant.
+
+**Consequence: `android.car.CarProjectionManager` / `ProjectionStatus` is REJECTED as the
+integration route for `:app`.** The 3P substitutes actually shipped, all hardware- or
+box-verified (see `host/CarlinkAndroid/OCBMANDROID.md` "3P native shell" for the wire-level detail):
+an active `MediaSession` (drives the AAOS media card, cluster now-playing, and steering-wheel media
+keys) in place of `updateProjectionStatus`; `Notification.CallStyle` for calls; `CarAppFocusManager`
+for nav focus; `CarUxRestrictionsManager` listening for drive state (already this doc's own
+"Drive state" pattern in `OCBMANDROID.md`, of reading a UX-restrictions signal instead of a gated
+one). **Cluster turn-by-turn video and `CH_ALT_VIDEO` on a cluster display are out of reach for a
+third-party app** — do not re-plan either against `ClusterHomeManager`.
+
+This finding is orthogonal to, and does not upgrade, the USB-handler squat below: squatting as
+`android.car.usb.handler` buys silent USB device-permission arbitration only (confirmed narrow in
+the "workaround" section), never a signature|privileged `android.car` grant. The two mechanisms
+guard different resources and neither substitutes for the other.
+
 ## GM AAOS USB permission handler
 
 <!-- absorbed: ../host/01_ANDROID_AND_AAOS.md -->

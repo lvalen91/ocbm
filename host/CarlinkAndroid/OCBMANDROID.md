@@ -9,15 +9,22 @@ media crossing the USB bulk pipe.
 > and reduces the adapter to BT + MFi. That is a different architecture. This one uses the full OCBM
 > stack. `gm_ccpa` is still where several of the components below were proven on this hardware.
 
-## WHERE THINGS STAND (updated 2026-08-16, end of session)
+## WHERE THINGS STAND (updated 2026-09-18, end of session)
 
-> **Status note, 2026-09-11 — dormant, and behind.** Nothing below has moved since 2026-08-16, and the
-> OCBM protocol has: `crates/ocbm-proto` is canonical and this app's `OcbmProto.kt` trails it (see
-> `tools/proto_check.py`, which still checks it). `gm_ccpa` used to symlink this app's `OcbmProto.kt`;
-> that link was replaced by an app-owned fork on 2026-09-11 because the ownership had inverted — gm_ccpa
-> (`host/gm_ccpa/`) and the macOS host (`host/MacHost/`) are the current implementations. When work
-> resumes here, follow those two and the canonical crate, not the other way round; do not re-share
-> this file into gm_ccpa.
+> **Status note, 2026-09-18 — active, three work packages landed today.** This replaces a
+> 2026-09-11 note (removed) that called the app "dormant, and behind" and pointed readers at
+> `gm_ccpa`/`host/MacHost/` instead — that was true on 2026-08-16 and is not true now. Today's
+> build gate is green
+> (`./gradlew :app:assembleDebug :app:testDebugUnitTest :app:detekt :app:ktlintCheck`,
+> `python3 tools/proto_check.py`), and three things landed in `:app`: the 3P native shell (WP1, see
+> below, box-verified on the emulator and a live box, no phone), phone-call audio (WP2, JVM-tested only
+> — no phone call yet), and a resolution/orientation-agnostic UI redesign (device-measured on two AVDs
+> and a live box, including two real iPhone CarPlay sessions). Nothing is committed yet.
+> `crates/ocbm-proto` remains canonical; `OcbmProto.kt` remains an app-owned fork of it since
+> 2026-09-11 (`gm_ccpa` no longer symlinks it) — that relationship did not change today. `CMD_VIEW_AREA`
+> (0x11) was added to `OcbmProto.kt` today, closing one of `:app`'s two `proto_check.py` gaps (the
+> other, `F_BOTH` not being in `ocbm-proto`, is unrelated and still open). Do not re-share this file
+> into `gm_ccpa`.
 
 **The adapter is currently in `ncm_only` mode.** `/script/ncm_only` exists, so `start_main_service.sh`
 skips `ocbm_boot.sh` and the box comes up as a USB-NCM network device instead of the OCBM accessory.
@@ -91,7 +98,7 @@ box's legacy on-box-decrypt TCP seams, so each already speaks a framing we can s
 | Renderer | Framing it expects | Produced by |
 |---|---|---|
 | `HevcRenderer` | `[u32 BE len][Annex-B AU]` | `VideoSeam` |
-| `VoiceRouter` | `[u32 BE rate][u16 BE ch][u8 atype][u32 BE len][AU]` | `AudioSeam` |
+| `VoiceRouter` | `[u32 BE rate][u16 BE ch][u8 atype][u8 codec][u32 BE len][AU]` (`VoiceTag`, 12 B — *corrected 2026-09-18: the codec byte was added so the router branches on it instead of assuming AAC-ELD; no longer byte-compatible with the box's legacy 11-byte `:9003` tag, which nothing in `:app` consumes*) | `AudioSeam` |
 | `AacPlayer` | ADTS byte stream | `AudioSeam` |
 
 `SeamPipe` is the join: a bounded blocking `InputStream` the renderers consume exactly as they would a
@@ -124,9 +131,11 @@ and a latency spike that never recovers.
 
 ### Tests
 
-`app/src/test/kotlin/com/carlink/ocbm/seam/SeamTest.kt` — 14 tests, JVM-only, no adapter and no
+`app/src/test/kotlin/com/carlink/ocbm/seam/SeamTest.kt` — 15 tests, JVM-only, no adapter and no
 emulator. The sealing helpers re-derive nonce and AAD from the wire spec rather than calling
 `SeamCrypto`, so an error in the production derivation cannot cancel itself out.
+`AudioSeamPlainTest.kt` (15 tests, 2026-09-18) covers the `SEAM_PKT_PLAIN` / mSBC path — see
+"Phone-call audio" below.
 
 ```sh
 ./gradlew :app:testSideloadDebugUnitTest --tests 'com.carlink.ocbm.seam.SeamTest'
@@ -280,9 +289,13 @@ bounded join. `media/` and all UI files are byte-identical to `carlink_native_pe
   `META_CMD` IS parsed (`CarlinkManager.onMetadata` → `onCommandPlist`) and DOES fire
   `onHostUIPressed` on `requestUI`; `VehicleConfigYaml` emits `oemIconConfig` including `visible`;
   and `vehicleConfigSpec()` passes `oemIconImages` + `oemIconLabel` alongside
-  name/width/height/maxFps. What survives is narrower and still true: **safe-area/cutout geometry
-  never reaches the wire** — `vehicleConfigSpec()` consumes none of `MainActivity`'s
-  `viewAreaData`/`safeAreaData` (see "Not done yet").
+  name/width/height/maxFps. What survived at the time: **safe-area/cutout geometry never reaches the
+  wire** — `vehicleConfigSpec()` consumed none of `MainActivity`'s `viewAreaData`/`safeAreaData`.
+  **LARGELY SUPERSEDED 2026-09-18** by the content-area work below ("Three rectangles"): the detected
+  content area (window minus visible bars) now IS what `vehicleConfigSpec()`/`CT_SUBSCRIBE` declares,
+  device-measured on the emulator and a live box. Cutout/waterfall/corner-arc insets specifically are
+  still JVM-proven only — no available panel has any, live box included — so that narrower geometry
+  still does not have an on-hardware wire proof. See "3P native shell" and "Three rectangles" below.
 - `MicrophoneCaptureManager.stop()`'s `join(1000)` expiring mid-`read()` will now deliver a spurious
   "capture died" callback after a *normal* stop. Harmless (it only clears an already-clearing flag),
   but it will appear in logs.
@@ -513,19 +526,340 @@ deliverable 52 KB set on hardware.
 - **`onHostUIPressed` is wired, but `META_CMD` is only partly consumed.** `requestUI` is handled;
   every other inbound iPhone command is logged once by verb and dropped. `BinaryPlist` can decode
   them all when a use appears.
-- **The FGS microphone type never applies.** The service runs as `types=0x2` (mediaPlayback only)
-  because the first `startForeground` happens during CONNECTING, before `RECORD_AUDIO` is granted.
-  Mic capture works only because the activity is visible; if the app ever backgrounds, Android will
-  cut the mic mid-Siri. Decide between deferring the FGS start and adding the microphone type on the
-  `CT_UPLINK` edge.
-- **Cutout/safe-area geometry never reaches the wire.** `MainActivity` still computes
-  `viewAreaData`/`safeAreaData`, but `vehicleConfigSpec()` consumes name/width/height/maxFps **plus `oemIconImages` and `oemIconLabel`** *(corrected 2026-08-16 — the "only" was false and is contradicted by this file's own correction earlier; the headline claim stands: `viewAreaData`/`safeAreaData` never reach the wire)*.
-  Moot on gminfo3.7 (zero cutouts), but the path is unwired.
+- ~~**The FGS microphone type never applies** — the service ran `types=0x2` (mediaPlayback only)
+  because the first `startForeground` happened during CONNECTING, before `RECORD_AUDIO` was
+  granted, so mic capture worked only while the activity was visible.~~ **RE-CHECKED 2026-09-18,
+  found already fixed (not part of today's three WPs — pre-existing in the codebase, not caught by
+  an earlier pass of this document).** `CarlinkMediaBrowserService.startForegroundMode()`
+  unconditionally ORs `FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK`, `..._CONNECTED_DEVICE` and
+  `..._MICROPHONE` into every `ServiceCompat.startForeground` call
+  (`media/CarlinkMediaBrowserService.kt:294-297`), and the manifest declares all three
+  (`AndroidManifest.xml:138`, `foregroundServiceType="mediaPlayback|connectedDevice|microphone"`).
+  Not independently hardware-verified as part of this session (no backgrounding-during-a-call test
+  run today) — flagged here rather than left silently stale.
+- ~~**Cutout/safe-area geometry never reaches the wire.**~~ **DONE, and hardware-verified beyond the
+  emulator (2026-09-18) — see "Three rectangles — a real defect found and fixed" under "3P native
+  shell" below.** `DisplayProfile.detect(activity, visibleBarTypes)` derives the content area (window
+  minus the stable insets of whichever bars the active `DisplayMode` leaves visible), and that — not
+  the panel, not the raw window — is what `CarlinkManager.vehicleConfigSpec()` declares, what the
+  decoder is sized to, and what the video surface is laid out to. A real defect from measuring the
+  window instead of the content area (a 1-pixel-tall SurfaceView mismatch in portrait, 800x1151 vs.
+  declared 800x1150) was found and fixed the same day via a `surfaceInsets` parity-pixel correction.
+  Measured on the emulator AND on the live box in both fullscreen and system-bars-visible, landscape
+  AND portrait (see the measured table below), including a real iPhone CarPlay session tapping into a
+  bar-offset surface correctly. The legacy `viewAreaData`/`safeAreaData` blobs in `AdapterConfig` are
+  still computed and still unread — harmless leftovers. The cutout/waterfall/corner arms remain
+  JVM-proven only (`DisplayProfileTest`) — no available panel, emulator or live box, has any.
 - **Test coverage gaps that matter.** `VideoSeam` claims `hvc1`/`hev1` but only `hvc1` and `avc1`
   unwrapping are exercised; a live session shipping `hev1` would hit an untested branch and
   black-screen. No test covers a non-`F_BOTH` (fragmented) OCBM message, or the heartbeat-driven
   re-subscribe after `SEV_HOST_GONE` (the retire side is covered, the re-subscribe side is not).
   The mic path was closed on 2026-08-15 — see below.
+
+## 3P native shell (WP1, 2026-09-18) — emulator + live box, no phone session
+
+Goal: integrate into AAOS the way a native CarPlay head unit does, as an ORDINARY third-party app.
+
+**The governing constraint, verified on a running AAOS 15 image (2026-09-18):** `pm list
+permissions -f` shows `android.car.permission.CAR_PROJECTION`, `ACCESS_CAR_PROJECTION_STATUS`,
+`CAR_NAVIGATION_MANAGER`, `CAR_UX_RESTRICTIONS_CONFIGURATION` and `CAR_DRIVING_STATE` are all
+`signature|privileged` — unreachable to a sideloaded app; only `CAR_INFO` is `normal`.
+`CarUxRestrictionsManager` *listening* (used below, "Drive state -> CarPlay limitedUI") and
+`CarAppFocusManager` focus claims (used below, "`CarAppFocusManager`") need no permission and stay
+in scope. The public SDK jar (`platforms/android-35/optional/android.car.jar`) has 55 classes and
+contains NEITHER `CarProjectionManager` NOR `ClusterHomeManager` — so cluster turn-by-turn is out of
+reach for a 3P app, full stop; this is not a permission gap to be re-argued later.
+**Consequence: `:app` rejects `:projection`'s `CarProjectionBridge` route** (`projection/src/main/
+kotlin/com/carlink/projection/CarProjectionBridge.kt`) and does not use `car-system-stubs`
+(`car-system-stubs/src/main/java/android/car/CarProjectionManager.java`,
+`.../projection/ProjectionStatus.java` — signature-permission stand-ins, compile-only for
+`:projection`). Record this so `ProjectionStatus`/`CarProjectionManager` for `:app` is not
+re-proposed; the SDK evidence above is why, not a preference.
+
+**Module split.** `:app` (applicationId `zeno.carlink.ocbm`, `app/build.gradle.kts:21`) owns the
+USB/OCBM transport to the adapter directly (`ocbm/UsbBulkTransport.kt`) and is the product this
+document describes: adapter-bridged CarPlay running as an ordinary 3P app on AAOS. `:projection` is
+a different arrangement — it consumes a loopback TCP seam (`projection/src/main/kotlin/com/carlink/
+projection/SeamListener.kt:78`) and pairs with the privileged `CarProjectionBridge` route just
+rejected above. The two modules are not two versions of the same thing; only `:app` is load-bearing
+for this document.
+
+This app still declares zero car permissions. Everything below was run on
+the AAOS 15 emulator (API 35, 2400x960) with the CCPA box attached over USB — subscribed session,
+no iPhone — so "box-verified" means the OCBM frames left and the box's replies parsed; nothing
+below has been seen by an iPhone yet.
+
+**MediaSession as the integration point** (`media/MediaSessionManager.kt`, `media/MediaKeyDecoder.kt`).
+`MediaLibrarySession.Callback.onMediaButtonEvent` now decodes raw KeyEvents: PLAY/PAUSE/NEXT/PREV,
+PLAY_PAUSE as the dedicated HID toggle (`MEDIA_BTN_PLAY_PAUSE`, never split from mirrored state), a
+HEADSETHOOK short press (answer a ringing call, else toggle — never hang up), HEADSETHOOK long press /
+VOICE_ASSIST → Siri. Measured: `cmd media_session dispatch play-pause` and `input keyevent
+KEYCODE_MEDIA_NEXT` land in our callback (`media key 85 -> PLAY_PAUSE`, `87 -> NEXT`) once the session is
+the platform's "media button session" (it is, after the USB grant; before that the keys go elsewhere).
+**Finding:** `input keyevent --longpress KEYCODE_HEADSETHOOK` reaches the session as a bare ACTION_UP —
+AOSP's `MediaSessionService` swallows the voice-key long press and calls the *assistant* itself. So
+tier 2 (long-press via the session) only works on a head unit that passes the raw hold through; on
+stock AOSP it collapses into tier 3. Decoder state machine is JVM-tested (`MediaKeyDecoderTest`).
+
+**Now-playing** (`media/NowPlayingInfo.kt`). `CarlinkManager.processNowPlaying` now also merges
+`genre`, `composer`, `trackNumber`, `trackCount` (the macOS `MediaSnapshot` set); `appName` was
+already carried and lands in `setSubtitle` + `setStation`. Published with `MEDIA_TYPE_MUSIC` and
+`isPlayable`. Unverified against a phone — no nowPlaying frames without one.
+
+**Siri, three tiers, all 3P** — wire form is the `CMD_SIRI_DOWN`/`CMD_SIRI_UP` hold pair
+(`OcbmClient.sendSiriPress()`; the bare `CMD_REQUEST_SIRI` is deprecated and iOS ignores it).
+1. In-app: the Siri button on the dashboard (`ui/MainScreen.kt` `SiriRow`) → `CarlinkManager.requestSiri()`.
+   Box-verified: the two `INPUT_COMMAND` frames go out in order (`OcbmShellInputTest` pins the bytes).
+2. Media-session voice key — see the finding above.
+3. `voice/CarlinkVoiceInteractionService` + `CarlinkVoiceSessionService` + `CarlinkRecognitionService`
+   (manifest, `res/xml/voice_interaction_service.xml`). The services are guarded by
+   `BIND_VOICE_INTERACTION`, which the SYSTEM holds; the app needs no permission. Inert until the user
+   picks Carlink under Settings > Apps > Default apps > Assistant (the dashboard's mic-settings button
+   opens `ACTION_VOICE_INPUT_SETTINGS`, which resolves to CarSettings' assistant screen). Measured on
+   the emulator with the assistant switched via `settings put secure voice_interaction_service`:
+   `cmd car_service inject-key 231` (the VHAL PTT path through `CarInputService`) → our session's
+   `onShow(flags=0x23)` → `[SIRI] press -> sent` to the box. Plain `input keyevent KEYCODE_VOICE_ASSIST`
+   does NOT reach it — `PhoneWindowManager` turns that into an `ACTION_VOICE_ASSIST` activity launch.
+   Cost of opting in, stated on purpose: while Carlink is the assistant, the platform's default
+   `SpeechRecognizer` is our stub, which refuses with `ERROR_CLIENT`. Whether GM's Settings exposes an
+   assistant picker at all is UNVERIFIED (gminfo, 12L).
+   `MainActivity.onKeyDown` also maps VOICE_ASSIST/ASSIST/SEARCH → Siri for head units that pass them.
+
+**Box state surfaced** (`OcbmClient.onProjMode`/`onBoxHealth`, `lastProjMode`/`lastBoxHealth`/
+`boxHealthKnown`; `CarlinkManager.projectionMode`/`boxHealth`, `BoxStatusListener`; dashboard line
+`BoxStatusLine`). Box-verified: `<< PROJ_MODE NONE`, `<< BOX_HEALTH HCI|SSP|btd|hostapd|rootfs-ok`
+parsed and rendered as "NONE · HCI|btd|hostapd|rootfs-ok" under the status text. Both are re-emitted by
+the box on every SUBSCRIBE, so every teardown path resets them to unknown (`clearSessionUiState`).
+
+**Telephony** — `OcbmClient.sendTelephony(index: Byte): Boolean` (`[INPUT_TELEPHONY][index]` on
+CH_INPUT, `Ocbm.TEL_*`) exposed as `CarlinkManager.sendTelephony(index: Byte): Boolean`; wire bytes
+pinned by `OcbmShellInputTest`. `callui/CallNotificationHost` posts a `Notification.CallStyle` card
+(channel `carlink_calls`, id 1002 — distinct from the media FGS slot 1001) for a ringing/ongoing iPhone
+call from the iAP2 `callState` records (`callui/CallState`, reduced by `CallRoster`), with
+Answer → `TEL_ANSWER`, Decline/Hang up → `TEL_END` through a non-exported dynamic receiver.
+Android 14+ admits CallStyle only from an FGS or with a `fullScreenIntent`; we set the latter
+(`USE_FULL_SCREEN_INTENT` declared; if the OS refuses, the IAE is caught and a plain card with the
+same actions is posted). Robolectric-proven (`CallNotificationHostTest`: template, ongoing flag,
+full-screen intent, action → HID index); NOT seen on a device — no phone, no call.
+`CarlinkManager.addCallStateListener { presentation -> }` is the hook for the audio path.
+
+**`CarAppFocusManager`** (`car/AppFocusClaimer.kt`): NAVIGATION focus is requested while iAP2
+`routeGuidance.routeGuidanceState != 0` and abandoned at 0 / teardown — the permission-free way to make
+this app the platform's nav-context owner and tell a native maps app it lost the road.
+`VOICE_COMMAND` focus is deliberately NOT claimed: nothing in the AOSP car stack acts on it for a 3P
+app, and the only "Siri is listening" edge we have (the mic gate) also fires for calls. Unverified
+end-to-end (needs a phone navigating); on the emulator `Car.createCar` + `getCarManager` succeed.
+
+**The seam decision (media session vs. call card vs. `VoiceRouter` focus).** Three rules:
+1. The MediaSession mirrors iOS NowPlaying ONLY. A call never touches it — iOS pauses its own player
+   and reports `playbackStatus 2`, which we mirror; forcing a pause here would desynchronise the card
+   from the phone, and forcing play after a call would guess. The media lane's audio focus
+   (`AacPlayer`) is likewise untouched by call state.
+2. Call audio focus belongs to `VoiceRouter`'s `Purpose.CALL` lane (USAGE_VOICE_COMMUNICATION,
+   GAIN_TRANSIENT, 3 s idle) and is driven by AUDIO ARRIVING, never by `callState` metadata — the
+   metadata can lag or be absent (a wired-only phone), and a lane that opened on a rumour would hold
+   the telephony context with nothing to play (the stuck-knob bug). WP2 added no new lane and no new
+   focus request; the call card adds none either.
+3. The call card is the only thing keyed on `callState`, plus one input decision: a HEADSETHOOK short
+   press answers while `callPresentation` is `Incoming`. `clearSessionUiState()` drops the card and the
+   nav-focus claim on every teardown path (stop, reboot, error), posted to main.
+   Net effect: a call cannot leave the media session in a wrong state because nothing writes to it
+   on call events, and cannot leave the focus stack wrong because the only focus holder for call
+   audio is the lane that also releases it on silence.
+
+**Launch-time display detection** (`util/WindowMetricsCompat.kt`: `DisplayProfile`, `SafeAreaMath`,
+`PanelGeometry`; `ocbm/VehicleConfigYaml.kt`: `PanelRule`, `ViewAreaRule`). Three rectangles, never
+conflated: the PHYSICAL panel (`maximumWindowMetrics`), the APP WINDOW (`currentWindowMetrics` —
+equal to the panel only when fullscreen), and the CONTENT AREA (window minus the system bars the
+`DisplayMode` keeps visible). The content area is read from the platform at launch (after the decor
+view is attached — earlier the insets come back all-zero) and is the source of truth for the
+CT_SUBSCRIBE config, the decoder size and the surface rect; `AdapterConfig` only fills in when no
+profile exists. The display mode (`ui/settings/DisplayModePreference.kt`: `SYSTEM_UI_VISIBLE` /
+`STATUS_BAR_HIDDEN` / `FULLSCREEN_IMMERSIVE` / `NAV_BAR_HIDDEN`, ints persisted — never renumber)
+is a user choice from the dashboard footer, default Fullscreen everywhere (= the previous hard-coded
+behaviour; no head-unit identity check). Changing it rebuilds the session exactly like a panel
+change; the cutout/waterfall insets are re-expressed relative to the content area. `maxFps` snaps to 30/60 (round first, so 59.94 is 60; 50 Hz is 30).
+Safe area = panel minus max(cutout, waterfall, corner-arc inset), origin rounded UP to even and far
+edges DOWN, dropped back to the full panel if below the product floor. Legality ported from the macOS
+`PanelRule`/`ViewArea2Rule`: floor 800x480 landscape / 480x800 portrait by the panel's OWN aspect,
+3840 max side, even/odd, containment, positivity — the spec's `init` refuses anything iOS tears a
+session down for. Measured on the running emulator with the box attached: launch reads
+`2400x960@60.00Hz 160dpi (16.2") -> panel 2400x960@60 safe 2400x960@0,0`; `wm size 1280x720` fires
+`onConfigurationChanged` → `panel changed 2400x960 -> 1280x720 — rebuilding session` → `[CONFIG] panel
+1280x720@60 ... (detected)` → a fresh `CT_SUBSCRIBE`; `wm size reset` brings it back the same way
+(emulator left at 2400x960 / 160). A portrait 800x1280@120dpi panel reads as a legal portrait panel
+(floor 480x800). Cutout/waterfall/corner arms are JVM-proven only (`DisplayProfileTest`) — no
+available panel has any.
+
+### Three rectangles — a real defect found and fixed (UI pass, 2026-09-18)
+
+WP1's `DisplayProfile.detect()` (paragraph above) originally measured `currentWindowMetrics.bounds`
+— the app WINDOW — for everything, including what went out in `CT_SUBSCRIBE`. Because the app was
+hardcoded immersive at the time, window = panel = surface, so it was self-consistent only by
+accident: nothing forced window and content area to be the same rectangle once a `DisplayMode` other
+than fullscreen existed. `util/WindowMetricsCompat.kt`'s `DisplayProfile` (`:132-273`) now keeps
+three rectangles distinct: `physicalWidthPx`/`physicalHeightPx` (`maximumWindowMetrics`),
+`windowWidthPx`/`windowHeightPx` (`currentWindowMetrics`), and `widthPx`/`heightPx` — the CONTENT
+AREA, window minus the stable insets of whichever bars the active `DisplayMode` leaves visible. **The
+content area, not the window or the panel, is what `CT_SUBSCRIBE` carries**, because it is the
+rectangle the CarPlay surface actually occupies and therefore the basis for `INPUT_TOUCH`'s 0..65535
+normalisation; cutout/waterfall insets are re-based relative to it, not the panel.
+
+`surfaceInsets` (`:224-236`) is bars-plus-a-parity-pixel so the rendered surface IS the declared
+panel — added after this was measured wrong on the real box in portrait: content came out
+800x**1151** while the declared/CT_SUBSCRIBE panel was 800x1150, a one-pixel-tall SurfaceView
+mismatch that the earlier window-only measurement could not see because it never had two
+independent numbers to disagree.
+
+Measured on the live box, 2026-09-18:
+
+| mode | physical | bars | content → `CT_SUBSCRIBE` |
+|---|---|---|---|
+| Fullscreen 2400x960 | 2400x960 | 0 | 2400x960 |
+| System bars visible 2400x960 | 2400x960 | T76 B96 | 2400x788 |
+| Fullscreen portrait | 800x1280 | 0 | 800x1280 |
+| System bars visible portrait | 800x1280 | T57 B72 | 800x1150 |
+
+**Portrait verified on a real 800x1280 / density 120 AVD**, density read from the platform (120, not
+assumed 160): `Display.Mode` 60.000004 Hz snaps to 60, and `[CONFIG] panel 800x1280@60 ... dpi=120
+diag=12.6" (detected)` is emitted immediately before `subscribe()`. The `PanelRule`/`ViewAreaRule`
+ported from the macOS `VehicleConfig.swift` (referenced in the paragraph above) ACCEPT a portrait
+panel — floor 480x800 by the panel's own aspect, no landscape clamp — which is worth recording
+because those rules were originally written and tested only against wide landscape panels. iOS
+accepted the pushed portrait config and rendered a 4-column portrait CarPlay home screen; a tap on
+the CarPlay tile through the resulting non-immersive, bar-offset surface produced `[UI_NAV] Host UI
+requested`, confirming the touch basis (content area, not window or panel) end to end on real
+hardware with a real iPhone, not just the emulator.
+
+### Dashboard layout (2026-09-18) — resolution- and orientation-agnostic redesign
+
+`ui/adaptive/WindowLayout.kt` (new file) drives the dashboard from `androidx.window:window-core:1.5.0`
+(`app/build.gradle.kts:169`) — chosen over the older `material3-window-size-class`, which is
+deprecated in favour of `androidx.window.core.layout.WindowSizeClass`. `rememberWindowLayoutInfo()`
+derives the class from `LocalWindowInfo.containerSize`, so an in-process `wm size` / rotation / split
+re-lays the dashboard without an Activity restart.
+
+Arrangement: `DashboardArrangement.TWO_PANE` at width ≥ 840 dp AND landscape; `STACKED` otherwise —
+portrait always stacks regardless of width, and **height never picks the arrangement**: a short
+window keeps its arrangement and scrolls instead of collapsing to a column (`WindowLayout.kt:47-70`,
+unit-tested in `app/src/test/kotlin/com/carlink/ui/adaptive/WindowLayoutTest.kt`). In `TWO_PANE` the
+content block keeps the gminfo look — `max(70% of width, 1100dp)` — with the adapter column at
+`(0.26·content).coerceIn(300, 420)` dp, replacing a `weight(0.24)` that used to collapse to ~170dp at
+1024x600.
+
+`PhonesTab`'s old `CARD_WIDTH` (360.dp, explicitly tuned to gminfo37 and previously cited at
+`PhonesTab.kt:58-66`) is replaced by `AdaptiveGrid` (`WindowLayout.kt:116-`), a custom NON-lazy
+`Layout` giving `GridCells.Adaptive` semantics with 200..280dp cells. Non-lazy is deliberate, not an
+oversight: `AdaptiveGrid` lives inside a `verticalScroll` column, and `LazyVerticalGrid` demands a
+bounded height there — it crashes on the unbounded height a `verticalScroll` gives it.
+
+Every fixed `height(ButtonMinHeight)` is now `heightIn(min = ButtonMinHeight)`, and both arrangements
+are wrapped in `verticalScroll` (centred when the content fits without scrolling). The version pill —
+previously overlaid on the cards at `Alignment.BottomEnd`, where it could sit on top of content — is
+now in a footer row instead. The single-panel-only prose this replaced was removed from
+`MainScreen.kt`, `PhonesTab.kt:58-66`, and a stale "788 usable height" comment in
+`MainActivity.onCreate` (that number was this same gminfo hardcode, from the old single fixed-panel
+assumption).
+
+Screenshot-verified at 2400x960/160, 1920x720/160+320, 1280x720/160, 1024x600/160+240, 800x1280/160
+on the reshaped landscape AVD and on the real portrait AVD (800x1280/120). `MainActivity` keeps the
+broad `configChanges` in full (`AndroidManifest.xml:67-77`, documented in the manifest comment, no
+`screenOrientation`): a system-driven recreate on rotation/resize would tear down the live USB
+session and the HWC plane. `onConfigurationChanged` now compares `geometry` AND `barInsets`, not
+geometry alone, so a bar/inset change (e.g. a `DisplayMode` switch with the panel unchanged) rebuilds
+the session even when the panel dimensions are identical.
+
+`dpi`/`diagonalInches` are detected and logged but deliberately NOT emitted: `vehicle_config.rs` has
+no slot for either, the receiver's `/info` hard-codes `widthPhysical: 0`, and the macOS host's own
+field help says `diagonalInches` is not sent to either phone (its `dpi` is an Android Auto field).
+`CMD_VIEW_AREA` (0x11) is now DEFINED in `OcbmProto.kt`, closing one of `:app`'s two
+`proto_check.py` gaps (the other, `F_BOTH`, is unrelated), but the mid-session push is NOT wired —
+a panel/mode change rebuilds the session instead of pushing a live view-area update; this app still
+declares a single view area with `enablesViewAreas: false`. `WindowMetricsCompat`'s old
+window-only-measurement code path is now callerless, superseded by the three-rectangle version above.
+
+**Also found today, unrelated to layout:** the launcher icon assets are byte-identical (same md5,
+both foreground and background/monochrome layers) to `carlink_native`'s — this app currently ships
+the older app's icon, distinct from the OEM CarPlay-tile icon described under "OEM icon + the return
+path" above, which is a separate asset pipeline.
+
+**Call-audio plumbing wired for WP2 — Android Auto lane (see the scope correction below):**
+`CT_UPLINK` byte 7 (codec) parsed into `onUplinkGate(on, rate, ch, codec)` / `uplinkCodec`;
+`CarlinkManager.onMicGate` restarts capture on a format change (CVSD→mSBC keeps 16 kHz, so the old
+early-return would have left PCM on a wideband socket) and drains through
+`MicrophoneCaptureManager.drainUplink`. Not hardware-verified (no phone call).
+
+## Phone-call audio — the Android Auto HFP telephony lane (WP2, 2026-09-18 — NOT yet hardware-verified)
+
+> **Scope correction, 2026-09-18.** This work package was commissioned on the mistaken belief that
+> `SEAM_PKT_PLAIN` carries CarPlay call audio. It does not. **CarPlay hands every audio stream —
+> media, Siri, telephony — to the accessory inside the AirPlay/WiFi session; it never rides SCO/HFP**
+> (`crates/vendor/wireless/src/sco_audio.rs:2-6`, `docs/wireless/01_BT_AND_RADIO.md:690-697`). The
+> `:9112` mic-seam listener and the HFP link `SEAM_PKT_PLAIN` carries are gated to an **Android
+> Auto** projection owner, wired or wireless — `owner == ProjectionOwner::WirelessAa || owner ==
+> ProjectionOwner::WiredAa` (`crates/vendor/wireless/src/sco_audio.rs:1181-1183`) — because gearhead
+> routes calls AND the Assistant through the connected Bluetooth headset, not this box's projection
+> link (`crates/vendor/wireless/src/hfp_hf.rs:28-36`). So everything below is a real, tested `:app`
+> capability, but it serves **Android Auto's** telephony lane, not this document's own CarPlay/OCBM
+> architecture — a scope mismatch worth carrying forward rather than quietly correcting away, since
+> the code and its tests are sound and simply were not the path this session was asked for. CarPlay
+> phone calls on this box continue to ride the AirPlay session exactly as before, unaffected by
+> anything in this section.
+
+Before this, the Android Auto call-audio lane did not decode at all on `:app`'s side: `AudioSeam.handle`
+matched only the three encrypted-seam markers, so the box's `SEAM_PKT_PLAIN` (`0x03`,
+`crates/ocbm-proto/src/lib.rs` `SEAM_PKT_PLAIN` / `SEAM_CODEC_MSBC`) was silently dropped; and every
+voice stream reaching `VoiceRouter` was fed to an AAC-ELD decoder regardless of codec. Landed, all in
+`:app`:
+
+- **`SEAM_PKT_PLAIN` in `ocbm/seam/AudioSeam.kt`.** `[scid 8 LE][payload]`, no key, no RTP. Under a
+  PCM `SEAM_FORMAT` (`btd`'s narrowband: 8 kHz mono S16 **little-endian**, 320 B / 20 ms) the bytes
+  pass through untouched. An unknown marker is skipped by its length prefix (bounded at 64 KiB so a
+  false magic in ciphertext cannot swallow the lane) and is never a desync.
+- **mSBC decoder, `telephony/Msbc.kt` + `MsbcFramer.kt`** — a line-for-line port of the macOS
+  `MSBCCodec.swift` / `MSBCFramer.swift`, pinned by the same reference vectors (encoder reproduces the
+  recorded bitstream byte-for-byte; decoder matches ffmpeg's fixed-point synthesis within 8 LSB).
+  `AudioSeam` keeps one `MsbcTelephonyDecoder` per scid; it resynchronises on the H2 header
+  (`0x01` + `08/38/C8/F8` + `0xAD`), never on message length, conceals sequence gaps, and writes
+  NOTHING to the voice pipe unless a frame decoded — the bitstream is never rendered as PCM.
+- **Codec carried through** (`ocbm/seam/VoiceTag.kt`, 12-byte tag). `VoiceRouter` now branches:
+  `CODEC_PCM` → S16LE straight to the `AudioTrack` (no MediaCodec); `CODEC_AAC_ELD` → the existing
+  ELD path; anything else is dropped with a warn-once naming the codec, BEFORE focus is requested.
+  PCM in the tag is always little-endian: the seam byte-swaps the big-endian AirPlay PCM downlink
+  (`SEAM_PKT`, codec 0) and passes HFP PLAIN / mSBC output through. Call audio of every flavour lands
+  on the existing `Purpose.CALL` lane (`USAGE_VOICE_COMMUNICATION`); no new lane.
+- **mSBC uplink** (`audio/MicProfile.kt`, `audio/MicrophoneCaptureManager.kt`). `start(decodeType,
+  codec)` honours the `CT_UPLINK` codec byte: codec 4 forces 16 kHz mono capture and arms an
+  `MsbcUplinkEncoder`; `drainUplink(maxPcmBytes, send)` cuts the ring buffer into whole 240-byte
+  frames and sends each as its OWN 60-byte `CH_MIC` message (the box writes one payload per SCO
+  write). The 7.5 ms cadence rides the 20 ms timer with the remainder carried in the ring buffer.
+  An unknown codec REFUSES to capture rather than uplinking PCM the far end would hear as noise.
+
+**Integration IS wired** *(corrected 2026-09-18 — this paragraph was written mid-session, while WP2
+still owned only the seam/audio half and WP1 had not yet landed its side; it read "deliberately not
+wired" and was already false by the end of the same session)*. All three hand-off points exist:
+`CT_UPLINK` reads the codec byte when `len >= 8` (default 0) and `onUplinkGate` carries it
+(`ocbm/OcbmClient.kt:92,443`); `onMicGate` restarts capture when
+`microphoneManager?.matchesFormat(rate, channels, codec) == false` and sizes the drain from
+`MicProfile.captureFormatFor`/`uplinkDrainBytes` (`CarlinkManager.kt:1815,1837,1850`); and
+`sendMicrophoneData` drains through `drainUplink` (`CarlinkManager.kt:1907`).
+
+The renegotiation guard is the load-bearing part: a CVSD→mSBC switch keeps the rate at 16 kHz, so an
+early-return on "already capturing" would leave a raw-PCM uplink running on a wideband SCO socket —
+silent corruption that reports no error anywhere.
+
+**Verified by test (JVM):** 320-byte narrowband framing and byte order; PLAIN split across feeds;
+unknown-marker skip (and the bounded-length resync); H2 resync across 37-byte and 30/90-byte splits,
+false `0x01 0x08` pairs, a header split across pushes, loss from the sequence gap, junk and the 4 KiB
+cap; drop-don't-render for an mSBC-format payload that never frames and for an undecodable codec;
+big-endian AirPlay PCM swap; uplink encode → downlink decode round trip at > 20 dB SNR with the 7.5 ms
+packets riding 100 ticks of the 20 ms timer without drift. Each of the endianness swap and the H2
+syncword check was mutated and confirmed to fail its test.
+
+**Unproven on hardware:** whether `btd` really emits the documented shapes at call time; the AAOS
+`USAGE_VOICE_COMMUNICATION` track from a third-party app on the gminfo call bus; AudioTrack at 8 kHz
+mono on that HAL; mSBC decode CPU on the Atom under a live call; the SCO write accepting one 60-byte
+`CH_MIC` message per packet; echo/latency of the HFP round trip.
 
 ## Mic path tests (2026-08-15)
 

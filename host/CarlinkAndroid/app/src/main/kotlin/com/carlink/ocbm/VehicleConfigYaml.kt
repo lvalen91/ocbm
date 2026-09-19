@@ -90,11 +90,28 @@ data class VehicleConfigSpec(
     val oemIconImages: List<OemIcon.Image> = emptyList(),
     val oemIconLabel: String = "",
     val oemIconVisible: Boolean = true,
+    /**
+     * Panel density and physical diagonal, DETECTED at launch and carried for the density check and
+     * the subscribe log line. Deliberately NOT emitted: the box's CarPlay schema
+     * (`vehicle_config.rs`) has no slot for either, its `/info` hard-codes `widthPhysical: 0`, and
+     * the macOS host's own field help says `diagonalInches` is "not sent to either phone" (`dpi`
+     * is its Android Auto density field). Emitting an unread key here would only widen the
+     * document the golden fixture guards. 0 = unknown.
+     */
+    val dpi: Int = 0,
+    val diagonalInches: Double = 0.0,
 ) {
     init {
         require(maxFps == 30 || maxFps == 60) { "maxFPS must be 30 or 60; the box ignores anything else" }
         require(width > 0 && height > 0) { "pixelDimensions must be positive" }
         require(metadataTier in LEGAL_TIERS) { "metadata tier must be one of $LEGAL_TIERS" }
+        // Legality, ported from the macOS host (VehicleConfig.swift PanelRule / ViewArea2Rule): a
+        // config that iOS tears the session down for must never be constructible. Callers clamp
+        // BEFORE constructing (DisplayProfile.toGeometry); this is the last line, not the policy.
+        PanelRule.verdict(width, height)?.let { throw IllegalArgumentException(it) }
+        ViewAreaRule.teardownVerdict(PixelRect(safeOriginX, safeOriginY, safeWidth, safeHeight), width, height)?.let {
+            throw IllegalArgumentException("safeArea: $it")
+        }
     }
 
     companion object {
@@ -104,6 +121,107 @@ data class VehicleConfigSpec(
          * Identify reject that costs the whole CarPlay session, not just the metadata.
          */
         val LEGAL_TIERS = setOf("proven", "extended", "all")
+    }
+}
+
+/** An axis-aligned pixel rectangle as CarPlay wants it: origin + size. */
+data class PixelRect(
+    val x: Int,
+    val y: Int,
+    val width: Int,
+    val height: Int,
+)
+
+/**
+ * What a view area (and therefore the safe area, which iOS treats the same way) may be. Ported from
+ * `host/MacHost/carlink_macOS/App/VehicleConfig.swift` `ViewArea2Rule`; every rule below is
+ * device-proven there, so do not relax one against a "measured" smaller value.
+ *
+ * Severity order: containment, parity and positivity END THE SESSION; the product floor only locks
+ * the area out black ("CarPlay does not support this display resolution") with the session alive.
+ */
+object ViewAreaRule {
+    /** PRODUCT FLOOR: 800 x 480 landscape, 480 x 800 portrait — the documented CarPlay minimum. */
+    const val LANDSCAPE_FLOOR_W = 800
+    const val LANDSCAPE_FLOOR_H = 480
+    const val PORTRAIT_FLOOR_W = 480
+    const val PORTRAIT_FLOOR_H = 800
+
+    /** The floor for an area of this aspect: `w >= h` is landscape. */
+    fun minimumSize(
+        w: Int,
+        h: Int,
+    ): Pair<Int, Int> = if (w >= h) LANDSCAPE_FLOOR_W to LANDSCAPE_FLOOR_H else PORTRAIT_FLOOR_W to PORTRAIT_FLOOR_H
+
+    /**
+     * Null = legal for the session. Otherwise the FIRST teardown rule violated:
+     *  1. containment — `x + w <= panelW && y + h <= panelH` (device-proven teardown).
+     *  2. parity — x, y, w, h all even; HEVC 4:2:0 cannot express an odd extent
+     *     (`kFigEndpointError_InvalidParameter -16720`, one-pixel-isolated on hardware).
+     *  3. positive dimensions, non-negative origin (a zero trips iOS's own validator).
+     */
+    fun teardownVerdict(
+        a: PixelRect,
+        panelW: Int,
+        panelH: Int,
+    ): String? {
+        val right = a.x.toLong() + a.width
+        val bottom = a.y.toLong() + a.height
+        if (right > panelW || bottom > panelH) {
+            return "area extends to ${right}x$bottom px, outside the ${panelW}x$panelH panel — CarPlay tears the session down"
+        }
+        val odd = listOf("X" to a.x, "Y" to a.y, "width" to a.width, "height" to a.height).filter { it.second and 1 != 0 }
+        if (odd.isNotEmpty()) {
+            return "odd value: ${odd.joinToString { "${it.first} ${it.second}" }} — all four must be even (HEVC 4:2:0); an odd value tears the session down"
+        }
+        if (a.width <= 0 || a.height <= 0) return "width and height must be positive — a zero dimension is a session teardown"
+        if (a.x < 0 || a.y < 0) return "the origin must be non-negative"
+        return null
+    }
+
+    /** Null = at or above the product floor. Otherwise the LOCKOUT (not teardown) message. */
+    fun floorVerdict(
+        w: Int,
+        h: Int,
+    ): String? {
+        val (mw, mh) = minimumSize(w, h)
+        if (w >= mw && h >= mh) return null
+        val orientation = if (w >= h) "landscape" else "portrait"
+        return "area ${w}x$h is below the $orientation floor of ${mw}x$mh — CarPlay locks it out black"
+    }
+}
+
+/**
+ * The envelope a PANEL may occupy and the one clamp that enforces it — `VehicleConfig.swift`
+ * `PanelRule`, orientation-agnostic: each side admits `MIN_SIDE`..`MAX_SIDE`, and the product floor
+ * applies by the panel's OWN aspect, so a clamp never flips it. 3840 is device-proven on the wire,
+ * not a measured iOS limit.
+ */
+object PanelRule {
+    const val MAX_SIDE = 3840
+    val MIN_SIDE: Int = minOf(ViewAreaRule.LANDSCAPE_FLOOR_H, ViewAreaRule.PORTRAIT_FLOOR_W)
+
+    /** The size to DECLARE for a requested size: floor by orientation, then each axis into range. */
+    fun clamped(
+        w: Int,
+        h: Int,
+    ): Pair<Int, Int> {
+        val (fw, fh) = ViewAreaRule.minimumSize(w, h)
+        return w.coerceIn(fw, MAX_SIDE) to h.coerceIn(fh, MAX_SIDE)
+    }
+
+    /** Null = inside the envelope AND legal as the panel's own (full) view area. */
+    fun verdict(
+        w: Int,
+        h: Int,
+    ): String? {
+        val (cw, ch) = clamped(w, h)
+        if (cw != w || ch != h) {
+            val (fw, fh) = ViewAreaRule.minimumSize(w, h)
+            val orientation = if (w >= h) "landscape" else "portrait"
+            return "a $orientation panel must be ${fw}x$fh to ${MAX_SIDE}x$MAX_SIDE px (got ${w}x$h) — clamp stores ${cw}x$ch"
+        }
+        return ViewAreaRule.teardownVerdict(PixelRect(0, 0, w, h), w, h)
     }
 }
 

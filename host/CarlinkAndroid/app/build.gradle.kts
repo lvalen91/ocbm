@@ -163,6 +163,10 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
+    // Window size classes (androidx.window.core.layout.WindowSizeClass) drive the dashboard
+    // breakpoints. material3-window-size-class is deprecated in favour of this; it is the
+    // platform-sanctioned copy and already resolves transitively at this version.
+    implementation("androidx.window:window-core:1.5.0")
 
     // MediaSession for AAOS integration — Media3 1.10.1.
     // media3-session supersedes legacy androidx.media:media (MediaSessionCompat, deprecated

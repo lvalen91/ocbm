@@ -1,8 +1,10 @@
 package com.carlink.ui
 
+import android.content.Intent
 import android.graphics.Bitmap
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.view.MotionEvent
 import android.view.PixelCopy
 import androidx.activity.compose.BackHandler
@@ -14,11 +16,13 @@ import androidx.compose.animation.scaleOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -27,25 +31,33 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.RestartAlt
+import androidx.compose.material.icons.filled.SettingsVoice
 import androidx.compose.material.icons.filled.Usb
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -79,15 +91,21 @@ import com.carlink.logging.logWarn
 import com.carlink.protocol.MessageSerializer
 import com.carlink.protocol.MultiTouchAction
 import com.carlink.protocol.PhoneType
+import com.carlink.ui.adaptive.DashboardArrangement
+import com.carlink.ui.adaptive.DashboardLayout
+import com.carlink.ui.adaptive.asWindowInsets
+import com.carlink.ui.adaptive.rememberWindowLayoutInfo
 import com.carlink.ui.components.LoadingSpinner
 import com.carlink.ui.components.VideoSurface
 import com.carlink.ui.components.VideoSurfaceState
 import com.carlink.ui.components.rememberVideoSurfaceState
+import com.carlink.ui.settings.DisplayMode
 import com.carlink.ui.settings.PhonesTabContent
 import com.carlink.ui.theme.AutomotiveDimens
 import com.carlink.ui.theme.GlassButton
 import com.carlink.ui.theme.GlassShapes
 import com.carlink.ui.theme.frostedGlass
+import com.carlink.util.EdgeInsets
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -98,11 +116,19 @@ import kotlin.coroutines.resume
  * The single app screen (cp-stripped). When STREAMING it is the CarPlay projection (SurfaceView
  * / HWC overlay) with touch forwarding; otherwise it shows the [CarlinkDashboard] (adapter status,
  * adapter controls, known devices) — no separate Settings screen / overlay.
+ *
+ * The video surface is laid out to the DECLARED PANEL the session was built for
+ * ([CarlinkManager.displayProfile]`.surfaceInsets` off the edge-to-edge window: the visible bars
+ * plus the parity pixel): the same rectangle that went out in CT_SUBSCRIBE and that the decoder is
+ * sized to, so touch — normalised over the surface — lands where iOS drew. A bar the display mode keeps visible is therefore outside the
+ * video, never under it.
  */
 @Composable
 fun MainScreen(
     carlinkManager: CarlinkManager,
     onResetConnection: (() -> Unit)? = null,
+    displayMode: DisplayMode = DisplayMode.DEFAULT,
+    onDisplayModeSelected: (DisplayMode) -> Unit = {},
 ) {
     // Key state on carlinkManager identity — when the manager is replaced (Reset Connection
     // rebuild), all session-scoped state resets automatically, preventing stale callbacks /
@@ -146,11 +172,11 @@ fun MainScreen(
     // effect below so start() never races an uninitialized manager.
     var initializedForStart by remember(carlinkManager) { mutableStateOf(false) }
 
-    // Container (display-bounds) dimensions, used for the adapter OPEN/BoxSettings resolution.
+    // Container (content-area) dimensions, used for the adapter OPEN/BoxSettings resolution.
     var containerSize by remember(carlinkManager) { mutableStateOf(IntSize.Zero) }
 
-    // Surface init for the adapter — uses container (display) dimensions. Idempotent across Surface
-    // recreations; start() runs once per manager (the decoupled effect below).
+    // Surface init for the adapter — uses container (content-area) dimensions. Idempotent across
+    // Surface recreations; start() runs once per manager (the decoupled effect below).
     LaunchedEffect(surfaceState.surface, containerSize) {
         surfaceState.surface?.let { surface ->
             if (containerSize.width <= 0 || containerSize.height <= 0) return@let
@@ -221,16 +247,24 @@ fun MainScreen(
             if (overlayingSession) captureSurfaceBitmap(surfaceState) else null
     }
 
-    // Fullscreen-immersive: video fills the entire display behind the (hidden) system bars
-    // and cutout. SafeArea (where CarPlay avoids placing UI) is emitted separately by
-    // CarlinkManager/MessageSerializer, not from this file.
+    // The surface rect comes from the SAME profile the config was built from — the bars the
+    // session's display mode keeps visible plus the parity pixel (DisplayProfile.surfaceInsets) —
+    // not from the live Compose insets, which flip with transient bar reveals and would move the
+    // surface out from under the pushed geometry.
+    val profile = carlinkManager.displayProfile
+    val surfaceInsets = profile?.surfaceInsets ?: EdgeInsets.NONE
+    val safeAreaInsets = profile?.safeAreaInsets ?: EdgeInsets.NONE
+
+    // Edge-to-edge window: the video occupies the declared panel (behind hidden bars and into the
+    // cutout; a visible bar is excluded by surfaceInsets). The cutout/waterfall/corner safe area is
+    // emitted separately by CarlinkManager/MessageSerializer, not from this file.
     Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
         val density = LocalDensity.current
 
         BoxWithConstraints(
-            modifier = Modifier.fillMaxSize().clipToBounds(),
+            modifier = Modifier.fillMaxSize().windowInsetsPadding(surfaceInsets.asWindowInsets()).clipToBounds(),
         ) {
-            // Track display-bounds for the adapter OPEN resolution.
+            // Track the content area for the adapter OPEN resolution.
             val containerPx =
                 with(density) {
                     IntSize(maxWidth.roundToPx(), maxHeight.roundToPx())
@@ -311,6 +345,7 @@ fun MainScreen(
             CarlinkDashboard(
                 carlinkManager = carlinkManager,
                 statusText = statusText,
+                frame = DashboardFrame(safeAreaInsets, displayMode, onDisplayModeSelected),
                 onResetConnection = onResetConnection,
                 onReturnToProjection =
                     if (overlayingSession) {
@@ -333,17 +368,26 @@ fun MainScreen(
 
 // ==================== Dashboard ====================
 
-/** Landscape dashboard cards take this fraction of the available height (moderate, not full). */
-private const val CARD_HEIGHT_FRACTION = 0.6f
-
-/** Landscape dashboard cards take this fraction of the available width, centered (not edge-to-edge). */
-private const val CARD_WIDTH_FRACTION = 0.7f
-
 /** Frosted-glass overlay (live-session): light scrim over the blurred video so the glass lifts. */
 private const val OVERLAY_SCRIM_ALPHA = 0.12f
 
 /** Blur radius for the frozen frosted-glass backdrop snapshot. */
 private val SNAPSHOT_BLUR_RADIUS = 32.dp
+
+/** Gap between dashboard cards and around the dashboard edge. */
+private val DASHBOARD_GAP = 16.dp
+
+/**
+ * The window frame the dashboard sits in: the detected safe-area padding (cutout / waterfall /
+ * corner arcs, from the session's [com.carlink.util.DisplayProfile]), the active [DisplayMode]
+ * and where a new choice goes (MainActivity persists it and rebuilds the session).
+ */
+@Immutable
+private class DashboardFrame(
+    val safeAreaInsets: EdgeInsets,
+    val displayMode: DisplayMode,
+    val onDisplayModeSelected: (DisplayMode) -> Unit,
+)
 
 // Snapshot downscale: PixelCopy scales into the destination bitmap, and the result is
 // blurred 32dp anyway — a quarter-resolution capture (600x240 vs 2400x960, ~0.55MB vs
@@ -386,15 +430,19 @@ private suspend fun captureSurfaceBitmap(state: VideoSurfaceState): ImageBitmap?
 }
 
 /**
- * Single-view dashboard shown when not projecting. Responsive to the display bounds:
- * landscape (e.g. gminfo 2400x960) lays the Adapter status + controls in a left column beside a
- * large Known-Devices card; portrait (e.g. 800x1280) stacks them in a scroll column. Black
+ * Single-view dashboard shown when not projecting. The arrangement follows the window size class
+ * ([DashboardLayout], `ui/adaptive/WindowLayout.kt`): an expanded-width landscape window puts the
+ * adapter card in a fixed-width column beside the known-devices card; anything narrower, and any
+ * portrait window, stacks them. Both arrangements SCROLL when the window is shorter than their
+ * content — nothing is clipped or pinned off-screen at any height. Padding keeps the cards inside
+ * the live system-UI insets and the detected safe area (cutout / waterfall / corner arcs). Black
  * background; day/night follows [MaterialTheme] (CarlinkTheme).
  */
 @Composable
 private fun CarlinkDashboard(
     carlinkManager: CarlinkManager,
     statusText: String,
+    frame: DashboardFrame,
     onResetConnection: (() -> Unit)?,
     onReturnToProjection: (() -> Unit)? = null,
 ) {
@@ -409,84 +457,165 @@ private fun CarlinkDashboard(
                 ""
             }
         }
-    val gap = 16.dp
+    val window = rememberWindowLayoutInfo()
+    val arrangement = DashboardLayout.arrangement(window)
 
     // Overlaying a live CarPlay session (host-UI/"Exit") → frosted glass: a translucent scrim
     // over the blurred video instead of opaque black, and semi-transparent card panels.
     val overlaying = onReturnToProjection != null
 
-    Box(
+    Column(
         modifier =
             Modifier
                 .fillMaxSize()
                 .background(if (overlaying) Color.Black.copy(alpha = OVERLAY_SCRIM_ALPHA) else Color.Black)
-                .windowInsetsPadding(WindowInsets.safeDrawing)
-                .padding(16.dp),
+                .windowInsetsPadding(WindowInsets.safeDrawing.union(frame.safeAreaInsets.asWindowInsets()))
+                .padding(DASHBOARD_GAP),
     ) {
-        BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-            val landscape = maxWidth >= maxHeight
-            // Cards wrap their content (height); they don't stretch to fill the open space.
-            // Top-aligned so they sit at the top with the black background around them.
-            if (landscape) {
-                // Cards take a moderate slice of the dashboard height (not full-screen) and are
-                // centered vertically in the screen. The adapter card then has slack to center
-                // its status block above the bottom-pinned controls. Tune CARD_HEIGHT_FRACTION.
-                Row(
-                    modifier =
-                        Modifier
-                            .fillMaxWidth(CARD_WIDTH_FRACTION)
-                            .fillMaxHeight(CARD_HEIGHT_FRACTION)
-                            .align(Alignment.Center),
-                    verticalAlignment = Alignment.Top,
-                    horizontalArrangement = Arrangement.spacedBy(gap),
-                ) {
-                    AdapterCard(
-                        carlinkManager,
-                        statusText,
-                        onResetConnection,
-                        Modifier.weight(0.24f).fillMaxHeight(),
-                        stretchStatus = true,
-                        onReturnToProjection = onReturnToProjection,
-                    )
-                    KnownDevicesCard(carlinkManager, Modifier.weight(0.76f).fillMaxHeight())
+        // Cards: centred when they fit, scrolling when they do not. The footer below keeps its own
+        // row, so the version pill can never sit on top of a card.
+        Box(modifier = Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+            when (arrangement) {
+                DashboardArrangement.TWO_PANE -> {
+                    val contentDp = DashboardLayout.contentWidthDp(window.widthDp.toFloat())
+                    val adapterDp = DashboardLayout.adapterWidthDp(contentDp)
+                    Column(
+                        modifier =
+                            Modifier
+                                .fillMaxWidth(contentDp / window.widthDp)
+                                .verticalScroll(rememberScrollState()),
+                    ) {
+                        // At least CONTENT_HEIGHT_SHARE of the window tall (the adapter card then
+                        // centres its status block in the slack), taller when the content is.
+                        Row(
+                            modifier =
+                                Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = (window.heightDp * DashboardLayout.CONTENT_HEIGHT_SHARE).dp)
+                                    .height(IntrinsicSize.Min),
+                            horizontalArrangement = Arrangement.spacedBy(DASHBOARD_GAP),
+                        ) {
+                            AdapterCard(
+                                carlinkManager,
+                                statusText,
+                                onResetConnection,
+                                Modifier.width(adapterDp.dp).fillMaxHeight(),
+                                stretchStatus = true,
+                                onReturnToProjection = onReturnToProjection,
+                            )
+                            KnownDevicesCard(carlinkManager, Modifier.weight(1f).fillMaxHeight(), fillHeight = true)
+                        }
+                    }
                 }
-            } else {
-                Column(
-                    modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(gap),
-                ) {
-                    AdapterCard(
-                        carlinkManager,
-                        statusText,
-                        onResetConnection,
-                        Modifier.fillMaxWidth(),
-                        onReturnToProjection = onReturnToProjection,
-                    )
-                    KnownDevicesCard(carlinkManager, Modifier.fillMaxWidth())
+
+                DashboardArrangement.STACKED -> {
+                    Column(
+                        modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(DASHBOARD_GAP),
+                    ) {
+                        AdapterCard(
+                            carlinkManager,
+                            statusText,
+                            onResetConnection,
+                            Modifier.fillMaxWidth(),
+                            onReturnToProjection = onReturnToProjection,
+                        )
+                        KnownDevicesCard(carlinkManager, Modifier.fillMaxWidth(), fillHeight = false)
+                    }
                 }
             }
         }
 
-        // App version / code pill (bottom-end).
-        Surface(
-            modifier = Modifier.align(Alignment.BottomEnd),
-            shape = MaterialTheme.shapes.small,
-            color = colorScheme.surfaceVariant,
+        // Footer: display-mode chooser (start) and the version pill (end).
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(
-                text = appVersion,
-                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                style = MaterialTheme.typography.labelSmall,
-                color = colorScheme.onSurfaceVariant,
-            )
+            DisplayModeButton(frame.displayMode, frame.onDisplayModeSelected)
+            Surface(
+                shape = MaterialTheme.shapes.small,
+                color = colorScheme.surfaceVariant,
+            ) {
+                Text(
+                    text = appVersion,
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = colorScheme.onSurfaceVariant,
+                )
+            }
         }
+    }
+}
+
+/**
+ * "Display: Fullscreen" — opens the [DisplayMode] picker. Choosing a mode rebuilds the session
+ * (MainActivity), because the bars a mode keeps change the content area the box is told about.
+ */
+@Composable
+private fun DisplayModeButton(
+    displayMode: DisplayMode,
+    onDisplayModeSelected: (DisplayMode) -> Unit,
+) {
+    var showDialog by remember { mutableStateOf(false) }
+    GlassButton(
+        onClick = { showDialog = true },
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        modifier = Modifier.heightIn(min = AutomotiveDimens.FooterMinHeight),
+    ) {
+        Icon(imageVector = Icons.Default.Fullscreen, contentDescription = null, modifier = Modifier.size(20.dp))
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(text = "Display: ${displayMode.label}", style = MaterialTheme.typography.labelLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+    if (showDialog) {
+        AlertDialog(
+            onDismissRequest = { showDialog = false },
+            title = { Text("Display mode") },
+            text = {
+                Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                    Text(
+                        text = "Which system bars stay on screen. CarPlay is re-sized to the area that is left, so the session restarts.",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    DisplayMode.entries.forEach { mode ->
+                        Row(
+                            modifier =
+                                Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = AutomotiveDimens.ListRowMinHeight)
+                                    .clickable {
+                                        showDialog = false
+                                        onDisplayModeSelected(mode)
+                                    }.padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RadioButton(selected = mode == displayMode, onClick = null)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column {
+                                Text(text = mode.label, style = MaterialTheme.typography.titleMedium)
+                                Text(
+                                    text = mode.summary,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showDialog = false }) { Text("Close") }
+            },
+        )
     }
 }
 
 /**
  * Combined adapter card: projection status (logo + "Connect Phone to: [name]" + live status
  * text) followed by the adapter control buttons (Reboot Adapter, Reset Connection). No section
- * title; no loading spinner.
+ * title; no loading spinner. Every button is a MINIMUM height (touch target), never a fixed one,
+ * so the card grows with its content and the dashboard scrolls it rather than overlapping.
  */
 @Composable
 private fun AdapterCard(
@@ -494,9 +623,9 @@ private fun AdapterCard(
     statusText: String,
     onResetConnection: (() -> Unit)?,
     modifier: Modifier = Modifier,
-    // When true (landscape, card stretched to full height) the status block takes the slack
-    // above the controls and centers within it. When false (portrait, wrap-content) it packs
-    // at the top as before.
+    // When true (two-pane, card stretched to the row height) the status block takes the slack
+    // above the controls and centers within it. When false (stacked, wrap-content) it packs
+    // at the top.
     stretchStatus: Boolean = false,
     // Non-null only while the dashboard overlays a live CarPlay session (host-UI/"Exit" action).
     // When non-null the top "Return to CarPlay" button is enabled and returns to projection;
@@ -519,7 +648,7 @@ private fun AdapterCard(
                 onClick = { onReturnToProjection?.invoke() },
                 enabled = onReturnToProjection != null,
                 contentColor = colorScheme.primary,
-                modifier = Modifier.fillMaxWidth().height(AutomotiveDimens.ButtonMinHeight),
+                modifier = Modifier.fillMaxWidth().heightIn(min = AutomotiveDimens.ButtonMinHeight),
             ) {
                 Text(
                     text = "Return to CarPlay",
@@ -560,19 +689,23 @@ private fun AdapterCard(
                     color = colorScheme.onSurface,
                     textAlign = TextAlign.Center,
                 )
+                BoxStatusLine(carlinkManager)
             }
 
-            // --- Controls: Reboot = glass (warning tint), Reset = solid vibrant accent (destructive) ---
             Spacer(modifier = Modifier.height(16.dp))
+            SiriRow(carlinkManager, connected = statusText.isNotEmpty() && carlinkManager.state != CarlinkManager.State.DISCONNECTED)
+
+            // --- Controls: Reboot = glass (warning tint), Reset = solid vibrant accent (destructive) ---
+            Spacer(modifier = Modifier.height(12.dp))
             GlassButton(
                 onClick = { showRebootDialog = true },
                 enabled = !isProcessing,
                 contentColor = colorScheme.tertiary,
-                modifier = Modifier.fillMaxWidth().height(AutomotiveDimens.ButtonMinHeight),
+                modifier = Modifier.fillMaxWidth().heightIn(min = AutomotiveDimens.ButtonMinHeight),
             ) {
                 Icon(imageVector = Icons.Default.RestartAlt, contentDescription = null, modifier = Modifier.size(24.dp))
                 Spacer(modifier = Modifier.width(8.dp))
-                Text(text = "Reboot Adapter", style = MaterialTheme.typography.titleMedium)
+                Text(text = "Reboot Adapter", style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
 
             Spacer(modifier = Modifier.height(12.dp))
@@ -635,23 +768,92 @@ private fun AdapterCard(
 }
 
 /**
+ * "WIRED_CP · HCI|SSP|iap2d|airplayd" — which transport owns the box (CT_PROJ_MODE) and which of its
+ * subsystems are alive (CT_BOX_HEALTH). Subscribes itself so the card's signature stays put; empty
+ * (and laid out as nothing) until the box has said anything.
+ */
+@Composable
+private fun BoxStatusLine(carlinkManager: CarlinkManager) {
+    var text by remember(carlinkManager) { mutableStateOf(carlinkManager.boxStatusText()) }
+    DisposableEffect(carlinkManager) {
+        val l = CarlinkManager.BoxStatusListener { text = it }
+        carlinkManager.addBoxStatusListener(l)
+        onDispose { carlinkManager.removeBoxStatusListener(l) }
+    }
+    if (text.isEmpty()) return
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        textAlign = TextAlign.Center,
+        maxLines = 2,
+        overflow = TextOverflow.Ellipsis,
+    )
+}
+
+/**
+ * Siri, tier 1: the in-app affordance — a tap sends the `CMD_SIRI_DOWN`/`UP` hold pair. Reachable
+ * during a live session through the OEM "Exit" overlay. Beside it, the tier-3 opt-in: the system
+ * assistant picker, where choosing Carlink routes the wheel's push-to-talk key to Siri (see `voice/`).
+ */
+@Composable
+private fun SiriRow(
+    carlinkManager: CarlinkManager,
+    connected: Boolean,
+) {
+    val colorScheme = MaterialTheme.colorScheme
+    val context = LocalContext.current
+    Row(modifier = Modifier.fillMaxWidth().height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        GlassButton(
+            onClick = {
+                val sent = carlinkManager.requestSiri()
+                logInfo("[UI_ACTION] Siri tapped -> ${if (sent) "sent" else "no session"}", tag = "UI")
+            },
+            enabled = connected,
+            contentColor = colorScheme.primary,
+            modifier = Modifier.weight(1f).heightIn(min = AutomotiveDimens.ButtonMinHeight),
+        ) {
+            Icon(imageVector = Icons.Default.Mic, contentDescription = null, modifier = Modifier.size(24.dp))
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(text = "Siri", style = MaterialTheme.typography.titleMedium, maxLines = 1)
+        }
+        GlassButton(
+            onClick = {
+                logInfo("[UI_ACTION] Assistant settings opened", tag = "UI")
+                runCatching {
+                    context.startActivity(Intent(Settings.ACTION_VOICE_INPUT_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                }.onFailure { logWarn("[UI_ACTION] no assistant settings screen: ${it.message}", tag = "UI") }
+            },
+            contentColor = colorScheme.onSurface,
+            modifier = Modifier.fillMaxHeight().heightIn(min = AutomotiveDimens.ButtonMinHeight),
+        ) {
+            Icon(imageVector = Icons.Default.SettingsVoice, contentDescription = "Assistant settings", modifier = Modifier.size(24.dp))
+        }
+    }
+}
+
+/**
  * Known/paired devices — an instruction line, then the device cards (USB + wireless, from
- * PhonesTab) centered within the card body. The centered row shifts as devices populate and
- * scrolls horizontally when they overflow.
+ * PhonesTab) in an adaptive grid whose column count follows the card's width. [fillHeight]
+ * (two-pane) centres the grid in the card's slack; stacked, the card wraps the grid.
  */
 @Composable
 private fun KnownDevicesCard(
     carlinkManager: CarlinkManager,
     modifier: Modifier = Modifier,
+    fillHeight: Boolean,
 ) {
     Box(modifier = modifier.fillMaxWidth().frostedGlass(GlassShapes.Card, strong = true)) {
-        Column(modifier = Modifier.padding(20.dp).fillMaxSize()) {
+        Column(modifier = Modifier.padding(20.dp).then(if (fillHeight) Modifier.fillMaxSize() else Modifier.fillMaxWidth())) {
             Text(
                 text = "Tap a known device or remove it",
                 style = MaterialTheme.typography.titleLarge,
                 color = MaterialTheme.colorScheme.onSurface,
             )
-            Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
+            Box(
+                modifier = Modifier.fillMaxWidth().then(if (fillHeight) Modifier.weight(1f) else Modifier),
+                contentAlignment = Alignment.Center,
+            ) {
                 PhonesTabContent(carlinkManager)
             }
         }
@@ -690,7 +892,7 @@ private fun ControlButton(
     Button(
         onClick = onClick,
         enabled = enabled && !isProcessing,
-        modifier = modifier.fillMaxWidth().height(AutomotiveDimens.ButtonMinHeight),
+        modifier = modifier.fillMaxWidth().heightIn(min = AutomotiveDimens.ButtonMinHeight),
         colors = ButtonDefaults.buttonColors(containerColor = containerColor, contentColor = contentColor),
         contentPadding = PaddingValues(horizontal = 24.dp, vertical = 16.dp),
     ) {

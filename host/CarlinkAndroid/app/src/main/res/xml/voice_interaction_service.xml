@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Assistant descriptor for CarlinkVoiceInteractionService. sessionService and recognitionService
+     are both REQUIRED by the platform parser (VoiceInteractionServiceInfo); the recognizer is a
+     refusing stub because recognition happens on the iPhone. supportsAssist lets the assist
+     gesture / long-press-home reach the session as well as the PTT key. -->
+<voice-interaction-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:sessionService="com.carlink.voice.CarlinkVoiceSessionService"
+    android:recognitionService="com.carlink.voice.CarlinkRecognitionService"
+    android:supportsAssist="true"
+    android:supportsLaunchVoiceAssistFromKeyguard="false"
+    android:supportsLocalInteraction="false" />

@@ -236,7 +236,7 @@ class OcbmClientTest {
         val t = FakeTransport()
         val c = newClient(t)
         var got: Triple<Boolean, Int, Int>? = null
-        c.onUplinkGate = { on, rate, ch -> got = Triple(on, rate, ch) }
+        c.onUplinkGate = { on, rate, ch, _ -> got = Triple(on, rate, ch) }
 
         // [CT_UPLINK][state=1][rate u32 LE = 16000][ch=1]
         t.deliver(Ocbm.CH_CTRL, byteArrayOf(Ocbm.CT_UPLINK, 1, 0x80.toByte(), 0x3E, 0, 0, 1))

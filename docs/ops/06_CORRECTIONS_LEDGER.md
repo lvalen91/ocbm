@@ -2264,6 +2264,63 @@ not claimed here.
 
 ## docs/SESSION_KICKOFF — Session Kickoff
 
+## host/CarlinkAndroid — Android client corrections, 2026-09-18 session
+
+### R-ANDROID-1 · "The Android app is behind the macOS host" is not uniform
+
+- **Verdict:** CORRECTED
+- **Landed:** uncommitted, same session (2026-09-18)
+- **Scope:** `docs/host/01_ANDROID_AND_AAOS.md` and any prose treating the Kotlin client as
+  uniformly behind the Swift one on protocol coverage.
+
+`python3 tools/proto_check.py` shows the Swift client (`carlink_macOS`) missing 30 constants —
+`does not define` hits for the entire `LOG_*` source table, `CMD_REQUEST_UI`/`CMD_REQUEST_SIRI`/
+`CMD_LIMITED_UI_ON`/`CMD_LIMITED_UI_OFF`/`CMD_UI_APPEARANCE`, `MODE_CONSOLE`/`MODE_PROJECTION`, and
+`NAV_APPEARANCE_COMPASS`/`_ETA`/`_SPEED_LIMIT` — plus one constant it defines that is not canonical
+(`CT_SET_TIME`), while the Kotlin client's only gap this session, before today's fix, was
+`CMD_VIEW_AREA` (now landed) and a local `F_BOTH = 0x03` shared with `gm_ccpa`. The Kotlin client
+leads on the log channel and the inbound command surface; "behind" does not hold in that direction.
+
+### R-ANDROID-2 · Panel size is not the same as the pushed config size — three distinct rectangles
+
+- **Verdict:** CORRECTED
+- **Landed:** uncommitted, same session (2026-09-18)
+- **Scope:** `app/.../ocbm/VehicleConfigYaml.kt` panel-size derivation and any doc describing the
+  Android client as pushing the measured panel.
+
+The Android client measured `currentWindowMetrics.bounds` (the app WINDOW) and pushed that as the
+panel. That was consistent only by accident, because the app was hardcoded immersive. There are
+three distinct rectangles — physical panel, app window, and content area (window minus visible
+bars' stable insets) — and the **content area** is what must be pushed, because it is what the
+CarPlay surface occupies and therefore the basis for `INPUT_TOUCH` 0..65535 normalisation.
+Measured: 2400x960 with system bars visible yields a 2400x**788** content area. Fixed this session
+in `VehicleConfigYaml.kt`.
+
+### R-ANDROID-3 · The ported `PanelRule`/`ViewAreaRule` do not reject portrait
+
+- **Verdict:** OPEN DEFECT (recorded, not yet fixed)
+- **Landed:** n/a — found this session, 2026-09-18, not landed
+- **Scope:** the JVM-test-ported panel/view-area validation rules; see
+  `docs/ops/04_OPEN_ITEMS.md` "Android host app" for the open-item entry.
+
+`PanelRule` and `ViewAreaRule` were written against wide landscape panels, and a real 800x1280
+portrait panel was accepted (floor 480x800 by its own aspect, no clamp); iOS accepted it too and
+rendered a 4-column portrait CarPlay home. Recorded as a found gap in the rules, not a landed fix.
+
+### R-ANDROID-4 · A headset-hook long press and `KEYCODE_VOICE_ASSIST` do not reach a 3P handler on stock AOSP
+
+- **Verdict:** CONFIRMED (device/emulator-measured, not a correction of prior doc text — new finding)
+- **Landed:** uncommitted, same session (2026-09-18)
+- **Scope:** `CarlinkVoiceInteractionService.kt`, `MediaKeyDecoder.kt`; the PTT-button integration
+  path documented for the Android client.
+
+A headset-hook long press does not reach a third-party `MediaSession` on stock AOSP —
+`MediaSessionService` swallows the hold and invokes the assistant itself, delivering only a bare
+`ACTION_UP` to the app's session. Nor does plain `KEYCODE_VOICE_ASSIST` reach the app:
+`PhoneWindowManager` converts it to an `ACTION_VOICE_ASSIST` activity launch. The working route to
+the hardware PTT button is a user-selected `VoiceInteractionService`
+(`CarlinkVoiceInteractionService.kt`), proven via `cmd car_service inject-key 231`.
+
 ### R-KICKOFF-1 · The "Current state" section is three weeks and five documents behind, and is not the current session opening
 
 - **Verdict:** STALE

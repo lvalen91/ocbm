@@ -3,21 +3,16 @@ package com.carlink.ui.settings
 import android.view.HapticFeedbackConstants
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.IntrinsicSize
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Usb
@@ -52,32 +47,38 @@ import androidx.compose.ui.unit.dp
 import com.carlink.CarlinkManager
 import com.carlink.R
 import com.carlink.protocol.PhoneType
+import com.carlink.ui.adaptive.AdaptiveGrid
 import com.carlink.ui.theme.AutomotiveDimens
 import com.carlink.ui.theme.GlassShapes
 import com.carlink.ui.theme.frostedGlass
 import kotlinx.coroutines.delay
 
 /**
- * Fixed card width for horizontal layout.
- *
- * 360.dp sized for gminfo37 (2400x960 @ 200dpi ≈ 456px ≈ 19% of width). Fits 2 cards
- * with 24dp gutters in the 75%-coerced content area (max 1200dp). Accommodates device
- * name + status line + Remove button without wrapping. No design token; retune only if
- * a device with non-200dpi ships.
+ * Device-card width envelope for the adaptive grid. The grid puts as many cards per row as fit
+ * at [CARD_MIN_WIDTH] and stretches them up to [CARD_MAX_WIDTH]; the count follows the width of
+ * whatever panel this runs on rather than assuming a number. The minimum is what the widest
+ * fixed content (the Remove button, a "Last seen" line) needs on one line at default font scale.
  */
-private val CARD_WIDTH = 240.dp
+private val CARD_MIN_WIDTH = 200.dp
+private val CARD_MAX_WIDTH = 280.dp
+private val CARD_GAP = 16.dp
 
 /** Safety-net timeout for the connect/disconnect guard if the adapter never reaches a terminal state. */
 private const val PROCESSING_TIMEOUT_MS = 10_000L
 
 /**
- * Phones tab — shows adapter's paired device list as horizontal scrolling cards.
+ * Phones tab — the adapter's paired device list as an adaptive grid of cards ([AdaptiveGrid]:
+ * column count follows the available width, every card the same size, rows centred). It wraps
+ * its content; the dashboard around it scrolls.
  *
- * - USB device card (leftmost): active when a USB phone is connected, greyed out otherwise.
+ * - USB device card (first): active when a USB phone is connected, greyed out otherwise.
  * - Wireless device cards: queried from adapter's DevList with Connect/Disconnect/Remove actions.
  */
 @Composable
-fun PhonesTabContent(carlinkManager: CarlinkManager) {
+fun PhonesTabContent(
+    carlinkManager: CarlinkManager,
+    modifier: Modifier = Modifier,
+) {
     val view = LocalView.current
 
     // Observe device list and connection state
@@ -131,67 +132,56 @@ fun PhonesTabContent(carlinkManager: CarlinkManager) {
     // Hoisted remove dialog state to prevent stale device references across recompositions.
     var deviceToRemove by remember { mutableStateOf<CarlinkManager.DeviceInfo?>(null) }
 
-    Box(
-        modifier = Modifier.fillMaxSize(),
-        contentAlignment = Alignment.Center,
+    AdaptiveGrid(
+        modifier = modifier.fillMaxWidth().padding(vertical = 16.dp),
+        minCellWidth = CARD_MIN_WIDTH,
+        maxCellWidth = CARD_MAX_WIDTH,
+        gap = CARD_GAP,
     ) {
-        // Row wraps its content (no fillMaxWidth) so the Box can center it both axes; when the
-        // cards overflow the card width, horizontalScroll lets the list scroll.
-        Row(
-            modifier =
-                Modifier
-                    .height(IntrinsicSize.Max)
-                    .horizontalScroll(rememberScrollState())
-                    .padding(24.dp),
-            horizontalArrangement = Arrangement.spacedBy(24.dp),
-        ) {
-            // === USB Device Card (always present) ===
-            // wifi=0 means explicit USB; wifi=-1 (null) with active phoneType means
-            // the adapter didn't send the wifi field — treat as USB since wireless
-            // always sends wifi=1 explicitly. (connectedBtMac is private backing with a
-            // public read-only accessor on CarlinkManager; activeWifi mirrors currentWifi.)
-            val isUsbConnected = phoneType != null && activeWifi != 1
-            UsbDeviceCard(
-                isConnected = isUsbConnected,
-                phoneType = if (isUsbConnected) phoneType else null,
-                modifier = Modifier.width(CARD_WIDTH).fillMaxHeight(),
-            )
+        // === USB Device Card (always present) ===
+        // wifi=0 means explicit USB; wifi=-1 (null) with active phoneType means
+        // the adapter didn't send the wifi field — treat as USB since wireless
+        // always sends wifi=1 explicitly. (connectedBtMac is private backing with a
+        // public read-only accessor on CarlinkManager; activeWifi mirrors currentWifi.)
+        val isUsbConnected = phoneType != null && activeWifi != 1
+        UsbDeviceCard(
+            isConnected = isUsbConnected,
+            phoneType = if (isUsbConnected) phoneType else null,
+        )
 
-            // === Wireless Device Cards ===
-            if (pairedDevices.isEmpty()) {
-                EmptyDeviceCard(modifier = Modifier.width(CARD_WIDTH).fillMaxHeight())
-            } else {
-                pairedDevices.forEach { device ->
-                    // Stable keying by btMac preserves per-card state across list reorderings.
-                    key(device.btMac) {
-                        val isDeviceActive =
-                            activeWifi == 1 &&
-                                activeBtMac != null &&
-                                device.btMac == activeBtMac &&
-                                (
-                                    managerState == CarlinkManager.State.STREAMING ||
-                                        managerState == CarlinkManager.State.DEVICE_CONNECTED
-                                )
+        // === Wireless Device Cards ===
+        if (pairedDevices.isEmpty()) {
+            EmptyDeviceCard()
+        } else {
+            pairedDevices.forEach { device ->
+                // Stable keying by btMac preserves per-card state across list reorderings.
+                key(device.btMac) {
+                    val isDeviceActive =
+                        activeWifi == 1 &&
+                            activeBtMac != null &&
+                            device.btMac == activeBtMac &&
+                            (
+                                managerState == CarlinkManager.State.STREAMING ||
+                                    managerState == CarlinkManager.State.DEVICE_CONNECTED
+                            )
 
-                        WirelessDeviceCard(
-                            device = device,
-                            isConnected = isDeviceActive,
-                            onTap = {
-                                view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                                isProcessing = true
-                                if (isDeviceActive) {
-                                    carlinkManager.disconnectPhone()
-                                } else {
-                                    carlinkManager.connectToDevice(device.btMac)
-                                }
-                            },
-                            onRemove = {
-                                deviceToRemove = device
-                            },
-                            modifier = Modifier.width(CARD_WIDTH).fillMaxHeight(),
-                            enabled = !isProcessing,
-                        )
-                    }
+                    WirelessDeviceCard(
+                        device = device,
+                        isConnected = isDeviceActive,
+                        onTap = {
+                            view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                            isProcessing = true
+                            if (isDeviceActive) {
+                                carlinkManager.disconnectPhone()
+                            } else {
+                                carlinkManager.connectToDevice(device.btMac)
+                            }
+                        },
+                        onRemove = {
+                            deviceToRemove = device
+                        },
+                        enabled = !isProcessing,
+                    )
                 }
             }
         }
@@ -423,7 +413,7 @@ private fun WirelessDeviceCard(
             Button(
                 onClick = onRemove,
                 enabled = enabled,
-                modifier = Modifier.height(AutomotiveDimens.ButtonMinHeight),
+                modifier = Modifier.heightIn(min = AutomotiveDimens.ButtonMinHeight),
                 colors =
                     ButtonDefaults.buttonColors(
                         containerColor = colorScheme.error,

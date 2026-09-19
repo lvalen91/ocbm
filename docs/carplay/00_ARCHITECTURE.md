@@ -162,10 +162,22 @@ the app.
 > pairing/key-derivation → **encrypted A/V forward + session-key handoff** (0-failure host-side decrypt),
 > under a host-app-driven lifecycle (see [`../carplay/02_SESSION_LIFECYCLE.md`](../carplay/02_SESSION_LIFECYCLE.md)) and a
 > hardening pass that confirmed the crypto/protocol byte-for-byte against Apple's `CarPlaySDK`. The
-> **host app** column (decrypt + decode/render + input uplink) is now IMPLEMENTED — the macOS app
-> `host/MacHost/carlink_macOS` (per-lane ChaCha20-Poly1305 decrypt, dual-lane decode/render, input
-> uplink). The Rust `ocbm-host avdec` receiver is now a validation/debug tool, not the stand-in. See
-> `../ops/04_OPEN_ITEMS.md`.
+> **host app** column (decrypt + decode/render + input uplink) is now IMPLEMENTED **twice** — the
+> macOS app `host/MacHost/carlink_macOS` (per-lane ChaCha20-Poly1305 decrypt, dual-lane decode/render,
+> input uplink), and, for a GM AAOS head unit, `host/CarlinkAndroid` module `:app`
+> (`zeno.carlink.ocbm`), which claims the same USB/OCBM transport and is the product for
+> adapter-bridged CarPlay on AAOS. The Rust `ocbm-host avdec` receiver is now a validation/debug
+> tool, not a stand-in for either. See `../ops/04_OPEN_ITEMS.md`.
+>
+> **The Android host app integrates as an ordinary third-party AAOS app, by decision (2026-09-18).**
+> `android.car.CarProjectionManager` is `@SystemApi` and every AAOS car-projection permission it
+> needs (`CAR_PROJECTION`, `CAR_NAVIGATION_MANAGER`, `CAR_UX_RESTRICTIONS_CONFIGURATION`,
+> `CAR_DRIVING_STATE`, …) is `signature|privileged` — confirmed unobtainable on a locked unit via
+> `pm list permissions -f`. `:app` substitutes an active `MediaSession`, `Notification.CallStyle`,
+> `CarAppFocusManager` and a permission-free `CarUxRestrictionsManager` listener instead; cluster
+> turn-by-turn video and `CH_ALT_VIDEO` on a cluster display are consequently out of reach for it.
+> Full detail: [`../host/01_ANDROID_AND_AAOS.md`](../host/01_ANDROID_AND_AAOS.md) and
+> `host/CarlinkAndroid/OCBMANDROID.md`.
 
 ### Vendored assets (CORRECTED 2026-08-10 — the previous text pointed at an archived directory and at
 C daemons that no longer exist)

@@ -89,7 +89,7 @@ class OcbmClient(
      * it on teardown, carrying the negotiated `(rate, channels)`. Capture ONLY while on, at exactly
      * that format — guessing is how an uplink ends up pitch-shifted.
      */
-    var onUplinkGate: ((on: Boolean, rate: Int, channels: Int) -> Unit)? = null
+    var onUplinkGate: ((on: Boolean, rate: Int, channels: Int, codec: Int) -> Unit)? = null
 
     /**
      * Bluetooth/iAP2 handshake progress (CT_BT_PHASE). The only signal the host has for the whole BT
@@ -105,6 +105,20 @@ class OcbmClient(
      * decision about what an unexpected shape means.
      */
     var onPhoneIdentity: ((String) -> Unit)? = null
+
+    /**
+     * Which projection transport OWNS the box right now (CT_PROJ_MODE, one of `PM_*`). Mirrors the
+     * box's single-owner arbitration flag; emitted on change and re-emitted to every fresh SUBSCRIBE,
+     * so nothing needs caching across a reconnect. Fires on the read thread — hand off.
+     */
+    var onProjMode: ((Byte) -> Unit)? = null
+
+    /**
+     * The box's own subsystem liveness as a `BH_*` bitmask (CT_BOX_HEALTH). Same emit discipline as
+     * CT_PROJ_MODE. Which bits a deployment REQUIRES is app policy, not protocol — read bit 0
+     * (`BH_HCI_PRESENT`) first when Bluetooth looks dead. Fires on the read thread — hand off.
+     */
+    var onBoxHealth: ((Int) -> Unit)? = null
 
     /** Last identity seen this session, so a late attacher is not blind until the next change. */
     @Volatile
@@ -129,10 +143,26 @@ class OcbmClient(
     @Volatile var uplinkChannels = 0
         private set
 
+    /** Negotiated uplink codec (`MicProfile.CODEC_PCM` 0 / `CODEC_MSBC` 4); 0 while the gate is down or on a 7-byte gate. */
+    @Volatile var uplinkCodec = 0
+        private set
+
     @Volatile var lastBtPhase: Byte = Ocbm.BTP_IDLE
         private set
 
     @Volatile var phonePresent = false
+        private set
+
+    /** Last CT_PROJ_MODE this session; `PM_NONE` until the box has said otherwise. */
+    @Volatile var lastProjMode: Byte = Ocbm.PM_NONE
+        private set
+
+    /** Last CT_BOX_HEALTH bitmask; meaningful only once [boxHealthKnown]. */
+    @Volatile var lastBoxHealth: Int = 0
+        private set
+
+    /** False until the first CT_BOX_HEALTH arrives — an all-zero mask before then is "unknown", not "dead". */
+    @Volatile var boxHealthKnown = false
         private set
 
     /**
@@ -402,11 +432,15 @@ class OcbmClient(
                         (pl[2].toInt() and 0xFF) or ((pl[3].toInt() and 0xFF) shl 8) or
                             ((pl[4].toInt() and 0xFF) shl 16) or ((pl[5].toInt() and 0xFF) shl 24)
                     val ch = pl[6].toInt() and 0xFF
-                    log.i("<< UPLINK ${if (on) "ON" else "OFF"} ${rate}Hz ${ch}ch (mic gate)")
+                    // Byte 7 (additive, lib.rs CT_UPLINK): the SCO codec — 0 PCM/CVSD, 4 mSBC. A 7-byte
+                    // gate from an older box is PCM; OFF carries no format at all.
+                    val codec = if (pl.size >= 8) pl[7].toInt() and 0xFF else 0
+                    log.i("<< UPLINK ${if (on) "ON" else "OFF"} ${rate}Hz ${ch}ch codec=$codec (mic gate)")
                     uplinkOn = on
                     uplinkRate = if (on) rate else 0
                     uplinkChannels = if (on) ch else 0
-                    onUplinkGate?.invoke(on, uplinkRate, uplinkChannels)
+                    uplinkCodec = if (on) codec else 0
+                    onUplinkGate?.invoke(on, uplinkRate, uplinkChannels, uplinkCodec)
                 }
             }
             Ocbm.CT_PHONE_IDENT -> {
@@ -427,6 +461,23 @@ class OcbmClient(
                 val code = if (pl.size > 1) String(pl, 1, pl.size - 1, Charsets.US_ASCII).trim() else ""
                 log.i(if (code.isEmpty()) "<< PAIRING_CODE cleared" else "<< PAIRING_CODE $code  <-- match this on the iPhone")
                 onPairingCode?.invoke(code)
+            }
+            Ocbm.CT_PROJ_MODE -> {
+                if (pl.size >= 2) {
+                    val m = pl[1]
+                    lastProjMode = m
+                    log.i("<< PROJ_MODE ${Ocbm.pmName(m)}")
+                    onProjMode?.invoke(m)
+                }
+            }
+            Ocbm.CT_BOX_HEALTH -> {
+                if (pl.size >= 2) {
+                    val f = pl[1].toInt() and 0xFF
+                    lastBoxHealth = f
+                    boxHealthKnown = true
+                    log.i("<< BOX_HEALTH ${Ocbm.bhString(f)}")
+                    onBoxHealth?.invoke(f)
+                }
             }
             else -> log.i("<< CTRL unknown type 0x%02x (${pl.size}B)".format(pl[0]))
         }
@@ -563,6 +614,18 @@ class OcbmClient(
         vararg args: Byte,
     ): Boolean = enqueue(Ocbm.CH_INPUT, byteArrayOf(Ocbm.INPUT_COMMAND, cmd) + args, "command 0x%02x".format(cmd))
 
+    /**
+     * Siri is a HOLD over `/command requestSiri` — `CMD_SIRI_DOWN` on press, `CMD_SIRI_UP` on release
+     * (`siriAction` 2/3, integer enum). The bare `CMD_REQUEST_SIRI` is deprecated and iOS ignores it.
+     * Both go through the one tx queue, so a DOWN/UP pair enqueued back-to-back keeps wire order.
+     */
+    fun sendSiriDown(): Boolean = sendCommand(Ocbm.CMD_SIRI_DOWN)
+
+    fun sendSiriUp(): Boolean = sendCommand(Ocbm.CMD_SIRI_UP)
+
+    /** A plain Siri tap — the pair with no gap, exactly what the macOS host's `siriPress()` sends. */
+    fun sendSiriPress(): Boolean = sendSiriDown() and sendSiriUp()
+
     /** Global night mode — one input alongside iOS's own logic, not a per-display override. */
     fun sendNightMode(on: Boolean): Boolean = sendCommand(Ocbm.CMD_NIGHT_MODE, if (on) 1 else 0)
 
@@ -580,6 +643,11 @@ class OcbmClient(
 
     fun sendNav(nav: Byte): Boolean = enqueue(Ocbm.CH_INPUT, byteArrayOf(Ocbm.INPUT_NAV, nav), "nav $nav")
 
+    /**
+     * `[INPUT_TELEPHONY][buttonIndex u8]` on CH_INPUT -> the box taps the uid-5 telephony HID (report then
+     * release). Indices are `Ocbm.TEL_*`; DTMF digit d is `TEL_DIGIT0 + d`. Non-blocking (tx queue);
+     * false = dropped (not subscribed or queue full).
+     */
     fun sendTelephony(index: Byte): Boolean = enqueue(Ocbm.CH_INPUT, byteArrayOf(Ocbm.INPUT_TELEPHONY, index), "telephony $index")
 
     private val lastKeyframeReqNs =

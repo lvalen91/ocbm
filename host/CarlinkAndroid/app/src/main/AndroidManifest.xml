@@ -19,6 +19,11 @@
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- CallStyle call notifications: on Android 14+ a CallStyle card must belong to a foreground
+         service or carry a fullScreenIntent, and the latter needs this. Normal permission on the
+         12L target; on 14+ the OS grants it at install for a sideloaded app (Play is what revokes
+         it for non-calling apps). CallNotificationHost falls back to a plain card if refused. -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
 
     <!-- USB Host. required=false on purpose: the CPC200 adapter needs USB host at
          runtime, but GM AAOS (gm/gminfo37) does NOT advertise android.hardware.usb.host
@@ -59,7 +64,16 @@
             android:name="android.car"
             android:required="false" />
 
-        <!-- Main Activity -->
+        <!-- Main Activity.
+             configChanges is DELIBERATELY broad and there is no screenOrientation: this activity
+             hosts a live USB/OCBM session and a SurfaceView on an HWC plane, so a system-driven
+             recreate on rotation / resize / density / uiMode would tear the session down and
+             re-request the USB grant. Instead every one of these is handled in-process:
+             Compose re-lays the UI from the window size (ui/adaptive/WindowLayout.kt reads
+             LocalWindowInfo.containerSize; isSystemInDarkTheme follows uiMode) and
+             MainActivity.onConfigurationChanged re-detects the display and rebuilds the session
+             only when the content area actually moved. The app is orientation-agnostic: it takes
+             whatever the head unit gives it. -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -140,6 +154,36 @@
             <meta-data
                 android:name="com.gm.homescreen.visibility"
                 android:value="HIDDEN" />
+        </service>
+
+        <!-- Siri on the hardware push-to-talk key — the only third-party route (WP1 tier 3).
+             The permission attribute is a REQUIREMENT on the binder: only the system, which holds
+             BIND_VOICE_INTERACTION, may bind. The app itself holds no new permission. Inert until
+             the user picks Carlink as the digital assistant in system Settings. -->
+        <service
+            android:name=".voice.CarlinkVoiceInteractionService"
+            android:exported="true"
+            android:permission="android.permission.BIND_VOICE_INTERACTION"
+            android:label="@string/assistant_label">
+            <intent-filter>
+                <action android:name="android.service.voice.VoiceInteractionService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.voice_interaction"
+                android:resource="@xml/voice_interaction_service" />
+        </service>
+        <service
+            android:name=".voice.CarlinkVoiceSessionService"
+            android:exported="true"
+            android:permission="android.permission.BIND_VOICE_INTERACTION" />
+        <!-- Required companion (see CarlinkRecognitionService): refuses every request. -->
+        <service
+            android:name=".voice.CarlinkRecognitionService"
+            android:exported="true"
+            android:label="@string/assistant_label">
+            <intent-filter>
+                <action android:name="android.speech.RecognitionService" />
+            </intent-filter>
         </service>
 
         <meta-data

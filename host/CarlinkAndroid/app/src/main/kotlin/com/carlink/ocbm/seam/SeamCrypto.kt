@@ -44,11 +44,27 @@ object SeamCrypto {
     const val MARK_PKT: Int = 0x01
     const val MARK_FORMAT: Int = 0x02
 
+    /**
+     * `[0x03][scid 8 LE][payload]` — an UNENCRYPTED payload (no RTP, no key): the box's `btd`
+     * forwarding Bluetooth HFP call audio on the voice seam (`ocbm-proto::SEAM_PKT_PLAIN`). Under a
+     * PCM SEAM_FORMAT the payload is 20 ms of 8 kHz mono S16 **little-endian** (unlike the AirPlay
+     * PCM downlink, which is big-endian); under [CODEC_MSBC] it is one raw transparent-eSCO read —
+     * a compressed bitstream, not PCM.
+     */
+    const val MARK_PLAIN: Int = 0x03
+
     /** SEAM_FORMAT codec byte. Wireless CarPlay negotiates AAC-LC media and AAC-ELD voice. */
     const val CODEC_PCM: Int = 0
     const val CODEC_AAC_LC: Int = 1
     const val CODEC_AAC_ELD: Int = 2
     const val CODEC_OPUS: Int = 3
+
+    /**
+     * mSBC, the HFP wideband-speech codec (`ocbm-proto::SEAM_CODEC_MSBC`). `rate`/`bits` in the
+     * SEAM_FORMAT describe the DECODED audio (16 kHz mono S16LE), not the payload. A host that
+     * cannot decode it must drop the stream — rendering the bitstream as PCM is full-scale noise.
+     */
+    const val CODEC_MSBC: Int = 4
 
     /**
      * SEAM_FORMAT `audioType`, i.e. the SETUP audioType.

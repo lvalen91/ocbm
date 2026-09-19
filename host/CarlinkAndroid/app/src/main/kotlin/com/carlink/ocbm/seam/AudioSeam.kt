@@ -1,6 +1,8 @@
 package com.carlink.ocbm.seam
 
 import com.carlink.logging.ProbeLog
+import com.carlink.telephony.Msbc
+import com.carlink.telephony.MsbcTelephonyDecoder
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -10,8 +12,9 @@ import java.util.concurrent.atomic.AtomicLong
  * existing players already speak, so neither player changes:
  *
  *  - **media** → ADTS-framed AAC, the byte stream `AacPlayer.consume` walks;
- *  - **voice** → `[u32 BE rate][u16 BE ch][u8 atype][u32 BE len][AU]`, the 11-byte tag
- *    `VoiceRouter.consume` reads (`forward.rs:101-109`).
+ *  - **voice** → `[u32 BE rate][u16 BE ch][u8 atype][u8 codec][u32 BE len][AU]`, the 12-byte
+ *    [VoiceTag] `VoiceRouter.consume` reads — the box's legacy 11-byte tag (`forward.rs:101-109`)
+ *    plus the codec, so the router can branch on it instead of assuming AAC-ELD.
  *
  * `VoiceRouter` even diagnoses the mismatch this class exists to remove — it rejects an implausible
  * rate with *"the seam is probably speaking the forward-encrypted v2 framing"*. It now never sees it.
@@ -30,6 +33,8 @@ import java.util.concurrent.atomic.AtomicLong
  *  - `0x00 SEAM_KEY`    `[key 32][scid 8 LE]`      (len 45)
  *  - `0x01 SEAM_PKT`    `[scid 8 LE][raw encrypted RTP packet]`
  *  - `0x02 SEAM_FORMAT` `[scid 8 LE][codec][rate u32 LE][ch][bits][atype]`  (len 21)
+ *  - `0x03 SEAM_PKT_PLAIN` `[scid 8 LE][raw payload]` — NOT encrypted: HFP call audio from `btd`
+ *
  *
  * The magic exists because ocbmd replaces a seam producer on a re-SETUP **without draining the old
  * one**, so this buffer can be holding half a message when the new producer's first bytes arrive. Before
@@ -37,6 +42,21 @@ import java.util.concurrent.atomic.AtomicLong
  * `OcbmProto.F_NEW_SOURCE` on the first frame of a new producer is the primary fix; the magic is the
  * recovery when that flag is absent. A box build older than that date sends no magic at all, so the
  * legacy `[u32 BE len][marker]` framing is detected once per seam and parsed as before.
+ *
+ * Any other marker is SKIPPED by its length prefix (the proto's rule for a host meeting a marker it
+ * does not know) and is never treated as a desync.
+ *
+ * ## HFP telephony (`SEAM_PKT_PLAIN`)
+ *
+ * Bluetooth call audio has no RTP packet and no key: the SCO link delivers what the controller
+ * already decoded (CVSD → 8 kHz S16 **little-endian**, 320 B per 20 ms) or, for wideband, the raw
+ * eSCO air frames (mSBC, `SeamCrypto.CODEC_MSBC`). The first is passed through as PCM; the second
+ * is decoded here — one [MsbcTelephonyDecoder] per scid, which resynchronises on the H2 header
+ * rather than trusting message boundaries — and handed on as 16 kHz S16LE PCM. If the format is
+ * mSBC and decode yields nothing, nothing is written: the bitstream is never rendered as PCM.
+ *
+ * PCM in the voice tag is therefore ALWAYS little-endian. The AirPlay PCM downlink (wired CarPlay,
+ * `SEAM_PKT`, codec 0) is big-endian on the wire and is byte-swapped here before tagging.
  */
 class AudioSeam(
     private val mediaPipe: SeamPipe,
@@ -46,6 +66,18 @@ class AudioSeam(
     companion object {
         /** Generous vs any real RTP packet; a larger declared length is a desync, not a jumbo packet. */
         private const val MAX_MESSAGE = 1 shl 20
+
+        /**
+         * Cap for a message whose marker this host does not know. The proto says skip it by its
+         * length, and that is honoured — but a false magic in ciphertext after a resync would
+         * otherwise let a random length swallow up to [MAX_MESSAGE]. No real audio message is
+         * anywhere near 64 KiB (a PLAIN is 320 B, an RTP packet ~1.5 KB), so anything larger under
+         * an unknown marker is junk and byte-resyncs instead.
+         */
+        private const val MAX_UNKNOWN_MESSAGE = 1 shl 16
+
+        /** Log the mSBC lane's health every this many decoded frames (~7.5 s). */
+        private const val MSBC_STATS_EVERY = 1000
         private val SF_INDEX =
             intArrayOf(
                 96000,
@@ -72,12 +104,35 @@ class AudioSeam(
         val atype: Int,
     )
 
+    /**
+     * One access unit's bytes plus where they came from. `plain` = `SEAM_PKT_PLAIN` (HFP: PCM is
+     * little-endian, mSBC is an air-frame bitstream); false = a decrypted `SEAM_PKT` (AirPlay: PCM is
+     * big-endian). The codec alone cannot tell those apart, and that is the difference that matters.
+     */
+    private class Au(
+        val buf: ByteArray,
+        val off: Int,
+        val len: Int,
+        val plain: Boolean,
+    ) {
+        fun copy(): ByteArray = buf.copyOfRange(off, off + len)
+    }
+
     val decryptOk = AtomicLong(0)
     val decryptFail = AtomicLong(0)
     val unkeyed = AtomicLong(0)
 
+    /** `SEAM_PKT_PLAIN` messages accepted (had a format and a codec this host can handle). */
+    val plainIn = AtomicLong(0)
+
+    /** Messages with a marker this host does not know, skipped by their length prefix. */
+    val skippedUnknown = AtomicLong(0)
+
     private val keys = HashMap<Long, ByteArray>()
     private val formats = HashMap<Long, Format>()
+
+    /** One wideband-telephony decode lane per scid; created on the first mSBC payload, dropped on a codec change. */
+    private val msbc = HashMap<Long, MsbcTelephonyDecoder>()
 
     private val media = Buf()
     private val voice = Buf()
@@ -188,8 +243,8 @@ class AudioSeam(
      * Magic-framed message: `[len 4][magic 4][marker][…]`. Two of the three shapes are FIXED length, so
      * "magic verified ⇒ mlen trustworthy" is structural, not probabilistic — after a resync the 4 bytes
      * in front of the magic are whatever preceded it, and a false magic inside RTP ciphertext would
-     * otherwise declare a length that swallows every message after it. An unknown marker is rejected for
-     * the same reason.
+     * otherwise declare a length that swallows every message after it. An unknown marker is skipped
+     * by its length as the proto requires, under a tighter cap for the same reason.
      */
     private fun lengthPlausible(
         s: Buf,
@@ -201,7 +256,9 @@ class AudioSeam(
             SeamCrypto.MARK_KEY -> mlen == 45
             SeamCrypto.MARK_FORMAT -> mlen == 21
             SeamCrypto.MARK_PKT -> mlen >= 4 + 1 + 8 + 36 // RTP hdr 12 + tag 16 + nonce 8 floor
-            else -> false
+            SeamCrypto.MARK_PLAIN -> mlen >= 4 + 1 + 8 + 1 // scid + at least one payload byte
+            // Unknown marker: SKIP by length (proto rule), bounded — see MAX_UNKNOWN_MESSAGE.
+            else -> mlen <= MAX_UNKNOWN_MESSAGE
         }
     }
 
@@ -329,50 +386,62 @@ class AudioSeam(
                 keys[scid] = b.copyOfRange(off + 1, off + 33)
                 log.i("received audio key (scid=$scid)")
             }
-            SeamCrypto.MARK_FORMAT -> {
-                if (len < 17) return
-                val scid = le64(b, off + 1)
-                val f =
-                    Format(
-                        codec = b[off + 9].toInt() and 0xFF,
-                        rate = le32(b, off + 10),
-                        channels = b[off + 14].toInt() and 0xFF,
-                        bits = b[off + 15].toInt() and 0xFF,
-                        atype = b[off + 16].toInt() and 0xFF,
-                    )
-                val prev = formats[scid]
-                formats[scid] = f
-                if (prev == null ||
-                    prev.codec != f.codec ||
-                    prev.rate != f.rate ||
-                    prev.channels != f.channels ||
-                    prev.atype != f.atype
-                ) {
-                    log.i(
-                        "audio format scid=$scid: codec=${codecName(f.codec)} ${f.rate}Hz " +
-                            "${f.channels}ch atype=${f.atype} -> ${if (SeamCrypto.isMediaAudioType(f.atype)) "media" else "voice"}",
-                    )
-                }
-            }
-            SeamCrypto.MARK_PKT -> {
-                if (len < 9) return
-                val scid = le64(b, off + 1)
-                val key = keys[scid]
-                if (key == null) {
-                    unkeyed.incrementAndGet()
-                    return
-                }
-                val pkt = b.copyOfRange(off + 9, off + len)
-                val au = SeamCrypto.openAudio(key, pkt)
-                if (au == null) {
-                    val n = decryptFail.incrementAndGet()
-                    if (n == 1L || n % 500 == 0L) log.e("audio decrypt FAILED (ok=${decryptOk.get()} fail=$n)")
-                    return
-                }
-                decryptOk.incrementAndGet()
-                route(scid, au)
+            SeamCrypto.MARK_FORMAT -> if (len >= 17) onFormat(b, off)
+            SeamCrypto.MARK_PKT -> if (len >= 9) onPacket(b, off, len)
+            SeamCrypto.MARK_PLAIN -> if (len >= 10) route(le64(b, off + 1), Au(b, off + 9, len - 9, plain = true))
+            else -> {
+                skippedUnknown.incrementAndGet()
+                val m = b[off].toInt() and 0xFF
+                warnOnce("marker-$m", "unknown audio seam marker 0x%02x — skipping by length".format(m))
             }
         }
+    }
+
+    private fun onFormat(
+        b: ByteArray,
+        off: Int,
+    ) {
+        val scid = le64(b, off + 1)
+        val f =
+            Format(
+                codec = b[off + 9].toInt() and 0xFF,
+                rate = le32(b, off + 10),
+                channels = b[off + 14].toInt() and 0xFF,
+                bits = b[off + 15].toInt() and 0xFF,
+                atype = b[off + 16].toInt() and 0xFF,
+            )
+        val prev = formats[scid]
+        formats[scid] = f
+        if (prev != null && prev.codec != f.codec) msbc.remove(scid)?.let { logMsbc(scid, it, "codec changed") }
+        val changed = prev == null || prev.codec != f.codec || prev.rate != f.rate || prev.channels != f.channels || prev.atype != f.atype
+        if (changed) {
+            log.i(
+                "audio format scid=$scid: codec=${codecName(f.codec)} ${f.rate}Hz " +
+                    "${f.channels}ch atype=${f.atype} -> ${if (SeamCrypto.isMediaAudioType(f.atype)) "media" else "voice"}",
+            )
+        }
+    }
+
+    private fun onPacket(
+        b: ByteArray,
+        off: Int,
+        len: Int,
+    ) {
+        val scid = le64(b, off + 1)
+        val key = keys[scid]
+        if (key == null) {
+            unkeyed.incrementAndGet()
+            return
+        }
+        val pkt = b.copyOfRange(off + 9, off + len)
+        val au = SeamCrypto.openAudio(key, pkt)
+        if (au == null) {
+            val n = decryptFail.incrementAndGet()
+            if (n == 1L || n % 500 == 0L) log.e("audio decrypt FAILED (ok=${decryptOk.get()} fail=$n)")
+            return
+        }
+        decryptOk.incrementAndGet()
+        route(scid, Au(au, 0, au.size, plain = false))
     }
 
     private fun codecName(c: Int) =
@@ -381,40 +450,157 @@ class AudioSeam(
             SeamCrypto.CODEC_AAC_LC -> "AAC-LC"
             SeamCrypto.CODEC_AAC_ELD -> "AAC-ELD"
             SeamCrypto.CODEC_OPUS -> "OPUS"
+            SeamCrypto.CODEC_MSBC -> "mSBC"
             else -> "codec$c"
         }
 
     /**
-     * Route one decrypted access unit by its stream's `audioType`.
+     * Route one access unit by its stream's `audioType`, then by its codec.
      *
      * atype 5 (`compatibility`) goes to **media**, not voice. It is a media-carrying PCM fallback
      * (`session.rs:889-895`); the macOS host's `isVoice { audioType != 0 }` shortcut sends it to the
      * voice player, which on AAOS would put music on the assistant volume group and permanently duck it.
+     *
+     * See [Au] for why the origin of the bytes travels with them.
      */
     private fun route(
         scid: Long,
-        au: ByteArray,
+        au: Au,
     ) {
         val f = formats[scid]
         if (f == null) {
             // Without SEAM_FORMAT there is no rate/channel/atype to route or configure with, and
             // guessing is how streams end up on the wrong AAOS volume group.
-            log.w("audio AU for scid=$scid with no SEAM_FORMAT yet — dropped")
+            warnOnce("nofmt-$scid", "audio AU for scid=$scid with no SEAM_FORMAT yet — dropped")
             return
         }
         if (SeamCrypto.isMediaAudioType(f.atype)) {
-            when (f.codec) {
-                SeamCrypto.CODEC_AAC_LC -> mediaPipe.write(adts(au, f.rate, f.channels))
-                else ->
-                    warnOnce(
-                        "media-${f.codec}",
-                        "media stream scid=$scid is ${codecName(f.codec)}; AacPlayer consumes ADTS AAC-LC " +
-                            "only — dropping. Wireless CarPlay negotiates AAC-LC, so this means the pushed " +
-                            "audio config selected something else.",
-                    )
-            }
+            routeMedia(scid, f, au)
         } else {
-            voicePipe.write(voiceTagged(au, f))
+            routeVoice(scid, f, au)
+        }
+    }
+
+    private fun routeMedia(
+        scid: Long,
+        f: Format,
+        au: Au,
+    ) {
+        when {
+            au.plain ->
+                warnOnce(
+                    "media-plain-$scid",
+                    "SEAM_PKT_PLAIN on a MEDIA stream scid=$scid (${codecName(f.codec)} ${f.rate}Hz " +
+                        "${f.channels}ch atype=${f.atype}) — the box only emits PLAIN for HFP telephony; dropping",
+                )
+            f.codec == SeamCrypto.CODEC_AAC_LC -> mediaPipe.write(adts(au.copy(), f.rate, f.channels))
+            else -> {
+                val why =
+                    if (f.codec == SeamCrypto.CODEC_PCM) {
+                        "This is the wired-CarPlay PCM media downlink, which this client cannot play yet."
+                    } else {
+                        "Wireless CarPlay negotiates AAC-LC, so the pushed audio config selected something else."
+                    }
+                warnOnce(
+                    "media-${f.codec}",
+                    "media stream scid=$scid is ${codecName(f.codec)} ${f.rate}Hz ${f.channels}ch " +
+                        "${f.bits}-bit; AacPlayer consumes ADTS AAC-LC only — dropping. $why",
+                )
+            }
+        }
+    }
+
+    private fun routeVoice(
+        scid: Long,
+        f: Format,
+        au: Au,
+    ) {
+        when (f.codec) {
+            SeamCrypto.CODEC_AAC_ELD ->
+                if (au.plain) {
+                    warnOnce("voice-plain-eld-$scid", "SEAM_PKT_PLAIN under an AAC-ELD format scid=$scid — not a wire shape the box produces; dropping")
+                } else {
+                    voicePipe.write(VoiceTag.wrap(au.buf, au.off, au.len, VoiceTag.Fmt(f.rate, f.channels, f.atype, SeamCrypto.CODEC_AAC_ELD)))
+                }
+            SeamCrypto.CODEC_PCM -> voicePcm(scid, f, au)
+            SeamCrypto.CODEC_MSBC ->
+                if (au.plain) {
+                    voiceMsbc(scid, f, au)
+                } else {
+                    warnOnce("voice-msbc-rtp-$scid", "mSBC format scid=$scid arrived as encrypted SEAM_PKT — not a wire shape the box produces; dropping")
+                }
+            else ->
+                warnOnce(
+                    "voice-${f.codec}",
+                    "voice stream scid=$scid is ${codecName(f.codec)} ${f.rate}Hz ${f.channels}ch atype=${f.atype}; " +
+                        "this client decodes AAC-ELD, PCM and mSBC on the voice lane — dropping rather than " +
+                        "feeding it to the wrong decoder",
+                )
+        }
+    }
+
+    /**
+     * PCM voice. HFP PLAIN is host-order little-endian and passes through untouched. AirPlay RTP
+     * PCM is big-endian on the wire (macOS `OCBMAVBridge`: "everything else came out of the CarPlay
+     * RTP and is BIG-endian"); VoiceRouter takes S16LE, so that one is swapped here.
+     */
+    private fun voicePcm(
+        scid: Long,
+        f: Format,
+        au: Au,
+    ) {
+        if (f.bits != 16) {
+            warnOnce("voice-pcm-bits-$scid", "PCM voice stream scid=$scid is ${f.bits}-bit; only S16 is supported — dropping")
+            return
+        }
+        val pcm = au.copy()
+        if (au.plain) plainIn.incrementAndGet() else swap16(pcm)
+        voicePipe.write(VoiceTag.wrap(pcm, VoiceTag.Fmt(f.rate, f.channels, f.atype, SeamCrypto.CODEC_PCM)))
+    }
+
+    /**
+     * Wideband HFP. One decoder per scid; it resynchronises on the H2 header, so a payload that is
+     * not a whole frame yields nothing now and completes later. NOTHING is written unless a frame
+     * decoded (or PLC filled a counted loss) — the bitstream itself never reaches the track.
+     */
+    private fun voiceMsbc(
+        scid: Long,
+        f: Format,
+        au: Au,
+    ) {
+        plainIn.incrementAndGet()
+        val dec =
+            msbc.getOrPut(scid) {
+                log.i("mSBC telephony scid=$scid: decoding wideband HFP -> 16 kHz PCM (atype=${f.atype})")
+                MsbcTelephonyDecoder()
+            }
+        val pcm = dec.decode(au.buf, au.off, au.len)
+        if (pcm.isEmpty()) return
+        if (dec.framesDecoded > 0 && dec.framesDecoded % MSBC_STATS_EVERY == 0) logMsbc(scid, dec, "stats")
+        // The tag carries the DECODED format — mSBC is defined as 16 kHz mono — not the
+        // SEAM_FORMAT's rate, which by the proto is the same thing but is not trusted here.
+        voicePipe.write(VoiceTag.wrap(pcm, VoiceTag.Fmt(Msbc.SAMPLE_RATE, Msbc.CHANNELS, f.atype, SeamCrypto.CODEC_PCM)))
+    }
+
+    private fun logMsbc(
+        scid: Long,
+        d: MsbcTelephonyDecoder,
+        why: String,
+    ) {
+        log.i(
+            "mSBC scid=$scid ($why): decoded=${d.framesDecoded} plc=${d.plcFrames} lost=${d.lostPackets} " +
+                "resyncs=${d.resyncs} failures=${d.decodeFailures}" + (d.lastFailure?.let { " last=$it" } ?: ""),
+        )
+    }
+
+    /** In-place S16 byte swap (big-endian wire -> little-endian host). An odd trailing byte is left alone. */
+    private fun swap16(b: ByteArray) {
+        var i = 0
+        while (i + 1 < b.size) {
+            val t = b[i]
+            b[i] = b[i + 1]
+            b[i + 1] = t
+            i += 2
         }
     }
 
@@ -425,27 +611,6 @@ class AudioSeam(
         msg: String,
     ) {
         if (warned.add(key)) log.w(msg)
-    }
-
-    /** `[u32 BE rate][u16 BE ch][u8 atype][u32 BE len][AU]` — VoiceRouter's 11-byte tag. */
-    private fun voiceTagged(
-        au: ByteArray,
-        f: Format,
-    ): ByteArray {
-        val out = ByteArray(11 + au.size)
-        out[0] = ((f.rate ushr 24) and 0xFF).toByte()
-        out[1] = ((f.rate ushr 16) and 0xFF).toByte()
-        out[2] = ((f.rate ushr 8) and 0xFF).toByte()
-        out[3] = (f.rate and 0xFF).toByte()
-        out[4] = ((f.channels ushr 8) and 0xFF).toByte()
-        out[5] = (f.channels and 0xFF).toByte()
-        out[6] = (f.atype and 0xFF).toByte()
-        out[7] = ((au.size ushr 24) and 0xFF).toByte()
-        out[8] = ((au.size ushr 16) and 0xFF).toByte()
-        out[9] = ((au.size ushr 8) and 0xFF).toByte()
-        out[10] = (au.size and 0xFF).toByte()
-        System.arraycopy(au, 0, out, 11, au.size)
-        return out
     }
 
     /**

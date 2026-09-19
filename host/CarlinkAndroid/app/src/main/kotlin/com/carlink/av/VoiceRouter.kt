@@ -9,6 +9,8 @@ import android.media.AudioTrack
 import android.media.MediaCodec
 import android.media.MediaFormat
 import com.carlink.logging.ProbeLog
+import com.carlink.ocbm.seam.SeamCrypto
+import com.carlink.ocbm.seam.VoiceTag
 import java.io.InputStream
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
@@ -18,13 +20,23 @@ import java.util.concurrent.atomic.AtomicLong
  * The non-media half of CarPlay audio: phone calls, Siri, alerts and navigation.
  *
  * `:9003` multiplexes every non-media stream onto one socket. Each access unit is tagged
- * `[rate u32 BE][ch u16 BE][atype u8][len u32 BE][AU]`, where `atype` is the CarPlay purpose —
- * 0 media, 1 telephony, 2 speechRecognition, 3 alert, 4 default, 5 compatibility. That byte is the
- * whole basis for
- * routing: telephony, speechRecognition and the Siri `default` downlink are ALL negotiated as
- * AAC-ELD 16 kHz mono, so without it they are byte-for-byte indistinguishable and call audio would
- * land on the assistant output — wrong volume group, wrong ducking, and a call whose volume the
- * user cannot adjust. (`ccpa_custom` carries the byte as of the matching `tag_voice` change.)
+ * `[rate u32 BE][ch u16 BE][atype u8][codec u8][len u32 BE][AU]` ([VoiceTag]), where `atype` is
+ * the CarPlay purpose — 0 media, 1 telephony, 2 speechRecognition, 3 alert, 4 default,
+ * 5 compatibility. That byte is the whole basis for routing: telephony, speechRecognition and the
+ * Siri `default` downlink are ALL negotiated as AAC-ELD 16 kHz mono, so without it they are
+ * byte-for-byte indistinguishable and call audio would land on the assistant output — wrong volume
+ * group, wrong ducking, and a call whose volume the user cannot adjust.
+ *
+ * `codec` is what the sink DECODES WITH, and it is branched on, never assumed:
+ *  - [SeamCrypto.CODEC_AAC_ELD] — wireless CarPlay voice; MediaCodec with the ELD ASC.
+ *  - [SeamCrypto.CODEC_PCM] — S16 **little-endian** (the seam normalises endianness): the HFP
+ *    narrowband call downlink (8 kHz mono, `SEAM_PKT_PLAIN`), the seam's own mSBC decode output
+ *    (16 kHz mono), and wired CarPlay's PCM voice streams. Written straight to the track.
+ *  - anything else is dropped with a diagnostic naming it. A non-ELD stream fed to an ELD decoder
+ *    is garbage or a codec exception per access unit, and that used to be the silent default.
+ *
+ * Phone-call audio of every flavour lands on [Purpose.CALL] (`USAGE_VOICE_COMMUNICATION`): the
+ * `atype` says telephony, the codec only says how to turn it into samples.
  *
  * Routing is by [AudioAttributes] usage, never by device address: GM's CarAudioService maps
  * usage → context → volume group → bus. See `docs/carplay/06_AV_PIPELINE.md`.
@@ -286,14 +298,16 @@ class VoiceRouter(
 
     /** Consume the tagged voice seam until it closes. Blocking; call on its own thread. */
     fun consume(ins: InputStream) {
-        val hdr = ByteArray(11)
+        val hdr = ByteArray(VoiceTag.LEN)
         try {
             while (running.get()) {
-                if (!readFully(ins, hdr, 11)) break
-                val rate = be32(hdr, 0)
-                val ch = ((hdr[4].toInt() and 0xFF) shl 8) or (hdr[5].toInt() and 0xFF)
-                val atype = hdr[6].toInt() and 0xFF
-                val len = be32(hdr, 7)
+                if (!readFully(ins, hdr, VoiceTag.LEN)) break
+                val h = VoiceTag.parse(hdr)
+                val rate = h.rate
+                val ch = h.channels
+                val atype = h.atype
+                val codec = h.codec
+                val len = h.len
                 if (rate !in 8000..48000) {
                     log.e(
                         "voice desync: implausible rate ${rate}Hz — the seam is probably speaking " +
@@ -308,8 +322,8 @@ class VoiceRouter(
                 if (len == 0) continue
                 val au = ByteArray(len)
                 if (!readFully(ins, au, len)) break
-                bytesIn.addAndGet((11 + len).toLong())
-                route(atype, rate, ch, au)
+                bytesIn.addAndGet((VoiceTag.LEN + len).toLong())
+                route(atype, rate, ch, codec, au)
             }
         } catch (t: Throwable) {
             if (running.get()) log.e("consume: ${t.javaClass.simpleName}: ${t.message}")
@@ -381,6 +395,21 @@ class VoiceRouter(
     /** Warn once per unknown atype rather than per access unit. */
     private val unroutedLogged = java.util.Collections.synchronizedSet(HashSet<Int>())
 
+    /** Warn once per (purpose, codec) this router cannot decode rather than per access unit. */
+    private val undecodableLogged = java.util.Collections.synchronizedSet(HashSet<String>())
+
+    private fun codecName(c: Int) =
+        when (c) {
+            SeamCrypto.CODEC_PCM -> "PCM"
+            SeamCrypto.CODEC_AAC_LC -> "AAC-LC"
+            SeamCrypto.CODEC_AAC_ELD -> "AAC-ELD"
+            SeamCrypto.CODEC_OPUS -> "OPUS"
+            SeamCrypto.CODEC_MSBC -> "mSBC"
+            else -> "codec$c"
+        }
+
+    private fun canDecode(codec: Int) = codec == SeamCrypto.CODEC_AAC_ELD || codec == SeamCrypto.CODEC_PCM
+
     /**
      * `atype` 4 (`default`) is the one value that needs the format to disambiguate: 16 kHz mono is
      * the Siri downlink on type 100, 48 kHz stereo is alt-audio/navigation on type 101. Those two
@@ -406,28 +435,43 @@ class VoiceRouter(
         atype: Int,
         rate: Int,
         ch: Int,
+        codec: Int,
         au: ByteArray,
     ) {
         val p =
             purposeFor(atype, rate, ch) ?: run {
-                if (unroutedLogged.add(atype)) log.w("atype $atype (${rate}Hz ${ch}ch) has no sink — dropping")
+                if (unroutedLogged.add(atype)) log.w("atype $atype (${rate}Hz ${ch}ch ${codecName(codec)}) has no sink — dropping")
                 return
             }
+        // Decide BEFORE touching the sink map: a stream this router cannot decode must not request
+        // focus, open a track on its volume group, or — worst — be handed to the ELD decoder.
+        if (!canDecode(codec)) {
+            if (undecodableLogged.add("${p.label}/$codec")) {
+                log.w(
+                    "${p.label}: stream is ${codecName(codec)} ${rate}Hz ${ch}ch; this router decodes " +
+                        "AAC-ELD and S16LE PCM only — dropping, not feeding it to the ELD decoder",
+                )
+            }
+            return
+        }
         val sink =
             synchronized(sinks) {
-                sinks.getOrPut(p) { Sink(p).also { it.configure(rate, ch) } }
+                sinks.getOrPut(p) { Sink(p).also { it.configure(rate, ch, codec) } }
             }
-        if (sink.isConfigured && (sink.rate != rate || sink.channels != ch)) {
-            log.i("${p.label}: format changed ${sink.rate}Hz${sink.channels}ch -> ${rate}Hz${ch}ch")
+        if (sink.isConfigured && !sink.matches(rate, ch, codec)) {
+            log.i(
+                "${p.label}: format changed ${sink.rate}Hz${sink.channels}ch ${codecName(sink.codec)} -> " +
+                    "${rate}Hz${ch}ch ${codecName(codec)}",
+            )
             sink.release()
-            sink.configure(rate, ch)
+            sink.configure(rate, ch, codec)
         } else if (!sink.isConfigured) {
             // DIVERGENCE from the gm_ccpa original, deliberate. feed()'s two error paths call
             // release() and promise a rebuild ("rebuilding the track", "the next AU reconfigures
             // immediately"), but neither could deliver it: configure() was reachable only from
             // the getOrPut lambda above, which runs solely for a purpose ABSENT from the map, or
             // from the format-change branch, which requires isConfigured. So a released sink sat
-            // in the map with isConfigured=false, feed() early-returned on `codec ?: return`
+            // in the map with isConfigured=false, feed() early-returned on `decoder ?: return`
             // forever, and sweepIdle (which skips unconfigured sinks) never evicted it to let
             // getOrPut rebuild. One ERROR_DEAD_OBJECT — which this file calls routine on a head
             // unit — killed that purpose, e.g. Siri, until the lanes generation retired.
@@ -438,7 +482,7 @@ class VoiceRouter(
             // the next AU while the codec-exception path (which arms it) still waits out its 5 s.
             // Evicting would construct a fresh Sink with a zero backoff and rebuild a codec plus
             // track per frame under a persistent fault — exactly what that backoff exists to stop.
-            sink.configure(rate, ch)
+            sink.configure(rate, ch, codec)
         }
         sink.feed(au)
         framesDecoded.incrementAndGet()
@@ -453,12 +497,22 @@ class VoiceRouter(
 
         @Volatile var channels = 0
 
+        /** The `SeamCrypto.CODEC_*` this sink was configured for; part of the format-change compare. */
+        @Volatile var codec = -1
+
         /** True only after a configure() that fully succeeded; guards the format-change branch. */
         @Volatile var isConfigured = false
 
+        fun matches(
+            r: Int,
+            c: Int,
+            cod: Int,
+        ): Boolean = rate == r && channels == c && codec == cod
+
         @Volatile var lastAudioAt = 0L
 
-        @Volatile private var codec: MediaCodec? = null
+        /** Null for a PCM sink; the AAC-ELD MediaCodec otherwise. */
+        @Volatile private var decoder: MediaCodec? = null
 
         @Volatile private var track: AudioTrack? = null
 
@@ -523,6 +577,7 @@ class VoiceRouter(
         fun configure(
             r: Int,
             c: Int,
+            cod: Int,
         ) {
             val now = android.os.SystemClock.elapsedRealtime()
             if (configureFailedAt != 0L && now - configureFailedAt < CONFIGURE_RETRY_MS) return
@@ -535,70 +590,24 @@ class VoiceRouter(
                         .setUsage(p.usage)
                         .setContentType(p.content)
                         .build()
-
                 // Focus BEFORE the track exists: AAOS picks the volume group from active players, so
                 // a track that starts without focus can claim the group before the request lands.
-                val gain =
-                    if (p == Purpose.NAV) {
-                        AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK
-                    } else {
-                        AudioManager.AUDIOFOCUS_GAIN_TRANSIENT
-                    }
-                val req =
-                    AudioFocusRequest
-                        .Builder(gain)
-                        .setAudioAttributes(attrs)
-                        .setOnAudioFocusChangeListener(focusListener)
-                        .build()
-                am.requestAudioFocus(req)
-                focus = req
+                focus = requestFocus(attrs)
+                tk = openTrack(attrs, r, c)
+                mc = openDecoder(cod, r, c)
 
-                val mask = if (c >= 2) AudioFormat.CHANNEL_OUT_STEREO else AudioFormat.CHANNEL_OUT_MONO
-                val minBuf = AudioTrack.getMinBufferSize(r, mask, AudioFormat.ENCODING_PCM_16BIT)
-                tk =
-                    AudioTrack
-                        .Builder()
-                        .setAudioAttributes(attrs)
-                        .setAudioFormat(
-                            AudioFormat
-                                .Builder()
-                                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                                .setSampleRate(r)
-                                .setChannelMask(mask)
-                                .build(),
-                        )
-                        // 4x minimum. AUDIO_OUTPUT_FLAG_FAST is denied to third-party apps on this head
-                        // unit, so PERFORMANCE_MODE_LOW_LATENCY buys nothing and can add jitter.
-                        .setBufferSizeInBytes(maxOf(minBuf, 4096) * 4)
-                        .setTransferMode(AudioTrack.MODE_STREAM)
-                        .build()
-                        .also { t ->
-                            try {
-                                t.play()
-                            } catch (e: Throwable) {
-                                runCatching { t.release() }
-                                throw e
-                            }
-                        }
-
-                val fmt = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, r, c)
-                fmt.setInteger(
-                    MediaFormat.KEY_AAC_PROFILE,
-                    android.media.MediaCodecInfo.CodecProfileLevel.AACObjectELD,
-                )
-                fmt.setByteBuffer("csd-0", ByteBuffer.wrap(eldCsd(r, c)))
-                mc = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
-                mc.configure(fmt, null, null, 0)
-                mc.start()
-
-                codec = mc
+                decoder = mc
                 track = tk
                 rate = r
                 channels = c
+                codec = cod
                 isConfigured = true
                 configureFailedAt = 0L
                 lastAudioAt = now
-                log.i("${p.label}: AAC-ELD ${r}Hz ${c}ch -> AudioTrack(usage=${p.usage}), decoder=${mc.name}")
+                log.i(
+                    "${p.label}: ${codecName(cod)} ${r}Hz ${c}ch -> AudioTrack(usage=${p.usage})" +
+                        (mc?.let { ", decoder=${it.name}" } ?: " (direct PCM, no decoder)"),
+                )
             } catch (e: Throwable) {
                 // Throwable, not Exception: an OutOfMemoryError here is an Error, and letting it
                 // escape leaks the native codec AND leaves the backoff unarmed.
@@ -612,8 +621,14 @@ class VoiceRouter(
         }
 
         fun feed(au: ByteArray) {
-            val c = codec ?: return
             val t = track ?: return
+            if (codec == SeamCrypto.CODEC_PCM) {
+                // Already S16LE at the track's rate — the seam byte-swapped the AirPlay downlink and
+                // decoded mSBC, so this is the CVSD / wideband call audio (or wired PCM voice) as-is.
+                if (au.size >= 2) render(au, t)
+                return
+            }
+            val c = decoder ?: return
             try {
                 val inIdx = c.dequeueInputBuffer(10_000)
                 if (inIdx >= 0) {
@@ -646,27 +661,10 @@ class VoiceRouter(
                         val pcm = ByteArray(info.size)
                         ob.position(info.offset)
                         ob.get(pcm)
-                        if (peakExceeds(pcm)) {
-                            lastAudioAt = android.os.SystemClock.elapsedRealtime()
-                            onDuck(true)
-                        } else if (lastAudioAt == 0L) {
-                            lastAudioAt = android.os.SystemClock.elapsedRealtime()
-                        }
-                        var off = 0
-                        while (off < pcm.size) {
-                            val w = t.write(pcm, off, pcm.size - off, AudioTrack.WRITE_NON_BLOCKING)
-                            if (w < 0) {
-                                // ERROR_DEAD_OBJECT (audioserver restart / route change) is routine on
-                                // a head unit, and a long-idle voice track is what provokes HAL standby.
-                                // Rebuild rather than writing into the void silently forever.
-                                log.w("${p.label}: write -> $w; rebuilding the track")
-                                release()
-                                configureFailedAt = 0L
-                                return
-                            }
-                            if (w == 0) break // buffer full: drop the remainder, do not spin
-                            off += w
-                        }
+                        // render() released the sink (dead track): the codec is gone too, so do
+                        // not touch its buffers — the outer catch would otherwise arm the 5 s
+                        // backoff that the dead-track path deliberately zeroes.
+                        if (!render(pcm, t)) return
                     }
                     c.releaseOutputBuffer(o, false)
                 }
@@ -681,6 +679,115 @@ class VoiceRouter(
             }
         }
 
+        private fun requestFocus(attrs: AudioAttributes): AudioFocusRequest {
+            val gain =
+                if (p == Purpose.NAV) {
+                    AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK
+                } else {
+                    AudioManager.AUDIOFOCUS_GAIN_TRANSIENT
+                }
+            val req =
+                AudioFocusRequest
+                    .Builder(gain)
+                    .setAudioAttributes(attrs)
+                    .setOnAudioFocusChangeListener(focusListener)
+                    .build()
+            am.requestAudioFocus(req)
+            return req
+        }
+
+        /** A PLAYING S16 track at [r]/[c]; released again if play() throws so nothing leaks. */
+        private fun openTrack(
+            attrs: AudioAttributes,
+            r: Int,
+            c: Int,
+        ): AudioTrack {
+            val mask = if (c >= 2) AudioFormat.CHANNEL_OUT_STEREO else AudioFormat.CHANNEL_OUT_MONO
+            val minBuf = AudioTrack.getMinBufferSize(r, mask, AudioFormat.ENCODING_PCM_16BIT)
+            return AudioTrack
+                .Builder()
+                .setAudioAttributes(attrs)
+                .setAudioFormat(
+                    AudioFormat
+                        .Builder()
+                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                        .setSampleRate(r)
+                        .setChannelMask(mask)
+                        .build(),
+                )
+                // 4x minimum. AUDIO_OUTPUT_FLAG_FAST is denied to third-party apps on this head
+                // unit, so PERFORMANCE_MODE_LOW_LATENCY buys nothing and can add jitter.
+                .setBufferSizeInBytes(maxOf(minBuf, 4096) * 4)
+                .setTransferMode(AudioTrack.MODE_STREAM)
+                .build()
+                .also { t ->
+                    try {
+                        t.play()
+                    } catch (e: Throwable) {
+                        runCatching { t.release() }
+                        throw e
+                    }
+                }
+        }
+
+        /**
+         * The MediaCodec for [cod], started; null for PCM (the seam delivers S16LE and the track
+         * takes it as-is). Throws for anything else — `route()` filters those before a sink exists.
+         */
+        private fun openDecoder(
+            cod: Int,
+            r: Int,
+            c: Int,
+        ): MediaCodec? =
+            when (cod) {
+                SeamCrypto.CODEC_PCM -> null
+                SeamCrypto.CODEC_AAC_ELD -> {
+                    val fmt = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, r, c)
+                    fmt.setInteger(
+                        MediaFormat.KEY_AAC_PROFILE,
+                        android.media.MediaCodecInfo.CodecProfileLevel.AACObjectELD,
+                    )
+                    fmt.setByteBuffer("csd-0", ByteBuffer.wrap(eldCsd(r, c)))
+                    MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_AUDIO_AAC).also {
+                        it.configure(fmt, null, null, 0)
+                        it.start()
+                    }
+                }
+                else -> throw IllegalArgumentException("codec ${codecName(cod)} is not decodable here")
+            }
+
+        /**
+         * Write S16LE PCM to the track, driving the duck/idle clock off its energy. Returns false if
+         * the track died and was released (the caller must stop touching it).
+         */
+        private fun render(
+            pcm: ByteArray,
+            t: AudioTrack,
+        ): Boolean {
+            if (peakExceeds(pcm)) {
+                lastAudioAt = android.os.SystemClock.elapsedRealtime()
+                onDuck(true)
+            } else if (lastAudioAt == 0L) {
+                lastAudioAt = android.os.SystemClock.elapsedRealtime()
+            }
+            var off = 0
+            while (off < pcm.size) {
+                val w = t.write(pcm, off, pcm.size - off, AudioTrack.WRITE_NON_BLOCKING)
+                if (w < 0) {
+                    // ERROR_DEAD_OBJECT (audioserver restart / route change) is routine on a head
+                    // unit, and a long-idle voice track is what provokes HAL standby. Rebuild rather
+                    // than writing into the void silently forever.
+                    log.w("${p.label}: write -> $w; rebuilding the track")
+                    release()
+                    configureFailedAt = 0L
+                    return false
+                }
+                if (w == 0) break // buffer full: drop the remainder, do not spin
+                off += w
+            }
+            return true
+        }
+
         /** pause + flush BEFORE abandoning focus, so AAOS sees no active player of this usage. */
         fun release() {
             val t = track
@@ -689,14 +796,15 @@ class VoiceRouter(
             runCatching { t?.flush() }
             runCatching { t?.stop() }
             runCatching { t?.release() }
-            val c = codec
-            codec = null
+            val c = decoder
+            decoder = null
             runCatching { c?.stop() }
             runCatching { c?.release() }
             runCatching { focus?.let { am.abandonAudioFocusRequest(it) } }
             focus = null
             rate = 0
             channels = 0
+            codec = -1
             isConfigured = false
         }
     }
@@ -713,13 +821,6 @@ class VoiceRouter(
         }
         return false
     }
-
-    private fun be32(
-        b: ByteArray,
-        off: Int,
-    ): Int =
-        ((b[off].toInt() and 0xFF) shl 24) or ((b[off + 1].toInt() and 0xFF) shl 16) or
-            ((b[off + 2].toInt() and 0xFF) shl 8) or (b[off + 3].toInt() and 0xFF)
 
     private fun readFully(
         ins: InputStream,

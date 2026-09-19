@@ -433,6 +433,20 @@ otherwise, and the only symptom is Siri hearing a pitch-shifted stream. `Project
 `RECORD_AUDIO` **before** iOS arms the uplink or capture returns zeroed buffers, and it declares the
 `microphone` FGS type conditionally to avoid taking video and input down with a `SecurityException`.
 
+**Voice-lane codec is no longer assumed (client capability, 2026-09-18, box unchanged).** Every
+voice-sink stream — CarPlay Siri/telephony `SEAM_PKT` AAC-ELD as well as the Android-Auto-only
+`SEAM_PKT_PLAIN` HFP lane (`../carplay/01_OCBM_PROTOCOL.md` §Audio lanes) — used to be fed to a
+hardcoded AAC-ELD decoder in `VoiceRouter`. The Android client now carries the codec through its
+internal voice tag (`ocbm/seam/VoiceTag.kt`) and branches: `CODEC_PCM` goes straight to the
+`AudioTrack` as S16LE (no `MediaCodec`), `CODEC_AAC_ELD` keeps the existing path, and anything else
+is refused — the router drops it and warns once, naming the codec, **before** any audio-focus request
+or sink is touched, so an undecodable stream cannot hold a focus slot open on nothing. For CarPlay
+this is a robustness fix with no behavior change (the box still only ever sends AAC-ELD on that
+lane); for the Android-Auto HFP lane it is what makes `SEAM_PKT_PLAIN` PCM/mSBC audio playable at
+all — see `../carplay/01_OCBM_PROTOCOL.md` for the wire shape and why that lane is scoped to Android
+Auto, never CarPlay. Test-green (`AudioSeamPlainTest.kt`), **not hardware-verified** — no phone call
+has exercised either path on a device.
+
 ### 7 · Known gaps (open, verified against the tree at this commit)
 
 - **`compatibility` (atype 5) is routed as voice on the host.** `OCBMAudioStreamFormat.isVoice` is

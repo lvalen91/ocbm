@@ -202,4 +202,10 @@ object AutomotiveDimens {
     val ButtonPaddingHorizontal = 24.dp
     val ButtonPaddingVertical = 20.dp
     val IconSize = 28.dp // Larger than M3 default (24.dp) for in-vehicle glanceability.
+
+    /** Secondary (footer) controls: the AAOS 48.dp minimum touch target, not the primary 72.dp. */
+    val FooterMinHeight = 48.dp
+
+    /** Rows in a picker dialog — a finger-sized minimum, they grow with their text. */
+    val ListRowMinHeight = 56.dp
 }

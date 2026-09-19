@@ -27,7 +27,7 @@ hand in another language:
 |---|---|
 | box daemons (Rust) | `crates/ocbm-proto/src/lib.rs` — **canonical** |
 | macOS host app (Swift) | `host/MacHost/carlink_macOS/OCBM/OCBMFraming.swift` |
-| CarlinkAndroid host app (Kotlin, dormant) | `host/CarlinkAndroid/app/src/main/kotlin/com/carlink/ocbm/OcbmProto.kt` |
+| CarlinkAndroid host app (Kotlin, active since 2026-09-18 — see below) | `host/CarlinkAndroid/app/src/main/kotlin/com/carlink/ocbm/OcbmProto.kt` |
 | gm_ccpa client (Kotlin) | `host/gm_ccpa/netprobe_app/app/src/main/java/zeno/gmccpa/ocbm/OcbmProto.kt` — app-owned fork (see below) |
 
 `tools/proto_check.py` verifies all three against the canonical table. Run it before committing a
@@ -43,15 +43,29 @@ not act on the opcode. `--strict` promotes every gap to an error.
 **gm_ccpa's Kotlin file is an app-owned fork, not a symlink (since 2026-09-11).** From 2026-08-31 to
 2026-09-11 `host/gm_ccpa/.../ocbm/OcbmProto.kt` was a relative symlink into CarlinkAndroid's copy, from
 the days when gm_ccpa was a separate checkout and the protocol was "edited once, in the main project".
-That inverted the actual ownership: CarlinkAndroid is dormant and behind the current protocol, while
-gm_ccpa and the macOS host are the implementations that ship. The link was replaced with a real file
+That inverted the actual ownership at the time: CarlinkAndroid was dormant and behind the current
+protocol, while gm_ccpa and the macOS host were the implementations that shipped. The link was
+replaced with a real file
 (byte-identical to the CarlinkAndroid original except `package zeno.gmccpa.ocbm`), so the Kotlin clients
 are per-app exactly as the Swift client already was. The wire contract does not move: `crates/ocbm-proto`
 stays canonical and `tools/proto_check.py` is the seam — it now checks gm_ccpa's file by default, where
 before it did so only when handed a root path, and then only by reading the same file twice.
 
+**Correction, 2026-09-18: CarlinkAndroid is no longer dormant, and "behind" no longer holds
+uniformly.** Three work packages landed in `:app` this session (a third-party AAOS integration shell,
+phone-call audio over the voice seam, and a resolution/orientation-agnostic UI), its build+test gate
+is green, and client currency is genuinely **not uniform** across the fleet: `tools/proto_check.py`
+now shows the CarlinkAndroid Kotlin client ahead of gm_ccpa and the Swift client on the whole `LOG_*`
+table and the inbound `CMD_*` command surface (`CMD_REQUEST_UI`/`REQUEST_SIRI`/`LIMITED_UI_*`/
+`UI_APPEARANCE`, `MODE_*`, `NAV_APPEARANCE_*` — the Swift client still lacks all of these), and it
+closed its own `CMD_VIEW_AREA` gap on 2026-09-18 (gm_ccpa still lacks it) — while still carrying a
+local `F_BOTH` constant not in `ocbm-proto`, a gap gm_ccpa also carries. See
+`host/CarlinkAndroid/OCBMANDROID.md` for what shipped; the box side of all of this predates today —
+none of it is a protocol change, only client capability catching up.
+
 **Only what a byte means is shared.** The two Android apps serve different roles — gm_ccpa is the GM
-head-unit bridge, CarlinkAndroid targets Pi AAOS — so `OcbmClient`, `VoiceRouter`, `AacPlayer`,
+head-unit bridge, CarlinkAndroid targets a GM gminfo3.7 AAOS unit (corrected 2026-09-18 — this line
+previously said "Pi AAOS"; see `host/CarlinkAndroid/OCBMANDROID.md`) — so `OcbmClient`, `VoiceRouter`, `AacPlayer`,
 `MicUplink` and the transports are separate implementations and are allowed to differ, and now so are
 the protocol files, within what the checker enforces. Deployment policy stays in the app: gm_ccpa's
 `BH_REQUIRED_BRIDGE` lives in its `SessionSupervisor`, not in the protocol file, because it deliberately
@@ -486,7 +500,19 @@ concurrent streams sharing the voice sink (telephony + alert) cannot clobber eac
   an ordinal), because there is exactly one SCO channel at a time; a scid in a host log therefore
   names its own origin. The uplink half has no ocbmd change at all: ocbmd's `CH_MIC` relay already
   connects to `127.0.0.1:9112`, and during an Android Auto session — when carplayd is not running —
-  `btd` listens there itself and speaks carplayd's protocol verbatim.
+  `btd` listens there itself and speaks carplayd's protocol verbatim. This lane is owner-gated
+  box-side to a wired- or wireless-AA projection owner (`sco_audio.rs`'s `:9112` serve check) —
+  it never carries CarPlay call audio, which stays inside the AirPlay session end to end.
+
+  **Client status, 2026-09-18 — CarlinkAndroid `:app` (the box side above is unchanged):** the
+  Android client's `AudioSeam.kt` now handles `SEAM_PKT_PLAIN` for this Android Auto telephony lane —
+  narrowband passthrough plus a ported mSBC decoder/encoder (`telephony/Msbc.kt`,
+  `telephony/MsbcFramer.kt`, resynchronising on the H2 header, never on message length, and dropping
+  rather than rendering an undecodable stream) — and the voice router now carries the codec through
+  instead of assuming AAC-ELD for every voice stream. This is client capability catching up to a
+  wire shape the box already produced; nothing box-side changed. **Test-green only** (JVM unit tests,
+  `AudioSeamPlainTest.kt`), **not yet hardware-verified** — no phone call has exercised it. See
+  `host/CarlinkAndroid/OCBMANDROID.md` "Phone-call audio (WP2)".
 
 The datagram is the iPhone's packet verbatim: `[12B RTP hdr][ciphertext][16B tag][8B nonce]`. Nonce =
 `[0,0,0,0]‖pkt[len-8..]`, AAD = `pkt[4..12]` (ts‖ssrc), ciphertext‖tag = `pkt[12..len-8]`. **This lane

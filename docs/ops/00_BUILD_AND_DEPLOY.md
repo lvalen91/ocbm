@@ -16,11 +16,21 @@ How the box binaries are built, what they cost in flash/RAM, and how they are pu
   its eld-codec. C probes use `zig cc -target arm-linux-musleabihf -static -Os -s`. Size profile below.
 - **Host** — macOS/Linux native, or Android. The two host *apps* are
   `host/MacHost/carlink_macOS` (Swift/Xcode, shipping) and `host/CarlinkAndroid` (Kotlin/Gradle,
-  AAOS 12L / API 32 — **no NDK and no Rust inside the app**; in-tree on a feature branch, not yet
-  merged to `main`). `host/ocbm-host` is native **Rust** (`rusb`), and "`ocbm-rescue`" is a *role* of
-  that same binary (`ocbm-host console`), not a separate build. The only `clang` + `libusb` artifact in
-  the tree is `host/accbench.c` (hand-built, see `host/README.md`). The `aarch64-linux-android` NDK
-  target IS used — but for the AAOS/Pi port of the **box** daemons (`pi/`), not for any host client.
+  AAOS 12L / API 32 min — **no NDK and no Rust inside the app**; on `main`. (**Corrected 2026-09-18**
+  — this line previously said "in-tree on a feature branch, not yet merged to `main`", which
+  `docs/ops/04_OPEN_ITEMS.md` had already flagged stale (`git ls-tree -d --name-only main host/` lists
+  `host/CarlinkAndroid`), but this file itself was never fixed until now.) `host/ocbm-host` is native
+  **Rust** (`rusb`), and "`ocbm-rescue`" is a *role* of that same binary (`ocbm-host console`), not a
+  separate build. The only `clang` + `libusb` artifact in the tree is `host/accbench.c` (hand-built,
+  see `host/README.md`). The `aarch64-linux-android` NDK target IS used — but for the AAOS/Pi port of
+  the **box** daemons (`pi/`), not for any host client.
+  - **Gate:** `~/.claude/bin/bt ./gradlew :app:assembleDebug :app:testDebugUnitTest :app:detekt
+    :app:ktlintCheck` from `host/CarlinkAndroid`; run `python3 tools/proto_check.py` from the repo
+    root whenever `OcbmProto.kt` changes. The box binaries above are unaffected by this gate — it
+    is client-only and does not rebuild or redeploy any box daemon.
+  - **Emulator constraint:** exactly ONE AVD instance may run at a time. It holds the USB
+    passthrough claim on the adapter (vendor id `0x1314`), and a second instance fights it for the
+    claim. Reshape the running device with `wm size` / `wm density` instead of booting a second AVD.
 
 Rust size profile (`Cargo.toml`) — size-first everywhere **except** the per-frame hot paths:
 ```toml

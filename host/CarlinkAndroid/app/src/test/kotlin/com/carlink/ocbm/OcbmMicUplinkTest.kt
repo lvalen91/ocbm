@@ -64,6 +64,24 @@ class OcbmMicUplinkTest {
             ch.toByte(),
         )
 
+    @Test
+    fun `CT_UPLINK codec byte is parsed, absent means PCM, and OFF clears it`() {
+        val t = FakeTransport()
+        val c = newClient(t)
+        var codec = -1
+        c.onUplinkGate = { _, _, _, k -> codec = k }
+
+        t.deliver(Ocbm.CH_CTRL, uplink(on = true, rate = 16000, ch = 1) + byteArrayOf(4))
+        assertEquals(4, codec)
+        assertEquals(4, c.uplinkCodec)
+
+        t.deliver(Ocbm.CH_CTRL, uplink(on = true, rate = 16000, ch = 1)) // 7-byte gate from an older box
+        assertEquals(0, codec)
+
+        t.deliver(Ocbm.CH_CTRL, uplink(on = false, rate = 16000, ch = 1) + byteArrayOf(4))
+        assertEquals("OFF carries no format", 0, c.uplinkCodec)
+    }
+
     /** Collect every payload the client wrote on [channel], in wire order. */
     private fun FakeTransport.payloadsOn(channel: Int): List<ByteArray> =
         generateSequence { takeWritten(150) }
@@ -79,7 +97,7 @@ class OcbmMicUplinkTest {
         val t = FakeTransport()
         val c = newClient(t)
         val seen = mutableListOf<Triple<Boolean, Int, Int>>()
-        c.onUplinkGate = { on, rate, ch -> seen += Triple(on, rate, ch) }
+        c.onUplinkGate = { on, rate, ch, _ -> seen += Triple(on, rate, ch) }
 
         t.deliver(Ocbm.CH_CTRL, uplink(on = true, rate = 16000, ch = 1))
 
@@ -100,7 +118,7 @@ class OcbmMicUplinkTest {
         val t = FakeTransport()
         val c = newClient(t)
         var rate = -1
-        c.onUplinkGate = { _, r, _ -> rate = r }
+        c.onUplinkGate = { _, r, _, _ -> rate = r }
 
         // 16000 == 0x00003E80 -> LE bytes 80 3E 00 00.
         t.feed(
@@ -119,7 +137,7 @@ class OcbmMicUplinkTest {
         val t = FakeTransport()
         val c = newClient(t)
         var got: Pair<Int, Int>? = null
-        c.onUplinkGate = { _, r, ch -> got = r to ch }
+        c.onUplinkGate = { _, r, ch, _ -> got = r to ch }
 
         for ((rate, ch) in listOf(8000 to 1, 16000 to 1, 24000 to 1, 16000 to 2)) {
             t.deliver(Ocbm.CH_CTRL, uplink(on = true, rate = rate, ch = ch))
@@ -135,7 +153,7 @@ class OcbmMicUplinkTest {
         assertTrue(c.uplinkOn)
 
         var off: Triple<Boolean, Int, Int>? = null
-        c.onUplinkGate = { on, r, ch -> off = Triple(on, r, ch) }
+        c.onUplinkGate = { on, r, ch, _ -> off = Triple(on, r, ch) }
         // The box sends the format again on the off edge; it must NOT be retained as live state.
         t.deliver(Ocbm.CH_CTRL, uplink(on = false, rate = 16000, ch = 2))
 
@@ -151,7 +169,7 @@ class OcbmMicUplinkTest {
         val t = FakeTransport()
         val c = newClient(t)
         var fired = false
-        c.onUplinkGate = { _, _, _ -> fired = true }
+        c.onUplinkGate = { _, _, _, _ -> fired = true }
 
         t.deliver(Ocbm.CH_CTRL, byteArrayOf(Ocbm.CT_UPLINK, 1, 0x80.toByte(), 0x3E, 0x00, 0x00))
 
