@@ -371,7 +371,7 @@ class SeamTest {
     }
 
     @Test
-    fun `media AAC-LC is decrypted and ADTS-wrapped for AacPlayer`() {
+    fun `media AAC-LC is decrypted and tagged raw for MediaAudioPlayer`() {
         val mediaPipe = SeamPipe(1 shl 20)
         val voicePipe = SeamPipe(1 shl 20)
         val seam = AudioSeam(mediaPipe, voicePipe, log)
@@ -392,20 +392,55 @@ class SeamTest {
         seam.feedMedia(audioMsg(SeamCrypto.MARK_PKT, le64(scid) + rtp(key, au, ByteArray(8) { 9 })))
 
         assertEquals(1L, seam.decryptOk.get())
-        val out = ByteArray(7 + au.size)
+        val out = ByteArray(VoiceTag.LEN + au.size)
         assertTrue(readFully(mediaPipe, out))
-        // ADTS: syncword, then the frame length must include the 7-byte header.
-        assertEquals(0xFF, out[0].toInt() and 0xFF)
-        assertEquals(0xF1, out[1].toInt() and 0xFF)
-        val fi = (out[2].toInt() shr 2) and 0x0F
-        assertEquals(3, fi) // 48 kHz
-        val ch = ((out[2].toInt() and 0x01) shl 2) or ((out[3].toInt() shr 6) and 0x03)
-        assertEquals(2, ch)
-        val frameLen =
-            ((out[3].toInt() and 0x03) shl 11) or ((out[4].toInt() and 0xFF) shl 3) or
-                ((out[5].toInt() shr 5) and 0x07)
-        assertEquals(7 + au.size, frameLen)
-        assertArrayEquals(au, out.copyOfRange(7, out.size))
+        val h = VoiceTag.parse(out)
+        assertEquals(48000, h.rate)
+        assertEquals(2, h.channels)
+        assertEquals(SeamCrypto.ATYPE_MEDIA, h.atype)
+        assertEquals(SeamCrypto.CODEC_AAC_LC, h.codec)
+        assertEquals(au.size, h.len)
+        // The AU is RAW: no ADTS header, the player configures MediaCodec from the tag's rate/channels.
+        assertArrayEquals(au, out.copyOfRange(VoiceTag.LEN, out.size))
+    }
+
+    /**
+     * The wired-CarPlay media downlink: `audioType:"media"` on stream type 100, PCM 48 kHz stereo,
+     * big-endian on the wire. This is the stream the app dropped until 2026-09-25 ("AacPlayer consumes
+     * ADTS AAC-LC only"). It must reach the media pipe byte-swapped to S16LE under codec 0.
+     */
+    @Test
+    fun `wired media PCM is byte-swapped to little-endian and tagged PCM media`() {
+        val mediaPipe = SeamPipe(1 shl 20)
+        val voicePipe = SeamPipe(1 shl 20)
+        val seam = AudioSeam(mediaPipe, voicePipe, log)
+
+        val key = ByteArray(32) { 0x66 }
+        val scid = 7L
+        seam.feedMedia(audioMsg(SeamCrypto.MARK_KEY, key + le64(scid)))
+        seam.feedMedia(
+            audioMsg(
+                SeamCrypto.MARK_FORMAT,
+                le64(scid) + byteArrayOf(SeamCrypto.CODEC_PCM.toByte()) +
+                    byteArrayOf(0x80.toByte(), 0xBB.toByte(), 0, 0) + // 48000 LE
+                    byteArrayOf(2, 16, SeamCrypto.ATYPE_MEDIA.toByte()),
+            ),
+        )
+
+        // Two BE samples: 0x1234, 0xFEDC.
+        val wire = byteArrayOf(0x12, 0x34, 0xFE.toByte(), 0xDC.toByte())
+        seam.feedMedia(audioMsg(SeamCrypto.MARK_PKT, le64(scid) + rtp(key, wire, ByteArray(8) { 3 })))
+
+        assertEquals(1L, seam.decryptOk.get())
+        assertEquals(0L, voicePipe.residentBytes()) // media, never the voice lane
+        val out = ByteArray(VoiceTag.LEN + wire.size)
+        assertTrue(readFully(mediaPipe, out))
+        val h = VoiceTag.parse(out)
+        assertEquals(48000, h.rate)
+        assertEquals(2, h.channels)
+        assertEquals(SeamCrypto.ATYPE_MEDIA, h.atype)
+        assertEquals(SeamCrypto.CODEC_PCM, h.codec)
+        assertArrayEquals(byteArrayOf(0x34, 0x12, 0xDC.toByte(), 0xFE.toByte()), out.copyOfRange(VoiceTag.LEN, out.size))
     }
 
     /**
@@ -446,9 +481,9 @@ class SeamTest {
         assertEquals(1L, seam.decryptOk.get())
         assertEquals(0L, seam.decryptFail.get())
         assertEquals(0L, seam.unkeyed.get())
-        val out = ByteArray(7 + au.size)
+        val out = ByteArray(VoiceTag.LEN + au.size)
         assertTrue(readFully(mediaPipe, out))
-        assertArrayEquals(au, out.copyOfRange(7, out.size))
+        assertArrayEquals(au, out.copyOfRange(VoiceTag.LEN, out.size))
     }
 
     @Test

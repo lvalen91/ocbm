@@ -706,6 +706,42 @@ class OcbmClient(
     /** Mid-session radio kill switch (docs/carplay/04_CAPABILITIES_AND_CONFIG.md radio gating). Blocking; call off the main thread. */
     fun setRadios(on: Boolean): Boolean = send(Ocbm.CH_CTRL, byteArrayOf(Ocbm.CT_RADIO, if (on) 1 else 0))
 
+    /**
+     * `[CT_PAIR_CONFIRM][accept]` — the user's answer to a `CT_PAIRING_CODE` prompt (1 = the codes
+     * match, pair; 0 = cancel). ocbmd relays it to btd's control port as `pair_answer`. Blocking;
+     * call off the main thread. Deliberately NOT gated on `subscribed`: the box only publishes a
+     * code to a subscribed host, so the guard could only refuse an answer the user really gave.
+     */
+    fun sendPairConfirm(accept: Boolean): Boolean {
+        val ok = send(Ocbm.CH_CTRL, byteArrayOf(Ocbm.CT_PAIR_CONFIRM, if (accept) 1 else 0))
+        log.i(">> CT_PAIR_CONFIRM ${if (accept) "PAIR" else "CANCEL"}${if (ok) "" else " (write FAILED)"}")
+        return ok
+    }
+
+    /**
+     * Whether this box can end the phone's session on request (wired or wireless).
+     *
+     * ALWAYS FALSE today, on purpose: OCBM defines no phone-disconnect verb and no capability bit
+     * for one (`crates/ocbm-proto/src/lib.rs`, the `MGMT_*` and `CAP_*` sets). When the box grows
+     * a transport-aware `MGMT_DISCONNECT_PHONE` and advertises it in HELLO_ACK's caps, this
+     * becomes a one-line `caps and Ocbm.CAP_<name> != 0` and [disconnectPhone] sends the verb — no
+     * UI change needed. The wire ids are NOT invented here; see docs/ops/04_OPEN_ITEMS.md.
+     */
+    val supportsPhoneDisconnect: Boolean get() = false
+
+    /**
+     * End the phone's session — the single wire hook behind Disconnect Phone. Gated on
+     * [supportsPhoneDisconnect]; sends NOTHING (and returns false) when the box cannot do it.
+     */
+    fun disconnectPhone(): Boolean {
+        if (!supportsPhoneDisconnect) {
+            log.w("disconnectPhone(): box advertises no phone-disconnect capability — nothing sent")
+            return false
+        }
+        // Unreachable until the capability exists; the verb id will be assigned with it.
+        error("MGMT_DISCONNECT_PHONE is not assigned in this build")
+    }
+
     // ---- bring-up -------------------------------------------------------------------------------
 
     /**
@@ -1025,13 +1061,18 @@ class OcbmClient(
     // ---- teardown -------------------------------------------------------------------------------
 
     /**
-     * Clean shutdown: CT_STOP gives the box its 5 s grace so a quick relaunch reuses the session.
+     * Clean shutdown. CT_STOP is a session-END indicator: the box goes idle immediately (ocbmd
+     * `go_idle` — `STOP_GRACE` and its warm-reuse window were removed 2026-09-03,
+     * docs/ops/06_CORRECTIONS_LEDGER.md), so the next SUBSCRIBE is always a fresh session.
      *
      * Order is deliberate. The lanes close BEFORE CT_STOP because a read thread parked in a seam write
      * has to be released before anything can join it, and the heartbeat is joined first so a straggling
      * tick cannot re-SUBSCRIBE after we have said STOP.
+     *
+     * @param sendStop false on a DEAD pipe (the error path): the write could only block for the
+     *   bulk timeout, and the box's heartbeat watchdog declares the host gone on its own.
      */
-    fun stop() {
+    fun stop(sendStop: Boolean = true) {
         if (!running.compareAndSet(true, false)) return
         // Latch the single-use flag HERE, not at the end of teardown. Set late, a start() racing
         // an in-progress stop() passes its `stopped` check and re-CASes running false->true
@@ -1068,8 +1109,12 @@ class OcbmClient(
             runCatching { it.close() }
         }
         if (subscribed) {
-            log.i(">> CT_STOP")
-            send(Ocbm.CH_CTRL, byteArrayOf(Ocbm.CT_STOP))
+            if (sendStop) {
+                log.i(">> CT_STOP")
+                send(Ocbm.CH_CTRL, byteArrayOf(Ocbm.CT_STOP))
+            } else {
+                log.i("-- CT_STOP skipped (dead pipe)")
+            }
             subscribed = false
         }
         transport.stop()

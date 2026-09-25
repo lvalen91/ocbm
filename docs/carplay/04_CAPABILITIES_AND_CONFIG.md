@@ -663,6 +663,15 @@ Allow UI to extend past the safe area: on = permit overflow.
 On = CarPlay may render some UI into the region between the safe area and the view-area edge (background/immersive content). Off = keep all UI inside the safe area.
 [E] `ViewAreaConfig.drawUIOutsideSafeArea: Swift.Bool?`; `/info` `safeArea.drawUIOutsideSafeArea` (doc 13 §4).
 
+**Android client, 2026-09-25 — set automatically from the display cutout.** `PanelGeometry.drawUiOutsideSafeArea`
+is `true` whenever the detected safe area is a real inset (cutout / waterfall / rounded corner) and
+`false` for a full-panel safe area, so a clean panel's document is byte-identical. Measured on the
+chevy12 AVD (2914x1134, GM CHEVROLET_12 cutout, pushed safe `2628x966@0,168`): with the flag off iOS
+painted the top/right inset bands 100 % black; with it on the wallpaper fills them and the interactive
+UI (near-white pixel extent `x 28..2372, y 218..1110`) stays inside the safe rectangle. See
+`host/CarlinkAndroid/OCBMANDROID.md` "Display cutout → CarPlay safe area". Box unchanged: the
+`vehicle_config.rs` → `info.rs` path this rides is the one the macOS host already exercised.
+
 #### statusBarEdge
 Which screen edge the CarPlay status bar hugs.
 Places the status/clock strip along a chosen edge (top/leading/…) for this layout. Cosmetic layout hint per view area.

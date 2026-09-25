@@ -16,14 +16,22 @@ import android.os.Looper
 import android.view.KeyEvent
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
@@ -34,14 +42,19 @@ import com.carlink.logging.Logger
 import com.carlink.logging.logInfo
 import com.carlink.logging.logWarn
 import com.carlink.media.MediaSessionManager
+import com.carlink.ocbm.Ocbm
 import com.carlink.protocol.AdapterConfig
 import com.carlink.protocol.KnownDevices
+import com.carlink.ui.DisplayModeOutcome
 import com.carlink.ui.MainScreen
+import com.carlink.ui.SettingsActions
+import com.carlink.ui.SettingsScreen
 import com.carlink.ui.settings.DisplayMode
 import com.carlink.ui.settings.DisplayModeStore
 import com.carlink.ui.theme.CarlinkTheme
 import com.carlink.util.DisplayProfile
 import com.carlink.util.LogCallback
+import com.carlink.voice.VoiceKeys
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import java.nio.ByteBuffer
@@ -57,7 +70,8 @@ import java.nio.ByteOrder
  *  - Ownership of [CarlinkManager] (nullable to survive being destroyed before init completes).
  *  - Microphone runtime permission (denial is survivable).
  *  - The persisted [DisplayMode] applied to the window ([applyDisplayMode]); the content area it leaves is what the session declares.
- *  - In-place session rebuild via [reinitialize] (used by Reset Connection).
+ *  - In-place session rebuild via [reinitialize] (display-mode / content-area changes; the user-facing
+ *    Reset Connection / Reset Device are `CarlinkManager.cleanSlateReset`, not a rebuild).
  *  - USB attach (onNewIntent, via manifest intent-filter) + detach (BroadcastReceiver)
  *    handling for faster disconnect detection than USB-transfer error paths provide.
  *  - Compose UI host: the top-level [CarlinkApp] composable keeps [MainScreen]
@@ -187,6 +201,7 @@ class MainActivity : ComponentActivity() {
         // the content area DisplayProfile.detect() derives matches the bars actually on screen.
         displayModeStore = DisplayModeStore(this)
         displayMode = displayModeStore.get()
+        appliedDisplayMode = displayMode
         applyDisplayMode()
 
         // Defer CarlinkManager creation to the next main-looper tick so the decorView is
@@ -221,9 +236,6 @@ class MainActivity : ComponentActivity() {
                     if (manager != null) {
                         CarlinkApp(
                             carlinkManager = manager,
-                            // Reset Connection rebuilds the full manager: new SurfaceView,
-                            // fresh HWC plane, fresh WindowMetrics, renegotiated Open().
-                            onResetConnection = { reinitialize() },
                             displayMode = displayMode,
                             onDisplayModeSelected = { onDisplayModeSelected(it) },
                         )
@@ -260,20 +272,17 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Voice keys that reach the foreground activity go to Siri. On AAOS `KEYCODE_VOICE_ASSIST` is
-     * normally intercepted by `CarInputService` (see `voice/`), and `ASSIST`/`SEARCH` by the window
-     * manager — so this mostly matters on head units that let the key through. Cheap and harmless
-     * where it never fires.
+     * Voice keys that reach the foreground activity go to Siri ([VoiceKeys]). Measured on the AAOS 14
+     * emulator: `KEYCODE_SEARCH` reaches this handler and activates Siri; `KEYCODE_VOICE_ASSIST` is
+     * intercepted by `CarInputService` and `KEYCODE_ASSIST` by the window manager, so on a head unit
+     * those arrive only through [com.carlink.voice.CarlinkVoiceInteractionService] once the user has
+     * selected this app as the digital assistant. Cheap and harmless where it never fires.
      */
     override fun onKeyDown(
         keyCode: Int,
         event: KeyEvent,
     ): Boolean {
-        val voice =
-            keyCode == KeyEvent.KEYCODE_VOICE_ASSIST ||
-                keyCode == KeyEvent.KEYCODE_ASSIST ||
-                keyCode == KeyEvent.KEYCODE_SEARCH
-        if (voice && event.repeatCount == 0) {
+        if (VoiceKeys.triggers(keyCode, event.repeatCount)) {
             val sent = carlinkManager?.requestSiri() ?: false
             logInfo("[KEY] voice key $keyCode -> Siri ${if (sent) "sent" else "dropped"}", tag = "MAIN")
             return true
@@ -337,7 +346,7 @@ class MainActivity : ComponentActivity() {
         // corners. This — not a stored setting — is what the CT_SUBSCRIBE config declares, what
         // the decoder is sized to, and what the video surface is laid out to (MainScreen pads by
         // the same barInsets), so touch is normalised over the rectangle iOS encodes for.
-        val profile = DisplayProfile.detect(this, displayMode.visibleBarTypes)
+        val profile = DisplayProfile.detect(this, appliedDisplayMode.visibleBarTypes)
         activeProfile = profile
         val g = profile.geometry
         val cutout = profile.cutout
@@ -371,7 +380,7 @@ class MainActivity : ComponentActivity() {
             )
 
         logInfo(
-            "[WINDOW] mode=${displayMode.name} physical ${profile.physicalWidthPx}x${profile.physicalHeightPx}, " +
+            "[WINDOW] mode=${appliedDisplayMode.name} physical ${profile.physicalWidthPx}x${profile.physicalHeightPx}, " +
                 "window ${profile.windowWidthPx}x${profile.windowHeightPx}, bars ${profile.barInsets}, " +
                 "content ${profile.widthPx}x${profile.heightPx} -> video ${g.width}x${g.height}, " +
                 "cutout T:${cutout.top} B:${cutout.bottom} L:${cutout.left} R:${cutout.right}",
@@ -382,7 +391,10 @@ class MainActivity : ComponentActivity() {
         // Adapter audio mode (hardcoded false) — acquire the app-scope MediaSession singleton.
         applyAudioTransferModeToMediaSession(false)
 
-        carlinkManager = CarlinkManager(this, config, mediaSessionManager, profile)
+        carlinkManager =
+            CarlinkManager(this, config, mediaSessionManager, profile).also {
+                it.addBoxStatusListener(displayModeApplier)
+            }
         carlinkManagerState.value = carlinkManager
     }
 
@@ -398,7 +410,7 @@ class MainActivity : ComponentActivity() {
         super.onConfigurationChanged(newConfig)
         val before = activeProfile ?: return
         if (carlinkManager == null || pendingReinitRunnable != null) return
-        val now = DisplayProfile.detect(this, displayMode.visibleBarTypes)
+        val now = DisplayProfile.detect(this, appliedDisplayMode.visibleBarTypes)
         if (now.geometry == before.geometry && now.barInsets == before.barInsets) return
         logInfo(
             "[DISPLAY] content area changed ${before.widthPx}x${before.heightPx} -> ${now.widthPx}x${now.heightPx} " +
@@ -409,18 +421,66 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * The user picked a display mode on the dashboard: persist it, then rebuild the session — the
+     * The user applied a display mode (Settings > Control): persist it, then rebuild the session — the
      * bars the mode leaves visible change the content area, which is a new CT_SUBSCRIBE, a new
      * decoder size and a new surface rect, exactly like a panel change. [reinitialize] applies the
      * mode to the window before it re-detects.
+     *
+     * MID-SESSION RULE (MacHost's, `OCBMClient.swift` `sessionConfigChanged`): while a phone session
+     * owns the box (`CT_PROJ_MODE` wired/wireless CarPlay) the change is only PERSISTED and applied
+     * at the next connection — rebuilding under a live session would tear the phone's session down
+     * for a geometry change. With no phone session it applies immediately, as before. The deferred
+     * apply fires from [displayModeApplier] when the box reports the session gone.
      */
-    private fun onDisplayModeSelected(mode: DisplayMode) {
-        if (mode == displayMode) return
+    private fun onDisplayModeSelected(mode: DisplayMode): DisplayModeOutcome {
+        if (mode == displayMode) return if (mode == appliedDisplayMode) DisplayModeOutcome.APPLIED else DisplayModeOutcome.DEFERRED
         logInfo("[DISPLAY] mode ${displayMode.name} -> ${mode.name}", tag = "MAIN")
         displayModeStore.set(mode)
         displayMode = mode
+        if (phoneSessionActive()) {
+            logInfo("[DISPLAY] phone session active (${Ocbm.pmName(carlinkManager?.projectionMode ?: Ocbm.PM_NONE)}) — mode saved, applies at next connection", tag = "MAIN")
+            // The dialog previewed the new bars live; the session is still built for the APPLIED
+            // mode, so put the window back to match it or the video sits under the wrong insets.
+            applyDisplayMode()
+            return DisplayModeOutcome.DEFERRED
+        }
         reinitialize()
+        return DisplayModeOutcome.APPLIED
     }
+
+    /** A phone session owns the box right now (the box's own word, not the app's state machine). */
+    private fun phoneSessionActive(): Boolean {
+        val m = carlinkManager?.projectionMode ?: return false
+        return m == Ocbm.PM_WIRED_CP || m == Ocbm.PM_WIRELESS_CP
+    }
+
+    /**
+     * The display mode the window and the current manager were BUILT with. Differs from
+     * [displayMode] only while a mid-session choice is waiting for the session to end.
+     */
+    private var appliedDisplayMode: DisplayMode = DisplayMode.DEFAULT
+
+    /**
+     * Applies a deferred display mode once the box reports no phone session — `CT_PROJ_MODE`
+     * leaving wired/wireless CarPlay, or the session-clear on teardown. Registered on every
+     * manager the activity builds; `reinitialize` releases that manager, listener included.
+     *
+     * NOT while a clean-slate reset is in flight: that reset's own teardown posts the same
+     * `PM_NONE`, and rebuilding the manager under a reset that holds the lifecycle mutex would
+     * release it mid-sequence. The reset brings the phone back with the old geometry; the pending
+     * mode then applies at the end of THAT session.
+     */
+    private val displayModeApplier =
+        CarlinkManager.BoxStatusListener {
+            val m = carlinkManager ?: return@BoxStatusListener
+            if (displayMode == appliedDisplayMode || phoneSessionActive()) return@BoxStatusListener
+            if (m.resetInFlight) {
+                logInfo("[DISPLAY] deferred mode ${displayMode.name} not applied — clean-slate reset in flight", tag = "MAIN")
+                return@BoxStatusListener
+            }
+            logInfo("[DISPLAY] phone session ended — applying the deferred display mode ${displayMode.name}", tag = "MAIN")
+            reinitialize()
+        }
 
     /**
      * Map the new config's `audioTransferMode` onto the app-scope [MediaSessionManager]
@@ -481,8 +541,9 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Rebuild the CarlinkManager in place (used by Reset Connection, a display-mode change and a
-     * configuration change that moved the content area). Tears down the current adapter session,
+     * Rebuild the CarlinkManager in place (a display-mode change and a configuration change that
+     * moved the content area; NOT the user's Reset Connection / Reset Device, which are the
+     * manager's own clean-slate reset). Tears down the current adapter session,
      * re-asserts the display mode, and reconstructs the manager against fresh WindowMetrics once
      * the system-UI transition settles. End state equals kill+relaunch: new SurfaceView, fresh HWC
      * plane, renegotiated Open().
@@ -505,6 +566,7 @@ class MainActivity : ComponentActivity() {
         }
 
         // 2. Re-assert the display mode (a mode change lands here with the new mode already set).
+        appliedDisplayMode = displayMode
         applyDisplayMode()
 
         // 3. Rebuild after the system-bar/WindowMetrics transition settles (200ms).
@@ -585,13 +647,13 @@ class MainActivity : ComponentActivity() {
         lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
         window.attributes = lp
         WindowCompat.setDecorFitsSystemWindows(window, false)
-        val hidden = displayMode.hiddenBarTypes
-        val shown = displayMode.visibleBarTypes
+        val hidden = appliedDisplayMode.hiddenBarTypes
+        val shown = appliedDisplayMode.visibleBarTypes
         if (shown != 0) windowInsetsController.show(shown)
         if (hidden != 0) windowInsetsController.hide(hidden)
         windowInsetsController.systemBarsBehavior =
             WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        logInfo("[DISPLAY] Applied display mode ${displayMode.name}", tag = "MAIN")
+        logInfo("[DISPLAY] Applied display mode ${appliedDisplayMode.name}", tag = "MAIN")
     }
 
     /**
@@ -625,22 +687,55 @@ class MainActivity : ComponentActivity() {
 }
 
 /**
- * Root composable: the single [MainScreen]. When projecting it's the CarPlay video surface;
- * otherwise it shows the in-screen dashboard (adapter status / controls / known devices). The
- * cp-stripped build collapsed the old Settings overlay into that dashboard — there is no
- * overlay/stack anymore.
+ * Root composable. [MainScreen] stays composed the whole time (its SurfaceView / HWC plane must
+ * survive), and [SettingsScreen] slides in ON TOP of it — opened from the loading overlay's
+ * Settings button or, mid-session, from CarPlay's OEM "Exit" icon (`requestUI`). Back closes the
+ * overlay; closing over a live session also asks the manager to recover the video (a keyframe,
+ * then a decoder rebuild only if frames still do not flow).
  */
 @Composable
 fun CarlinkApp(
     carlinkManager: CarlinkManager,
-    onResetConnection: () -> Unit = {},
     displayMode: DisplayMode = DisplayMode.DEFAULT,
-    onDisplayModeSelected: (DisplayMode) -> Unit = {},
+    onDisplayModeSelected: (DisplayMode) -> DisplayModeOutcome = { DisplayModeOutcome.APPLIED },
 ) {
-    MainScreen(
-        carlinkManager = carlinkManager,
-        onResetConnection = onResetConnection,
-        displayMode = displayMode,
-        onDisplayModeSelected = onDisplayModeSelected,
-    )
+    var showSettings by remember(carlinkManager) { mutableStateOf(false) }
+    var connectionState by remember(carlinkManager) { mutableStateOf(CarlinkManager.State.DISCONNECTED) }
+
+    val closeSettings = {
+        logInfo(
+            "[UI_NAV] Closing SettingsScreen overlay (state=${carlinkManager.state}, frames=${carlinkManager.videoFramesRendered()})",
+            tag = "UI",
+        )
+        showSettings = false
+        // Same return path as carlink_native (flush + one keyframe request); see recoverVideoFromOverlay.
+        carlinkManager.recoverVideoFromOverlay()
+    }
+    BackHandler(enabled = showSettings) { closeSettings() }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        MainScreen(
+            carlinkManager = carlinkManager,
+            onNavigateToSettings = {
+                logInfo(
+                    "[UI_NAV] Opening SettingsScreen overlay (state=${carlinkManager.state}, frames=${carlinkManager.videoFramesRendered()})",
+                    tag = "UI",
+                )
+                showSettings = true
+            },
+            onStateChanged = { connectionState = it },
+        )
+        AnimatedVisibility(
+            visible = showSettings,
+            enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
+            exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
+        ) {
+            SettingsScreen(
+                carlinkManager = carlinkManager,
+                connectionState = connectionState,
+                displayMode = displayMode,
+                actions = SettingsActions(onNavigateBack = closeSettings, onDisplayModeSelected = onDisplayModeSelected),
+            )
+        }
+    }
 }

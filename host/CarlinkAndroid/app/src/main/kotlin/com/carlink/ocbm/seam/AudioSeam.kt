@@ -6,15 +6,13 @@ import com.carlink.telephony.MsbcTelephonyDecoder
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * `CH_MEDIA_AUDIO` + `CH_ALT_AUDIO` → the proven `AacPlayer` and `VoiceRouter`.
+ * `CH_MEDIA_AUDIO` + `CH_ALT_AUDIO` → `MediaAudioPlayer` and `VoiceRouter`.
  *
- * Like [VideoSeam] this is a transcoder from the forward-encrypted v2 seam into the legacy framing the
- * existing players already speak, so neither player changes:
- *
- *  - **media** → ADTS-framed AAC, the byte stream `AacPlayer.consume` walks;
- *  - **voice** → `[u32 BE rate][u16 BE ch][u8 atype][u8 codec][u32 BE len][AU]`, the 12-byte
- *    [VoiceTag] `VoiceRouter.consume` reads — the box's legacy 11-byte tag (`forward.rs:101-109`)
- *    plus the codec, so the router can branch on it instead of assuming AAC-ELD.
+ * Like [VideoSeam] this is a transcoder from the forward-encrypted v2 seam into the framing the
+ * players speak. Both lanes get the same 12-byte [VoiceTag] per access unit —
+ * `[u32 BE rate][u16 BE ch][u8 atype][u8 codec][u32 BE len][AU]`, the box's legacy 11-byte tag
+ * (`forward.rs:101-109`) plus the codec — so each player dispatches on the codec THE BOX NEGOTIATED
+ * instead of assuming one: PCM on wired CarPlay, AAC-LC media / AAC-ELD voice on wireless.
  *
  * `VoiceRouter` even diagnoses the mismatch this class exists to remove — it rejects an implausible
  * rate with *"the seam is probably speaking the forward-encrypted v2 framing"*. It now never sees it.
@@ -55,8 +53,9 @@ import java.util.concurrent.atomic.AtomicLong
  * rather than trusting message boundaries — and handed on as 16 kHz S16LE PCM. If the format is
  * mSBC and decode yields nothing, nothing is written: the bitstream is never rendered as PCM.
  *
- * PCM in the voice tag is therefore ALWAYS little-endian. The AirPlay PCM downlink (wired CarPlay,
- * `SEAM_PKT`, codec 0) is big-endian on the wire and is byte-swapped here before tagging.
+ * PCM in the tag is therefore ALWAYS little-endian, on both lanes. The AirPlay PCM downlink (wired
+ * CarPlay, `SEAM_PKT`, codec 0 — media AND voice) is big-endian on the wire and is byte-swapped here
+ * before tagging.
  */
 class AudioSeam(
     private val mediaPipe: SeamPipe,
@@ -78,22 +77,6 @@ class AudioSeam(
 
         /** Log the mSBC lane's health every this many decoded frames (~7.5 s). */
         private const val MSBC_STATS_EVERY = 1000
-        private val SF_INDEX =
-            intArrayOf(
-                96000,
-                88200,
-                64000,
-                48000,
-                44100,
-                32000,
-                24000,
-                22050,
-                16000,
-                12000,
-                11025,
-                8000,
-                7350,
-            )
     }
 
     class Format(
@@ -481,6 +464,11 @@ class AudioSeam(
         }
     }
 
+    /**
+     * Media → the same 12-byte [VoiceTag] framing the voice lane uses, so `MediaAudioPlayer` dispatches
+     * on the tag's codec: wired CarPlay's PCM (big-endian on the wire, byte-swapped here to S16LE) and
+     * wireless CarPlay's AAC-LC (raw AU; the player configures MediaCodec from the tag's rate/channels).
+     */
     private fun routeMedia(
         scid: Long,
         f: Format,
@@ -493,20 +481,24 @@ class AudioSeam(
                     "SEAM_PKT_PLAIN on a MEDIA stream scid=$scid (${codecName(f.codec)} ${f.rate}Hz " +
                         "${f.channels}ch atype=${f.atype}) — the box only emits PLAIN for HFP telephony; dropping",
                 )
-            f.codec == SeamCrypto.CODEC_AAC_LC -> mediaPipe.write(adts(au.copy(), f.rate, f.channels))
-            else -> {
-                val why =
-                    if (f.codec == SeamCrypto.CODEC_PCM) {
-                        "This is the wired-CarPlay PCM media downlink, which this client cannot play yet."
-                    } else {
-                        "Wireless CarPlay negotiates AAC-LC, so the pushed audio config selected something else."
-                    }
+            f.codec == SeamCrypto.CODEC_AAC_LC ->
+                mediaPipe.write(VoiceTag.wrap(au.buf, au.off, au.len, VoiceTag.Fmt(f.rate, f.channels, f.atype, SeamCrypto.CODEC_AAC_LC)))
+            f.codec == SeamCrypto.CODEC_PCM -> {
+                if (f.bits != 16) {
+                    warnOnce("media-pcm-bits-$scid", "PCM media stream scid=$scid is ${f.bits}-bit; only S16 is supported — dropping")
+                    return
+                }
+                val pcm = au.copy()
+                swap16(pcm)
+                mediaPipe.write(VoiceTag.wrap(pcm, VoiceTag.Fmt(f.rate, f.channels, f.atype, SeamCrypto.CODEC_PCM)))
+            }
+            else ->
                 warnOnce(
                     "media-${f.codec}",
                     "media stream scid=$scid is ${codecName(f.codec)} ${f.rate}Hz ${f.channels}ch " +
-                        "${f.bits}-bit; AacPlayer consumes ADTS AAC-LC only — dropping. $why",
+                        "${f.bits}-bit; the media player decodes PCM and AAC-LC — dropping. " +
+                        "Wireless CarPlay negotiates AAC-LC and wired negotiates PCM, so the pushed audio config selected something else.",
                 )
-            }
         }
     }
 
@@ -611,32 +603,5 @@ class AudioSeam(
         msg: String,
     ) {
         if (warned.add(key)) log.w(msg)
-    }
-
-    /**
-     * Prepend a 7-byte ADTS header (no CRC) to a raw AAC-LC access unit.
-     *
-     * `AacPlayer` parses ADTS to find frame boundaries and then strips the header again before feeding
-     * MediaCodec, because it configures the codec from csd-0. Wrapping here rather than reworking the
-     * player keeps that proven, on-hardware path byte-identical.
-     */
-    private fun adts(
-        au: ByteArray,
-        rate: Int,
-        channels: Int,
-    ): ByteArray {
-        val fi = SF_INDEX.indexOf(rate).let { if (it < 0) 3 else it } // default 48 kHz
-        val ch = channels.coerceIn(1, 7)
-        val total = au.size + 7
-        val out = ByteArray(total)
-        out[0] = 0xFF.toByte()
-        out[1] = 0xF1.toByte() // MPEG-4, layer 0, no CRC
-        out[2] = (((1 and 0x03) shl 6) or ((fi and 0x0F) shl 2) or ((ch shr 2) and 0x01)).toByte()
-        out[3] = (((ch and 0x03) shl 6) or ((total shr 11) and 0x03)).toByte()
-        out[4] = ((total shr 3) and 0xFF).toByte()
-        out[5] = (((total and 0x07) shl 5) or 0x1F).toByte()
-        out[6] = 0xFC.toByte()
-        System.arraycopy(au, 0, out, 7, au.size)
-        return out
     }
 }

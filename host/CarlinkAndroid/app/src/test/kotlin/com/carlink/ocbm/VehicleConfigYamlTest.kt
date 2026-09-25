@@ -191,6 +191,22 @@ metadata:
     }
 
     @Test
+    fun `enablesHEVC follows the decoder probe so a codec the head unit cannot decode is never offered`() {
+        // Default (probe found an HEVC decoder): the document offers HEVC.
+        assertTrue(VehicleConfigYaml.render(VehicleConfigSpec()).contains("  enablesHEVC: true\n"))
+        // No HEVC decoder at the negotiated geometry: the ONLY change is that one line — the box then
+        // omits hevcInfo and iOS encodes H.264, which VideoRenderer decodes.
+        val doc = VehicleConfigYaml.render(VehicleConfigSpec(enablesHevc = false))
+        assertTrue(doc.contains("  enablesHEVC: false\n"))
+        assertFalse(doc.contains("enablesHEVC: true"))
+        assertEquals(1, doc.lines().count { it.contains("enablesHEVC") })
+        assertEquals(
+            VehicleConfigYaml.render(VehicleConfigSpec()).replace("enablesHEVC: true", "enablesHEVC: false"),
+            doc,
+        )
+    }
+
+    @Test
     fun `the refuted metadata tiers cannot be selected by accident`() {
         var threw = false
         try {

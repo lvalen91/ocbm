@@ -1641,6 +1641,51 @@ mod tests {
         }
     }
 
+    /// The Android client's cutout push (chevy12: 2914x1134, framework safe insets top 167 / right
+    /// 285, even-aligned to 2628x966@0,168): the pushed `drawUIOutsideSafeArea` must reach the main
+    /// display's `safeArea` dict verbatim, both ways. With it false iOS paints the inset band black;
+    /// with it true the wallpaper fills it (hardware 2026-09-09). No safe area at all keeps the
+    /// full-bleed shape (`safeArea` == the panel, flag false).
+    #[test]
+    fn pushed_draw_ui_outside_safe_area_reaches_the_main_safe_area_both_ways() {
+        let yaml = |draw: &str| {
+            format!(
+                "displayPanelsConfig:\n  mainDisplayPanel:\n    pixelDimensions: {{ width: 2914, height: 1134 }}\n\
+                 videoStreamsConfig:\n  mainVideoStream:\n    pixelDimensions: {{ width: 2914, height: 1134 }}\n\
+                 \x20   viewAreas:\n    - viewArea: {{ originX: 0, originY: 0, width: 2914, height: 1134 }}\n\
+                 \x20     safeArea: {{ originX: 0, originY: 168, width: 2628, height: 966 }}\n\
+                 \x20     drawUIOutsideSafeArea: {draw}\n"
+            )
+        };
+        for (draw, want) in [("true", true), ("false", false)] {
+            let vc = crate::vehicle_config::VehicleConfig::from_yaml(yaml(draw).as_bytes()).expect("parse");
+            assert!(vc.view_areas_enabled(), "a real inset arms viewAreas without the toggle");
+            let cfg = vc.apply(DeviceConfig::default());
+            assert_eq!(cfg.main_safe_area, Some((0, 168, 2628, 966)));
+            assert_eq!(cfg.main_draw_outside_safe, want, "draw={draw}");
+            let disp = main_display(&build_info(&cfg));
+            let areas = disp["viewAreas"].as_array().unwrap();
+            assert_eq!(areas.len(), 1);
+            let safe = areas[0].as_dictionary().unwrap()["safeArea"].as_dictionary().unwrap();
+            assert_eq!(safe["originXPixels"].as_signed_integer(), Some(0));
+            assert_eq!(safe["originYPixels"].as_signed_integer(), Some(168));
+            assert_eq!(safe["widthPixels"].as_signed_integer(), Some(2628));
+            assert_eq!(safe["heightPixels"].as_signed_integer(), Some(966));
+            assert_eq!(safe["drawUIOutsideSafeArea"].as_boolean(), Some(want), "draw={draw}");
+        }
+        // No safe area in the push: full-bleed, flag false — today's behaviour, byte-identical.
+        let none = "displayPanelsConfig:\n  mainDisplayPanel:\n    pixelDimensions: { width: 2914, height: 1134 }\n";
+        let vc = crate::vehicle_config::VehicleConfig::from_yaml(none.as_bytes()).expect("parse");
+        assert!(!vc.view_areas_enabled());
+        let cfg = vc.apply(DeviceConfig::default());
+        assert_eq!(cfg.main_safe_area, None);
+        let disp = main_display(&build_info(&cfg));
+        let safe = disp["viewAreas"].as_array().unwrap()[0].as_dictionary().unwrap()["safeArea"].as_dictionary().unwrap();
+        assert_eq!(safe["originYPixels"].as_signed_integer(), Some(0));
+        assert_eq!(safe["heightPixels"].as_signed_integer(), Some(1134));
+        assert_eq!(safe["drawUIOutsideSafeArea"].as_boolean(), Some(false));
+    }
+
     fn main_display(info: &[u8]) -> Dictionary {
         let d: Value = plist::from_bytes(info).unwrap();
         d.as_dictionary().unwrap()["displays"].as_array().unwrap()[0]

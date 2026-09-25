@@ -430,6 +430,18 @@ explicitly requests `CONSOLE`. New modes are pure additions — no rewrite.
 | `0x0FFF` | DISCARD | box parses + drops silently (uplink benchmark sink) | all |
 | `0xF000–0xFFFF` | reserved: **experimental / vendor** | — | — |
 
+### Proposed MGMT verbs — NOT assigned (2026-09-25)
+
+Two verbs the Android host's Settings controls are waiting on. **No id is assigned and none may be
+put on the wire until the box implements them**; the app hooks are capability-gated
+(`OcbmClient.supportsPhoneDisconnect`, false on every box today). Problem, evidence and acceptance
+tests: [../ops/04_OPEN_ITEMS.md](../ops/04_OPEN_ITEMS.md), "Host-app controls waiting on box verbs".
+
+| Proposed | Direction | Payload | Semantics |
+|---|---|---|---|
+| `MGMT_DISCONNECT_PHONE` | host→box | *(none)* | Transport-aware. Wired: end the CarPlay session and soft-detach / re-attach the phone-facing USB gadget so iOS sees an unplug. Wireless: drop that phone's BT ACL + Wi-Fi session WITHOUT restarting the stack (not `wireless_down`). Both: a reconnect hold-off window, then `MGMT_ACK` 0/1. Advertised by a new `CAP_*` bit in `HELLO_ACK` so a host can enable its button. |
+| `MGMT_CONNECT_DEVICE` | host→box | `[ascii MAC "AA:BB:.."]` | Relay to btd's control port `{"cmd":"connect","address":…}` (`crates/vendor/wireless/src/control.rs`, already implemented there, next to the `pair_answer` verb `CT_PAIR_CONFIRM` relays); `MGMT_ACK` 1 when the MAC is not bonded. |
+
 ### Media transport — committed model (encrypted forward + session-key handoff) — VALIDATED
 
 In the committed architecture the box does the AirPlay **pairing** and derives the ChaCha20 keys, then

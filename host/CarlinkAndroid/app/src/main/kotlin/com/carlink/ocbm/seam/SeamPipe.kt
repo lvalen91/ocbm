@@ -9,8 +9,8 @@ import java.util.concurrent.atomic.AtomicLong
 /**
  * A bounded, blocking byte pipe that presents itself as an [InputStream].
  *
- * This is the join between the OCBM seam layer and the three proven renderers (`HevcRenderer`,
- * `VoiceRouter`, `AacPlayer`). Those all have the same shape — `consume(ins: InputStream)`, blocking,
+ * This is the join between the OCBM seam layer and the three proven renderers (`VideoRenderer`,
+ * `VoiceRouter`, `MediaAudioPlayer`). Those all have the same shape — `consume(ins: InputStream)`, blocking,
  * owning their codec for the life of the call on their own thread — because they were written against
  * the box's *legacy on-box-decrypt* TCP seams. Handing them one of these instead of a socket means the
  * decrypt path can feed them **without touching a line of renderer code**: they cannot tell the

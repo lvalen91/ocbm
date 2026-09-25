@@ -366,4 +366,61 @@ class OcbmClientTest {
         assertFalse(c.isRunning)
         assertFalse(c.subscribe("x".toByteArray()))
     }
+
+    // ---- Settings -> OCBM action mappings (2026-09-25) ------------------------------------------
+
+    /** `[CT_PAIR_CONFIRM][1]` on CH_CTRL for Pair, `[CT_PAIR_CONFIRM][0]` for Cancel — the box reads any non-zero byte as yes. */
+    @Test
+    fun `pair confirm is CT_PAIR_CONFIRM with a one-byte accept flag`() {
+        val t = FakeTransport()
+        val c = subscribedClient(t)
+        drainWritten(t)
+
+        assertTrue(c.sendPairConfirm(accept = true))
+        assertArrayEquals(byteArrayOf(Ocbm.CT_PAIR_CONFIRM, 1), t.awaitFrameOn(Ocbm.CH_CTRL))
+
+        assertTrue(c.sendPairConfirm(accept = false))
+        assertArrayEquals(byteArrayOf(Ocbm.CT_PAIR_CONFIRM, 0), t.awaitFrameOn(Ocbm.CH_CTRL))
+    }
+
+    /**
+     * Disconnect Phone is gated on a capability the box does not advertise: even with EVERY caps bit
+     * set in HELLO_ACK the gate stays closed and NOTHING goes on the wire — in particular no
+     * MGMT_RESTART_WIRELESS, which is what the old button sent in disguise.
+     */
+    @Test
+    fun `disconnectPhone sends nothing while the box advertises no phone-disconnect capability`() {
+        val t = FakeTransport()
+        val c = newClient(t)
+        t.deliver(Ocbm.CH_CTRL, helloAck(caps = -1))
+        assertTrue(c.helloAcked)
+        assertTrue(c.subscribe("name: test\n".toByteArray()))
+        drainWritten(t)
+
+        assertFalse(c.supportsPhoneDisconnect)
+        assertFalse(c.disconnectPhone())
+        assertNull("no frame of any kind may follow a refused disconnect", t.takeWritten(300))
+    }
+
+    /** The error path skips CT_STOP (dead pipe); the clean path still sends it. */
+    @Test
+    fun `stop sends CT_STOP only when asked to`() {
+        val t1 = FakeTransport()
+        val c1 = subscribedClient(t1)
+        drainWritten(t1)
+        c1.stop(sendStop = false)
+        assertNull("dead-pipe stop must not write CT_STOP", t1.awaitFrameOn(Ocbm.CH_CTRL, ms = 300))
+        assertFalse(c1.subscribed)
+
+        val t2 = FakeTransport()
+        val c2 = subscribedClient(t2)
+        drainWritten(t2)
+        c2.stop()
+        assertArrayEquals(byteArrayOf(Ocbm.CT_STOP), t2.awaitFrameOn(Ocbm.CH_CTRL))
+        client = null
+    }
+
+    private fun drainWritten(t: FakeTransport) {
+        while (t.takeWritten(50) != null) Unit
+    }
 }

@@ -2,8 +2,6 @@ package com.carlink.ui.settings
 
 import android.view.HapticFeedbackConstants
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -21,6 +19,8 @@ import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -36,7 +36,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.painterResource
@@ -49,30 +48,30 @@ import com.carlink.R
 import com.carlink.protocol.PhoneType
 import com.carlink.ui.adaptive.AdaptiveGrid
 import com.carlink.ui.theme.AutomotiveDimens
-import com.carlink.ui.theme.GlassShapes
-import com.carlink.ui.theme.frostedGlass
 import kotlinx.coroutines.delay
 
 /**
  * Device-card width envelope for the adaptive grid. The grid puts as many cards per row as fit
  * at [CARD_MIN_WIDTH] and stretches them up to [CARD_MAX_WIDTH]; the count follows the width of
- * whatever panel this runs on rather than assuming a number. The minimum is what the widest
- * fixed content (the Remove button, a "Last seen" line) needs on one line at default font scale.
+ * whatever panel this runs on rather than assuming a number. The maximum is the fixed 360 dp card
+ * of the carlink_native Phones tab; the minimum is what the widest fixed content (the Remove
+ * button, a "Last seen" line) needs on one line at default font scale.
  */
-private val CARD_MIN_WIDTH = 200.dp
-private val CARD_MAX_WIDTH = 280.dp
-private val CARD_GAP = 16.dp
-
-/** Safety-net timeout for the connect/disconnect guard if the adapter never reaches a terminal state. */
-private const val PROCESSING_TIMEOUT_MS = 10_000L
+private val CARD_MIN_WIDTH = 240.dp
+private val CARD_MAX_WIDTH = 360.dp
+private val CARD_GAP = 24.dp
 
 /**
- * Phones tab — the adapter's paired device list as an adaptive grid of cards ([AdaptiveGrid]:
+ * Phones tab — the adapter's known device list as an adaptive grid of cards ([AdaptiveGrid]:
  * column count follows the available width, every card the same size, rows centred). It wraps
- * its content; the dashboard around it scrolls.
+ * its content; the pane around it scrolls.
  *
  * - USB device card (first): active when a USB phone is connected, greyed out otherwise.
- * - Wireless device cards: queried from adapter's DevList with Connect/Disconnect/Remove actions.
+ * - Wireless device cards: the box's bonded MACs merged with the app's own history
+ *   ([com.carlink.device.KnownDeviceStore]). INFORMATION-ONLY plus Remove: there is no
+ *   targeted-connect verb and no phone-disconnect verb in OCBM, and a tap used to send
+ *   `MGMT_RESTART_WIRELESS` in their place (wrong with two bonded phones, a radio bounce for a
+ *   wired one). Both verbs are box-side TODOs — docs/ops/04_OPEN_ITEMS.md.
  */
 @Composable
 fun PhonesTabContent(
@@ -103,10 +102,8 @@ fun PhonesTabContent(
     // Poll connection state periodically while tab is visible.
     // Rationale: CarlinkManager.callback is single-slot and already consumed by MainScreen,
     // and DeviceListener only fires on DevList changes — neither surfaces state/phoneType/
-    // wifi/btMac transitions to secondary observers. 1 Hz polling is a pragmatic workaround.
-    // TODO: multi-observer ConnectionStateListener / StateFlow on CarlinkManager (would also
-    // replace the SettingsScreen.kt:356 stale-remember pattern — same root cause). 1 Hz poll
-    // is pragmatic for now; no contention observed in 2026-04-20 POTATO captures.
+    // wifi/btMac transitions to secondary observers. 1 Hz polling is a pragmatic workaround
+    // until CarlinkManager grows a multi-observer connection-state listener.
     LaunchedEffect(carlinkManager) {
         while (true) {
             managerState = carlinkManager.state
@@ -114,18 +111,6 @@ fun PhonesTabContent(
             activeWifi = carlinkManager.currentWifi ?: -1
             phoneType = carlinkManager.currentPhoneType
             delay(1000)
-        }
-    }
-
-    // Guard against rapid button taps launching conflicting operations. The state-driven reset
-    // below clears this on a normal connect/disconnect; this timeout is the safety net for when
-    // the adapter swallows the command or stalls in CONNECTING — without it the cards would stay
-    // disabled indefinitely (UI deadlock recoverable only by leaving the tab).
-    var isProcessing by remember { mutableStateOf(false) }
-    LaunchedEffect(isProcessing) {
-        if (isProcessing) {
-            delay(PROCESSING_TIMEOUT_MS)
-            isProcessing = false
         }
     }
 
@@ -168,46 +153,20 @@ fun PhonesTabContent(
                     WirelessDeviceCard(
                         device = device,
                         isConnected = isDeviceActive,
-                        onTap = {
-                            view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                            isProcessing = true
-                            if (isDeviceActive) {
-                                carlinkManager.disconnectPhone()
-                            } else {
-                                carlinkManager.connectToDevice(device.btMac)
-                            }
-                        },
                         onRemove = {
                             deviceToRemove = device
                         },
-                        enabled = !isProcessing,
                     )
                 }
             }
         }
     }
 
-    // Reset processing guard when state changes (connection completed or failed). DEVICE_CONNECTED
-    // is a terminal outcome for the tap too: a phone can connect and plateau there without ever
-    // advancing to STREAMING (e.g. CarPlay handshake stalls), so the guard must clear or the card
-    // stays disabled despite a completed connect.
-    LaunchedEffect(managerState) {
-        if (managerState == CarlinkManager.State.STREAMING ||
-            managerState == CarlinkManager.State.DEVICE_CONNECTED ||
-            managerState == CarlinkManager.State.DISCONNECTED
-        ) {
-            isProcessing = false
-        }
-    }
-
     // Hoisted remove confirmation dialog.
-    // NOTE: forgetDevice is invoked on the main thread here. CarlinkManager optimistically
-    // mutates _pairedDevices on main while IO-dispatched callbacks may also fire — assumed safe
-    // pending audit; 2026-04-20 POTATO logs show no ConcurrentModification/IndexOutOfBounds
-    // across 3 sessions. Still warrants an explicit main-thread-only contract on _pairedDevices.
     deviceToRemove?.let { device ->
         RemoveDeviceDialog(
             deviceName = device.name,
+            bonded = device.bonded,
             onConfirm = {
                 view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                 carlinkManager.forgetDevice(device.btMac)
@@ -227,7 +186,7 @@ private val AndroidAutoActiveColor = Color(0xFF1A2A3D) // Dark blue tint
 /**
  * Card representing the wired USB slot.
  *
- * Always rendered as the leftmost card; shows a branded CarPlay / Android Auto icon when a
+ * Always rendered as the first card; shows a branded CarPlay / Android Auto icon when a
  * USB phone is connected, greyed-out UsbOff icon otherwise. Non-interactive — the adapter
  * owns USB session lifecycle.
  */
@@ -240,11 +199,18 @@ private fun UsbDeviceCard(
     val colorScheme = MaterialTheme.colorScheme
     val alpha = if (isConnected) 1f else 0.38f
 
-    val tint = if (isConnected && phoneType != null) activeCardColor(phoneType).copy(alpha = 0.5f) else null
+    val containerColor =
+        if (isConnected && phoneType != null) {
+            activeCardColor(phoneType)
+        } else {
+            colorScheme.surfaceContainerLow
+        }
     val textColor = if (isConnected) Color.White else colorScheme.onSurface.copy(alpha = alpha)
 
-    Box(
-        modifier = modifier.frostedGlass(GlassShapes.Inner, tint = tint),
+    Card(
+        modifier = modifier,
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+        colors = CardDefaults.cardColors(containerColor = containerColor),
     ) {
         Column(
             modifier = Modifier.padding(24.dp).fillMaxWidth().fillMaxHeight(),
@@ -256,40 +222,23 @@ private fun UsbDeviceCard(
                 tint = textColor,
                 modifier = Modifier.size(32.dp),
             )
-
             Spacer(modifier = Modifier.height(12.dp))
-
             Text(
                 text = "USB",
-                style =
-                    MaterialTheme.typography.headlineSmall.copy(
-                        fontWeight = FontWeight.SemiBold,
-                    ),
+                style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.SemiBold),
                 color = textColor,
             )
-
             Spacer(modifier = Modifier.height(12.dp))
-
             if (isConnected && phoneType != null) {
                 Text(
                     text = "Connected",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = Color.White,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color.White.copy(alpha = 0.85f),
                 )
-
                 // Push icon to bottom
                 Spacer(modifier = Modifier.weight(1f))
-
-                // Show CarPlay or Android Auto branded icon
                 Image(
-                    painter =
-                        painterResource(
-                            id =
-                                when (phoneType) {
-                                    PhoneType.CARPLAY, PhoneType.CARPLAY_WIRELESS -> R.drawable.ic_carplay
-                                    else -> R.drawable.ic_android_auto
-                                },
-                        ),
+                    painter = painterResource(id = phoneTypeIcon(phoneType)),
                     contentDescription = phoneType.name,
                     modifier = Modifier.size(48.dp),
                 )
@@ -297,7 +246,7 @@ private fun UsbDeviceCard(
                 Text(
                     text = "No device",
                     style = MaterialTheme.typography.bodyLarge,
-                    color = colorScheme.onSurface.copy(alpha = 0.6f),
+                    color = colorScheme.onSurface.copy(alpha = 0.38f),
                 )
             }
         }
@@ -307,67 +256,34 @@ private fun UsbDeviceCard(
 // ==================== Wireless Device Card ====================
 
 /**
- * Card representing a single paired wireless device from the adapter's DevList.
- *
- * Tap toggles connect/disconnect (guarded by [enabled] / isProcessing); Remove confirms
- * forget. Active card tint is chosen by [device.type] string match.
- *
- * FRAGILITY: [CarlinkManager.DeviceInfo.type] is a raw String from
- * CarlinkManager.parseDevList. Any adapter spelling drift ("Carplay", "Android Auto",
- * "CarPlay-W") and alternative types like "HiCar" (listed as valid in the DeviceInfo
- * KDoc) silently fall through to the generic icon/surfaceContainerHighest tint.
- * Suggested fix: map to a DeviceType enum at parseDevList boundary and log unknown
- * values; keep the String on DeviceInfo for debugging.
+ * Card representing a single known wireless device. Information-only (no tap action — see the
+ * tab KDoc) plus Remove. A device the app remembers but the box no longer holds a link key for
+ * ([CarlinkManager.DeviceInfo.bonded] false) says so on its status line, and its Remove is a
+ * local history delete. Under OCBM `type` is always "CarPlay" (the box's link-key store carries
+ * no type), so the branded icon is effectively fixed; the string match is kept for the history
+ * records that may carry another value.
  */
 @Composable
 private fun WirelessDeviceCard(
     device: CarlinkManager.DeviceInfo,
     isConnected: Boolean,
-    onTap: () -> Unit,
     onRemove: () -> Unit,
     modifier: Modifier = Modifier,
-    enabled: Boolean = true,
 ) {
     val colorScheme = MaterialTheme.colorScheme
+    val containerColor = if (isConnected) activeCardColor(device.type) else colorScheme.surfaceContainer
 
-    // Active state shows as a translucent green/blue tint over the glass; unknown types and the
-    // inactive state fall through to neutral glass.
-    val tint =
-        if (isConnected) {
-            when (device.type) {
-                "CarPlay" -> CarPlayActiveColor.copy(alpha = 0.5f)
-                "AndroidAuto" -> AndroidAutoActiveColor.copy(alpha = 0.5f)
-                else -> null
-            }
-        } else {
-            null
-        }
-
-    // clickable(enabled=...) gates both the ripple and the action (fixes the prior Card(onClick)
-    // ripple-while-disabled inconsistency).
-    Box(
-        modifier =
-            modifier
-                .frostedGlass(GlassShapes.Inner, tint = tint)
-                .clip(GlassShapes.Inner)
-                .clickable(enabled = enabled, onClick = onTap),
+    Card(
+        modifier = modifier,
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+        colors = CardDefaults.cardColors(containerColor = containerColor),
     ) {
         Column(
             modifier = Modifier.padding(24.dp).fillMaxWidth().fillMaxHeight(),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            // Device type icon (CarPlay / Android Auto branded) — same String-match fragility
-            // as the container tint above; unknown types render the generic phone-projection icon.
             Image(
-                painter =
-                    painterResource(
-                        id =
-                            when (device.type) {
-                                "CarPlay" -> R.drawable.ic_carplay
-                                "AndroidAuto" -> R.drawable.ic_android_auto
-                                else -> R.drawable.ic_phone_projection
-                            },
-                    ),
+                painter = painterResource(id = deviceTypeIcon(device.type)),
                 contentDescription = device.type,
                 modifier = Modifier.size(48.dp),
             )
@@ -376,13 +292,9 @@ private fun WirelessDeviceCard(
 
             // Device name — white on active colored cards, theme-adaptive otherwise
             val cardTextColor = if (isConnected) Color.White else colorScheme.onSurface
-
             Text(
                 text = device.name,
-                style =
-                    MaterialTheme.typography.headlineSmall.copy(
-                        fontWeight = FontWeight.SemiBold,
-                    ),
+                style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.SemiBold),
                 color = cardTextColor,
                 textAlign = TextAlign.Center,
                 maxLines = 1,
@@ -391,16 +303,11 @@ private fun WirelessDeviceCard(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Status line — single field: "Connected" or "Last seen: ..."
+            // Status line — "Connected", "Not paired with adapter", "Last seen: ..." or "Disconnected"
             Text(
-                text =
-                    if (isConnected) {
-                        "Connected"
-                    } else {
-                        device.lastConnected?.let { "Last seen: $it" } ?: "Disconnected"
-                    },
-                style = MaterialTheme.typography.bodyLarge,
-                color = if (isConnected) Color.White else colorScheme.onSurface,
+                text = deviceStatusText(device, isConnected),
+                style = MaterialTheme.typography.bodySmall,
+                color = if (isConnected) Color.White.copy(alpha = 0.85f) else colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,
             )
 
@@ -412,7 +319,6 @@ private fun WirelessDeviceCard(
             // Remove button — matches "Disconnect Adapter" style (filled error)
             Button(
                 onClick = onRemove,
-                enabled = enabled,
                 modifier = Modifier.heightIn(min = AutomotiveDimens.ButtonMinHeight),
                 colors =
                     ButtonDefaults.buttonColors(
@@ -435,24 +341,51 @@ private fun WirelessDeviceCard(
     }
 }
 
+/** Active (connected) card tint for a known-device `type` string; unknown types fall back to neutral. */
+@Composable
+private fun activeCardColor(deviceType: String): Color =
+    when (deviceType) {
+        "CarPlay" -> CarPlayActiveColor
+        "AndroidAuto" -> AndroidAutoActiveColor
+        else -> MaterialTheme.colorScheme.surfaceContainerHighest
+    }
+
+/** Branded drawable for a known-device `type` string; unknown types render the generic projection icon. */
+private fun deviceTypeIcon(deviceType: String): Int =
+    when (deviceType) {
+        "CarPlay" -> R.drawable.ic_carplay
+        "AndroidAuto" -> R.drawable.ic_android_auto
+        else -> R.drawable.ic_phone_projection
+    }
+
+/** "Connected", "Not paired with adapter", "Last seen: ..." or "Disconnected". */
+private fun deviceStatusText(
+    device: CarlinkManager.DeviceInfo,
+    isConnected: Boolean,
+): String =
+    when {
+        isConnected -> "Connected"
+        !device.bonded -> "Not paired with adapter"
+        else -> device.lastConnected?.let { "Last seen: $it" } ?: "Disconnected"
+    }
+
 // ==================== Empty State ====================
 
 /**
- * Placeholder card shown when the adapter's DevList is empty (no paired wireless devices).
+ * Placeholder card shown when there are no known wireless devices.
  * Prompts the user to pair a phone with the adapter; no interactive actions.
  */
 @Composable
 private fun EmptyDeviceCard(modifier: Modifier = Modifier) {
     val colorScheme = MaterialTheme.colorScheme
 
-    Box(
-        modifier = modifier.frostedGlass(GlassShapes.Inner),
+    Card(
+        modifier = modifier,
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+        colors = CardDefaults.cardColors(containerColor = colorScheme.surfaceContainerLow),
     ) {
         Column(
-            modifier =
-                Modifier
-                    .padding(24.dp)
-                    .fillMaxWidth(),
+            modifier = Modifier.padding(24.dp).fillMaxWidth(),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Icon(
@@ -465,13 +398,13 @@ private fun EmptyDeviceCard(modifier: Modifier = Modifier) {
             Text(
                 text = "No paired wireless devices",
                 style = MaterialTheme.typography.titleMedium,
-                color = colorScheme.onSurface,
+                color = colorScheme.onSurface.copy(alpha = 0.6f),
             )
             Spacer(modifier = Modifier.height(4.dp))
             Text(
                 text = "Connect a phone to the adapter to get started",
                 style = MaterialTheme.typography.bodyMedium,
-                color = colorScheme.onSurface.copy(alpha = 0.8f),
+                color = colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
             )
         }
     }
@@ -486,17 +419,25 @@ private fun activeCardColor(phoneType: PhoneType): Color =
         else -> MaterialTheme.colorScheme.surfaceContainerHighest
     }
 
+/** Branded drawable for a connected USB phone. */
+private fun phoneTypeIcon(phoneType: PhoneType): Int =
+    when (phoneType) {
+        PhoneType.CARPLAY, PhoneType.CARPLAY_WIRELESS -> R.drawable.ic_carplay
+        else -> R.drawable.ic_android_auto
+    }
+
 // ==================== Dialogs ====================
 
 /**
- * Confirmation dialog for forgetting a paired wireless device.
- *
- * Dismissal paths (onDismissRequest + Cancel button) both route to [onDismiss], which the
- * caller wires to clear the hoisted `deviceToRemove` state — verified consistent.
+ * Confirmation dialog for forgetting a known wireless device. For a [bonded] record Remove clears
+ * the phone from the app's history AND the box (link key + AirPlay peer store), so the next
+ * connection from that phone is a fresh pairing. For an unbonded one the box holds nothing, so
+ * only the app's history entry goes — nothing is sent (`CarlinkManager.forgetDevice`).
  */
 @Composable
 private fun RemoveDeviceDialog(
     deviceName: String,
+    bonded: Boolean,
     onConfirm: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -506,8 +447,13 @@ private fun RemoveDeviceDialog(
         title = { Text("Remove Device") },
         text = {
             Text(
-                "Remove \"$deviceName\" from the adapter's paired device list? " +
-                    "The adapter will no longer auto-connect to this device.",
+                if (bonded) {
+                    "Remove \"$deviceName\" from the known device list? " +
+                        "The adapter will forget it and the phone will need to be paired again."
+                } else {
+                    "Remove \"$deviceName\" from this app's history? " +
+                        "The adapter is not paired with it, so nothing is sent to the adapter."
+                },
             )
         },
         confirmButton = {

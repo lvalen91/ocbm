@@ -20,6 +20,8 @@ media crossing the USB bulk pipe.
 > below, box-verified on the emulator and a live box, no phone), phone-call audio (WP2, JVM-tested only
 > — no phone call yet), and a resolution/orientation-agnostic UI redesign (device-measured on two AVDs
 > and a live box, including two real iPhone CarPlay sessions). Nothing is committed yet.
+> **2026-09-25:** that dashboard UI was replaced by a port of the `carlink_native` screens — see
+> "UI — carlink_native screens on the OCBM stack" below.
 > `crates/ocbm-proto` remains canonical; `OcbmProto.kt` remains an app-owned fork of it since
 > 2026-09-11 (`gm_ccpa` no longer symlinks it) — that relationship did not change today. `CMD_VIEW_AREA`
 > (0x11) was added to `OcbmProto.kt` today, closing one of `:app`'s two `proto_check.py` gaps (the
@@ -55,12 +57,161 @@ phone's pairing is intact).
 a complete, evidence-backed spec — read it before starting either. Phase 1 (persistent history) and
 the Remove semantics are landed and hardware-verified.
 
+## UI — carlink_native screens on the OCBM stack (2026-09-25, emulator-measured)
+
+The in-screen dashboard (frosted-glass cards, `FrostedGlass.kt`) is gone. The UI is now the
+`carlink_native` structure, restyled 1:1 from its screenshots, on top of the unchanged
+`CarlinkManager` / OCBM / USB / display-detection code:
+
+- **`ui/MainScreen.kt`** — the projection surface (laid out to `DisplayProfile.surfaceInsets` exactly
+  as before; `handleTouchEvent` byte-identical) and, while not STREAMING, the loading overlay: logo,
+  spinner, `[ status ]`, the CT_PROJ_MODE/CT_BOX_HEALTH line, and top-left **Settings** / **Reset
+  Device** (= `MainActivity.reinitialize()`, the full session rebuild).
+- **`ui/SettingsScreen.kt`** — slides in OVER `MainScreen` (`CarlinkApp` in `MainActivity.kt`, so the
+  SurfaceView survives). Navigation rail: back, **Phones** / **Control** tabs, close-app (confirm →
+  `stop()` + `finishAffinity`), version. Reached from the overlay's Settings button or, mid-session,
+  from the CarPlay OEM "Carlink" tile (`requestUI` → `onHostUIPressed`). Closing it calls
+  `recoverVideoFromOverlay()`.
+- **Phones** (`ui/settings/PhonesTab.kt`) — the known-device grid (`AdaptiveGrid`, column count follows
+  the pane width). A history record the box no longer holds a link key for (`DeviceInfo.bonded ==
+  false`) now reads "Not paired with adapter" and is not tappable — it used to render identically to
+  a bonded one.
+- **Control** (`ui/settings/ControlTab.kt`) — "Adapter" card: box status, Disconnect Phone
+  (`disconnectPhone()`), Reboot Adapter (confirm → `rebootAdapter()`), Disconnect Adapter (`stop()`).
+  "App Control" card: Display Mode (`DisplayModeDialog`, live bar preview, Apply → persisted +
+  session rebuild via `MainActivity.onDisplayModeSelected`), Reset Decoder (`resetVideoDecoder()`), Reset Connection
+  (`restart()` — the in-manager restart, distinct from Reset Device). Two-pane on an expanded
+  landscape window, stacked otherwise (`DashboardLayout.arrangement`). The in-app Siri button and
+  the assistant-picker button were removed on 2026-09-25 (owner request); `requestSiri()` and the
+  `voice/` services stay, reachable through the wheel key / assistant tiers below.
+- **Dropped, no OCBM backing:** the Adapter Configuration dialog (audio source, mic source, media
+  delay, video resolution, FPS, drive side, GPS forwarding, cluster navigation, WiFi band — all
+  riddleBox `BoxSettings`/`AdapterConfig` knobs; the OCBM path pushes `VehicleConfigYaml` from the
+  detected display and hardcodes the rest), Reset Cluster (no cluster in this build), and the Logs
+  tab (`Logger` has no file sink or level switch — `adb logcat` only).
+
+No protocol or state-machine change was needed; `MainScreen` gained one plain callback
+(`onStateChanged`) so the overlay can gate its buttons on the connection state without polling, and
+`CarlinkManager.videoFramesRendered()` (a read of the epoch's frame counter) so the loading overlay
+lifts on the FIRST RENDERED FRAME — carlink_native's STREAMING edge — instead of waiting for the
+first media metadata, which is where OCBM stamps STREAMING (`markStreamingIfFirstMedia`). Without
+it the "[ Phone connected ]" spinner sat over live video until something played.
+
+**OEM tile → Settings → back, end to end (2026-09-25, box-measured).** carlink_native's wiring is
+`CommandMessage(REQUEST_HOST_UI=3)` → `onHostUIPressed` → open Settings directly; on close
+`recoverVideoFromOverlay()` = codec flush + ONE keyframe request (`CommandMapping.FRAME`, 0x0C). No
+take-screen / changeModes command exists in the old protocol either. The OCBM port is the same
+shape: inbound `{type:"requestUI"}` rides `META_CMD` → `onCommandPlist` → `onHostUIPressed` →
+Settings; back → `recoverVideoFromOverlay()` = `INPUT_KEYFRAME` (+ the 750 ms watchdog that
+rebuilds the decoder only if the counter does not move). Measured: iOS does NOT stop the main video
+stream when the tile is pressed — the frame counter kept advancing under the overlay whenever the
+CarPlay screen had motion (947→977 over a 9 s overlay on the app grid; 220→220 only because the grid
+is static) and resumed at once after the keyframe (no watchdog rebuild in 6 loops). The accessory
+→ controller `requestUI` (`CMD_REQUEST_UI` 0x01, box-handled at `carplayd main.rs:1169`) and the
+`changeModes` Take that the box sends itself at RECORD (`events::send_take_screen`) are the only
+screen-focus verbs; neither is needed for this return path and neither is sent by the app. There is
+no Android Auto equivalent in this build (CarPlay-only; `PM_WIRED_AA` is a box mode, not an app
+path).
+
+**OEM-tile tap reliability.** When the app grid has been sitting on screen since the session
+(re)started, the FIRST TWO `adb shell input tap`s on the tile are silently ignored and the third
+produces the `requestUI` (META arrives 18-25 ms after that tap's DOWN); this held at 3 s and 12 s
+spacing, with a 120 ms press, on the ported build AND on the pre-port baseline (2/2), so it is not
+the port. Once CarPlay has navigated away and back to the grid (dashboard → grid) the first tap
+fires (4/4 in the final loops). Regular icons (Music, Podcasts, Now Playing) respond to
+the first tap, and the box relays every inbound `/command` unconditionally
+(`session.rs` `fn command` → `emit_command_plist`), so the drop is upstream of `META_CMD` — the
+iPhone or the box's `[command] ← iPhone` log would settle it (`/tmp/carplay_cmd_capture.bin` on the
+box records every inbound plist; pull it next time the box is in shell mode). Measured loops, all
+green: 6/6 tile → Settings → back on the ported build (frames counter and the Now Playing progress
+bar advance after every back; no watchdog rebuild), back with no session → main page. One wart seen
+there, pre-existing: after Disconnect Adapter the status line still reads the last text ("Phone
+connected") because `stop()` does not reset it.
+Measured on the `ultrawide` AVD with the live box and a wired iPhone: session → STREAMING, touch
+reaches iOS, Settings over the live video, Display Mode apply (2400x960 → 2400x788 rebuild),
+portrait via `wm size 800x1280` (800x1108 session, stacked Control tab). One pre-existing quirk
+stands out more now that the overlay is opaque: STREAMING is stamped by the first media metadata
+(`markStreamingIfFirstMedia`), so with the phone's player paused at connect the loading overlay
+stays over a decoding video until something plays — unchanged from the dashboard build.
+
+## Settings → OCBM action mappings (2026-09-25, chevy12 emulator + live wired CarPlay)
+
+Owner-confirmed intent: **Reset Connection and Reset Device are deliberate CLEAN-SLATE resets** (end
+the phone session, close the app↔box link, let the box run its own session-end lifecycle, wait,
+reclaim, start a NEW session); **Disconnect Phone must end the phone's session on wired AND
+wireless**. Every control now sends what its label says, or is disabled with the reason. Box-side
+TODOs are in [docs/ops/04_OPEN_ITEMS.md](../../docs/ops/04_OPEN_ITEMS.md) ("Host-app controls
+waiting on box verbs") and the proposed verbs in
+[docs/carplay/01_OCBM_PROTOCOL.md](../../docs/carplay/01_OCBM_PROTOCOL.md) ("Proposed MGMT verbs").
+
+| Control | What it sends now | Evidence |
+|---|---|---|
+| Reset Connection (Settings ▸ Control) and Reset Device (loading overlay) | ONE path, `CarlinkManager.cleanSlateReset()` → `CleanSlateReset`: confirm → CT_STOP → close OCBM → release the USB interface (IO thread) → wait **6 s** → reclaim → HELLO with a ROTATED instance nonce → SUBSCRIBE. Status line: "Resetting…" / "Waiting for adapter…" / "Reconnecting…". `restart()` and the `reinitialize()` route are gone for these buttons | timeline below; `CleanSlateResetTest` |
+| Disconnect Phone | **Nothing.** Disabled with "Requires adapter firmware support". Gate: `OcbmClient.supportsPhoneDisconnect` (false: OCBM has no verb and no capability bit). It used to send `MGMT_RESTART_WIRELESS` in disguise. Shown disabled rather than hidden so the driver sees WHY; enabling it later is the one-line cap check | screenshot `03_control_tab` |
+| Restart Wireless (new) | `MGMT_RESTART_WIRELESS`, confirmed; the text says a wired phone is not affected | live: ACK status=0, no SESSION_EVENT / PROJ_MODE / BOX_HEALTH change, wired CarPlay stayed up |
+| Reboot Adapter | `MGMT_REBOOT`, confirmed; dialog now says ~50 s and warns about the USB permission prompt after re-enumeration | dialog screenshot |
+| Disconnect Adapter | `CarlinkManager.disconnect()` = `stopImpl` under the lifecycle mutex on IO, now confirmed; the stop path resets the status line to "Disconnected" | dialog screenshot |
+| Close App | the same `disconnect()`; `finishAffinity()` runs after it returns, so onDestroy's synchronous `release()` never overlaps a teardown in flight | code |
+| Phones cards | information-only (no tap; there is no targeted-connect verb, and the tap used to bounce wireless). Remove: bonded → `MGMT_FORGET_DEVICE`; **unbonded → local history delete, nothing sent** (the box holds no bond and its FORGET handler restarts wireless unconditionally) | screenshot `02_remove_unbonded_dialog` |
+| Display Mode ▸ Apply & Restart | MacHost's rule (`OCBMClient.swift` `sessionConfigChanged`): a phone session owns the box (`CT_PROJ_MODE` wired/wireless CP) → persist, "Display mode saved — applies at the next connection" dialog, window re-asserted to the APPLIED mode (the dialog's live preview would otherwise leave bars under a session built without them); applied by a `BoxStatusListener` when the box reports no phone session — skipped while a clean-slate reset is in flight. No phone session → rebuild now, as before | live: log `phone session active (WIRED_CP) — mode saved`; no `[REINIT]`; screenshot `09_display_mode_deferred_notice` |
+| Back from Settings | keyframe + 750 ms watchdog gated on a live video epoch, not `state == STREAMING` (OCBM stamps STREAMING on first media metadata, so wired sessions sit in DEVICE_CONNECTED with video) | live: `Recovering video after overlay close (state=DEVICE_CONNECTED)` |
+| Wireless pairing code | Pair / Cancel dialog on the main screen → `CT_PAIR_CONFIRM` 1/0 (`OcbmClient.sendPairConfirm`); one answer per prompt, box cancels on its own after 55 s | `OcbmClientTest` pins the bytes; NOT hardware-exercised (no wireless pairing today) |
+
+Also in this pass: the stale `STOP_GRACE` comments went (CT_STOP is an immediate `go_idle` since
+2026-09-03); `handleErrorImpl` now really skips CT_STOP (`OcbmClient.stop(sendStop = false)`) — every
+path into it is a dead pipe; and the empty `CT_PAIRING_CODE` the box replays on every SUBSCRIBE no
+longer paints "Pairing..." over a wired session's CONNECTING overlay (it did, measured 03:47).
+
+### The wait is 6 s, derived, not guessed
+
+There is NO box-reported "teardown finished" the app can wait on: after CT_STOP ocbmd's `go_idle`
+clears `subscribed`, and every box→host mirror (`proj_mode_tick`, `phone_tick`, `bt_phase_tick`)
+returns early on `!subscribed`. So the wait is a timer, derived from the supervisor's own teardown
+(`tools/session_supervisor.sh`): 1 Hz presence poll (`:1461`) + its own 4 s "past teardown
+settle" deferral before wireless comes back up (`:1190`; the same one Restart-wireless rides, `:905`)
++ 1 s margin. The serialized wired teardown — `teardown` (`:479`) → `kill_session` (`:291`):
+SIGTERM carplayd, `sleep 1` (`:302`), SIGKILL (`:303`), `release_carplay_owner` (`:304`) — completes
+≤ 2 s after CT_STOP; the detached radio teardown (`:1092` `sleep 1`, `radio_hal.sh:470` ≤ 5 s
+hostapd wait) bounds the worst case at 7 s. ocbmd's `REARM_HOLD` (2 s, `main.rs:643`) guarantees
+the 1 Hz poll sees the GONE edge even for a fast SUBSCRIBE. Full derivation in `CleanSlateReset`'s KDoc.
+
+### Measured: one clean-slate reset (Reset Connection, wired iPhone, 2026-09-25 03:55:41)
+
+```
++0.000  Reset Connection confirmed              (03:55:41.746)
++0.163  >> CT_STOP                              (client closed; lanes drained)
++0.247  USB interface released; nonce 0x02493916 -> 0x9041b6e0; "Waiting for adapter…"
++6.248  "Reconnecting…"                         (6.0 s wait)
++6.260  claimed interface 0; >> CT_HELLO; << HELLO_ACK 1 ms later
++6.312  >> CT_SUBSCRIBE
++6.394  << HOST_PRESENT, PHONE_PRESENT, BT_PHASE IDLE, PROJ_MODE NONE, PHONE_IDENT, BOX_HEALTH iap2d
+        (the box IS idle: NONE is the replayed current state; the phone never left the bus)
++6.395  [deferred display mode from the mid-session test fired here: REINIT → second CT_STOP at
+         +6.516, HELLO +6.931, SUBSCRIBE +7.001 — 0.6 s, session state identical]
++11.04  << BOX_HEALTH iap2d|airplayd   (carplayd re-armed)
++11.54  << PROJ_MODE WIRED_CP
++13.24  DEVICE_CONNECTED ("Phone connected")
++13.45  first video frame on screen
+```
+
+No `SEV_PHONE_ABSENT`, no error, no reconnect chain. Confirm-to-video 13.5 s, of which 6.0 s is
+the deliberate wait and ~5 s is carplayd's own bring-up after re-arm. Two more timelines from the
+same session are in 04_OPEN_ITEMS.md item 3 under "Host-app controls waiting on box verbs" — the
+reported PROJ_MODE NONE → PHONE_ABSENT drop was NOT reproduced by any of the three.
+
+### Follow-ups (listed, not implemented)
+
+Forget-all (`MGMT_FORGET_ALL`), NCM maintenance mode (`MGMT_ENTER_NCM`), box log view (`CH_LOG`),
+radio inhibit (`CT_RADIO`), preferred-device UI (`KnownDeviceStore.preferredMac` is stored, no
+box verb acts on it), vehicle / metadata / audio config UI, adapter info panel (`MGMT_INFO` typed
+surface). All exist on MacHost's Adapter tab; none is wired on Android.
+
 ## Provenance — this is a three-way graft
 
 | From | What was taken | Status |
 |---|---|---|
 | `carlink_native_personal` | The product: frosted-glass UI, Controls dashboard, `MediaSessionManager` / `AlbumArtCache` / MediaBrowserService, `DualStreamAudioManager`, `MicrophoneCaptureManager`, `PlatformDetector` / `AudioConfig`, `H264Renderer`, day/night. **Authoritative for working AAOS behaviour.** | imported whole, builds green |
-| `gm_ccpa` | `ocbm/` (framing, proto, transport, USB bulk, client) and `av/` (`HevcRenderer`, `AacPlayer`, `VoiceRouter`) — **head-unit-proven** | imported, repackaged `zeno.gmccpa` → `com.carlink` |
+| `gm_ccpa` | `ocbm/` (framing, proto, transport, USB bulk, client) and `av/` (`HevcRenderer`, `AacPlayer`, `VoiceRouter`; the first two replaced 2026-09-25 by `VideoRenderer` / `MediaAudioPlayer`) — **head-unit-proven** | imported, repackaged `zeno.gmccpa` → `com.carlink` |
 | `ccpa_custom` | The A/V transport half neither of the above has: this document's `ocbm/seam/`, plus `CH_INPUT` / `CH_METADATA` / the config push (still to come) | new code |
 
 `applicationId` is **`zeno.carlink.ocbm`**, deliberately distinct from the riddleBox app's
@@ -97,9 +248,9 @@ box's legacy on-box-decrypt TCP seams, so each already speaks a framing we can s
 
 | Renderer | Framing it expects | Produced by |
 |---|---|---|
-| `HevcRenderer` | `[u32 BE len][Annex-B AU]` | `VideoSeam` |
+| `VideoRenderer` (was `HevcRenderer` until 2026-09-25; now H.264 **or** HEVC, latched from the first parameter set) | `[u32 BE len][Annex-B AU]` | `VideoSeam` |
 | `VoiceRouter` | `[u32 BE rate][u16 BE ch][u8 atype][u8 codec][u32 BE len][AU]` (`VoiceTag`, 12 B — *corrected 2026-09-18: the codec byte was added so the router branches on it instead of assuming AAC-ELD; no longer byte-compatible with the box's legacy 11-byte `:9003` tag, which nothing in `:app` consumes*) | `AudioSeam` |
-| `AacPlayer` | ADTS byte stream | `AudioSeam` |
+| `MediaAudioPlayer` (was `AacPlayer`, ADTS-only, until 2026-09-25) | the same 12-byte `VoiceTag` framing as the voice lane — codec 0 = S16LE PCM (wired), 1 = raw AAC-LC AU (wireless) | `AudioSeam` |
 
 `SeamPipe` is the join: a bounded blocking `InputStream` the renderers consume exactly as they would a
 socket. `VoiceRouter` even carries the diagnostic for the mismatch this removes — it rejects an
@@ -165,7 +316,7 @@ emulator. The sealing helpers re-derive nonce and AAD from the wire spec rather 
 
 ### One design finding worth carrying
 
-`VideoSeam`'s output pipe is **swappable** (`attach`). `HevcRenderer` binds its Surface at construction,
+`VideoSeam`'s output pipe is **swappable** (`attach`). `VideoRenderer` (was `HevcRenderer` until 2026-09-25) binds its Surface at construction,
 so its pipe is surface-scoped — but the ChaCha20 key and frame sequence are **session**-scoped. Rebuilding
 the seam on a surface change would discard the key, and the box only re-sends it when its *own* seam
 reconnects, which a host-side surface change does not cause. Every frame after the first surface swap
@@ -186,7 +337,7 @@ exactly, so `MainActivity`, `MainScreen`, `PhonesTab` and the whole `media/` lay
   `PHONECALL_START` arrived ~130 ms *before* `SIRI_STOP`, so a naive reading killed the call's
   microphone; OCBM routes per stream by `audioType`, so there is no ordering to reason about. And
   audio formats are no longer guessed from a `decodeType` byte — each stream carries `SEAM_FORMAT`.
-- **Video is an epoch.** `HevcRenderer` binds its Surface at construction, so pipe + renderer +
+- **Video is an epoch.** `VideoRenderer` (was `HevcRenderer`) binds its Surface at construction, so pipe + renderer +
   consumer thread are retired as a unit. The `join(1500)` on retire is not optional: without it a
   second decoder is configured while the first is still draining, and this VPU's codec pool is
   small enough that exhausting it is a permanently black screen. `pauseVideo` closes the pipe, and
@@ -493,7 +644,7 @@ iPhone `POST /command`. The verb is `requestUI` — Apple's own words are "the f
 the controller requests accessory UI" (`AirPlayReceiverSession.h:189`), and it is the SAME verb name
 the host sends outbound. We had been dropping `META_CMD` entirely, which is why `onHostUIPressed`
 was declared, implemented in `MainScreen`, and never fired. With it wired, the whole host-UI overlay
-— the dashboard, the known-device list, Reboot Adapter / Reset Connection, and
+— today the Settings screen (Phones / Control tabs), Reboot Adapter / Reset Connection, and
 `recoverVideoFromOverlay` — stops being dead code.
 
 `BinaryPlist` is a minimal `bplist00` reader for exactly that payload. macOS gets this from
@@ -606,24 +757,57 @@ stock AOSP it collapses into tier 3. Decoder state machine is JVM-tested (`Media
 already carried and lands in `setSubtitle` + `setStation`. Published with `MEDIA_TYPE_MUSIC` and
 `isPlayable`. Unverified against a phone — no nowPlaying frames without one.
 
-**Siri, three tiers, all 3P** — wire form is the `CMD_SIRI_DOWN`/`CMD_SIRI_UP` hold pair
-(`OcbmClient.sendSiriPress()`; the bare `CMD_REQUEST_SIRI` is deprecated and iOS ignores it).
-1. In-app: the Siri button on the dashboard (`ui/MainScreen.kt` `SiriRow`) → `CarlinkManager.requestSiri()`.
-   Box-verified: the two `INPUT_COMMAND` frames go out in order (`OcbmShellInputTest` pins the bytes).
-2. Media-session voice key — see the finding above.
-3. `voice/CarlinkVoiceInteractionService` + `CarlinkVoiceSessionService` + `CarlinkRecognitionService`
-   (manifest, `res/xml/voice_interaction_service.xml`). The services are guarded by
-   `BIND_VOICE_INTERACTION`, which the SYSTEM holds; the app needs no permission. Inert until the user
-   picks Carlink under Settings > Apps > Default apps > Assistant (the dashboard's mic-settings button
-   opens `ACTION_VOICE_INPUT_SETTINGS`, which resolves to CarSettings' assistant screen). Measured on
-   the emulator with the assistant switched via `settings put secure voice_interaction_service`:
-   `cmd car_service inject-key 231` (the VHAL PTT path through `CarInputService`) → our session's
-   `onShow(flags=0x23)` → `[SIRI] press -> sent` to the box. Plain `input keyevent KEYCODE_VOICE_ASSIST`
-   does NOT reach it — `PhoneWindowManager` turns that into an `ACTION_VOICE_ASSIST` activity launch.
-   Cost of opting in, stated on purpose: while Carlink is the assistant, the platform's default
-   `SpeechRecognizer` is our stub, which refuses with `ERROR_CLIENT`. Whether GM's Settings exposes an
-   assistant picker at all is UNVERIFIED (gminfo, 12L).
-   `MainActivity.onKeyDown` also maps VOICE_ASSIST/ASSIST/SEARCH → Siri for head units that pass them.
+**Siri activation — measured route table (2026-09-25, emulator-5554 = chevy12, AAOS 14, app as user 10,
+live wired CarPlay).** Wire form for every app-side route is the `CMD_SIRI_DOWN`/`CMD_SIRI_UP` hold
+pair (`OcbmClient.sendSiriPress()` → two `INPUT_COMMAND` frames → box `/command requestSiri
+{siriAction: 2}` then `{siriAction: 3}`, `events.rs`; the bare `CMD_REQUEST_SIRI` is deprecated and iOS
+ignores it). Proof of activation in every "yes" row below: `<< UPLINK ON 16000Hz 1ch codec=0 (mic gate)`,
+`[MIC] Capture started at 16000Hz 1ch`, `audio format … codec=PCM 16000Hz 1ch atype=2 -> voice`,
+`[voice] siri: PCM 16000Hz 1ch -> AudioTrack(usage=16), decoder=direct PCM`, `[voice] assistant SPEAKING —
+pausing media`, and the Siri orb in the CarPlay frame.
+
+| Route | Injected as | Reaches the app? | Siri activates? |
+|---|---|---|---|
+| A. Press-and-hold the CarPlay dock home button (touch forwarding only) | `input swipe 80 932 80 932 1500` (dock button at x≈80; y=932 with system bars visible, y≈1054 in fullscreen-immersive) | yes — plain `INPUT_TOUCH` DOWN … UP; the box turns them into HID digitizer reports and iOS times the hold itself, so no MOVE keep-alive or timestamps are needed | **yes** (`/tmp/siri_a3.png`: orb; log lines above at 02:08:03) |
+| B1. `cmd car_service inject-key 231` (VHAL `HW_KEY_INPUT`, tap and `-t 1000` hold) with the platform assistant left as Google's | VHAL → `CarInputService` | no — `CAR.INPUT: voice key, invoke AssistUtilsHelper` → Google `AutoVoiceInteractionSes` opens; no `[KEY]` line | no (Google assistant session instead) |
+| B2. same, with this app selected as the digital assistant (`settings put secure --user 10 voice_interaction_service` + `assistant` = `zeno.carlink.ocbm/com.carlink.voice.CarlinkVoiceInteractionService`) | VHAL → `CarInputService` → `AssistUtils` → `CarlinkVoiceInteractionService` | yes — `[VOICE] PTT (flags=0x23) -> Siri hold pair sent`, `[SIRI] press -> sent` | **yes** (`/tmp/siri_b2.png`: orb + AAOS mic indicator; 02:11:53) |
+| B3. `input keyevent 231` / `--longpress 231` (VOICE_ASSIST via InputManager) | window manager | no — nothing reaches the activity | no |
+| B4. `input keyevent 84` (SEARCH) and `--longpress 84` | activity `onKeyDown` | yes — `[KEY] voice key 84 -> Siri sent` | **yes** (02:09:00; the long-press variant re-sends the pair, which toggles Siri if already up) |
+| B5. `input keyevent 219` (ASSIST) | window manager (assist gesture) | no | no |
+| B6. `input keyevent --longpress 79` (HEADSETHOOK, the MediaSession route: `MediaKeyDecoder` → `onVoiceAssist` → `requestSiri`) | MediaSession media-button dispatch | no — the app's session never received the key on the emulator (media keys go to the active media session; a paused CarPlay session was not it) | no |
+| B7. `cmd car_service inject-key -t 1000 5` (CALL hold, push-to-talk on some units) | `CarInputService` | no | no |
+| Emulator steering-wheel controls | none exist for a voice key; the VHAL path IS `inject-key` (B1/B2) | — | — |
+
+The first attempt at route A failed for a reason worth keeping: with system bars visible the AAOS
+bottom bar spans `y>1002`, so a hold at `y=1054` hit the bar's own home button and the launcher
+came to the front (`ActivityTaskManager: START … CarLauncher`). Locate the dock button from a
+screenshot for the active display mode. `handleTouchEvent` is unchanged — no long-press special case
+is needed on the app side.
+
+**Implemented routes (all third-party legal, nothing GM-only):**
+1. Activity key: `MainActivity.onKeyDown` → `VoiceKeys.triggers(keyCode, repeatCount)` (VOICE_ASSIST /
+   ASSIST / SEARCH, first DOWN only; `VoiceKeysTest`). On the emulator only SEARCH arrives this way.
+2. Assistant role: `voice/CarlinkVoiceInteractionService` + session + `CarlinkRecognitionService`
+   (manifest, `BIND_VOICE_INTERACTION` held by the system; the app needs no permission). Inert until the
+   user picks Carlink under Settings > Apps > Default apps > Digital assistant (`android.app.role.ASSISTANT`;
+   a third-party app may hold it on the emulator — verified above — and no `ACTION_VOICE_COMMAND` /
+   `ASSIST` intent filter is needed, `CarInputService` calls `AssistUtils` directly). Cost: while Carlink
+   is the assistant the platform `SpeechRecognizer` is our stub (`ERROR_CLIENT`). The emulator's
+   setting was restored to `com.google.android.carassistant` after the test.
+3. MediaSession voice key (`MediaKeyDecoder.VOICE_ASSIST` / HEADSETHOOK hold → `onVoiceAssist` →
+   `requestSiri`) stays wired for head units that route it, but did not fire on the emulator.
+
+**GM head unit (CT5 image under `/tmp/ct5_aaos`, read-only).** The steering-wheel voice button is a
+plain `KEYCODE_VOICE_ASSIST`: `system/usr/keylayout/gminfo3-virtual.kl` `key 216 VOICE_ASSIST SWC`
+(and `Vendor_18d1_Product_0200.kl` `0x246 VOICE_ASSIST`, `0x247 ASSIST`). GM ships Google's
+`com.google.android.carassistant` (`GsaVoiceInteractionService`) as the assistant with per-brand RROs
+(`chevrolet.vcd_chevy_ff.com.google.android.carassistant.apk` for CHEVROLET_12, etc.); no GM input
+service or `config_customInputService` overlay was found (only SystemUI/CarSettings theme RROs). So on
+a GM unit a third-party foreground app receives NOTHING from the wheel button (same as B1): the key goes
+`CarInputService` → `AssistUtils` → Google Assistant. It reaches Carlink only via route 2, which needs
+the "Digital assistant" picker; whether GM's CarSettings exposes it is UNVERIFIED (AOSP's
+`AssistantAndVoiceSettingsActivity` exists in CarSettings; GM's theme RRO could hide the entry). The
+touch route A works regardless.
 
 **Box state surfaced** (`OcbmClient.onProjMode`/`onBoxHealth`, `lastProjMode`/`lastBoxHealth`/
 `boxHealthKnown`; `CarlinkManager.projectionMode`/`boxHealth`, `BoxStatusListener`; dashboard line
@@ -654,7 +838,7 @@ end-to-end (needs a phone navigating); on the emulator `Car.createCar` + `getCar
 1. The MediaSession mirrors iOS NowPlaying ONLY. A call never touches it — iOS pauses its own player
    and reports `playbackStatus 2`, which we mirror; forcing a pause here would desynchronise the card
    from the phone, and forcing play after a call would guess. The media lane's audio focus
-   (`AacPlayer`) is likewise untouched by call state.
+   (`MediaAudioPlayer`, was `AacPlayer`) is likewise untouched by call state.
 2. Call audio focus belongs to `VoiceRouter`'s `Purpose.CALL` lane (USAGE_VOICE_COMMUNICATION,
    GAIN_TRANSIENT, 3 s idle) and is driven by AUDIO ARRIVING, never by `callState` metadata — the
    metadata can lag or be absent (a wired-only phone), and a lane that opened on a rumour would hold
@@ -732,6 +916,10 @@ requested`, confirming the touch basis (content area, not window or panel) end t
 hardware with a real iPhone, not just the emulator.
 
 ### Dashboard layout (2026-09-18) — resolution- and orientation-agnostic redesign
+
+> **2026-09-25:** the in-screen dashboard was replaced by the carlink_native screens (see "UI — carlink_native
+> screens on the OCBM stack"). `WindowLayout` survives and now arranges the Settings › Control cards (two-pane vs
+> stacked); the rest of this section is the historical rationale.
 
 `ui/adaptive/WindowLayout.kt` (new file) drives the dashboard from `androidx.window:window-core:1.5.0`
 (`app/build.gradle.kts:169`) — chosen over the older `material3-window-size-class`, which is
@@ -860,6 +1048,268 @@ syncword check was mutated and confirmed to fail its test.
 `USAGE_VOICE_COMMUNICATION` track from a third-party app on the gminfo call bus; AudioTrack at 8 kHz
 mono on that HAL; mSBC decode CPU on the Atom under a live call; the SCO write accepting one 60-byte
 `CH_MIC` message per packet; echo/latency of the HFP round trip.
+
+## Silent media after Siri — focus release, one volume authority, resume fade-in (2026-09-25, chevy12-measured)
+
+**Root cause (confirmed).** `MediaFocus` (the `carlink_native` port in `MediaAudioPlayer`) maps
+`AUDIOFOCUS_LOSS_TRANSIENT` to gain 0.0 and the effective volume was `min(duckGain, focus.gain)`; the
+Siri sink (`USAGE_ASSISTANT`, `GAIN_TRANSIENT`) kept its focus until `VoiceRouter`'s 15 s idle sweep. So
+"media restored to 1.0" on the duck path was masked by focus 0.0 until the sweep — 11–15 s of silent
+media per turn, 32.7 s with two turns in the user's log (02:17:34.96 stream resumed → 02:18:07.65 gain
+1.0). The old `AacPlayer` had no focus listener, so this was a regression of the 2026-09-25 media rewrite.
+
+**Fix.**
+- One volume authority: `MediaAudioPlayer.applyGain` sets `MediaGain.effective(focus, duck)` and logs
+  both (`media gain 0.0 (focus 0.0, duck 1.0, ramp -)`). `min`, not a product: both are "duck to 0.2"
+  for the same nav event (product = 0.04, inaudible); the resume ramp is applied to the PCM samples,
+  so effective = focus × duck × ramp with the ramp factor in the samples.
+- Transient focus is released on the real end-of-Siri signals (`VoiceRouter.releaseQuietSinks`):
+  (1) audible media arriving while focus still suppresses it (`MediaFocus.noticeAudible` →
+  `onAudibleWhileSuppressed`, sink quiet ≥ 250 ms) — decisive, iOS never resumes audible media inside a
+  turn; (2) `UPLINK OFF` + `TransientFocusPolicy.UPLINK_GRACE_MS` = 1 s (a re-open inside the window
+  keeps the held focus); (3) "assistant done" (4 s hold) but only when the uplink is closed; (4) the
+  idle sweep as backstop — ASSISTANT 15 s → 4 s, NAV 8 s → 2 s (may-duck focus kept media at 0.2 for the
+  whole window after every prompt), CALL/ALERT 3 s unchanged; uplink purposes use a 15 s backstop while
+  the gate is open (a lost UPLINK OFF). Grace justification: measured gaps — UPLINK OFF → media stream
+  resumed 0.15 s (this build) / 0.9 s (user log); UPLINK OFF → next user-initiated turn 7–9 s, i.e. a new
+  session, where a fresh focus request (media audible in between) is the native behaviour.
+- Nav: same end-of-stream release via the 2 s idle; the duck→restore stays a `setVolume` step (0.2 → 1.0,
+  no ramp). Calls: `UPLINK OFF` + grace and media-audible release, 3 s idle backstop.
+
+**Measured (three Siri cycles each, `input swipe 80 932 80 932 1500`, not speaking).** Before: 11–35 s.
+After: media gain 1.0 within 59–64 ms of the first post-gap media frame (`stream resumed after a 6.6 s
+gap` 02:31:27.777 → `siri: released (media audible again)` .835 → `media gain 1.0` .836), 202–215 ms
+after `UPLINK OFF`; `dumpsys audio` 12 s after the trigger lists only `MediaFocus gain: GAIN USAGE_MEDIA`.
+Back-to-back (second trigger 6 s later): each turn recovers the same way; media is audible between turns.
+
+**Resume fade-in (`av/ResumeRamp.kt`).** After a HARD interruption (Siri, or focus 0 = exclusive
+transient/permanent loss) with media active in the 2 s before it, the first media frame after the
+track's ≥1 s gap (its re-prime point) starts an equal-power ramp `sin(π/2·p)` — 0 / 0.383 / 0.707 /
+0.924 / 1.0 at 0/25/50/75/100 % — over `ResumeRamp.DURATION_MS` = 1000 ms, applied to the S16LE samples
+in the write path (sample-accurate, independent of `AudioTrack.setVolume`, same code for wired PCM and
+decoded AAC). Not armed by nav (soft duck), session start, plain underrun/network gaps or a user
+pause/play — none of those call `interrupted()`. A new interruption mid-ramp cancels it and the restart
+continues from the level reached (no dip); a chained interruption while media is already silenced keeps
+the arm (the within-turn focus flap disarmed it in the first build). Measured envelope, cycle 1:
+`UPLINK OFF` 02:36:13.883 → `resume ramp START from gain 0.00` 14.031 (+148 ms, same instant as the
+first post-gap frame) → 25 % 0.47 @+303 ms → 50 % 0.79 @+574 ms → 75 % 0.96 @+815 ms → `END after 1062 ms`.
+Cycles 2/3 identical (1049 ms; 0.51/0.79/0.96 and 0.40/0.75/0.96). Back-to-back: the second turn
+cancelled the ramp at 1.00 and the next resume restarted "from 1.00, 2 ms" — no second fade, by the
+restart-from-level rule. Nav prompt not exercised on the emulator (no route driven); excluded by
+construction and by `ResumeRampTest`.
+
+Tests: `AudioFocusPolicyTest` (gain composition, uplink grace once/cancel, measured-gap bound,
+`uplinkOn`), `ResumeRampTest` (curve, positive trigger with sample envelope, excluded cases,
+cancel/restart from level, chained arm, one-shot).
+
+## Display cutout → CarPlay safe area (2026-09-25, chevy12-measured)
+
+**What the app already did.** `DisplayProfile.detect` reads the framework's computed cutout insets
+(`WindowInsetsCompat.getInsetsIgnoringVisibility(displayCutout())`, plus waterfall insets and
+`RoundedCorner` radii — never the raw `DisplayCutout.boundingRects`), `SafeAreaMath.derive` turns them
+into the largest EVEN-aligned rectangle inside the insets (origin rounded up, far edges down, so the
+rect can only shrink), `ViewAreaRule` refuses anything iOS would tear the session down for, and
+`VehicleConfigYaml` pushes `viewAreas[0] = {viewArea: full panel, safeArea: that rect}`. The stream and
+touch space are the FULL content area (2914x1134 on chevy12); only the safe rect is inset. The receiver
+(`vehicle_config.rs` `safe_area_inset` → `info.rs` `view_areas`) already forwarded it as
+`displays[0].viewAreas[0].safeArea{originXPixels…}` and armed `viewAreas` in `enabledFeatures` — the
+same path the macOS host's `SettingsWindow.swift` `va()` uses, same keys, same units (panel pixels,
+absolute rect).
+
+**What was wrong.** `VehicleConfigSpec.drawUIOutsideSafeArea` was never set (always `false`). On this
+panel iOS then honoured the safe rect but painted the inset bands BLACK — measured on the chevy12 AVD
+(2914x1134, GM CHEVROLET_12 cutout, framework insets top 167 / right 285 → pushed safe
+`2628x966@0,168`): top band `y<168` and right band `x>=2628` were 100 % pure black (`/tmp/chevy12_before.png`).
+`docs/carplay/06_AV_PIPELINE.md` had already recorded on hardware (2026-09-09) that this flag is exactly
+what lets CarPlay render the wallpaper into the band.
+
+**The change (app only, no box change).** `PanelGeometry.drawUiOutsideSafeArea` is `true` whenever the
+declared safe area is a real inset and `false` for a full-panel safe area (that document stays
+byte-identical); `CarlinkManager.vehicleConfigSpec()` copies it into the YAML. Tests:
+`DisplayProfileTest` (`a cutout turns drawUIOutsideSafeArea on and a clean panel leaves it off`, the
+chevy12 numbers), `VehicleConfigYamlTest` (pre-existing render of `drawUIOutsideSafeArea: true`), and
+receiver `info.rs` `pushed_draw_ui_outside_safe_area_reaches_the_main_safe_area_both_ways` (YAML →
+`DeviceConfig.main_draw_outside_safe` → plist `safeArea.drawUIOutsideSafeArea`, true/false/absent). The
+receiver source is unchanged apart from that test, so the deployed box binary needs no rebuild.
+
+**Measured after** (`/tmp/chevy12_after.png`, same session type, user 10, `PROJ_MODE WIRED_CP`,
+STREAMING): pushed `[CONFIG] panel 2914x1134@60 safe 2628x966@0,168 drawUIOutsideSafeArea=true`;
+right band `x>=2628` dark fraction 0.000 (was 1.000), top band `y<168` 0.219 (wallpaper's own dark
+regions; sample pixels (16,15,27)/(14,14,24) vs (1,0,1) before); interactive UI (near-white pixels =
+status clock, icon labels, page dots) bounding box `x 28..2372, y 218..1110` — entirely inside the safe
+rect, zero near-white pixels in either band, in both screenshots. So: wallpaper edge-to-edge under the
+cutout, UI in the safe area, touch unchanged (full-panel space).
+
+**Curve vs rectangle.** CarPlay's safe area is one rectangle per view area; the GM cutout is curved.
+The rect is the framework's computed safe insets (the cutout's bounding extent), so the region between
+the curve and the rect is wallpaper only — nothing interactive can land there. `cornerMasks` (the
+other CarPlay mechanism for shaped panels) is mutually exclusive with `safeArea` per display and
+paints opaque corner bitmaps; it does not describe a top/right notch, so it is not used. A second view
+area (narrower alternate layout) is a resize feature, not a shape hint, and is not pushed.
+
+**Runtime changes.** Detection runs at launch, in `MainActivity.onConfigurationChanged` (a changed
+`geometry` — which includes the safe rect — rebuilds the session with a fresh `CT_SUBSCRIBE`), on a
+display-mode change and on Reset Connection (`reinitialize()` → `initializeCarlinkManager()` →
+`DisplayProfile.detect`). An overlay toggle that changes the cutout therefore takes effect on the next
+session; there is no live mid-session safe-area update (CarPlay's `updateViewArea` switches between
+declared areas, it does not redefine one).
+
+**Both display modes honour it (chevy12, 2026-09-25).** The content area already excludes the system
+bars, so the cutout's share that the bars cover drops out of the safe inset on its own:
+- Immersive / fullscreen: `panel 2914x1134@60 safe 2628x966@0,168 drawUIOutsideSafeArea=true`.
+- System UI visible (bars top 95 / bottom 120): `panel 2914x918@60 safe 2628x846@0,72
+  drawUIOutsideSafeArea=true`. The top inset is 167 − 95 = 72 and the right inset stays at 286. CarPlay
+  rendered accordingly (user-observed).
+
+**Reproducing the chevy12 test bench.**
+- `chevy12` is an AVD cloned from `ultrawide` (android-35-ext15 automotive arm64) with
+  `hw.lcd.width=2914`, `hw.lcd.height=1134` and `hw.lcd.density=200`. Launch it with `emu_cpc chevy12`,
+  and only one box-passthrough emulator may run at a time.
+- A config clone alone is not enough. The clone needs ultrawide's writable-system layer
+  (`system.img.qcow2`, which carries `android.hardware.usb.host`). Without it `dumpsys usb` has no
+  `host_manager`, and the box shows up in the guest's sysfs but never reaches the app.
+- `adb install` installs for user 0 only. The driver user is 10, so after installing also run
+  `pm install-existing --user 10 zeno.carlink.ocbm`.
+- The cutout is an RRO carrying GM's CHEVROLET_12 `config_mainBuiltInDisplayCutout` string verbatim,
+  taken from a GM AAOS 14 image. It must be signed with the platform test key, or idmap2 maps nothing.
+  The `fill` variant is the one to use on the emulator.
+
+**Provenance.** From `carlink_native`: nothing new to port — its `WindowMetricsCompat` was only the
+API-29 compat shim for `currentWindowMetrics`/stable insets (this app's `DisplayProfile` is the evolved
+form: content area, cutout/waterfall/corner, parity, legality rules), and its riddleBox "safearea" was
+a fixed 100/50 px blob for the adapter's NAVISCREEN, unrelated to CarPlay `viewAreas`. From MacHost:
+the YAML shape and semantics (`va()`: full-frame `viewArea`, absolute-rect `safeArea`,
+`drawUIOutsideSafeArea` as a sibling key; `FieldInfo`: "wallpaper is displayed outside the safe area,
+replacing the normal black background"). Disagreement: MacHost leaves `drawUIOutsideSafeArea` a
+user toggle defaulting to `false` and does not even-align the safe rect (`max(1, …)` clamping only);
+this app derives the flag from the inset and keeps the even rule — followed the hardware finding for
+the flag and the parity teardown rule for the rect (1 px more conservative than the raw insets).
+
+## Audio/video format matrix (2026-09-25 — wired CarPlay media PCM path landed; see verification status at the end)
+
+The stream matrix below is built from what the box actually advertises and forwards
+(`crates/vendor/receiver/src/info.rs` `preset_wired_pcm` / `preset_wireless_8`, `session.rs` SETUP
+phase-2 audio → `SEAM_FORMAT` `[codec][rate][ch][bits][atype]`, `uplink.rs`) and from what `:app`
+consumes. Rows marked *(outside knowledge)* come from the CarPlay/AA protocols, not from this repo.
+
+**How the seam names a stream.** Every audio access unit reaches the app tagged with the SETUP
+`audioType` (`atype`: 0 media, 1 telephony, 2 speechRecognition, 3 alert, 4 default/absent,
+5 compatibility) and the negotiated codec (`SeamCrypto.CODEC_*`: 0 PCM, 1 AAC-LC, 2 AAC-ELD, 3 Opus,
+4 mSBC — the last only from `btd`, decoded in `AudioSeam`). `AudioSeam` routes atype 0/5 → media lane,
+1-4 → voice lane; `VoiceRouter` maps atype → purpose (1 CALL, 2 ASSISTANT, 3 ALERT, 4 → NAV when
+≥44.1 k stereo else ASSISTANT). The stream type (100 main, 101 alt, 102 media-buffered) is NOT
+forwarded — it is implied by the (atype, format) pair, which is why atype 4 needs the format to split
+Siri (16 k mono) from alt-audio/nav (48 k stereo).
+
+### CarPlay
+
+| Stream | Transport | Wire format (box advertises) | atype / codec | App path | AudioAttributes usage | Focus | Status |
+|---|---|---|---|---|---|---|---|
+| Media (music, podcasts) | wired | PCM S16 **BE** 48 kHz stereo, type 100 catch-all (`pcm_48k_stereo`) | 0 / 0 | `AudioSeam` byte-swaps → `MediaAudioPlayer` → `PcmPassthrough` → `AudioTrack` | `USAGE_MEDIA` / `CONTENT_TYPE_MUSIC` | `AUDIOFOCUS_GAIN`, held for the session; software duck 0.2 from the voice lane; pause (not duck) while Siri speaks | **ADDED 2026-09-25** (was dropped: "AacPlayer consumes ADTS AAC-LC only") |
+| Media | wireless | AAC-LC 48 kHz stereo, type 102 `media` (`aac_lc_48k_stereo`) | 0 / 1 | `MediaAudioPlayer` → `MediaCodecAacDecoder` (csd-0 `0x1190`) | same | same | supported (device-proven before this change as `AacPlayer`; now raw-AU tagged instead of ADTS — re-verify on wireless) |
+| Media, PCM compatibility fallback | wireless | PCM 48 k stereo / 16 k mono, types 100/101 `compatibility` | 5 / 0 | media lane, same as wired PCM | same | same | added with the PCM path (never observed on device) |
+| Alt audio / navigation prompts | wired | PCM 48 k stereo, type 101 (no audioType → `default`) | 4 / 0 | `VoiceRouter` NAV sink, direct PCM | `USAGE_ASSISTANCE_NAVIGATION_GUIDANCE` / `SPEECH` | `GAIN_TRANSIENT_MAY_DUCK`; ducks media to 0.2 on energy, restores 1.5 s after | supported (code path pre-existed; unexercised today, see verification) |
+| Alt audio / navigation prompts | wireless | AAC-ELD 48 k stereo, type 101 `default` (`aac_eld_48k_stereo`) | 4 / 2 | NAV sink → `MediaCodecAacDecoder` (ELD csd synthesised for 48 k stereo) | same | same | supported (ELD decode path pre-existed) |
+| Telephony (call downlink) | wired | PCM 16 k mono, type 100 catch-all (`pcm_16k_mono`) | 1 / 0 | `VoiceRouter` CALL sink, direct PCM | `USAGE_VOICE_COMMUNICATION` / `SPEECH` | `GAIN_TRANSIENT` (exclusive); released 3 s after the last audio | supported, unexercised |
+| Telephony | wireless | AAC-ELD 16 k mono, type 100 `telephony` | 1 / 2 | CALL sink → ELD decoder (device-confirmed csd `f8f0312c00bc00`) | same | same | supported |
+| Siri (speech recognition + `default` Siri downlink) | wired | PCM 16 k mono, type 100 | 2 or 4 / 0 | `VoiceRouter` ASSISTANT sink, direct PCM | `USAGE_ASSISTANT` / `SPEECH` | `GAIN_TRANSIENT`; keep-alive silence so the knob stays on the voice group; media paused | supported, unexercised |
+| Siri | wireless | AAC-ELD 16 k mono, type 100 `speechRecognition` / `default` | 2 or 4 / 2 | ASSISTANT sink → ELD | same | same | supported (device-proven before this change) |
+| Alerts | wireless | AAC-ELD 48 k stereo, type 100 `alert` | 3 / 2 | `VoiceRouter` ALERT sink | `USAGE_VOICE_COMMUNICATION_SIGNALLING` / `SONIFICATION` | `GAIN_TRANSIENT` | supported; bus mapping UNPROVEN on GM (docs/carplay/03) |
+| Alerts | wired | not advertised (`preset_wired_pcm` has no `alert` entry) — iOS rides alerts on the 48 k stereo `default` stream | 4 / 0 → NAV | as alt audio | nav usage | may-duck | by design of the wired preset |
+| Opus (`opus_16k/24k/48k_mono`) | either | expressible in a YAML `audio.formats` list only; **neither preset advertises it**, so no session negotiates it | any / 3 | `AudioDecoders.Path.UNSUPPORTED` → dropped with one diagnostic | — | — | not advertised, not decoded (deliberate: no way to exercise it) |
+| Mic uplink (Siri, calls) | wired | box expects **PCM S16LE 16 k mono** on `CH_MIC` after a `CT_UPLINK` gate (rate/ch/codec carried); box converts to BE and encrypts (`uplink.rs`) | — / 0 | `MicrophoneCaptureManager` (`AudioRecord`, ring buffer, 20 ms ticks); `RECORD_AUDIO` checked at `hasPermission()`; `FOREGROUND_SERVICE_TYPE_MICROPHONE` | `AudioSource.VOICE_COMMUNICATION` (see `MicProfile`) | n/a | supported (hardware-verified 2026-08-15) |
+| Mic uplink | wireless | box expects PCM 16 k mono and encodes **AAC-ELD itself** (`uplink.rs` `EldEncoder`, fdk) — the app never encodes | — / 0 | same | same | n/a | supported |
+| Mic uplink (HFP, AA only) | BT | mSBC 60-byte eSCO packets via `CH_MIC` (`MicProfile.CODEC_MSBC`) | — / 4 | `MicrophoneCaptureManager` + `Msbc` encoder | same | n/a | JVM-tested only (WP2) |
+| Screen video | either | H.264 (`avcC`) or HEVC (`hvcC`, only when the pushed `enablesHEVC: true` sets the box's `hevcInfo` lever) — iOS picks; max 2400x960@60 per the pushed geometry | — | `VideoSeam` → Annex-B → `VideoRenderer` (`video/hevc` csd-0 = VPS+SPS+PPS; `video/avc` csd-0 = SPS, csd-1 = PPS) | — | — | HEVC device-proven (emulator `c2.goldfish.hevc.decoder`, 2400x788); **H.264 ADDED 2026-09-25** (JVM-tested NAL walk; not yet exercised live — needs a session negotiated without HEVC) |
+| Video codec advertisement | either | `accessoryConfig.enablesHEVC` in the pushed YAML | — | `VideoCodecs.probe(w,h,fps)` (`MediaCodecList.findDecoderForFormat`) → `VehicleConfigSpec.enablesHevc` | — | — | **ADDED 2026-09-25**; emulator probe: `h264=c2.goldfish.h264.decoder hevc=c2.goldfish.hevc.decoder -> enablesHEVC=true` |
+| Instrument-cluster / alt-screen video (`CH_ALT_VIDEO`, `altVideoStreams`) | either | the box forwards `CH_ALT_VIDEO` and the config schema has `alt_video_streams`; the app pushes none | — | `VideoSeam` can parse it; **no consumer / surface** | — | — | missing — not advertised by this app, so never negotiated |
+
+### Android Auto
+
+| Stream | Wire format *(outside knowledge: AA protocol)* | App path | Status |
+|---|---|---|---|
+| Media | PCM 48 kHz stereo 16-bit (AudioStreamType MEDIA); AAC only if the HU offers it | none | **missing** |
+| Guidance / navigation | PCM 16 kHz mono | none | missing |
+| System / assistant audio | PCM 16 kHz mono | none | missing |
+| Mic | PCM 16 kHz mono uplink; HFP mSBC/CVSD when a call rides the BT headset (this box's `SEAM_PKT_PLAIN` lane) | `MicrophoneCaptureManager` exists (mSBC/PCM) | partial — mic only |
+| Video | H.264 baseline/main, 480p/720p/1080p @30/60; H.265 and VP9 only if the HU offers them | `VideoRenderer` could decode H.264 | missing |
+
+**AA is not reachable with this app today, and not because of formats.** The box's `PM_WIRED_AA`
+(`aa-bridge` AOAP pump) hands the AA *protocol* to the host over `CH_IP` (`IP_OPEN 127.0.0.1:5277`,
+`ccpa/aa-bridge/src/appport.rs`): the head-unit side of Android Auto — the gearhead handshake, service
+discovery, media/video channel setup — runs in the host app. The macOS host has that stack; `:app`
+has none (`CH_IP` appears only as a constant in `OcbmProto.kt`). Until an AA client exists here, the AA
+rows above are unreachable regardless of decoder coverage. The decode/playback layer built for CarPlay
+(`AudioDecoders`, `MediaAudioPlayer`, `VoiceRouter`, `VideoRenderer`) is protocol-agnostic and would
+be reused by it.
+
+### What changed on 2026-09-25 (app side only; no box-side wire or negotiation change)
+
+- **`av/AudioDecoder.kt`** — the one decode interface (`AudioDecoder`), `PcmPassthrough`,
+  `MediaCodecAacDecoder`, `AacCsd` (LC + ELD AudioSpecificConfig builders, moved out of the players),
+  `AudioDecoders` (codec → path dispatch, `canDecode`, `open`), `PcmLevel` (the shared -32 dBFS gate).
+- **`av/MediaAudioPlayer.kt`** replaces `AacPlayer`: consumes `VoiceTag`-framed media, dispatches on
+  the tag's codec, honours the tag's rate/channels (48 k stereo is only the prime). One `USAGE_MEDIA`
+  track. `MediaFocus` holds `AUDIOFOCUS_GAIN`, maps focus changes to gain (CAN_DUCK 0.2, transient/
+  permanent loss 0), and on a permanent loss asks the phone to pause (`MEDIA_BTN_PAUSE`) and re-requests
+  once audible media resumes. `MediaTrack` carries the `carlink_native` discipline: 4x min buffer,
+  `PERFORMANCE_MODE_NONE`, 80 ms pre-fill before `play()`, re-arm after a ≥1 s gap, `underrunCount`
+  deltas logged, `ERROR_DEAD_OBJECT` rebuild, `THREAD_PRIORITY_URGENT_AUDIO` on the writer.
+- **`AudioSeam`** — media lane now emits `VoiceTag` frames (PCM byte-swapped BE→LE; AAC-LC raw AU)
+  instead of ADTS. The voice lane is unchanged.
+- **`VoiceRouter`** — sinks decode through `AudioDecoders` (ELD csd/`openDecoder`/`peakExceeds` moved
+  out; routing, focus, keep-alive, idle sweep untouched).
+- **`av/VideoCodecs.kt` + `av/VideoRenderer.kt`** replace `HevcRenderer`: codec latched from the first
+  parameter set (`sniff`), H.264 and HEVC csd handling, `probe()` for the advertisement.
+- **`CarlinkManager`** — `vehicleConfigSpec()` sets `enablesHevc` from the probe; wires
+  `MediaAudioPlayer(onFocusLost = pause the phone)`.
+- Tests: `AudioDecodersTest`, `VideoCodecsTest`, `SeamTest` (media tag + wired PCM byte-swap),
+  `VehicleConfigYamlTest` (`enablesHEVC` follows the probe).
+
+### Ported from `carlink_native`, changed, and not carried over
+
+Ported (measured on the GM head unit there): `AudioTrack` sizing (`bufferMultiplier` 4,
+`PERFORMANCE_MODE_NONE` because `AUDIO_OUTPUT_FLAG_FAST` is denied to third-party apps), the per-purpose
+usage → track mapping (`purposeToAttributes`: MEDIA/USAGE_MEDIA, PHONE_CALL/VOICE_COMMUNICATION,
+SIRI/ASSISTANT, ALERT/VOICE_COMMUNICATION_SIGNALLING, NAVIGATION/ASSISTANCE_NAVIGATION_GUIDANCE — already
+what `VoiceRouter.Purpose` uses), the focus gain types (GAIN for media, TRANSIENT for call/Siri/alert,
+TRANSIENT_MAY_DUCK for nav — likewise already in place), the MEDIA focus listener's gain map, pre-fill
+before `play()`, underrun accounting and recovery (re-arm pre-fill), dead-object recreation, URGENT_AUDIO
+priority, and the mic capture manager (already ported earlier, 2026-08-15, with mSBC added).
+
+Changed: no playback thread + `AudioRingBuffer` for output. `carlink_native`'s USB ingest thread must
+never block, so a ring decoupled it; here `SeamPipe` (bounded, blocking) already decouples the OCBM
+read thread from each consumer, and the consumer's blocking `AudioTrack.write` is the pacing — a second
+ring would only add latency. Stream identity comes from the seam's per-stream `atype`/codec tag, not
+from riddleBox `decode_type` heuristics (`AudioFormats.fromDecodeType`, zero-packet filter, nav
+"end marker" / warm-up-noise skipping) — none of those apply to a format-tagged stream.
+
+Not carried over (bugs in the reference): (1) `getOrCreateFocusListener` set `focusDuckLevel = 0` on
+`AUDIOFOCUS_LOSS` and nothing ever re-requested media focus or told the phone, so media stayed muted
+until the next `MEDIA_START`; (2) `AudioFormatConfig.bitDepth` was decorative — `ENCODING_PCM_16BIT`
+regardless — whereas the seam's `bits` is honoured (a non-16-bit PCM stream is dropped with a diagnostic);
+(3) nav packets were dropped for ~2 s after `NAVI_STOP` by counting consecutive zero packets, which
+on a stream that carries digital silence by design would have eaten real prompts.
+
+### Verification status (2026-09-25)
+
+- Gate green: `bt ./gradlew :app:assembleSideloadDebug :app:detekt :app:ktlintCheck :app:testSideloadDebugUnitTest`;
+  `detekt-baseline.xml` unchanged.
+- Emulator-5554 after install: `[media] media audio focus: GRANTED`, `[media] AudioTrack 48000Hz 2ch
+  buffer=36928B (min 9232) prefill=15360B`, `[video] stream codec: hevc`, `MediaCodec configured:
+  video/hevc 2400x788 ... decoder=c2.goldfish.hevc.decoder`, and the probe line
+  `decoders at 2400x788@60: h264=c2.goldfish.h264.decoder hevc=c2.goldfish.hevc.decoder -> enablesHEVC=true`.
+- **Wired-CarPlay media PCM: PROVEN end to end (2026-09-25, emulator-5554 / chevy12, user 10).** The
+  first relaunch after install dropped the iPhone off the box's USB bus (`PROJ_MODE WIRED_CP → NONE`,
+  `SESSION_EVENT PHONE_ABSENT`; recovered only by the user re-plugging the phone). Once re-plugged:
+  `[ocbm ] audio format scid=…: codec=PCM 48000Hz 2ch atype=0 -> media`,
+  `[media] configured PCM 48000Hz 2ch -> AudioTrack(USAGE_MEDIA), decoder=direct PCM`,
+  `[media] pre-fill complete: 15576B (~81 ms) buffered, playback started`, `[media] FIRST AUDIO FRAME PLAYED`,
+  `[media] 32000 media frames played` with no `dropping` line. `dumpsys media.audio_flinger`, two
+  samples 5 s apart: `Output thread … name AudioOut_D … Standby: no … Frames written: 11256192` →
+  `11498112` (241 920 frames / 5 s ≈ 48.4 kHz). `dumpsys audio`: `pack: zeno.carlink.ocbm … client:
+  …MediaFocus… gain: GAIN … attr: AudioAttributes: usage=USAGE_MEDIA content=CONTENT_TYPE_MUSIC`.
+  Nav, Siri and telephony rows remain unexercised on this build (no route or Siri turn was driven).
 
 ## Mic path tests (2026-08-15)
 

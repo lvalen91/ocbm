@@ -4,10 +4,10 @@ import com.carlink.logging.ProbeLog
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * `CH_VIDEO` / `CH_ALT_VIDEO` → Annex-B, for the proven `HevcRenderer`.
+ * `CH_VIDEO` / `CH_ALT_VIDEO` → Annex-B, for the proven `VideoRenderer`.
  *
  * Feed raw OCBM payload bytes with [feed]; complete access units come out the other side as
- * `[u32 BE len][Annex-B]` messages on [pipe] — **exactly the framing `HevcRenderer.consume` already
+ * `[u32 BE len][Annex-B]` messages on [pipe] — **exactly the framing `VideoRenderer.consume` already
  * expects** (it was written against the box's legacy on-box-decrypt seam, `forward_screen`). So this
  * class is a transcoder from the forward-encrypted v2 seam into that legacy shape, and the renderer
  * needs no change at all.
@@ -91,7 +91,7 @@ class VideoSeam(
     /**
      * The current output pipe, or null when there is no surface to decode to.
      *
-     * **Swappable on purpose, and this is load-bearing.** `HevcRenderer`'s surface is bound at
+     * **Swappable on purpose, and this is load-bearing.** `VideoRenderer`'s surface is bound at
      * construction, so its pipe and consumer thread live and die with the Surface — but the ChaCha20
      * key and the frame sequence counter live in *this* object and are scoped to the OCBM **session**.
      * Rebuilding the seam on a surface change would throw the key away, and the box only re-sends it

@@ -55,6 +55,58 @@ canonical control, box-autonomous page-on-boot) are **not** open items and are n
 > `/script/start_bluetooth_wifi.sh` call, the missing `iap_role_switch` install). They are
 > deliberately not duplicated here so the two documents cannot drift.
 
+- **Host-app controls waiting on box verbs (2026-09-25, from the Android Settings → OCBM audit;
+  app side landed in `host/CarlinkAndroid`, see OCBMANDROID.md "Settings → OCBM action mappings").**
+  The app hooks exist and are capability-gated; NOTHING below is implemented box-side, and no verb
+  id is assigned — the proposed shapes are in
+  [../carplay/01_OCBM_PROTOCOL.md](../carplay/01_OCBM_PROTOCOL.md) ("Proposed MGMT verbs").
+  1. **`MGMT_DISCONNECT_PHONE`, transport-aware, plus a capability bit.** Problem: the app's
+     Disconnect Phone has no honest verb to send — OCBM's six MGMT verbs are
+     `crates/ocbm-proto/src/lib.rs:334-346`, dispatched at `ccpa/ocbmd/src/main.rs:3397-3446`; the
+     Android button used to send `MGMT_RESTART_WIRELESS` in disguise (nothing for a wired phone, a
+     whole-stack bounce for a wireless one). Proposed semantics — WIRED: end the CarPlay session and
+     soft-detach / re-attach the phone-facing USB gadget so iOS sees an unplug (the un-CONFIGURED
+     edge `iap2d` already exits on, per CLAUDE.md's wired-tier note; `projection_up` respawns it);
+     WIRELESS: drop that phone's BT ACL + Wi-Fi session WITHOUT `wireless_down` (btd's control port
+     already addresses one phone, `crates/vendor/wireless/src/control.rs:34-39`); BOTH: a reconnect
+     hold-off so the phone does not re-page at once, `MGMT_ACK` 0/1, and a `CAP_*` bit in
+     `HELLO_ACK` so a host can enable the button. App hook waiting: `OcbmClient.supportsPhoneDisconnect`
+     (one line: `caps and CAP_<bit> != 0`) → `OcbmClient.disconnectPhone()` →
+     `CarlinkManager.disconnectPhone()` → the Control-tab button enables itself and its
+     "Requires adapter firmware support" line disappears; no UI edit. Acceptance: wired session,
+     press Disconnect Phone → iOS ends CarPlay within ~2 s, box emits `SEV_PHONE_ABSENT` then
+     `SEV_PHONE_PRESENT`, no re-arm during the hold-off, the phone reconnects on its own afterwards;
+     wireless session, same press → `BT_PHASE IDLE`, `PROJ_MODE NONE`, hostapd and hci stay up
+     (no `wireless_down` in the supervisor log), the phone re-pages after the hold-off.
+  2. **`MGMT_CONNECT_DEVICE [ascii MAC]` — targeted connect.** Problem: a Phones-tab card tap used
+     to send `MGMT_RESTART_WIRELESS` (wrong with two bonds, a radio bounce for a wired phone); the
+     cards are information-only until this exists. Evidence: btd's control port already has
+     `{"cmd":"connect","address":..}` (`crates/vendor/wireless/src/control.rs:36`, dispatch `:499`)
+     next to the `pair_answer` verb (`:557`) that ocbmd already relays (`send_pair_answer`,
+     `ccpa/ocbmd/src/main.rs:2269`) — the MGMT relay is the only missing piece. Semantics: forward
+     to btd, `MGMT_ACK` 1 when the MAC is not bonded. App hook waiting: re-add
+     `CarlinkManager.connectToDevice(mac)` → `mgmtAction(MGMT_CONNECT_DEVICE, mac)` and the card's
+     `onTap`. Acceptance: two bonded phones in range, tap B → `BT_PHASE LINK_UP` →
+     `CT_PHONE_IDENT.deviceID == B`.
+  3. **"Phone drop on host re-SUBSCRIBE" (`PROJ_MODE NONE` then `SESSION_EVENT PHONE_ABSENT` after
+     an app relaunch) — NOT reproduced, 2026-09-25.** Three timelines, all wired, the phone never
+     left the bus in any: (a) kill-without-STOP relaunch (`adb install -r`): SUBSCRIBE → stale
+     `WIRED_CP` replay → `NONE` +2.5 s (the box's forced re-arm teardown) → `WIRED_CP` +4.5 s →
+     video +6.8 s; (b) clean CT_STOP then a 27.6 s gap (activity destroyed, relaunched): SUBSCRIBE →
+     `NONE` immediately (box already idle) → `WIRED_CP` +2.5 s → video +4.3 s; (c) the app's
+     clean-slate reset (CT_STOP, 6 s wait, new nonce): SUBSCRIBE → `NONE` immediately →
+     `WIRED_CP` +5.2 s → video +7.1 s. So after a clean STOP plus ≥ 6 s the box is idle at
+     re-SUBSCRIBE and `PROJ_MODE NONE` is the replayed CURRENT state, not a transition, and the
+     host returning "before teardown completes" is only the (a) shape — which still kept the phone.
+     If `PHONE_ABSENT` recurs, look at the supervisor's L1 `phone_reset` rung
+     (`tools/session_supervisor.sh`, `escalate`) and the gadget un-CONFIGURED edge, not at host timing.
+  4. **Is the A/V session key re-issued to a same-nonce re-SUBSCRIBE?** Still open. Today's resets
+     rotate the nonce, so they cannot answer it; the same-nonce paths are the heartbeat
+     re-SUBSCRIBE after `SEV_HOST_GONE` (`OcbmClient.startHeartbeat`) and a USB-blip reattach.
+     Test: with carplayd alive, starve the heartbeat past `HEARTBEAT_GRACE` (10 s), let the client
+     re-SUBSCRIBE, and check whether a fresh seam key arrives (`onSessionKeyed`, the lanes'
+     `keys=` counter) before any A/V frame.
+
 - **No inbound `stopSession` handler.** The box declares a five-value `stopSessionReasons`
   vocabulary and then ignores the command; `disconnectReason` plumbing to the supervisor follows
   from the same gap. Both halves sit behind `CARPLAY_SESSION_MGMT`, so shipping the declaration
@@ -1230,9 +1282,10 @@ CLOSED or materially advanced (test-green; **NOT hardware-verified** unless stat
 
 STILL OPEN (re-checked, not newly found this session — carried forward): the host-side `mgmtLock`
 gap; `CH_MGMT` typed surface (`MgmtInfo`) and `CH_FILE` `FILE_PULL` for config readback; `META_CMD`
-only partly consumed; the FGS microphone-type issue; wireless pairing — the Android client receives
-`CT_PAIRING_CODE` (`OcbmProto.kt`, `OcbmClient.kt`) but still never answers with `CT_PAIR_CONFIRM`,
-so SSP numeric-comparison pairing cannot complete from Android.
+only partly consumed; the FGS microphone-type issue; ~~wireless pairing — the Android client receives
+`CT_PAIRING_CODE` but never answers with `CT_PAIR_CONFIRM`~~ **CLOSED app-side 2026-09-25:**
+`OcbmClient.sendPairConfirm` + a Pair / Cancel prompt on the main screen (bytes pinned by
+`OcbmClientTest`; not yet exercised against a real wireless pairing).
 
 NEW open items:
 - **`:app` cannot use `CarProjectionManager`/`ProjectionStatus`, `CAR_NAVIGATION_MANAGER` cluster

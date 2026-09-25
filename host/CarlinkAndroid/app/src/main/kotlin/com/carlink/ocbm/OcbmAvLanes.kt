@@ -23,7 +23,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * throttles that encoder). Interposing a queue would replace a closed loop with an unbounded buffer and
  * merely move the head-of-line problem.
  *
- * That design has exactly one hazard. `HevcRenderer.consume` `break`s out of its loop on an implausible
+ * That design has exactly one hazard. `VideoRenderer.consume` `break`s out of its loop on an implausible
  * seam length — a dead consumer — while the pipe is still open, and `SeamPipe.write` only returns false
  * once the pipe is **closed**. A dead consumer plus an open pipe therefore blocks the USB read thread
  * forever, taking every other channel down with it.
@@ -35,7 +35,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * ## Scoping
  *
  * Audio and metadata are **session**-scoped (as in the reference implementation, where the players are
- * activity-scoped and only the video renderer is surface-scoped). Video is different: `HevcRenderer`
+ * activity-scoped and only the video renderer is surface-scoped). Video is different: `VideoRenderer`
  * binds its Surface at construction, so its pipe and thread are **surface**-scoped and are owned by the
  * caller's video epoch. The [videoSeam] stays here because it holds the session's decrypt key —
  * see [VideoSeam.attach].

@@ -6,13 +6,9 @@ import android.media.AudioFocusRequest
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
-import android.media.MediaCodec
-import android.media.MediaFormat
 import com.carlink.logging.ProbeLog
-import com.carlink.ocbm.seam.SeamCrypto
 import com.carlink.ocbm.seam.VoiceTag
 import java.io.InputStream
-import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
@@ -62,6 +58,7 @@ class VoiceRouter(
 ) {
     private val log = ProbeLog.sub("voice")
     private val running = AtomicBoolean(false)
+    private val policy = TransientFocusPolicy()
     private val am = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
 
     /** One sink per PURPOSE, created lazily — most sessions never see a call or an alert. */
@@ -96,14 +93,16 @@ class VoiceRouter(
         // context active after the call ends, which is exactly the stuck-knob bug.
         CALL(AudioAttributes.USAGE_VOICE_COMMUNICATION, AudioAttributes.CONTENT_TYPE_SPEECH, "call", 3_000L),
 
-        // bus2_voice_command_out — longest window AND keep-alive: Siri goes quiet between prompt and
-        // answer, and a drained track stops being an active player, which is what makes the head
-        // unit's volume knob ignore Siri and adjust media instead.
+        // bus2_voice_command_out — keep-alive: Siri goes quiet between prompt and answer, and a
+        // drained track stops being an active player, which is what makes the head unit's volume
+        // knob ignore Siri and adjust media instead. The idle window is only a BACKSTOP now: the
+        // sink is released on the real end-of-Siri signals (see releaseQuietSinks), because holding
+        // USAGE_ASSISTANT transient focus keeps media at gain 0 for as long as it lasts.
         ASSISTANT(
             AudioAttributes.USAGE_ASSISTANT,
             AudioAttributes.CONTENT_TYPE_SPEECH,
             "siri",
-            15_000L,
+            ASSISTANT_HOLD_MS_VALUE,
             keepAlive = true,
         ),
 
@@ -121,46 +120,11 @@ class VoiceRouter(
             AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE,
             AudioAttributes.CONTENT_TYPE_SPEECH,
             "nav",
-            8_000L,
+            NAV_IDLE_MS_VALUE,
         ),
     }
 
     private companion object {
-        /**
-         * AAC-ELD AudioSpecificConfig as the shipping fdk-aac encoder actually emits it
-         * (`ccpa_custom/docs/50`): SBR enabled by fdk auto-mode, frameLength 480. NOT the
-         * `f8f03000` the older docs claim. `:9003` carries RAW access units with no ADTS header, so
-         * MediaCodec has to be handed this or it cannot configure at all.
-         */
-        val ELD_CSD_16K_MONO =
-            byteArrayOf(
-                0xF8.toByte(),
-                0xF0.toByte(),
-                0x31,
-                0x2C,
-                0x00,
-                0xBC.toByte(),
-                0x00,
-            )
-
-        /** samplingFrequencyIndex per ISO/IEC 14496-3 Table 1.16. */
-        val SF_INDEX =
-            intArrayOf(
-                96000,
-                88200,
-                64000,
-                48000,
-                44100,
-                32000,
-                24000,
-                22050,
-                16000,
-                12000,
-                11025,
-                8000,
-                7350,
-            )
-
         /** Never re-attempt configure per access unit — that drains the codec pool in seconds. */
         const val CONFIGURE_RETRY_MS = 5_000L
 
@@ -186,64 +150,17 @@ class VoiceRouter(
          * `audioVolumeKeyEventTimeoutMs`, or MUSIC re-enters the active set (and re-latches the knob)
          * while the driver is still reaching for the dial.
          */
-        const val ASSISTANT_HOLD_MS = 4_000L
+        const val ASSISTANT_HOLD_MS = ASSISTANT_HOLD_MS_VALUE
 
         /** Restore media this long after the last ENERGETIC frame on any voice sink. */
         const val DUCK_RELEASE_MS = 1_500L
-    }
 
-    /**
-     * Build an AAC-ELD AudioSpecificConfig for [rate]/[channels].
-     *
-     * A single hardcoded ASC was wrong: it encodes AOT 39, samplingFrequencyIndex 8 (16 kHz),
-     * channelConfiguration 1 — and AAC decoders treat csd-0 as AUTHORITATIVE over KEY_SAMPLE_RATE
-     * and KEY_CHANNEL_COUNT. The producer puts MIXED formats on this one socket (telephony/Siri
-     * 16 k mono, alert/nav 48 k stereo), so handing every sink the 16 k mono ASC made nav and alert
-     * either fail to configure or decode ~3x fast with the channels garbled.
-     *
-     * Layout: 5 bits AOT (39 = ER AAC ELD, so escape 31 + 6-bit (39-32)), 4 bits freq index,
-     * 4 bits channel config, then the ELDSpecificConfig. The 16 k mono case is returned verbatim
-     * from the capture in `ccpa_custom/docs/50` rather than synthesised, because that one is
-     * device-confirmed against the shipping fdk encoder (SBR on, frameLength 480).
-     */
-    private fun eldCsd(
-        rate: Int,
-        channels: Int,
-    ): ByteArray {
-        if (rate == 16000 && channels == 1) return ELD_CSD_16K_MONO
-        val fi = SF_INDEX.indexOf(rate).let { if (it < 0) 3 else it } // default 48 kHz
-        val ch = channels.coerceIn(1, 2)
-        // 11111 (esc) 000111 (39-32) | fi(4) | ch(4) | ELDSpecificConfig: frameLengthFlag=0,
-        // aacSectionDataResilience=0, aacScalefactorDataResilience=0, aacSpectralDataResilience=0,
-        // ldSbrPresentFlag=0, then a 4-bit ELDEXT_TERM(0).
-        var acc = 0L
-        var bits = 0
-
-        fun put(
-            v: Int,
-            n: Int,
-        ) {
-            acc = (acc shl n) or (v.toLong() and ((1L shl n) - 1))
-            bits += n
-        }
-        put(31, 5)
-        put(39 - 32, 6)
-        put(fi, 4)
-        put(ch, 4)
-        // frameLengthFlag = 1 => 480 samples. NOT 0/512: every proven ELD config in this project
-        // is 480 (the macOS decoder hardcodes it at every rate, and the device-confirmed 16k ASC
-        // sets this bit). A frameLength mismatch is a configure failure or garbage output.
-        put(1, 1)
-        put(0, 1)
-        put(0, 1)
-        put(0, 1)
-        put(0, 1)
-        put(0, 4)
-        val pad = (8 - (bits % 8)) % 8
-        put(0, pad)
-        val out = ByteArray((bits) / 8)
-        for (i in out.indices) out[i] = ((acc shr ((out.size - 1 - i) * 8)) and 0xFF).toByte()
-        return out
+        /**
+         * NAV idle backstop. Was 8 s: while the NAV sink held MAY_DUCK focus, AAOS kept media at
+         * 0.2 (`LOSS_TRANSIENT_CAN_DUCK`) for the whole window after every prompt. Guidance phrases
+         * inside one prompt are well under 2 s apart; prompts are tens of seconds apart.
+         */
+        const val NAV_IDLE_MS = NAV_IDLE_MS_VALUE
     }
 
     fun start() {
@@ -268,6 +185,11 @@ class VoiceRouter(
                     val now = android.os.SystemClock.elapsedRealtime()
                     runCatching { synchronized(sinks) { sinks.values.forEach { it.keepAlive(now) } } }
                     runCatching { assistantTick(now) }
+                    runCatching {
+                        if (policy.uplinkReleaseDue(now)) {
+                            releaseQuietSinks("uplink closed ${TransientFocusPolicy.UPLINK_GRACE_MS} ms ago", KEEPALIVE_AFTER_MS, UPLINK_PURPOSES)
+                        }
+                    }
                     runCatching { sweepIdle() }
                 }
             }, "cp-voice-sweep").apply {
@@ -279,7 +201,7 @@ class VoiceRouter(
     private var sweeper: Thread? = null
 
     /**
-     * FLAG-ONLY teardown, exactly like [AacPlayer.stop].
+     * FLAG-ONLY teardown, exactly like [MediaAudioPlayer.stop].
      *
      * It releases NOTHING. [consume] owns every codec and track and releases them on its own thread
      * in its `finally`. Releasing here — from the UI thread, via onDestroy — while the consume
@@ -367,6 +289,50 @@ class VoiceRouter(
         assistantWasActive = live
         log.i("assistant ${if (live) "SPEAKING — pausing media so the knob can reach the voice group" else "done — media resumes"}")
         runCatching { onAssistant(live) }
+        // "done" = quiet for ASSISTANT_HOLD_MS. Resuming media while still holding USAGE_ASSISTANT
+        // transient focus is what left it at gain 0 (AAOS LOSS_TRANSIENT) until the old 15 s sweep.
+        // NOT while the uplink is open: Siri is still listening (its 4-5 s silent gap between the
+        // chime and the answer), and releasing there flapped focus for 9 ms and disarmed the resume
+        // fade-in (measured 2026-09-25). UPLINK OFF + grace or audible media release it instead.
+        if (!live && !policy.uplinkOn) releaseQuietSinks("assistant done", ASSISTANT_HOLD_MS, setOf(Purpose.ASSISTANT))
+    }
+
+    /**
+     * `CT_UPLINK` edge from the box. OFF starts the [TransientFocusPolicy] grace; ON inside it keeps
+     * the held focus (a Siri follow-up), ON otherwise is just the next turn's own configure.
+     */
+    fun onUplinkGate(on: Boolean) {
+        policy.uplinkChanged(on, android.os.SystemClock.elapsedRealtime())
+    }
+
+    /**
+     * Give back the transient focus of every sink in [purposes] that has been quiet for at least
+     * [minQuietMs] — the end-of-stream release the idle sweep only backstops. Called on the real
+     * end-of-Siri signals: "assistant done", UPLINK OFF + grace, and audible media resuming
+     * (`MediaAudioPlayer`). A sink still speaking is never released; the next AU rebuilds a released one.
+     */
+    fun releaseQuietSinks(
+        reason: String,
+        minQuietMs: Long,
+        purposes: Set<Purpose> = Purpose.entries.toSet(),
+    ) {
+        if (!running.get()) return
+        val now = android.os.SystemClock.elapsedRealtime()
+        val dead = ArrayList<Purpose>()
+        synchronized(sinks) {
+            for ((p, sk) in sinks) {
+                if (p in purposes && sk.isConfigured && now - sk.lastAudioAt >= minQuietMs) dead.add(p)
+            }
+            dead.forEach { sinks.remove(it)?.release() }
+        }
+        dead.forEach { log.i("${it.label}: released ($reason) — focus + volume group freed") }
+        if (dead.isNotEmpty()) sweepDuck(now)
+    }
+
+    /** Drop the software duck when no configured sink has been loud within DUCK_RELEASE_MS. */
+    private fun sweepDuck(now: Long) {
+        val anyLoud = synchronized(sinks) { sinks.values.any { it.isConfigured && now - it.lastAudioAt < DUCK_RELEASE_MS } }
+        if (!anyLoud) onDuck(false)
     }
 
     private fun sweepIdle() {
@@ -382,11 +348,16 @@ class VoiceRouter(
                 if (!s.isConfigured) continue
                 val quiet = now - s.lastAudioAt
                 if (quiet < DUCK_RELEASE_MS) anyLoud = true
-                if (quiet > p.idleMs) dead.add(p) // per-purpose, not one global window — see [Purpose]
+                // While the mic uplink is open, Siri/a call is still in session however quiet the
+                // downlink is (Siri's 4-5 s listening gap): sweeping then flapped focus for 1 ms
+                // mid-turn (measured 2026-09-25). UPLINK OFF + grace releases those sinks; the long
+                // window is only the backstop for a lost gate.
+                val window = if (p in UPLINK_PURPOSES && policy.uplinkOn) UPLINK_BACKSTOP_MS else p.idleMs
+                if (quiet > window) dead.add(p) // per-purpose, not one global window — see [Purpose]
             }
             dead.forEach { sinks.remove(it)?.release() }
         }
-        dead.forEach { log.i("${it.label}: idle ${it.idleMs / 1000}s — released (focus + volume group freed)") }
+        dead.forEach { log.i("${it.label}: idle — released (focus + volume group freed)") }
         if (!anyLoud) onDuck(false)
     }
 
@@ -397,18 +368,6 @@ class VoiceRouter(
 
     /** Warn once per (purpose, codec) this router cannot decode rather than per access unit. */
     private val undecodableLogged = java.util.Collections.synchronizedSet(HashSet<String>())
-
-    private fun codecName(c: Int) =
-        when (c) {
-            SeamCrypto.CODEC_PCM -> "PCM"
-            SeamCrypto.CODEC_AAC_LC -> "AAC-LC"
-            SeamCrypto.CODEC_AAC_ELD -> "AAC-ELD"
-            SeamCrypto.CODEC_OPUS -> "OPUS"
-            SeamCrypto.CODEC_MSBC -> "mSBC"
-            else -> "codec$c"
-        }
-
-    private fun canDecode(codec: Int) = codec == SeamCrypto.CODEC_AAC_ELD || codec == SeamCrypto.CODEC_PCM
 
     /**
      * `atype` 4 (`default`) is the one value that needs the format to disambiguate: 16 kHz mono is
@@ -440,16 +399,16 @@ class VoiceRouter(
     ) {
         val p =
             purposeFor(atype, rate, ch) ?: run {
-                if (unroutedLogged.add(atype)) log.w("atype $atype (${rate}Hz ${ch}ch ${codecName(codec)}) has no sink — dropping")
+                if (unroutedLogged.add(atype)) log.w("atype $atype (${rate}Hz ${ch}ch ${AudioDecoders.codecName(codec)}) has no sink — dropping")
                 return
             }
         // Decide BEFORE touching the sink map: a stream this router cannot decode must not request
         // focus, open a track on its volume group, or — worst — be handed to the ELD decoder.
-        if (!canDecode(codec)) {
+        if (!AudioDecoders.canDecode(codec)) {
             if (undecodableLogged.add("${p.label}/$codec")) {
                 log.w(
-                    "${p.label}: stream is ${codecName(codec)} ${rate}Hz ${ch}ch; this router decodes " +
-                        "AAC-ELD and S16LE PCM only — dropping, not feeding it to the ELD decoder",
+                    "${p.label}: stream is ${AudioDecoders.codecName(codec)} ${rate}Hz ${ch}ch; AudioDecoders has no path " +
+                        "for it — dropping, not feeding it to the wrong decoder",
                 )
             }
             return
@@ -460,8 +419,8 @@ class VoiceRouter(
             }
         if (sink.isConfigured && !sink.matches(rate, ch, codec)) {
             log.i(
-                "${p.label}: format changed ${sink.rate}Hz${sink.channels}ch ${codecName(sink.codec)} -> " +
-                    "${rate}Hz${ch}ch ${codecName(codec)}",
+                "${p.label}: format changed ${sink.rate}Hz${sink.channels}ch ${AudioDecoders.codecName(sink.codec)} -> " +
+                    "${rate}Hz${ch}ch ${AudioDecoders.codecName(codec)}",
             )
             sink.release()
             sink.configure(rate, ch, codec)
@@ -511,8 +470,8 @@ class VoiceRouter(
 
         @Volatile var lastAudioAt = 0L
 
-        /** Null for a PCM sink; the AAC-ELD MediaCodec otherwise. */
-        @Volatile private var decoder: MediaCodec? = null
+        /** [AudioDecoders] path for this sink's codec: PCM passthrough or an AAC MediaCodec. */
+        @Volatile private var decoder: AudioDecoder? = null
 
         @Volatile private var track: AudioTrack? = null
 
@@ -581,7 +540,7 @@ class VoiceRouter(
         ) {
             val now = android.os.SystemClock.elapsedRealtime()
             if (configureFailedAt != 0L && now - configureFailedAt < CONFIGURE_RETRY_MS) return
-            var mc: MediaCodec? = null
+            var dec: AudioDecoder? = null
             var tk: AudioTrack? = null
             try {
                 val attrs =
@@ -594,9 +553,9 @@ class VoiceRouter(
                 // a track that starts without focus can claim the group before the request lands.
                 focus = requestFocus(attrs)
                 tk = openTrack(attrs, r, c)
-                mc = openDecoder(cod, r, c)
+                dec = AudioDecoders.open(cod, r, c)
 
-                decoder = mc
+                decoder = dec
                 track = tk
                 rate = r
                 channels = c
@@ -605,13 +564,12 @@ class VoiceRouter(
                 configureFailedAt = 0L
                 lastAudioAt = now
                 log.i(
-                    "${p.label}: ${codecName(cod)} ${r}Hz ${c}ch -> AudioTrack(usage=${p.usage})" +
-                        (mc?.let { ", decoder=${it.name}" } ?: " (direct PCM, no decoder)"),
+                    "${p.label}: ${AudioDecoders.codecName(cod)} ${r}Hz ${c}ch -> AudioTrack(usage=${p.usage}), decoder=${dec.name}",
                 )
             } catch (e: Throwable) {
                 // Throwable, not Exception: an OutOfMemoryError here is an Error, and letting it
                 // escape leaks the native codec AND leaves the backoff unarmed.
-                runCatching { mc?.release() }
+                runCatching { dec?.close() }
                 runCatching { tk?.release() }
                 runCatching { focus?.let { am.abandonAudioFocusRequest(it) } }
                 focus = null
@@ -622,60 +580,23 @@ class VoiceRouter(
 
         fun feed(au: ByteArray) {
             val t = track ?: return
-            if (codec == SeamCrypto.CODEC_PCM) {
-                // Already S16LE at the track's rate — the seam byte-swapped the AirPlay downlink and
-                // decoded mSBC, so this is the CVSD / wideband call audio (or wired PCM voice) as-is.
-                if (au.size >= 2) render(au, t)
-                return
-            }
-            val c = decoder ?: return
+            val d = decoder ?: return
             try {
-                val inIdx = c.dequeueInputBuffer(10_000)
-                if (inIdx >= 0) {
-                    // Once dequeued the index MUST be queued back on every path. Input buffers are a
-                    // fixed pool (4-8); leaking them makes dequeueInputBuffer return TRY_AGAIN_LATER
-                    // forever — the sink goes silent with no error and every later AU pays the full
-                    // 10 ms timeout.
-                    var size = 0
-                    try {
-                        val ib = c.getInputBuffer(inIdx)
-                        if (ib != null) {
-                            ib.clear()
-                            if (au.size <= ib.remaining()) {
-                                ib.put(au)
-                                size = au.size
-                            } else {
-                                log.w("${p.label}: AU ${au.size} > input buffer ${ib.remaining()} — dropped")
-                            }
-                        }
-                    } finally {
-                        c.queueInputBuffer(inIdx, 0, size, 0, 0)
-                    }
+                d.decode(au, 0, au.size) { pcm, off, len ->
+                    // render() may release the sink (dead track) mid-decode; later callbacks of the
+                    // same decode then see decoder == null and must not touch the released track.
+                    if (decoder != null) render(pcm, off, len, t)
                 }
-                val info = MediaCodec.BufferInfo()
-                while (true) {
-                    val o = c.dequeueOutputBuffer(info, 0)
-                    if (o < 0) break
-                    val ob = c.getOutputBuffer(o)
-                    if (ob != null && info.size > 0) {
-                        val pcm = ByteArray(info.size)
-                        ob.position(info.offset)
-                        ob.get(pcm)
-                        // render() released the sink (dead track): the codec is gone too, so do
-                        // not touch its buffers — the outer catch would otherwise arm the 5 s
-                        // backoff that the dead-track path deliberately zeroes.
-                        if (!render(pcm, t)) return
-                    }
-                    c.releaseOutputBuffer(o, false)
-                }
-            } catch (e: Exception) {
+            } catch (e: IllegalStateException) {
+                // MediaCodec.CodecException IS an IllegalStateException. If render() already released
+                // for a dead track, the decoder is null and its ZEROED backoff stands (rebuild on the
+                // next AU); otherwise this is a real codec fault: release and ARM the backoff, or the
+                // next AU reconfigures immediately and a persistent fault rebuilds a codec + track
+                // per frame.
+                if (decoder == null) return
                 log.e("${p.label}: feed ${e.javaClass.simpleName}: ${e.message}")
-                if (e is MediaCodec.CodecException || e is IllegalStateException) {
-                    release()
-                    // Arm the backoff, or the next AU reconfigures immediately and a persistent
-                    // fault rebuilds a codec + track per frame.
-                    configureFailedAt = android.os.SystemClock.elapsedRealtime()
-                }
+                release()
+                configureFailedAt = android.os.SystemClock.elapsedRealtime()
             }
         }
 
@@ -731,48 +652,25 @@ class VoiceRouter(
         }
 
         /**
-         * The MediaCodec for [cod], started; null for PCM (the seam delivers S16LE and the track
-         * takes it as-is). Throws for anything else — `route()` filters those before a sink exists.
-         */
-        private fun openDecoder(
-            cod: Int,
-            r: Int,
-            c: Int,
-        ): MediaCodec? =
-            when (cod) {
-                SeamCrypto.CODEC_PCM -> null
-                SeamCrypto.CODEC_AAC_ELD -> {
-                    val fmt = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, r, c)
-                    fmt.setInteger(
-                        MediaFormat.KEY_AAC_PROFILE,
-                        android.media.MediaCodecInfo.CodecProfileLevel.AACObjectELD,
-                    )
-                    fmt.setByteBuffer("csd-0", ByteBuffer.wrap(eldCsd(r, c)))
-                    MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_AUDIO_AAC).also {
-                        it.configure(fmt, null, null, 0)
-                        it.start()
-                    }
-                }
-                else -> throw IllegalArgumentException("codec ${codecName(cod)} is not decodable here")
-            }
-
-        /**
          * Write S16LE PCM to the track, driving the duck/idle clock off its energy. Returns false if
          * the track died and was released (the caller must stop touching it).
          */
         private fun render(
             pcm: ByteArray,
+            off: Int,
+            len: Int,
             t: AudioTrack,
         ): Boolean {
-            if (peakExceeds(pcm)) {
+            if (PcmLevel.audible(pcm, off, len, DUCK_PEAK_THRESHOLD)) {
                 lastAudioAt = android.os.SystemClock.elapsedRealtime()
                 onDuck(true)
             } else if (lastAudioAt == 0L) {
                 lastAudioAt = android.os.SystemClock.elapsedRealtime()
             }
-            var off = 0
-            while (off < pcm.size) {
-                val w = t.write(pcm, off, pcm.size - off, AudioTrack.WRITE_NON_BLOCKING)
+            var o = off
+            val end = off + len
+            while (o < end) {
+                val w = t.write(pcm, o, end - o, AudioTrack.WRITE_NON_BLOCKING)
                 if (w < 0) {
                     // ERROR_DEAD_OBJECT (audioserver restart / route change) is routine on a head
                     // unit, and a long-idle voice track is what provokes HAL standby. Rebuild rather
@@ -783,7 +681,7 @@ class VoiceRouter(
                     return false
                 }
                 if (w == 0) break // buffer full: drop the remainder, do not spin
-                off += w
+                o += w
             }
             return true
         }
@@ -798,8 +696,7 @@ class VoiceRouter(
             runCatching { t?.release() }
             val c = decoder
             decoder = null
-            runCatching { c?.stop() }
-            runCatching { c?.release() }
+            runCatching { c?.close() }
             runCatching { focus?.let { am.abandonAudioFocusRequest(it) } }
             focus = null
             rate = 0
@@ -810,17 +707,6 @@ class VoiceRouter(
     }
 
     // ---- helpers -----------------------------------------------------------------------------
-
-    /** int16 peak over the frame; ~-32 dBFS separates real speech from iOS's idle silence. */
-    private fun peakExceeds(pcm: ByteArray): Boolean {
-        var i = 0
-        while (i + 1 < pcm.size) {
-            val s = ((pcm[i + 1].toInt() shl 8) or (pcm[i].toInt() and 0xFF)).toShort().toInt()
-            if (s > DUCK_PEAK_THRESHOLD || s < -DUCK_PEAK_THRESHOLD) return true
-            i += 2
-        }
-        return false
-    }
 
     private fun readFully(
         ins: InputStream,
@@ -842,3 +728,13 @@ class VoiceRouter(
         return true
     }
 }
+
+/** ASSISTANT idle backstop = the hold after Siri's last audio (must exceed AAOS's ~3 s knob timeout). */
+private const val ASSISTANT_HOLD_MS_VALUE = 4_000L
+private const val NAV_IDLE_MS_VALUE = 2_000L
+
+/** The purposes whose stream rides the mic uplink; UPLINK OFF is their end-of-session signal. */
+private val UPLINK_PURPOSES = setOf(VoiceRouter.Purpose.ASSISTANT, VoiceRouter.Purpose.CALL)
+
+/** Idle backstop for the uplink purposes while the gate is still open (a lost UPLINK OFF). */
+private const val UPLINK_BACKSTOP_MS = 15_000L

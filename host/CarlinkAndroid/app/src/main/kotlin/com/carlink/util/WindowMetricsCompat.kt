@@ -63,10 +63,18 @@ data class PanelGeometry(
     val diagonalInches: Double,
     /** Where the numbers came from, for the subscribe log line. */
     val source: String,
+    /**
+     * `drawUIOutsideSafeArea` for the declared view area. True whenever [safe] is a real inset:
+     * with it OFF iOS paints the band between the safe rectangle and the panel edge BLACK; with it ON
+     * the wallpaper extends into it while interactive UI stays inside the safe rectangle
+     * (hardware-confirmed 2026-09-09, `docs/carplay/06_AV_PIPELINE.md`). A full-panel safe area sends
+     * `false`, which keeps that document byte-identical to before this flag existed.
+     */
+    val drawUiOutsideSafeArea: Boolean = false,
 ) {
     fun describe(): String =
         "panel ${width}x$height@$maxFps safe ${safe.width}x${safe.height}@${safe.x},${safe.y} " +
-            "dpi=$dpi diag=${"%.1f".format(diagonalInches)}\" ($source)"
+            "drawUIOutsideSafeArea=$drawUiOutsideSafeArea dpi=$dpi diag=${"%.1f".format(diagonalInches)}\" ($source)"
 
     companion object {
         fun fromConfig(c: AdapterConfig): PanelGeometry =
@@ -240,16 +248,20 @@ data class DisplayProfile(
 
     /** Everything the config needs, as one legal value. */
     val geometry: PanelGeometry
-        get() =
-            PanelGeometry(
+        get() {
+            val safe = safeArea
+            return PanelGeometry(
                 width = panelWidth,
                 height = panelHeight,
                 maxFps = maxFps,
-                safe = safeArea,
+                safe = safe,
                 dpi = densityDpi,
                 diagonalInches = diagonalInches,
                 source = if (panelClamped) "detected, CLAMPED from ${widthPx}x$heightPx" else "detected",
+                // A cutout/waterfall/corner inset: let the wallpaper fill the band instead of black.
+                drawUiOutsideSafeArea = safe != PixelRect(0, 0, panelWidth, panelHeight),
             )
+        }
 
     /** One line for the log and the report: content area first (that is what goes on the wire), then the window and the panel it sits in. */
     fun describe(): String =

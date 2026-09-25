@@ -142,6 +142,22 @@ class DisplayProfileTest {
     }
 
     @Test
+    fun `a cutout turns drawUIOutsideSafeArea on and a clean panel leaves it off`() {
+        // The chevy12 AVD: 2914x1134, GM CHEVROLET_12 cutout, framework safe insets top 167 / right 285.
+        val chevy = DisplayProfile(2914, 1134, 60f, 200, 200f, 200f, cutout = EdgeInsets(top = 167, right = 285))
+        val g = chevy.geometry
+        assertEquals(2914, g.width)
+        assertEquals(1134, g.height)
+        assertEquals(PixelRect(0, 168, 2628, 966), g.safe) // even-aligned inside the insets
+        assertTrue("an inset safe area must let the wallpaper fill the band", g.drawUiOutsideSafeArea)
+        assertTrue(g.describe().contains("drawUIOutsideSafeArea=true"))
+
+        val clean = DisplayProfile(2400, 960, 60f, 160, 160f, 160f).geometry
+        assertEquals(PixelRect(0, 0, 2400, 960), clean.safe)
+        assertFalse("a full-panel safe area keeps the document byte-identical", clean.drawUiOutsideSafeArea)
+    }
+
+    @Test
     fun `rounded corners inset every edge by the arc, not the full radius`() {
         val p = panel(2400, 960).copy(cornerRadiusPx = 100)
         // ceil(100 * 0.2929) = 30 -> origin 30, far edge 2370 / 930.

@@ -7,8 +7,10 @@ import android.os.SystemClock
 import android.view.Surface
 import com.carlink.audio.MicProfile
 import com.carlink.audio.MicrophoneCaptureManager
-import com.carlink.av.AacPlayer
-import com.carlink.av.HevcRenderer
+import com.carlink.av.MediaAudioPlayer
+import com.carlink.av.TransientFocusPolicy
+import com.carlink.av.VideoCodecs
+import com.carlink.av.VideoRenderer
 import com.carlink.av.VoiceRouter
 import com.carlink.callui.CallNotificationHost
 import com.carlink.callui.CallRoster
@@ -29,6 +31,7 @@ import com.carlink.media.CarlinkMediaBrowserService
 import com.carlink.media.MediaSessionManager
 import com.carlink.media.NowPlayingInfo
 import com.carlink.ocbm.BinaryPlist
+import com.carlink.ocbm.HostInstanceNonce
 import com.carlink.ocbm.Ocbm
 import com.carlink.ocbm.OcbmAvLanes
 import com.carlink.ocbm.OcbmClient
@@ -65,8 +68,8 @@ import java.util.concurrent.atomic.AtomicReference
  * Central orchestrator for the CarPlay-only app against the **open OCBM userspace** on a
  * CPC200-CCPA:
  * - USB device lifecycle ([UsbBulkTransport]) and the OCBM session ([OcbmClient])
- * - Video via [HevcRenderer], fed from `CH_VIDEO` through the forward-encrypted seam
- * - Audio via [AacPlayer] (media) and [VoiceRouter] (telephony/Siri/alert/nav)
+ * - Video via [VideoRenderer] (H.264 or HEVC, whichever iOS negotiated), fed from `CH_VIDEO` through the forward-encrypted seam
+ * - Audio via [MediaAudioPlayer] (media: PCM wired / AAC-LC wireless) and [VoiceRouter] (telephony/Siri/alert/nav)
  * - Microphone capture gated by the box's own `CT_UPLINK`, shipped over `CH_MIC`
  * - MediaSession integration for AAOS (metadata + album art) from `CH_METADATA`
  * - Auto-reconnect with exponential backoff and Pattern A / Pattern C escalation
@@ -245,6 +248,33 @@ class CarlinkManager(
             health: Int,
             healthKnown: Boolean,
         ) {}
+
+        /**
+         * The box published (non-null) or cleared (null) a wireless SSP Numeric-Comparison pairing
+         * code. The UI must show it beside Pair / Cancel and route the answer to
+         * [answerPairing]; the box waits up to 55 s and then cancels on its own. Main thread.
+         */
+        fun onPairingCodeChanged(code: String?) {}
+    }
+
+    /** The pairing code currently awaiting the user's Pair / Cancel, or null. */
+    @Volatile var pairingCode: String? = null
+        private set
+
+    /**
+     * Answer the pairing prompt: `CT_PAIR_CONFIRM` (accept = the codes match). One answer per
+     * prompt — the prompt clears locally at once; the box clears its code when the bond completes
+     * or is refused. False = no prompt outstanding or no session.
+     */
+    fun answerPairing(accept: Boolean): Boolean {
+        val c = client ?: return false
+        val code = pairingCode ?: return false
+        logInfo("[PAIRING] user answered ${if (accept) "PAIR" else "CANCEL"} for code $code", tag = Logger.Tags.ADAPTR)
+        pairingCode = null
+        callback?.onPairingCodeChanged(null)
+        setStatusText(if (accept) "Pairing..." else "Pairing cancelled")
+        scope.launch(Dispatchers.IO) { c.sendPairConfirm(accept) }
+        return true
     }
 
     /**
@@ -377,7 +407,7 @@ class CarlinkManager(
     /**
      * One video generation: a pipe, the renderer bound to a Surface, and the thread draining it.
      *
-     * These three live and die together because [HevcRenderer] binds its `Surface` at
+     * These three live and die together because [VideoRenderer] binds its `Surface` at
      * construction and its `consume` owns the codec for the life of the call. A new Surface
      * therefore means a new epoch, never a mutation of the old one.
      *
@@ -388,7 +418,7 @@ class CarlinkManager(
     private class VideoEpoch(
         val seq: Int,
         val pipe: SeamPipe,
-        val renderer: HevcRenderer,
+        val renderer: VideoRenderer,
         val thread: Thread,
     )
 
@@ -450,22 +480,24 @@ class CarlinkManager(
      * box believing a host is present, and a relaunch inside the heartbeat grace keeps that belief
      * alive from the new process — so projection is never re-armed and the session comes up with no
      * A/V. Verified on hardware before the fix; see OCBMANDROID.md.
+     *
+     * Stable across USB blips (a reattach is the same host), rotated ONLY by [cleanSlateReset] —
+     * whose whole point is that the box must see a new host, not a reattaching one.
      */
-    private val instanceNonce: Int =
-        java.util.concurrent.ThreadLocalRandom
-            .current()
-            .nextInt()
-            .let { if (it == 0) 1 else it }
+    @Volatile private var instanceNonce: Int = HostInstanceNonce.fresh()
+
+    /** The nonce the next CT_HELLO will carry. Exposed for logs and tests. */
+    val hostInstanceNonce: Int get() = instanceNonce
 
     private var actualSurfaceWidth = 0
     private var actualSurfaceHeight = 0
 
     // ---- audio ------------------------------------------------------------------------------
     // Session-scoped (as in the reference implementation, where only the video renderer is
-    // surface-scoped). AacPlayer holds a resting AUDIOFOCUS_GAIN so AAOS has an owner to return
+    // surface-scoped). MediaAudioPlayer holds a resting AUDIOFOCUS_GAIN so AAOS has an owner to return
     // to; VoiceRouter takes per-purpose transient focus with distinct listener identities,
     // because AAOS CarAudioFocus keys on the listener object.
-    private var aacPlayer: AacPlayer? = null
+    private var mediaPlayer: MediaAudioPlayer? = null
     private var voiceRouter: VoiceRouter? = null
 
     // ---- microphone -------------------------------------------------------------------------
@@ -957,8 +989,18 @@ class CarlinkManager(
         // Detected panel first (DisplayProfile.geometry, already clamped and legalised); the stored
         // AdapterConfig only fills in when no profile exists. The spec's own checks are a backstop.
         val g = displayProfile?.geometry ?: PanelGeometry.fromConfig(config)
+        // Advertise HEVC only when this head unit can actually decode it at the negotiated geometry:
+        // `enablesHEVC` drives the box's `hevcInfo` lever (carplayd main.rs), and a stream iOS
+        // encodes in a codec the decoder cannot take is a black screen with no error anywhere.
+        val caps = VideoCodecs.probe(g.width, g.height, g.maxFps)
+        logInfo(
+            "[CONFIG] decoders at ${g.width}x${g.height}@${g.maxFps}: h264=${caps.h264Decoder ?: "NONE"} " +
+                "hevc=${caps.hevcDecoder ?: "NONE"} -> enablesHEVC=${caps.hevc}",
+            tag = Logger.Tags.VIDEO,
+        )
         val spec =
             VehicleConfigSpec(
+                enablesHevc = caps.hevc,
                 name = config.boxName,
                 width = g.width,
                 height = g.height,
@@ -967,6 +1009,8 @@ class CarlinkManager(
                 safeOriginY = g.safe.y,
                 safeWidth = g.safe.width,
                 safeHeight = g.safe.height,
+                // Wallpaper under the cutout, interactive UI inside the safe rect — see PanelGeometry.
+                drawUIOutsideSafeArea = g.drawUiOutsideSafeArea,
                 dpi = g.dpi,
                 diagonalInches = g.diagonalInches,
                 // The OEM icon is the CarPlay home-screen tile that returns the driver here; its tap
@@ -1032,26 +1076,77 @@ class CarlinkManager(
         retireVideoEpoch("session stopping")
         releaseAudio()
 
-        // CT_STOP gives the box a 5 s warm grace, so a quick relaunch reuses the session rather
-        // than re-running the whole handshake.
+        // CT_STOP is a session-end indicator: the box goes idle IMMEDIATELY (ocbmd `go_idle`;
+        // STOP_GRACE was removed 2026-09-03, docs/ops/06_CORRECTIONS_LEDGER.md). Nothing is reused
+        // by a relaunch — the next SUBSCRIBE is a fresh session.
         client?.stop()
         client = null
         transport?.stop()
         transport = null
 
         setState(State.DISCONNECTED)
+        setStatusText("Disconnected")
     }
 
     /**
-     * End the phone's session without stopping the adapter.
-     *
-     * DEGRADED: OCBM has no per-phone disconnect verb, so this bounces the box's wireless stack,
-     * which drops whatever phone is attached. The status text says so rather than pretending.
+     * User-initiated Disconnect Adapter / Close App: [stopImpl] under the lifecycle mutex on IO,
+     * so it neither blocks the main thread on USB teardown nor interleaves with a start() in
+     * flight. [stop] stays synchronous for [release] / onDestroy, which need teardown before they
+     * return.
      */
-    fun disconnectPhone() {
-        logInfo("[LIFECYCLE] disconnectPhone() — restarting wireless (no per-phone verb exists)")
+    suspend fun disconnect() =
+        lifecycleMutex.withLock {
+            withContext(Dispatchers.IO) {
+                logInfo("[LIFECYCLE] disconnect() — user-initiated", tag = Logger.Tags.ADAPTR)
+                stopImpl()
+            }
+        }
+
+    /**
+     * Whether the connected adapter can end the phone's session on request — wired or wireless.
+     *
+     * False on every box today: OCBM has no phone-disconnect verb and advertises no such
+     * capability (the six MGMT verbs are `crates/ocbm-proto/src/lib.rs`, `MGMT_*`). The box-side
+     * work — a transport-aware `MGMT_DISCONNECT_PHONE` plus the capability bit that flips this —
+     * is tracked in docs/ops/04_OPEN_ITEMS.md. Until then the UI shows the button disabled with
+     * "Requires adapter firmware support".
+     */
+    val phoneDisconnectSupported: Boolean get() = client?.supportsPhoneDisconnect == true
+
+    /**
+     * End the phone's session without stopping the adapter — the ONE entry point for Disconnect
+     * Phone. Gated on [phoneDisconnectSupported]; sends nothing when the box cannot do it.
+     *
+     * This used to send `MGMT_RESTART_WIRELESS` in disguise, which bounced the whole wireless
+     * stack (and did nothing to a wired phone). That verb is now its own honest control,
+     * [restartWireless]. Returns false when nothing was sent.
+     */
+    fun disconnectPhone(): Boolean {
+        val c = client ?: return false
+        if (!c.supportsPhoneDisconnect) {
+            logInfo("[LIFECYCLE] disconnectPhone() — adapter has no phone-disconnect verb; nothing sent", tag = Logger.Tags.ADAPTR)
+            return false
+        }
+        logInfo("[LIFECYCLE] disconnectPhone()", tag = Logger.Tags.ADAPTR)
+        setStatusText("Disconnecting phone...")
+        scope.launch(Dispatchers.IO) { c.disconnectPhone() }
+        return true
+    }
+
+    /**
+     * `MGMT_RESTART_WIRELESS`: bounce the box's wireless stack (btd + radios; the box re-advertises).
+     *
+     * Drops a WIRELESS phone; a wired phone is untouched — the supervisor's `wireless_down` leaves
+     * a wired-owned carplayd running (tools/session_supervisor.sh, the "carplayd are wired-owned"
+     * branch). Same verb and semantics as MacHost's "Restart wireless stack".
+     */
+    fun restartWireless() {
+        logWarn("[LIFECYCLE] MGMT_RESTART_WIRELESS requested", tag = Logger.Tags.ADAPTR)
         setStatusText("Restarting wireless...")
-        scope.launch(Dispatchers.IO) { client?.mgmtAction(Ocbm.MGMT_RESTART_WIRELESS) }
+        scope.launch(Dispatchers.IO) {
+            val status = client?.mgmtAction(Ocbm.MGMT_RESTART_WIRELESS)
+            logInfo("[LIFECYCLE] RESTART_WIRELESS status=$status", tag = Logger.Tags.ADAPTR)
+        }
     }
 
     /**
@@ -1155,30 +1250,33 @@ class CarlinkManager(
         }
     }
 
-    /**
-     * Connect to a specific paired device.
-     *
-     * DEGRADED: there is no targeted-connect verb in OCBM. The best available action is to bounce
-     * wireless and let the box's own reconnect loop pick up whichever bonded phone is in range —
-     * which is the right answer with one paired phone and wrong with several.
-     */
-    fun connectToDevice(btMac: String) {
-        logInfo("[DEVICE_MGMT] Connect requested for $btMac — no targeted-connect verb; restarting wireless", tag = Logger.Tags.ADAPTR)
-        setStatusText("Restarting wireless...")
-        scope.launch(Dispatchers.IO) { client?.mgmtAction(Ocbm.MGMT_RESTART_WIRELESS) }
-    }
+    // There is deliberately NO connectToDevice(): OCBM has no targeted-connect verb, and the
+    // previous implementation sent MGMT_RESTART_WIRELESS in its place — wrong with more than one
+    // bonded phone, and a full radio bounce for a wired one. The Phones cards are information-only
+    // until the box grows the verb (btd's control port already has `{"cmd":"connect","address"}`,
+    // crates/vendor/wireless/src/control.rs; the MGMT relay is the missing piece —
+    // docs/ops/04_OPEN_ITEMS.md).
+
+    /** True when the box currently holds a link key for [btMac] (from the last MGMT_INFO). */
+    fun isBonded(btMac: String): Boolean = btMac.lowercase() in bondedMacs
 
     /**
-     * Remove a device from the box's bond store.
+     * Remove a device.
      *
-     * The box restarts wireless as part of the forget, which drops a live session.
+     * A BONDED record is forgotten on the box too (`MGMT_FORGET_DEVICE`; the box restarts wireless
+     * as part of the forget, which drops a live wireless session). An UNBONDED record — one the app
+     * remembers but the box holds no link key for — is a LOCAL history delete only: the box has
+     * nothing to forget, and its FORGET_DEVICE handler unconditionally restarts wireless
+     * (`ccpa/ocbmd/src/main.rs`, the `MGMT_FORGET_DEVICE` arm), so sending it would bounce the
+     * radios for nothing.
      */
     fun forgetDevice(btMac: String) {
-        logInfo("[DEVICE_MGMT] Forget device: $btMac", tag = Logger.Tags.ADAPTR)
+        val mac = btMac.lowercase()
+        val bonded = mac in bondedMacs
+        logInfo("[DEVICE_MGMT] Forget device: $btMac (bonded=$bonded${if (bonded) "" else " — local history delete, nothing sent"})", tag = Logger.Tags.ADAPTR)
 
         // Optimistically remove for a responsive UI, and suppress the MAC from merges while the
         // box processes the forget — its snapshot still contains the device for a while.
-        val mac = btMac.lowercase()
         synchronized(deviceListLock) {
             recentlyForgotten[mac] = SystemClock.elapsedRealtime() + FORGET_SUPPRESS_MS
         }
@@ -1196,6 +1294,7 @@ class CarlinkManager(
         callback?.onDeviceListChanged(_pairedDevices)
         notifyDeviceListeners()
 
+        if (!bonded) return
         scope.launch(Dispatchers.IO) {
             val status = client?.mgmtAction(Ocbm.MGMT_FORGET_DEVICE, btMac.toByteArray(Charsets.US_ASCII))
             logInfo("[DEVICE_MGMT] FORGET_DEVICE($btMac) status=$status", tag = Logger.Tags.ADAPTR)
@@ -1205,23 +1304,65 @@ class CarlinkManager(
     }
 
     /**
-     * Restart the connection: STOP, settle, then a fresh transport + client.
+     * The clean-slate reset behind BOTH Settings ▸ Reset Connection and the overlay's Reset Device.
      *
-     * A re-subscribe inside the box's 5 s grace REUSES the session, so this is usually seconds to
-     * pixels rather than a full re-handshake.
+     * CT_STOP → close OCBM → release the USB interface → wait for the box's own session-end
+     * lifecycle → reclaim USB → HELLO with a NEW instance nonce → SUBSCRIBE. The sequence, the
+     * stage order and the wait's derivation live in [CleanSlateReset]; this is only its binding
+     * to the manager. Runs entirely under [lifecycleMutex] so nothing (a USB-attach start, a
+     * link-dead error) can interleave with the half-torn-down state.
+     *
+     * Ending the phone session is intended: the box tears projection down on the GONE edge
+     * (`tools/session_supervisor.sh` `teardown`), and the new session re-arms it.
      */
-    suspend fun restart() {
-        // Called only by the UI's Reset Connection. There is deliberately no INTERNAL trigger any
-        // more: riddleBox restarted the session from UNPLUGGED / Phase-0, whereas the box now owns
-        // phone departure (it holds the session and waits) and a dead link goes through
-        // handleError -> scheduleReconnect. A single-flight guard is therefore unnecessary.
-        setStatusText("Restarting...")
-        lifecycleMutex.withLock {
-            withContext(Dispatchers.IO) { stopImpl(preserveEscalation = true) }
+    suspend fun cleanSlateReset(): Boolean {
+        if (released) return false
+        return lifecycleMutex.withLock {
+            withContext(Dispatchers.IO) { cleanSlate.run() }
         }
-        delay(2000)
-        start()
     }
+
+    /** True while [cleanSlateReset] is in flight — the UI keeps its spinner on this. */
+    val resetInFlight: Boolean get() = cleanSlate.isInFlight
+
+    private val cleanSlate =
+        CleanSlateReset(
+            object : CleanSlateReset.Steps {
+                override fun stopSession() {
+                    // Escalation context preserved: a reset is diagnostic recovery, not a fresh
+                    // install — the NEXT failure should still read as "after a prior session".
+                    stopImpl(preserveEscalation = true)
+                }
+
+                override fun rotateInstanceNonce(): Int {
+                    val old = instanceNonce
+                    instanceNonce = HostInstanceNonce.fresh(previous = old)
+                    logInfo(
+                        "[LIFECYCLE] host instance nonce rotated %#010x -> %#010x".format(old, instanceNonce),
+                        tag = Logger.Tags.ADAPTR,
+                    )
+                    return instanceNonce
+                }
+
+                override suspend fun reconnect() {
+                    if (released) {
+                        logWarn("[LIFECYCLE] released during clean-slate wait — not reconnecting", tag = Logger.Tags.ADAPTR)
+                        return
+                    }
+                    startImpl()
+                }
+
+                override fun onStage(stage: CleanSlateReset.Stage) {
+                    logInfo("[LIFECYCLE] clean-slate reset: $stage", tag = Logger.Tags.ADAPTR)
+                    when (stage) {
+                        CleanSlateReset.Stage.STOPPING -> setStatusText("Resetting...")
+                        CleanSlateReset.Stage.WAITING_FOR_ADAPTER -> setStatusText("Waiting for adapter...")
+                        CleanSlateReset.Stage.RECONNECTING -> setStatusText("Reconnecting...")
+                        CleanSlateReset.Stage.DONE -> Unit // startImpl set the live text
+                    }
+                }
+            },
+        )
 
     private fun sendMediaButton(index: Byte) {
         val c = client ?: return
@@ -1295,6 +1436,10 @@ class CarlinkManager(
                 if (before != CallRoster.Presentation.None) notifyCallListeners(CallRoster.Presentation.None)
             }
             appFocusClaimer?.setNavigating(false)
+            if (pairingCode != null) {
+                pairingCode = null
+                callback?.onPairingCodeChanged(null)
+            }
             onBoxStatus(Ocbm.PM_NONE, 0, false)
         }
     }
@@ -1478,7 +1623,7 @@ class CarlinkManager(
         val seq = videoEpochSeq.incrementAndGet()
         val pipe = SeamPipe(VIDEO_PIPE_BYTES, VIDEO_PIPE_DEPTH)
         val renderer =
-            HevcRenderer(config.width, config.height, surface) {
+            VideoRenderer(config.width, config.height, surface) {
                 client?.requestKeyframe()
             }
         renderer.start()
@@ -1489,7 +1634,7 @@ class CarlinkManager(
         codecDeferred = false
 
         // Every epoch MUST ask for one, and it has to happen here rather than at the call sites.
-        // A fresh HevcRenderer has an empty parameter-set cache, and VideoSeam emits the
+        // A fresh VideoRenderer has an empty parameter-set cache, and VideoSeam emits the
         // opcode-1 VideoConfig exactly once per session — attach() re-emits nothing. So a
         // mid-session epoch sees only frame AUs, and it cannot ask for a keyframe itself:
         // handleMessage returns at `if (!configured)` BEFORE reaching its own !sawKeyframe
@@ -1605,17 +1750,29 @@ class CarlinkManager(
     }
 
     /**
+     * Frames the current video epoch has handed to the Surface (0 with no epoch). A UI-side read
+     * only: the loading overlay hides once video is actually on screen, which under OCBM happens
+     * BEFORE [State.STREAMING] (that edge is the first media metadata, [markStreamingIfFirstMedia]),
+     * and the overlay open/close path logs it so a frozen feed is distinguishable from a stale frame.
+     */
+    fun videoFramesRendered(): Long = videoEpoch?.renderer?.framesRendered?.get() ?: 0L
+
+    /**
      * Recover video after the settings overlay closes.
      *
      * A keyframe request FIRST, not an epoch bump. The problem this solves is a stale frame while
      * the next natural IDR is up to a minute away — a keyframe fixes that for the price of one
      * frame, whereas an epoch bump costs a codec teardown, a configure and an IDR wait anyway.
      * The watchdog bumps the epoch only if the frame counter proves the keyframe did not help.
+     *
+     * Gated on a live video epoch, NOT on `state == STREAMING`: OCBM stamps STREAMING on the first
+     * media metadata, so a session can sit in DEVICE_CONNECTED with video on screen indefinitely
+     * (live-verified 2026-09-25: Back from Settings skipped the recovery there and left a stale
+     * frame). A retired epoch (no session, or stopped) is the only "nothing to recover".
      */
     fun recoverVideoFromOverlay() {
-        if (state != State.STREAMING) return
-        logInfo("[LIFECYCLE] Recovering video after overlay close", tag = Logger.Tags.VIDEO)
         val e = videoEpoch ?: return
+        logInfo("[LIFECYCLE] Recovering video after overlay close (state=$state)", tag = Logger.Tags.VIDEO)
         val before = e.renderer.framesRendered.get()
         client?.requestKeyframe()
 
@@ -1659,6 +1816,31 @@ class CarlinkManager(
     private fun wireBoxStatus(c: OcbmClient) {
         c.onProjMode = { mode -> scope.launch { if (client === c) onBoxStatus(mode, boxHealth, boxHealthKnown) } }
         c.onBoxHealth = { flags -> scope.launch { if (client === c) onBoxStatus(projectionMode, flags, true) } }
+    }
+
+    /** CT_PAIRING_CODE -> the Pair / Cancel prompt ([pairingCode], [answerPairing]). */
+    private fun wirePairingCode(c: OcbmClient) {
+        c.onPairingCode = { code ->
+            // The one value that MUST reach a human: it is matched against a prompt on the
+            // iPhone, and until it is on screen the only place it exists is a logcat line nobody
+            // is watching from the driver's seat. SSP Numeric Comparison needs a real yes/no on
+            // BOTH ends, so the code is a PROMPT (Pair / Cancel -> answerPairing), not just text.
+            scope.launch {
+                if (client !== c) return@launch
+                if (code.isNotEmpty()) {
+                    setStatusText("Pairing code: $code")
+                    pairingCode = code
+                    callback?.onPairingCodeChanged(code)
+                } else if (pairingCode != null) {
+                    // A clear with no prompt showing is the box's replay on SUBSCRIBE (it mirrors
+                    // an EMPTY /tmp/pairing_code) — not a pairing in progress. Measured 2026-09-25:
+                    // it painted "Pairing..." over every fresh wired session's CONNECTING overlay.
+                    setStatusText("Pairing...")
+                    pairingCode = null
+                    callback?.onPairingCodeChanged(null)
+                }
+            }
+        }
     }
 
     /**
@@ -1717,14 +1899,7 @@ class CarlinkManager(
             if (text != null) scope.launch { if (state != State.STREAMING) setStatusText(text) }
         }
 
-        c.onPairingCode = { code ->
-            // The one value that MUST reach a human: it is matched against a prompt on the
-            // iPhone, and until it is on screen the only place it exists is a logcat line nobody
-            // is watching from the driver's seat.
-            scope.launch {
-                if (code.isNotEmpty()) setStatusText("Pairing code: $code") else setStatusText("Pairing...")
-            }
-        }
+        wirePairingCode(c)
 
         // Hops through `scope` like every other callback here. It previously ran inline on the
         // read thread, which let a CT_UPLINK(on) arriving mid-teardown start an AudioRecord that
@@ -1752,12 +1927,19 @@ class CarlinkManager(
         // Audio consumers must start here or the pipes fill and eventually backpressure the read
         // thread. Both are flag-only on stop(); their consume threads are the sole releasers.
         val am = context.getSystemService(Context.AUDIO_SERVICE) as? android.media.AudioManager
+        // A permanent focus loss means another AAOS source took over: a native head unit tells the
+        // phone to pause, and so do we. The player re-requests focus when audible media resumes.
         val player =
-            AacPlayer(am).also {
-                it.start()
-                it.prime()
-            }
-        aacPlayer = player
+            MediaAudioPlayer(
+                am,
+                onFocusLost = { sendMediaButton(Ocbm.MEDIA_BTN_PAUSE) },
+                // Audible media while our own Siri/call sink still holds transient focus: iOS has
+                // ended the session, so release the quiet sink and let AAOS hand focus back.
+                onAudibleWhileSuppressed = {
+                    voiceRouter?.releaseQuietSinks("media audible again", TransientFocusPolicy.MEDIA_RESUME_MIN_QUIET_MS)
+                },
+            ).also { it.start() }
+        mediaPlayer = player
         val router =
             VoiceRouter(
                 context,
@@ -1783,11 +1965,11 @@ class CarlinkManager(
 
     private fun releaseAudio() {
         // Flag-only on both: each consume thread releases its own codec and track in its finally,
-        // and it is the only thread allowed to. AacPlayer.stop() additionally releases a primed
-        // but never-consumed track, which matters on every path where the media seam never
+        // and it is the only thread allowed to. MediaAudioPlayer.stop() additionally releases a
+        // primed but never-consumed track, which matters on every path where the media seam never
         // delivered.
-        aacPlayer?.stop()
-        aacPlayer = null
+        mediaPlayer?.stop()
+        mediaPlayer = null
         voiceRouter?.stop()
         voiceRouter = null
     }
@@ -1808,6 +1990,7 @@ class CarlinkManager(
         channels: Int,
         codec: Int,
     ) {
+        voiceRouter?.onUplinkGate(on)
         if (on) {
             // A renegotiation (CVSD -> mSBC keeps the rate at 16 kHz) must restart capture: the
             // early-return in startMicrophoneCapture would otherwise leave a PCM uplink running on
@@ -2450,8 +2633,10 @@ class CarlinkManager(
         retireVideoEpoch("session error")
         releaseAudio()
 
-        // Skip the graceful CT_STOP — the pipe is likely already dead.
-        client?.stop()
+        // Skip the graceful CT_STOP: every path into here is a dead pipe (no HELLO_ACK, a failed
+        // SUBSCRIBE write, USB detach, link dead), so the write could only block for the bulk
+        // timeout. The box's heartbeat watchdog declares us gone on its own.
+        client?.stop(sendStop = false)
         client = null
         transport?.stop()
         transport = null
