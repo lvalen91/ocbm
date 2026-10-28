@@ -1,6 +1,6 @@
 # Projection arbitration — CarPlay vs Android Auto
 
-> **STATUS:** CURRENT · single owner for this topic. Split out of `docs/host/02_ANDROID_AUTO.md` on 2026-08-31 when Android Auto got its own category. Correct this file in place — do not add a sibling.
+> **STATUS:** CURRENT · single owner for this topic. Split out of the retired host/02 Android Auto doc on 2026-08-31 when Android Auto got its own category (provenance map: docs/README.md). Correct this file in place — do not add a sibling.
 
 **Contents:** what the box does to detect and arbitrate between CarPlay and Android Auto — iPhone vs
 Android, wired vs wireless — so the right path starts and a live session is never interrupted by
@@ -46,7 +46,7 @@ exactly one client at a time — see §6.
 **Arbitration hub = `tools/session_supervisor.sh`** (installed to `/script/`), driven by `/tmp` flags
 written by `ocbmd`:
 - `host_present` — master app-session gate (ocbmd, on CT_SUBSCRIBE). Box IDLE until an app connects.
-- `carplay_transport` = `wireless` when the wireless arm owns the session (`av.rs:274`); absent = wired-or-idle.
+- `carplay_transport` = `wireless` when the wireless arm owns the session (written by `btd` `av.rs`); absent = wired-or-idle.
 - `phone_present`, `radio_off` (app CT_RADIO), `carplay_cfg.yaml` (app-pushed YAML config).
 
 **CarPlay wired↔wireless arbitration is robust** (all in session_supervisor):
@@ -60,6 +60,32 @@ hot-handover, pairing mode, WiFi creds) via CT_SUBSCRIBE → `carplay_cfg.yaml`.
 opcode to explicitly pick wired-CP / wireless-CP / AA (`CT_MODE_SELECT` is unrelated — projection vs
 console debug). The Rust `/run/proj/arbiter.sock` is a STUB (always grants standalone); all real
 arbitration is the shell supervisor.
+
+**Android Auto is EXPLICIT OPT-IN on the box (owner decision D1, 2026-10-19).** Only a pushed
+`android_auto: true` (with no `android_auto: false` line) arms it; an absent key or an absent config
+file is OFF. Until then absent meant ON — a box-side default for a value the app owns. The lever
+has two readings, deliberately different:
+- **Start gates** — `session_supervisor.sh::aa_enabled()` (`arm_aa`, `arm_aa_wireless`, the
+  `wireless_up` AA choke point), `box_common::cfg::aa_requested()` (aa-bridge's resident
+  `wait_for_wired_work`, the wireless listener's per-phone accept), and btd's Android Auto SDP
+  record (`wifi_ap_enabled() && aa_requested()`) plus its RFCOMM channel-4 accept, which drops the
+  socket per connect when AA is not requested. Explicit `true` only.
+- **Stand-down checks inside a running bridge** — `box_common::cfg::aa_withdrawn()`: an EXISTING
+  document that no longer requests AA (explicit `false`, or a new host whose document lacks the
+  key). An ABSENT file is not a withdrawal: a restarted ocbmd unlinks it at startup and `go_idle`
+  deletes it, both mid-drive, and host departure stays the debounced `host_gone_confirmed` /
+  `HOST_GONE_POLLS` decision — so an ocbmd restart ends a live AA session no faster than before.
+Both readings are `box_common::cfg::AaGate` (`Launch` / `StandDown`). Every Rust site names its kind
+as a constant — aa-bridge in `ccpa/aa-bridge/src/gates.rs` (site table + tests), btd as
+`SDP_RECORD_GATE` / `CH4_ACCEPT_GATE` in `crates/vendor/wireless/src/main.rs` — and unit tests pin
+each one, so swapping a site's reading fails the suite. The exceptions are aa-bridge's two claim
+re-checks in `run_wired_arm` (after `prepare_accessory`, and the unclaimed-client claim), which call
+`cfg::aa_withdrawn()` directly by owner decision and are not covered by those tests.
+(Added 2026-10-19, tranche-1 review.)
+Shell/Rust parity: `tools/run_tests.sh` runs the supervisor's real `aa_enabled()` line and the
+Rust matcher against one fixture, `crates/box-common/tests/fixtures/aa_lever_cases.txt`. Hosts:
+the macOS app emits `android_auto:` in every push (its own default ON); the Android host, which has
+no AA engine, emits `android_auto: false`.
 
 **Phone-type detection was two ISOLATED probes** — CarPlay grepping Apple `05ac`, `aa-bridge`
 matching Google `0x18d1`, neither aware of the other vendor. It is now one resolver:
@@ -81,7 +107,7 @@ matching Google `0x18d1`, neither aware of the other vendor. It is now one resol
 | 5 | Android mid-AA, app subscribes (projection_up runs) | grep 05ac no-match → exits 1; `phone_waiting` latches; AA undisturbed | ⚠️ | Latent `phone_reset.sh` hazard (see §3) |
 | 6 | Wireless CarPlay active + wired AA phone plugged | **No guard.** If aa-bridge runs it grabs ci_hdrc.0 unmediated → collision | ❌ | No CP↔AA arbitration |
 | 7 | Wired CarPlay active + phone in BT range | Wireless defers (Hot-Handover off); radio parked | ✅ | CP-only (AA has no wireless) |
-| 8 | Wireless Android Auto | Does not exist | — | Phase 3 — bootstrap + pump now built (§4, [`03_WIRELESS.md`](03_WIRELESS.md) §6b/§6c); not device-tested |
+| 8 | Wireless Android Auto | Does not exist | — | Built and device-run end to end 2026-09-04 (§4, [`03_WIRELESS.md`](03_WIRELESS.md) §1, §6b/§6c) |
 
 Incidental safety even then: strict per-VID self-filtering (CP=05ac, AA=18d1) + role-switched devices
 becoming invisible to the other path prevented cross-wiring in 1,3,4,5. The real holes were **2** (AA
@@ -181,7 +207,8 @@ and the shell (`box_common::flags::owner()`).
 - **F3 — the Android Auto toggle did not reach a running bridge.** `android_auto: false` was read in
   exactly one place, `session_supervisor.sh::aa_enabled()`, guarding `arm_aa` — the launch. Nothing
   consulted it afterwards, so turning AA off during a live session did nothing until the phone was
-  unplugged. It is now checked inside the session loop as well.
+  unplugged. It is now checked inside the session loop as well. *(2026-10-19: the in-session checks
+  read `cfg::aa_withdrawn`, the launch gates `aa_requested` — see §1, D1 opt-in.)*
 - **F2 and F5** were settled on hardware 2026-08-27 and are closed.
 - **Race: `wireless_up` vs AA ownership** — fixed 2026-08-24.
 

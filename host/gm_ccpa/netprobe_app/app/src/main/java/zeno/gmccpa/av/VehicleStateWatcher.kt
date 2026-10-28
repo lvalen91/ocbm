@@ -61,8 +61,12 @@ import zeno.gmccpa.pair.NativeCore
  * ## Failure posture
  * Every Car API touch is wrapped: `android.car` is a `required="false"` shared library, so on a head
  * unit without it the class loader throws `NoClassDefFoundError` at first use rather than at install.
- * A missing Car API degrades to **night-mode-only** and logs it once. Nothing here may ever take down
- * a CarPlay session — a vehicle-state lever failing is a cosmetic loss; the session is the product.
+ * "First use" includes CONSTRUCTION (D-F3, 2026-10-08): the three Car callbacks are `by lazy`, built
+ * inside [start]'s try, because as plain field initialisers they ran in the constructor — outside any
+ * try — and a missing `android.car` then threw out of `SessionCore.startCarPlayRx` before the
+ * receiver started, which is the opposite of degrading. A missing Car API degrades to
+ * **night-mode-only** and logs it once. Nothing here may ever take down a CarPlay session — a
+ * vehicle-state lever failing is a cosmetic loss; the session is the product.
  *
  * ## Threading
  * `NativeCore.setLimitedUI`/`setNightMode` BLOCK on the global event mutex, and Car callbacks arrive
@@ -94,9 +98,30 @@ class VehicleStateWatcher(private val ctx: Context) {
 
     /** True once a session is live; commands before that are pointless (no event channel). */
     @Volatile private var sessionUp = false
+    /**
+     * Bumped by [onSessionUp] and [onSessionDown] (from whichever thread delivers them, hence atomic).
+     * Every reassert chain carries the generation it started in and ends once it is stale, so a retry
+     * or F100 persist tick can never act for a session that has already gone.
+     */
+    private val sessionGen = java.util.concurrent.atomic.AtomicInteger(0)
+    /** F100 persister bookkeeping (OD-7D, LeverRetry.kt). Touched ONLY on the `cp-vehicle` thread. */
+    private val chains = LeverChains()
 
     /** Which signal each lever is fed from, fixed at [start]; the [SessionTrace.Board] shows it. */
     @Volatile private var sources = "not started"
+
+    /** Set by [stop], never cleared: a stopped watcher's inputs are frozen, so [parked] says null. */
+    @Volatile private var stopped = false
+
+    /**
+     * Is the vehicle confirmed in PARK? GEAR ONLY (2026-10-06): true = gear PARK, false = any other
+     * gear, null = gear unknown / no Car API / watcher stopped — and null means NOT parked to every
+     * caller. UXR is deliberately not consulted: `desiredLimited()` falls back to it, and "UXR
+     * unrestricted while the gear is unknown" is not evidence the vehicle cannot move. Read by the
+     * USB re-claim policy (MainActivity), which may raise the permission dialog over live CarPlay
+     * only when this is true.
+     */
+    fun parked(): Boolean? = if (stopped) null else gearLimited?.not()
 
     /**
      * Shared by the change callback and the initial seed read.
@@ -124,14 +149,17 @@ class VehicleStateWatcher(private val ctx: Context) {
         }
     }
 
-    private val gearCb = object : CarPropertyManager.CarPropertyEventCallback {
-        override fun onChangeEvent(v: CarPropertyValue<*>) {
-            applyGear(v.value as? Int ?: return)
-        }
+    // The three callbacks are lazy, not field initialisers: see "Failure posture" in the class KDoc.
+    private val gearCb: CarPropertyManager.CarPropertyEventCallback by lazy {
+        object : CarPropertyManager.CarPropertyEventCallback {
+            override fun onChangeEvent(v: CarPropertyValue<*>) {
+                applyGear(v.value as? Int ?: return)
+            }
 
-        override fun onErrorEvent(propId: Int, zone: Int) {
-            log.w("gear property error propId=0x${propId.toString(16)} zone=$zone — leaning on UXR")
-            gearLimited = null
+            override fun onErrorEvent(propId: Int, zone: Int) {
+                log.w("gear property error propId=0x${propId.toString(16)} zone=$zone — leaning on UXR")
+                gearLimited = null
+            }
         }
     }
 
@@ -143,23 +171,27 @@ class VehicleStateWatcher(private val ctx: Context) {
         }
     }
 
-    private val nightCb = object : CarPropertyManager.CarPropertyEventCallback {
-        override fun onChangeEvent(v: CarPropertyValue<*>) {
-            applyNightProp(v.value as? Boolean ?: return)
-        }
+    private val nightCb: CarPropertyManager.CarPropertyEventCallback by lazy {
+        object : CarPropertyManager.CarPropertyEventCallback {
+            override fun onChangeEvent(v: CarPropertyValue<*>) {
+                applyNightProp(v.value as? Boolean ?: return)
+            }
 
-        override fun onErrorEvent(propId: Int, zone: Int) {
-            log.w("NIGHT_MODE property error zone=$zone — falling back to uiMode")
-            propNight = null
+            override fun onErrorEvent(propId: Int, zone: Int) {
+                log.w("NIGHT_MODE property error zone=$zone — falling back to uiMode")
+                propNight = null
+            }
         }
     }
 
-    private val uxrCb = CarUxRestrictionsManager.OnUxRestrictionsChangedListener { r ->
-        val limited = r.isRequiresDistractionOptimization
-        if (limited != uxrLimited) {
-            uxrLimited = limited
-            log.i("uxr: distractionOptimization=$limited (active=0x${r.activeRestrictions.toString(16)})")
-            reassert("uxr")
+    private val uxrCb: CarUxRestrictionsManager.OnUxRestrictionsChangedListener by lazy {
+        CarUxRestrictionsManager.OnUxRestrictionsChangedListener { r ->
+            val limited = r.isRequiresDistractionOptimization
+            if (limited != uxrLimited) {
+                uxrLimited = limited
+                log.i("uxr: distractionOptimization=$limited (active=0x${r.activeRestrictions.toString(16)})")
+                reassert("uxr")
+            }
         }
     }
 
@@ -227,7 +259,11 @@ class VehicleStateWatcher(private val ctx: Context) {
     }
 
     fun stop() {
+        stopped = true
         sessionUp = false   // nothing may be asserted from a stopped watcher
+        // Frozen inputs must not outlive the watcher: a relink resolving a destroyed generation
+        // could otherwise read a stale PARK (2026-10-06).
+        gearLimited = null; uxrLimited = null
         // deliberate, all four: teardown of managers we are discarding.
         runCatching { props?.unregisterCallback(gearCb) }
         runCatching { props?.unregisterCallback(nightCb) }
@@ -235,7 +271,10 @@ class VehicleStateWatcher(private val ctx: Context) {
         runCatching { car?.disconnect() }
         props = null; uxr = null; car = null
         io.shutdown()
-        SessionTrace.Board.down(BOARD, "stopped — MainActivity destroyed")
+        // v5.7 U4: the process-scoped SessionCore owns this watcher and stops it only on receiver-off
+        // (one fresh watcher per receiver start; a stopped one cannot restart — `io` is shut and
+        // `stopped` is never cleared). MainActivity no longer stops it.
+        SessionTrace.Board.down(BOARD, "stopped — receiver stopped")
     }
 
     /** Theme changed. Call from `onConfigurationChanged`, which fires without recreating the activity. */
@@ -254,6 +293,7 @@ class VehicleStateWatcher(private val ctx: Context) {
      */
     fun onSessionUp() {
         if (io.isShutdown) { log.w("onSessionUp on a stopped watcher — ignored (stale Activity capture?)"); return }
+        sessionGen.incrementAndGet()
         sessionUp = true
         sentLimited = null
         sentNight = null
@@ -263,6 +303,7 @@ class VehicleStateWatcher(private val ctx: Context) {
 
     fun onSessionDown() {
         sessionUp = false
+        sessionGen.incrementAndGet()
         sentLimited = null
         sentNight = null
         SessionTrace.Board.up(BOARD, "$sources; session idle")
@@ -285,15 +326,27 @@ class VehicleStateWatcher(private val ctx: Context) {
      */
     private fun desiredNight(): Boolean = propNight ?: uiNight
 
-    private fun reassert(why: String, attempt: Int = 0) {
-        if (!sessionUp) return
+    /**
+     * Push the desired levers to iOS. [attempt] counts refusals in this chain; [gen] is the session
+     * generation the chain started in; [startedAt] is the chain's first attempt; [token] is non-zero
+     * only on the F100 persister. The schedule itself is [LeverRetry] (pure, unit-tested).
+     */
+    private fun reassert(
+        why: String,
+        attempt: Int = 0,
+        gen: Int = sessionGen.get(),
+        startedAt: Long = android.os.SystemClock.elapsedRealtime(),
+        token: Long = 0L,
+    ) {
+        if (!sessionUp || stopped || gen != sessionGen.get()) return
         try {
             io.execute {
-                if (!sessionUp) return@execute
+                // Session down or newer, watcher stopped, or a persister whose role was cleared
+                // (delivered) or taken over: the chain ends here.
+                if (!chains.shouldRun(sessionUp, stopped, gen, sessionGen.get(), token)) return@execute
                 val wantLimited = desiredLimited()
                 val wantNight = desiredNight()
                 var refused = false
-
                 if (wantLimited != null && wantLimited != sentLimited) {
                     if (NativeCore.setLimitedUI(wantLimited)) {
                         sentLimited = wantLimited
@@ -310,7 +363,6 @@ class VehicleStateWatcher(private val ctx: Context) {
                         refused = true
                     }
                 }
-
                 // RETRY, because "session up" and "event channel usable" are NOT the same instant.
                 // Device-measured 2026-09-08: the supervisor logged `awaiting dial-back -> CarPlay live`
                 // at 12:52:07.779 and BOTH commands were refused at 12:52:07.833 — 54 ms later. State was
@@ -318,17 +370,27 @@ class VehicleStateWatcher(private val ctx: Context) {
                 // already in Drive, never touch the lever, and the restriction would never be asserted at
                 // all — which is the failure that actually matters.
                 if (refused) {
-                    if (attempt < RETRY_MAX) {
-                        io.schedule({ reassert(why, attempt + 1) }, RETRY_DELAY_MS, TimeUnit.MILLISECONDS)
-                    } else {
-                        // E, not W: sessionUp is still true here (onSessionDown short-circuits above), so
-                        // this is a LIVE session whose event channel refused every command for ~8 s —
-                        // and a vehicle in Drive with no limitedUI is the failure that actually matters.
-                        log.e("gave up asserting vehicle state [$why] after $RETRY_MAX tries — no event channel; " +
-                              "limitedUI=${wantLimited ?: "no opinion"} night=$wantNight were NOT delivered to iOS")
-                        SessionTrace.Board.note(BOARD, "FAILED ($sources; levers refused $RETRY_MAX times on a live session — event channel unusable)")
+                    val next = chains.onRefused(attempt, gen, token, startedAt)
+                    if (next.logGiveUp) {
+                        // E, not W: sessionUp is still true here, so this is a LIVE session whose event
+                        // channel refused every command for ~8 s — and a vehicle in Drive with no
+                        // limitedUI is the failure that actually matters. Written ONCE per persister.
+                        // F100 HOOK — implemented (OD-7D = yes, owner 2026-10-07): this chain is now the
+                        // single persister for this session generation (plan v5.7 B1-5, F100).
+                        log.e("gave up asserting vehicle state [$why] after ${LeverRetry.RETRY_MAX} tries — no event channel; " +
+                              "limitedUI=${wantLimited ?: "no opinion"} night=$wantNight were NOT delivered to iOS; " +
+                              "re-asserting every ${LeverRetry.PERSIST_DELAY_MS / 1000} s while the session is up")
+                        SessionTrace.Board.note(BOARD, "FAILED ($sources; levers refused ${LeverRetry.RETRY_MAX} times on a live session — event channel unusable; re-asserting every ${LeverRetry.PERSIST_DELAY_MS / 1000} s)")
+                    }
+                    next.delayMs?.let { d ->
+                        try {
+                            io.schedule({ reassert(why, attempt + 1, gen, startedAt, next.token) }, d, TimeUnit.MILLISECONDS)
+                        } catch (_: java.util.concurrent.RejectedExecutionException) { /* stop() shut io */ }
                     }
                 } else {
+                    chains.onDelivered(gen, android.os.SystemClock.elapsedRealtime())?.let { n ->
+                        log.i("limitedUI=${sentLimited ?: "no opinion"} night=$sentNight delivered after $n s [$why]")
+                    }
                     SessionTrace.Board.up(BOARD, "$sources; sent limitedUI=${sentLimited ?: "no opinion"} night=$sentNight")
                 }
             }
@@ -338,9 +400,6 @@ class VehicleStateWatcher(private val ctx: Context) {
     }
 
     private companion object {
-        /** ~8 s of cover at 400 ms — comfortably past the observed 54 ms gap without spinning. */
-        const val RETRY_MAX = 20
-        const val RETRY_DELAY_MS = 400L
         /** [SessionTrace.Board] entry. */
         const val BOARD = "vehicle-state"
 

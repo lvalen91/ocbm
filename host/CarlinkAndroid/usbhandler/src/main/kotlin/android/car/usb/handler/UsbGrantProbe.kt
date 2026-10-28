@@ -30,7 +30,7 @@ object UsbGrantProbe {
     // which application protocol is on the wire.
     private const val CCPA_VID = 0x1314
     private const val CCPA_OCBM_PID = 0x2d00 // the converted, OCBM-speaking adapter — our real target
-    private val CCPA_STOCK_PIDS = setOf(0x1520, 0x1521) // stock/NCM firmware, not yet converted
+    private val CCPA_STOCK_PIDS = setOf(0x1520, 0x1521) // stock Carlinkit firmware ids, not yet converted (NCM is planned to use its own PID 1314:2d10; not listed here yet)
 
     fun probe(context: Context, device: UsbDevice?, source: String) {
         if (device == null) {

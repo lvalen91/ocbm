@@ -5,10 +5,11 @@
 // only. If you must build with Gradle: (a) the jniLibs.srcDirs below expects the .so to have been
 // built first by `cargo build --release --target x86_64-linux-android` in native/carplay-jni; and
 // (b) the versionCode below is a STUB. Since 2026-09-11 the manifest declares no version at all and
-// build_apk.sh injects the real one at link time (code = git commit count, name = "4.0+<sha>"), so a
-// Gradle-built APK always carries a LOWER code than a canonically-built one. That is deliberate: it
-// means a Studio build cannot be mistaken for a shipping artifact, and `adb install -r` will reject
-// it over a real build rather than silently putting unpackaged-native code on the truck.
+// build_apk.sh injects the real one at link time (code = git commit count, name = "4.0+<STAMP>",
+// STAMP = <sha> or <sha>-dirty.<h8>), so a Gradle-built APK always carries a LOWER code than a
+// canonically-built one. That is deliberate: it means a Studio build cannot be mistaken for a
+// shipping artifact, and `adb install -r` will reject it over a real build rather than silently
+// putting unpackaged-native code on the truck.
 // =============================================================================================
 plugins {
     id 'com.android.application'
@@ -16,12 +17,14 @@ plugins {
 }
 
 android {
-    namespace "zeno.gmccpa"  // install id == source package again; the fixed-handler squat was reverted 2026-09-08
+    namespace "zeno.gmccpa"  // the CLASS package; the install id below differs on purpose (2026-10-15)
     compileSdk 32
 
     defaultConfig {
-        applicationId "zeno.gmccpa"
-        minSdk 26          // safe floor for AAOS units
+        // android.car.usb.handler DELIBERATELY again, owner request 2026-10-15 (GM's USB fixed-handler
+        // package). Must match INSTALL_PKG in tools/build_apk.sh, which is what actually builds the APK.
+        applicationId "android.car.usb.handler"
+        minSdk 32          // owner decision OD-4 (2026-10-06): the app targets API 32 (GM Info 3.7) only — was 26
         targetSdk 32       // Android 12 (GM Info 3.7 / API 32)
         versionCode 7        // stub, Studio-only — build_apk.sh injects the real code (commit count)
         versionName "4.0-ide" // marked so a Gradle artifact is identifiable in `dumpsys package`
@@ -31,6 +34,9 @@ android {
         // The canonical build (build_apk.sh) builds and stores this .so; mirror the path here so a
         // Gradle build at least packages whatever was last cargo-built rather than shipping none.
         main.jniLibs.srcDirs += ["${rootProject.projectDir}/../native/jniLibs"]
+        // plan v5.9 MIC — mirrors tools/build_apk.sh's GMCCPA_BENCH switch (documentation only;
+        // Gradle is not the build): exactly one of the two BenchHooks source dirs is compiled.
+        main.java.srcDirs += [(System.getenv('GMCCPA_BENCH') == '1') ? 'src/bench/java' : 'src/nobench/java']
     }
 
     buildTypes {
@@ -55,6 +61,9 @@ android {
 }
 
 dependencies {
-    // Intentionally none. Everything used is in the platform SDK so the APK stays tiny and
+    // Intentionally none at runtime. Everything used is in the platform SDK so the APK stays tiny and
     // has no transitive AndroidX/version friction when sideloaded onto a locked user build.
+    // Host JVM unit tests only, never packaged: src/test (UsbRequestPolicyTest). They need no Android
+    // classes, so they also run without Gradle: kotlinc + this jar, then org.junit.runner.JUnitCore.
+    testImplementation 'junit:junit:4.13.2'
 }

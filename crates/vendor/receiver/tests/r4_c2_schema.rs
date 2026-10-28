@@ -12,8 +12,18 @@
 
 use receiver::vehicle_config::VehicleConfig;
 
-/// Byte-for-byte the document `SettingsWindow.swift`'s `yaml` getter emits with the C-2 additions,
-/// Swift multiline-literal indentation stripped. Note what is and is NOT in the `hidConfig` block:
+/// A SNAPSHOT of the document `SettingsWindow.swift`'s `yaml` getter emitted on 2026-08-10, when C-2
+/// landed (commit d1190e5), Swift multiline-literal indentation stripped. It is deliberately NOT kept
+/// in step with the live emitter: what this file tests is that the C-2 tail parses and moves nothing,
+/// which an older document shape tests as well as a current one. It is therefore stale against the
+/// macOS app on purpose (corrected 2026-10-19: this comment claimed "byte-for-byte the document the
+/// getter emits"). Since then the live emitter has dropped `version:` and `nightMode:` and added
+/// `wifi_ap:` (every push since 2026-10-19). It already emitted `android_auto:`, which this
+/// snapshot never carried. The CURRENT Swift output is pinned by the fixture in
+/// `src/vehicle_config.rs`, which `tools/check_app_yaml_fixture.py` compares against the live
+/// emitter. The Android host's `VehicleConfigYaml.kt` takes its shape from THIS snapshot, which is
+/// why it still emits `version`/`rightHandDrive`/`nightMode`. Note what is and is NOT in the
+/// `hidConfig` block:
 /// the app emits `touchScreenMode` (derived from its `touchScreenHighFidelity` toggle) and NOT
 /// `touchScreenHighFidelity` itself, and it emits `steeringWheelSupport` LAST, after
 /// `touchScreenSupportsCancel`.

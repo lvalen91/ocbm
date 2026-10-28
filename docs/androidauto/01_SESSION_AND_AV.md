@@ -1,6 +1,6 @@
 # Android Auto — session state, A/V, input and open items
 
-> **STATUS:** CURRENT · single owner for this topic. Split out of `docs/host/02_ANDROID_AUTO.md` on 2026-08-31 when Android Auto got its own category. Correct this file in place — do not add a sibling.
+> **STATUS:** CURRENT · single owner for this topic. Split out of the retired host/02 Android Auto doc on 2026-08-31 when Android Auto got its own category (provenance map: docs/README.md). Correct this file in place — do not add a sibling.
 
 **Contents:** what works today → resolved defects and the causes worth keeping → open items.
 
@@ -375,7 +375,7 @@ channels 140 ms after discovery. What it then sent, from the wire:
 | 12 | 32769 | `PhoneStatus` {1 calls[ {1 state, 2 duration, 3 number, 4 caller id, 5 type, 6 thumbnail} ], 2 signal} | on change | device-proven with a Phony fake call: `4:Guy man` (INCOMING) ~1 s after the HFP `RING`/`+CLIP`, `1:Guy man` (IN_CALL) on answer, `calls=0` on hangup; the app builds Call History locally from these transitions (AA has no recents list). Owner-confirmed: Phone pane correct, audio "8 kHz good" (Phony playing the Harvard sentences as the far end — the reference for the wideband comparison in T3) |
 
 The deprecated `NavigationNextTurnEvent` (32772, the one that carries a rendered turn image) and
-`NavigationNextTurnDistanceEvent` (32773) were **never sent** by this phone at protocol 1.7; the
+`NavigationNextTurnDistanceEvent` (32773) were **never sent** by this phone (the 2026-09-04 session requested 6.1; not re-checked at 1.7); the
 decoders exist for older phones. So the answer to "does AA ship the maneuver icon as an image":
 only in the deprecated scheme; current gearhead sends the type and the head unit draws the glyph —
 same division of labour as CarPlay. The app maps the type to an SF Symbol in the Metadata
@@ -424,14 +424,14 @@ against a previous best of 94 s.
 **Video stall at ~2 minutes over the box relay** (audio and ping/pong kept flowing). Cause:
 `AAWire.mediaConfigReady()` advertised `max_unacked=1`, making video stop-and-wait — the phone will
 not send frame N+1 until it sees the ACK for N. Over the fire-and-forget box relay one delayed ACK
-wedged the channel; low-latency adb-TCP never tripped it. Fix: `max_unacked` 1 → 64, and send the
+wedged the channel; low-latency adb-TCP never tripped it. Fix (macOS host; the `host/aa-headunit` harness still sends `max_unacked = 1`): `max_unacked` 1 → 64, and send the
 `mediaAck` on receipt before decode work. Window scaling confirmed the mechanism (1 → stall at 3690
 frames, 8 → 4140, 64 → no stall).
 
 **Mid-session pixelation.** The phone's keyframe cadence follows **the protocol version the head unit
 REQUESTS**: `key_frame_interval_wireless = 60` s below 6.0, `key_frame_interval_ackless = 2` s at 6.0+.
 At 1.7 the phone emits an IDR once a minute, and the protocol has no keyframe request at all, so one
-shed P-frame visibly persists. With `AA_PROTO=6.1` IDRs land every ~60 frames instead of at frame
+shed P-frame visibly persists. 6.1 is the default request (`AA_PROTO=1.7` reproduces the 60 s cadence); at 6.1 IDRs land every ~60 frames instead of at frame
 #1801. Not a codec problem — switching to H.265 would not have fixed it.
 
 **Refuted:** the "we never ACKed audio" root cause for recurring teardowns. Disproved by experiment in
@@ -444,9 +444,9 @@ runs indefinitely. Audio ACK conformance remains worth doing, but it was not the
   parse it in `OCBMClient` (status byte) and log clock-set success/failure. Cosmetic.
 - **Guidance-sink micro-underruns** — prime the 16 kHz sinks with ~40–60 ms before starting playback
   (baseline above: 6–9 ms dry gaps at up to 8/s during prompts). App-side, `Audio/AudioPlayer.swift`.
-- **Audio ACK conformance** — per-channel session ids for the audio sinks.
+- **Audio ACK conformance** — per-channel session ids for the audio sinks. Applies only when the phone answers protocol < 6.0: at 6.0+ no media acks are sent (`AASession` `mediaAcksEnabled`).
 - **Driving status needs a real signal** — vehicle speed or parking brake; the box sources neither, so
-  the sensor channel declares unrestricted (see §6).
+  the sensor channel declares unrestricted (see "Driving status" under §1).
 - **D-Pad focus** — all four directions are delivered exactly (sent 18/16/16/14, gearhead received
   keycode 19/21/20/22 with the same counts), but gearhead's own focus ring moves inconsistently,
   jumps to the sidebar and sometimes disappears. Not a defect on our side. `AA_NO_TOUCH=1` (declare

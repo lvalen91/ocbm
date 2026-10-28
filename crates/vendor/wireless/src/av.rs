@@ -383,10 +383,13 @@ pub fn ensure_av_layer() {
             // them is what makes it possible to tell which one (if either) is the real gate.
             ("CARPLAY_SESSION_MGMT", "1"),
         ];
-        // cornerMask experiment (Phase 1): opt-in via the on-box flag file /tmp/cornermask_test (tmpfs,
-        // so a reboot disarms it — same gate the wired supervisor uses). When present, advertise
-        // cornerMasks and dump the phone's `topLeftCornerMask` buffer (CARPLAY_CORNERMASK_CAPTURE) so we
-        // can learn its undocumented wire format. Absent = byte-identical to the proven wireless spawn.
+        // cornerMask experiment (Phase 1): APP-LESS bench flag /tmp/cornermask_test (tmpfs, so a reboot
+        // disarms it — same gate the wired supervisor uses). It seeds CARPLAY_CORNERMASKS, which is
+        // NO-CONFIG-ONLY since 2026-10-19 (D2; `receiver::levers::SubordinateLevers`): any parsed
+        // pushed config takes `enablesCornerMasks` from the YAML alone, so with the app connected this
+        // flag is inert (carplayd logs it as IGNORED) — it no longer ORs over a pushed false and so no
+        // longer strips the app's main-view safeArea. CARPLAY_CORNERMASK_CAPTURE still dumps any
+        // `topLeftCornerMask` the phone streams. Absent = byte-identical to the proven wireless spawn.
         if std::path::Path::new("/tmp/cornermask_test").exists() {
             envs.push(("CARPLAY_CORNERMASKS", "1"));
             envs.push(("CARPLAY_CORNERMASK_CAPTURE", "/tmp"));

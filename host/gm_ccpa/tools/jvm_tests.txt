@@ -1,0 +1,86 @@
+# Tier-0 JVM unit tests, run by tools/test.sh (kotlinc + JUnit 4, no Gradle).
+#
+# FORMAT (owned by plan v5.8 unit V6 / VC):
+#   * one fully-qualified test class per line, e.g. zeno.gmccpa.av.FgsGateTest;
+#   * its source MUST be netprobe_app/app/src/test/java/<package path>/<Class>.kt — the path is
+#     derived from the name, so a class whose file is elsewhere is a gate failure, not a skip;
+#   * `#` starts a comment (whole line or trailing); blank lines are ignored;
+#   * a class may appear once only (a duplicate fails the gate).
+#
+# The step compiles the WHOLE main source root plus every listed test source against android.jar +
+# android.car.jar (compile classpath only) and runs the classes with no Android on the runtime
+# classpath, so a test that reaches a real Android call fails loudly. The ONLY Android classes at
+# runtime are the stubs in tools/jvm_stubs/ (a recording android.util.Log and a throwing
+# android.os.SystemClock, from the v5.7 U3 harness). Adding a stub there is a reviewed change to the
+# gate, not a way to make a failing test pass.
+#
+# APPEND-ONLY, one block per unit: add a `# --- <unit> (<agent>) ---` header and your class lines at
+# the END of the file. Do not reorder, edit or delete another unit's block; removing a test is a
+# change to that unit's plan, not to this list.
+
+# --- pre-v5.8 tests, seeded by V6 (VC) — every class in src/test at v5.8 start ---
+zeno.gmccpa.AdmissionPolicyTest
+zeno.gmccpa.BoxNameGateTest
+zeno.gmccpa.CarPlayRxSlotsTest
+zeno.gmccpa.CredsLatchTest
+zeno.gmccpa.MdnsResponderStopTest
+zeno.gmccpa.RelinkChainTest
+zeno.gmccpa.SessionCorePartsTest
+zeno.gmccpa.SessionSupervisorTest
+zeno.gmccpa.UsbRequestPolicyTest
+zeno.gmccpa.av.FgsGateTest
+zeno.gmccpa.av.LeverRetryTest
+zeno.gmccpa.av.PrimaryPointerFilterTest
+zeno.gmccpa.av.VoiceIdleRulesNavTest
+zeno.gmccpa.ocbm.MgmtInfoTest
+zeno.gmccpa.ocbm.OcbmClientHeartbeatTest
+zeno.gmccpa.ocbm.OcbmClientMgmtTest
+zeno.gmccpa.ocbm.PhoneIdentRedactTest
+zeno.gmccpa.ocbm.SubscribeConfigTest
+
+# --- v5.8 V1-V4 (VA) ---
+zeno.gmccpa.av.VoiceFrameTest
+zeno.gmccpa.av.VoiceJitterBufferTest
+zeno.gmccpa.av.VoiceStreamsTest   # also hosts the v5.8 voice rig used by the three below
+zeno.gmccpa.av.FocusSlotTest
+zeno.gmccpa.av.NavTest
+zeno.gmccpa.av.DuckRampTest
+zeno.gmccpa.av.RouteLatchTest
+
+# --- v5.8 V5 (VB): per-install accessory Ed25519 key (Q001) ---
+zeno.gmccpa.AccessoryKeyTest
+zeno.gmccpa.RekeyFlowTest   # OD-8B decision seam (review fix1-6)
+
+# --- v5.8 V7 (VD): Q018 relink throw, Q019 blank-field merge, Q014/Q023 redactor SSID + IPv6 ---
+zeno.gmccpa.HotspotMergeTest
+zeno.gmccpa.logging.RedactorTest
+zeno.gmccpa.ocbm.OcbmClientClockTest   # V7 fix1: Q015 injected-clock MISSED promotion
+zeno.gmccpa.av.VoiceReaderTest
+
+# --- v5.9 MIC (Opus) ---
+zeno.gmccpa.av.WavPcmTest
+zeno.gmccpa.av.MicInjectTest
+
+# --- v5.9 MED (Opus) ---
+zeno.gmccpa.av.NowPlayingMergeTest
+zeno.gmccpa.av.FocusReclaimRuleTest
+
+# --- v5.9 UI (Opus) ---
+zeno.gmccpa.LauncherModelTest
+
+# --- v5.9 D6 (Opus) ---
+zeno.gmccpa.AutoClaimPolicyTest
+zeno.gmccpa.av.StatusNoticeTest
+zeno.gmccpa.av.NoticeThrottleTest
+
+# --- v5.9 UC2 + rc2 fix round (Opus) ---
+# v5.9 UC2: VoiceIdleRulesTest removed with D019
+zeno.gmccpa.av.MainAudioHandoverTest
+
+# --- 2026-10-08 remediation plan (Fable, single implementer) ---
+zeno.gmccpa.UnverifiedConnRuleTest                 # A-F1 unverified-connection deadline rule
+zeno.gmccpa.av.TapTargetTest                       # D-F1 PendingIntent keys
+zeno.gmccpa.av.VehicleStateWatcherConstructionTest # D-F3 lazy Car callbacks
+zeno.gmccpa.av.NalScanTest                         # F-C2 bounded NAL scan (buffer reuse)
+zeno.gmccpa.av.ModesChangedTest                    # A11 decode over the stored capture
+zeno.gmccpa.InfoTxtEqualityTest                    # docs/11 5.12: TXT <-> /info identity

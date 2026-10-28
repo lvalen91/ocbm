@@ -1,0 +1,12 @@
+com.gm.hmi.connection
+com.android.networkstack.tethering.inprocess
+com.android.networkstack.tethering.inprocess.csm
+com.android.networkstack.tethering.csm
+com.gm.vmsplugin
+com.gm.updater
+com.gm.hmi.hvac
+brand.chevrolet.app.hvac
+com.google.android.embedded.projection
+com.gm.domain.server.delayed
+com.gm.hmi.trailer
+brand.chevrolet.app.trailer

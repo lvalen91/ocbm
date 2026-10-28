@@ -113,6 +113,9 @@ internal class LogFiles(
      * capture whose output goes nowhere.
      */
     fun open(): Boolean = lock.withLock {
+        // A close() that raced ahead of the pump's open() (stop()'s bounded join expired in between)
+        // must not reopen a stream nobody will close.
+        if (closed) return@withLock false
         if (!dir.exists() && !dir.mkdirs()) {
             log.e("cannot create ${dir.absolutePath} — no capture")
             return@withLock false

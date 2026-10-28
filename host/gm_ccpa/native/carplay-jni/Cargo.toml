@@ -10,6 +10,8 @@ crate-type = ["cdylib"]
 [dependencies]
 jni = "0.21"
 libc = "0.2"
+# The :9112 mic-ingest auth token (F136). Already in the graph via rand_core; no new crate.
+getrandom = "0.2"
 # Vendored protocol crates from the sibling ccpa_custom checkout.
 #
 # THESE ARE PATH DEPS: cargo compiles whatever is on disk RIGHT NOW. The "rev" below is a RECORD of
@@ -36,7 +38,7 @@ libc = "0.2"
 # `levers::set_hevc(true)` etc. in JNI_OnLoad still stands. If gm_ccpa ever adopts the config path,
 # re-verify this or HEVC silently drops out of the SETUP enabledFeatures echo while the static
 # /info still advertises hevcInfo — a half-gate, which is the worst kind (docs/05 §5).
-receiver = { path = "../../../../crates/vendor/receiver", default-features = false, features = ["mic-uplink"] }
+receiver = { path = "../../../../crates/vendor/receiver", default-features = false, features = ["mic-uplink", "voice-tag-v2"] }
 pairing  = { path = "../../../../crates/vendor/pairing" }
 mfi      = { path = "../../../../crates/vendor/mfi" }
 

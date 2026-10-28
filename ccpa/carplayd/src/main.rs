@@ -18,7 +18,7 @@ use pairing::verify::{Identity, PeerStore};
 use receiver::info::{build_info, DeviceConfig};
 use receiver::net::serve_connection;
 use receiver::server::ControlServer;
-use receiver::vehicle_config::VehicleConfig;
+use receiver::vehicle_config::PushedCfgRead;
 use receiver::{events, hid, levers};
 use std::collections::HashMap;
 use std::io;
@@ -663,39 +663,22 @@ fn base_device_config() -> DeviceConfig {
     }
 }
 
-/// The `CARPLAY_APP_SETUP` harness override: `Some(true)`/`Some(false)` for "1"/"0", `None` when
-/// unset/other. It BEATS the YAML in both directions (a "0" can force the proven box-driven path even
-/// when a config asks for the relay), and it is deliberately re-read per connection rather than
-/// cached: carplayd re-reads the whole config per control connection anyway, so this stays consistent
-/// with how a config change lands (the reconnect-consumed class, docs/carplay/06_AV_PIPELINE.md) — unlike the receiver-side
-/// `CARPLAY_RELAY_*` knobs, which are process-cached.
-fn appsetup_override() -> Option<bool> {
-    match std::env::var("CARPLAY_APP_SETUP").ok().as_deref() {
-        Some("1") => Some(true),
-        Some("0") => Some(false),
-        _ => None,
-    }
-}
-
 /// Reset every per-connection lever to its no-config baseline: plain `false` for the schema-driven
-/// ones, the sanctioned bench env for the four that have one. Replaces the old `remove_var` block
-/// (see the setenv-UB note in [`load_device_config`]).
+/// ones, the bench env for the four that have one. Replaces the old `remove_var` block (see the
+/// setenv-UB note in [`load_device_config`]).
 ///
-/// THE RULE: a lever clears to its ENV form iff that env form is a sanctioned app-less bench
-/// override — cornerMasks (docs/carplay/06_AV_PIPELINE.md §4), its logTransfer twin (docs/carplay/04_CAPABILITIES_AND_CONFIG.md), mainBuffered (docs/carplay/04_CAPABILITIES_AND_CONFIG.md
-/// B4), and appDrivenSetup's `CARPLAY_APP_SETUP` harness switch. This function runs ONLY on the
-/// no-config / parse-failure paths, i.e. exactly the app-less case. The rest clear to plain `false`
-/// because their env form is vestigial (`CARPLAY_HEVC`, docs/carplay/04_CAPABILITIES_AND_CONFIG.md) or the value is schema-derived
-/// from the YAML (dPad/knob/telephony from `hidConfig`, altScreen + dims from `altVideoStreams[]`,
-/// viewAreas from the safeArea/enable). Either way a parsed config overwrites the lever afterwards,
-/// so nothing here can decide anything for a configured connection.
+/// THE RULE (docs/carplay/04_CAPABILITIES_AND_CONFIG.md §2, owner decision D2 2026-10-19): every
+/// env / flag-file lever is NO-CONFIG-ONLY. The four with an app-less bench form — cornerMasks,
+/// logTransfer, mainBuffered and appDrivenSetup's `CARPLAY_APP_SETUP=1`, `levers::SubordinateLevers`
+/// — are NOT handled here: `load_device_config` arms them ONCE, before its branch match, from
+/// `SubordinateLevers::to_arm` (pushed set on a parsed config, bench set on every fallback; unit-
+/// tested in `receiver::levers`). This function runs ONLY on the no-config / parse-failure paths and
+/// clears the rest to plain `false`, because their env form is vestigial (`CARPLAY_HEVC`) or the value
+/// is schema-derived from the YAML (dPad/knob/telephony from `hidConfig`, altScreen + dims from
+/// `altVideoStreams[]`, viewAreas from the safeArea/enable). A parsed config overwrites every one of
+/// them, so nothing here can decide anything for a configured connection.
 fn clear_levers() {
     levers::set_hevc(false);
-    // mainBuffered falls back to the bench env on these no-config / parse-failure paths only (NOT
-    // plain false, and NOT the cornerMasks OR-force-arm shape — a stale bench flag must never
-    // override an app's pushed `false`, which the config path below guarantees by setting the
-    // lever from the YAML value alone, so with an app connected the env is inert).
-    levers::set_mainbuffered(std::env::var_os("CARPLAY_MAINBUFFERED").is_some());
     events::set_dpad_advertised(false);
     events::set_knob_advertised(false);
     events::set_telephony_advertised(false); // audit Fix #14: was missing — a stale telephony advert
@@ -707,15 +690,6 @@ fn clear_levers() {
     levers::set_altscreen(false);
     levers::set_alt_dims(None);
     levers::set_viewareas(false);
-    // Sanctioned bench overrides (see THE RULE above): `CARPLAY_CORNERMASKS` (docs/carplay/06_AV_PIPELINE.md §4) and its
-    // logTransfer twin (docs/carplay/04_CAPABILITIES_AND_CONFIG.md). Clearing them to `false` here made both dead on the very first
-    // connection — the app-less path is the only one they exist for. Presence-shaped, so the exact
-    // twin is `set_mainbuffered` above, NOT `set_appsetup` below (that one is a tri-state VALUE
-    // override where "0" can force OFF). Caveat worth keeping straight: on the CONFIG path these two
-    // are armed as `config || env`, so the env DOES override a pushed `false` there — deliberately,
-    // unlike mainBuffered which is strictly YAML-wins. This line only stops the app-less paths from
-    // wiping the seed.
-    levers::set_cornermasks(std::env::var_os("CARPLAY_CORNERMASKS").is_some());
     // docs/carplay/04_CAPABILITIES_AND_CONFIG.md #25 — the NO-CONFIG floor must reproduce the pre-gating wire exactly: the appearance
     // keys were emitted unconditionally and viewAreaSupportsFocusTransfer was hardcoded false. These
     // are NOT env-overridable, so they clear to constants rather than to env presence.
@@ -725,11 +699,6 @@ fn clear_levers() {
     // updateViewArea animation duration: no env form (same reasoning as the trio above — the app
     // owns it), so it clears to the constant 3000 that the box always sent before it was pushable.
     levers::set_view_area_anim_ms(levers::VIEW_AREA_ANIM_MS_DEFAULT);
-    levers::set_logtransfer(std::env::var_os("CARPLAY_LOGTRANSFER").is_some());
-    // appDrivenSetup clears to the env override (not plain false): a harness run with
-    // CARPLAY_APP_SETUP=1 must still relay when no YAML landed (the no-config / parse-failure paths
-    // both come through here).
-    levers::set_appsetup(appsetup_override().unwrap_or(false));
 }
 
 /// Resolve the effective `DeviceConfig` for the connection about to be served. Reads the host-pushed
@@ -746,145 +715,157 @@ fn load_device_config() -> (DeviceConfig, u32) {
     let mut cfg_crc: u32 = 0;
     // Bound the host-pushed YAML before parsing (audit R6): serde_yaml is a recursive-descent parser, so
     // a pathologically large / deeply-nested config could drive it into a stack-overflow-abort. A real
-    // VehicleConfig is a few KB; anything past this cap is treated as absent (fall back to base).
-    const MAX_CFG_BYTES: usize = 256 * 1024;
+    // VehicleConfig is a few KB; anything past this cap is refused (fall back to base). The cap and the
+    // whole branch classification live in `PushedCfgRead::classify` so they are host-testable.
+    const MAX_CFG_BYTES: usize = PushedCfgRead::MAX_BYTES;
     let cfg_path = carplay_cfg_file();
-    let dev = match std::fs::read(cfg_path) {
-        Ok(bytes) if !bytes.is_empty() && bytes.len() <= MAX_CFG_BYTES => match VehicleConfig::from_yaml(&bytes) {
-            Ok(vc) => {
-                let dev = vc.apply(base);
-                // HEVC lever (user directive 2026-07-12): the receiver's two box-side gates
-                // (`hevcInfo` in /info + `enabledFeatures:["hevc"]` in SETUP phase 1) both read
-                // the lever dynamically, so arming it here makes the host-pushed
-                // `accessoryConfig.enablesHEVC` the single source of truth, re-evaluated per
-                // connection. Default/parse-failure/idle = off = the proven H.264 path.
-                //
-                // ALL of these used to be published via std::env::set_var/remove_var. That was
-                // genuine UB: this runs on the serve thread on EVERY control connection while the
-                // HID-ingest thread (and a hijacking connection's reads in info.rs/session.rs)
-                // concurrently getenv the same names — musl's setenv frees the old value string and
-                // unsetenv memmoves __environ, so a concurrent reader can SIGSEGV the daemon under
-                // panic="abort". Now they go through `receiver::levers`, the atomic mirror pattern
-                // `events::set_dpad_advertised` pioneered.
-                // Metadata declaration tier for the AirPlayTunnel arm (docs/carplay/04_CAPABILITIES_AND_CONFIG.md B3), parsed from the
-                // SAME bytes this connection just read and CRC'd — not a second read of the path,
-                // which could see a different generation than the CRC describes. The tier is an
-                // iAP2-side concern the receiver's VehicleConfig deliberately does not carry, hence
-                // the separate struct over the same document. Note this sits in the parse-SUCCESS
-                // branch: a document the receiver rejects arms no tier either (conservative, and the
-                // two parsers can fail independently). `arm_pushed_policy` is first-arm-wins, and
-                // `iap_tunnel::start` (which builds the tunnel Identify) runs at session start —
-                // strictly after this — so the declaration and the subscribes share one snapshot.
-                iap2_core::config::Iap2Config::from_slice(&bytes).arm_metadata_policy();
-                levers::set_hevc(vc.accessory_config.enables_hevc);
-                // mainBuffered from the pushed config alone (docs/carplay/04_CAPABILITIES_AND_CONFIG.md B4) — deliberately NO env OR:
-                // a stale bench flag must never override an app that said `false` (media-silence
-                // hazard). The bench env applies only on the no-config paths via clear_levers.
-                levers::set_mainbuffered(vc.accessory_config.enables_main_buffered_audio);
-                // D-Pad from Apple's schema `videoStreamsConfig.mainVideoStream.hidConfig.dPadSupport`.
-                events::set_dpad_advertised(vc.dpad_support());
-                // Knob (uid 4) from `hidConfig.knobSupport` — the Simulator's real navigation device.
-                events::set_knob_advertised(vc.knob_support());
-                // Telephony (uid 5) from `hidConfig.telephonyButtonsSupport` — Answer/End/Flash/DTMF.
-                events::set_telephony_advertised(vc.telephony_support());
-                // Two-finger touchscreen from `hidConfig.touchScreenSupportsMultiTouch`. This swaps the
-                // uid-1 DESCRIPTOR, so the contact state has to start empty or the first report of the
-                // new session would carry a contact left down by the old one.
-                events::set_multi_touch_advertised(vc.multi_touch_support());
-                *plock(&CONTACTS) = Default::default();
-                // ALT / cluster screen from `videoStreamsConfig.altVideoStreams[]` (docs/carplay/06_AV_PIPELINE.md). Arms the
-                // 2nd displays[] entry + altScreen feature + the type-111 SETUP forward path.
-                levers::set_altscreen(vc.alt_screen());
-                // Set ALT_W/H when dimensions are given; otherwise CLEAR them so info.rs falls back to
-                // its 800×480 default rather than reading stale dims leaked from a prior connection
-                // (audit M-c). Cleared on every alt-off/failure path below too.
-                levers::set_alt_dims(if vc.alt_screen() { vc.alt_dimensions() } else { None });
-                // viewAreas / safeArea (curved-panel UI inset). The geometry travels on `dev`
-                // (main_safe_area / alt_safe_area, applied above); this lever only controls whether
-                // SETUP echoes "viewAreas" in enabledFeatures — iOS honors an inset safeArea ONLY when
-                // that feature is negotiated. Set when the host enables it or defines a real inset.
-                levers::set_viewareas(vc.view_areas_enabled());
-                // cornerMasks (docs/carplay/06_AV_PIPELINE.md): config-driven via accessoryConfig.enablesCornerMasks. The env
-                // CARPLAY_CORNERMASKS (dev /tmp/cornermask_test flag) still force-arms it as an override.
-                levers::set_cornermasks(
-                    vc.corner_masks_enabled()
-                        || std::env::var_os("CARPLAY_CORNERMASKS").is_some(),
-                );
-                // logTransfer (docs/carplay/04_CAPABILITIES_AND_CONFIG.md Half A): config-driven via accessoryConfig.enablesLogTransfer,
-                // with the env CARPLAY_LOGTRANSFER as a dev force-arm override, mirroring cornerMasks.
-                levers::set_logtransfer(
-                    vc.log_transfer_enabled()
-                        || std::env::var_os("CARPLAY_LOGTRANSFER").is_some(),
-                );
-                // docs/carplay/04_CAPABILITIES_AND_CONFIG.md #25 — three advertisements the box used to decide for itself while the app
-                // shipped owner toggles for them. No env force-arm: unlike cornerMasks/logTransfer
-                // these were never bench levers, and inventing one would add a second source of truth
-                // for a value the app already owns.
-                levers::set_ui_appearance(vc.ui_appearance_enabled());
-                levers::set_map_appearance(vc.map_appearance_enabled());
-                levers::set_focus_transfer(vc.focus_transfer_enabled());
-                // updateViewArea animation duration from the top-level `view_area_anim_ms` (OUR
-                // extension; absent = 3000). The lever clamps to 0..=10000 and returns what it
-                // stored: out of range is LOGGED, not rejected — a cosmetic knob must never take
-                // the owner's whole document off the air. The value actually sent is logged again
-                // by events.rs at every switch, since iOS never acknowledges the field.
-                let anim_req = vc.view_area_anim_ms();
-                let anim_ms = levers::set_view_area_anim_ms(anim_req);
-                if anim_ms != anim_req {
-                    eprintln!(
-                        "[carplayd] view_area_anim_ms={anim_req} is outside {:?} — CLAMPED to {anim_ms} ms",
-                        levers::VIEW_AREA_ANIM_MS_RANGE
-                    );
-                }
-                // appDrivenSetup (plan P1): config-driven, with the CARPLAY_APP_SETUP=1/0 env
-                // override beating the YAML in BOTH directions (harness runs; a "0" force-reverts a
-                // relay-enabled config to the proven box-driven path without repushing).
-                levers::set_appsetup(
-                    appsetup_override().unwrap_or(vc.app_driven_setup()),
-                );
-                // The crc the relay's RS_OPEN reports: computed over the exact YAML bytes this
-                // connection's /info was built from (only on THIS success path — a rejected config
-                // configured nothing, so it reports 0 like the default).
-                cfg_crc = ocbm_proto::crc32(&bytes);
-                println!(
-                    // mainBuffered is logged because it is the one arm here whose failure mode is
-                    // SILENT MEDIA — an operator diagnosing dead audio must be able to see whether
-                    // this session advertised it, without capturing /info.
-                    "[carplayd] cfg: {cfg_path} ({} B) → {}×{}@{} hevc={} dpad={} viewAreas={} viewAreaAnim={}ms mainBuffered={} safe={:?}",
-                    bytes.len(),
-                    dev.display_width,
-                    dev.display_height,
-                    dev.max_fps,
-                    vc.accessory_config.enables_hevc,
-                    vc.dpad_support(),
-                    vc.view_areas_enabled(),
-                    anim_ms,
-                    vc.accessory_config.enables_main_buffered_audio,
-                    dev.main_safe_area,
-                );
-                dev
-            }
-            Err(e) => {
-                // LOUD ON PURPOSE (docs/carplay/04_CAPABILITIES_AND_CONFIG.md #26). This is not a routine fallback — it is the OWNER'S
-                // SETTINGS BEING DISCARDED, and the blast radius is the whole document, not the one
-                // bad key. This exact path fired on 2026-08-11 when a glued newline in the app's
-                // emitter made the alt-ON document unparseable: resolution, HEVC, appDrivenSetup,
-                // audio AND the metadata tier all reverted at once, and the single quiet line here
-                // read like normal operation. serde_yaml reports line and column — print them.
-                eprintln!("[carplayd] *** PUSHED CONFIG REJECTED — {e} ***");
+    let read = PushedCfgRead::classify(std::fs::read(cfg_path));
+    // The four levers with a bench form — cornerMasks (docs/carplay/06_AV_PIPELINE.md §4), logTransfer
+    // (Half A), mainBuffered (B4) and appDrivenSetup (plan P1) — armed HERE, ONCE, for every branch
+    // below (docs/carplay/04_CAPABILITIES_AND_CONFIG.md §2, D2 2026-10-19): a parsed config arms its
+    // own values ALONE, in both directions; every fallback arms the bench env (`/tmp/cornermask_test`,
+    // `/tmp/logtransfer_test`, `/tmp/mainbuffered_test`, `CARPLAY_APP_SETUP=1`). Until 2026-10-19
+    // cornerMasks/logTransfer were `config || env` and CARPLAY_APP_SETUP beat the YAML both ways; a
+    // stale /tmp/cornermask_test therefore stripped the app's pushed main-view safeArea. The decision
+    // is `SubordinateLevers::to_arm`, tested per branch in receiver::levers — do not re-derive it here.
+    let bench = levers::SubordinateLevers::from_env();
+    if let Some(vc) = read.config() {
+        let ignored = levers::SubordinateLevers::ignored_bench(
+            &levers::SubordinateLevers::from_config(vc),
+            &bench,
+        );
+        if !ignored.is_empty() {
+            eprintln!(
+                "[carplayd] bench lever(s) {} IGNORED — a pushed config is in force and \
+                 says otherwise (bench levers are no-config-only); set it in the app",
+                ignored.join(",")
+            );
+        }
+    }
+    levers::SubordinateLevers::to_arm(&read, bench).arm();
+    let dev = match read {
+        PushedCfgRead::Parsed { vc, bytes } => {
+            let dev = vc.apply(base);
+            // HEVC lever (user directive 2026-07-12): the receiver's two box-side gates
+            // (`hevcInfo` in /info + `enabledFeatures:["hevc"]` in SETUP phase 1) both read
+            // the lever dynamically, so arming it here makes the host-pushed
+            // `accessoryConfig.enablesHEVC` the single source of truth, re-evaluated per
+            // connection. Default/parse-failure/idle = off = the proven H.264 path.
+            //
+            // ALL of these used to be published via std::env::set_var/remove_var. That was
+            // genuine UB: this runs on the serve thread on EVERY control connection while the
+            // HID-ingest thread (and a hijacking connection's reads in info.rs/session.rs)
+            // concurrently getenv the same names — musl's setenv frees the old value string and
+            // unsetenv memmoves __environ, so a concurrent reader can SIGSEGV the daemon under
+            // panic="abort". Now they go through `receiver::levers`, the atomic mirror pattern
+            // `events::set_dpad_advertised` pioneered.
+            // Metadata declaration tier for the AirPlayTunnel arm (docs/carplay/04_CAPABILITIES_AND_CONFIG.md B3), parsed from the
+            // SAME bytes this connection just read and CRC'd — not a second read of the path,
+            // which could see a different generation than the CRC describes. The tier is an
+            // iAP2-side concern the receiver's VehicleConfig deliberately does not carry, hence
+            // the separate struct over the same document. Note this sits in the parse-SUCCESS
+            // branch: a document the receiver rejects arms no tier either (conservative, and the
+            // two parsers can fail independently). `arm_pushed_policy` is first-arm-wins, and
+            // `iap_tunnel::start` (which builds the tunnel Identify) runs at session start —
+            // strictly after this — so the declaration and the subscribes share one snapshot.
+            iap2_core::config::Iap2Config::from_slice(&bytes).arm_metadata_policy();
+            levers::set_hevc(vc.accessory_config.enables_hevc);
+            // (cornerMasks / logTransfer / mainBuffered / appDrivenSetup were armed above the
+            // match, from this config alone.)
+            // D-Pad from Apple's schema `videoStreamsConfig.mainVideoStream.hidConfig.dPadSupport`.
+            events::set_dpad_advertised(vc.dpad_support());
+            // Knob (uid 4) from `hidConfig.knobSupport` — the Simulator's real navigation device.
+            events::set_knob_advertised(vc.knob_support());
+            // Telephony (uid 5) from `hidConfig.telephonyButtonsSupport` — Answer/End/Flash/DTMF.
+            events::set_telephony_advertised(vc.telephony_support());
+            // Two-finger touchscreen from `hidConfig.touchScreenSupportsMultiTouch`. This swaps the
+            // uid-1 DESCRIPTOR, so the contact state has to start empty or the first report of the
+            // new session would carry a contact left down by the old one.
+            events::set_multi_touch_advertised(vc.multi_touch_support());
+            *plock(&CONTACTS) = Default::default();
+            // ALT / cluster screen from `videoStreamsConfig.altVideoStreams[]` (docs/carplay/06_AV_PIPELINE.md). Arms the
+            // 2nd displays[] entry + altScreen feature + the type-111 SETUP forward path.
+            levers::set_altscreen(vc.alt_screen());
+            // Set ALT_W/H when dimensions are given; otherwise CLEAR them so info.rs falls back to
+            // its 800×480 default rather than reading stale dims leaked from a prior connection
+            // (audit M-c). Cleared on every alt-off/failure path below too.
+            levers::set_alt_dims(if vc.alt_screen() { vc.alt_dimensions() } else { None });
+            // viewAreas / safeArea (curved-panel UI inset). The geometry travels on `dev`
+            // (main_safe_area / alt_safe_area, applied above); this lever only controls whether
+            // SETUP echoes "viewAreas" in enabledFeatures — iOS honors an inset safeArea ONLY when
+            // that feature is negotiated. Set when the host enables it or defines a real inset.
+            levers::set_viewareas(vc.view_areas_enabled());
+            // docs/carplay/04_CAPABILITIES_AND_CONFIG.md #25 — three advertisements the box used to decide for itself while the app
+            // shipped owner toggles for them. No bench form at all: unlike cornerMasks/logTransfer
+            // these were never bench levers, and inventing one would add a second source of truth
+            // for a value the app already owns.
+            levers::set_ui_appearance(vc.ui_appearance_enabled());
+            levers::set_map_appearance(vc.map_appearance_enabled());
+            levers::set_focus_transfer(vc.focus_transfer_enabled());
+            // updateViewArea animation duration from the top-level `view_area_anim_ms` (OUR
+            // extension; absent = 3000). The lever clamps to 0..=10000 and returns what it
+            // stored: out of range is LOGGED, not rejected — a cosmetic knob must never take
+            // the owner's whole document off the air. The value actually sent is logged again
+            // by events.rs at every switch, since iOS never acknowledges the field.
+            let anim_req = vc.view_area_anim_ms();
+            let anim_ms = levers::set_view_area_anim_ms(anim_req);
+            if anim_ms != anim_req {
                 eprintln!(
-                    "[carplayd] *** the ENTIRE document was discarded, not just the bad key: \
-                     reverting to {}×{}, HEVC off, box-driven SETUP, default audio, compiled \
-                     metadata tier ***",
-                    base.display_width, base.display_height
+                    "[carplayd] view_area_anim_ms={anim_req} is outside {:?} — CLAMPED to {anim_ms} ms",
+                    levers::VIEW_AREA_ANIM_MS_RANGE
                 );
-                clear_levers(); // a bad config never leaves a stale lever armed
-                base
             }
-        },
+            // (appDrivenSetup was armed above the match from the YAML alone. To force the
+            // box-driven path with an app connected, push `appDrivenSetup: false` —
+            // CARPLAY_APP_SETUP=0 no longer reverts a relay-enabled config.)
+            // The crc the relay's RS_OPEN reports: computed over the exact YAML bytes this
+            // connection's /info was built from (only on THIS success path — a rejected config
+            // configured nothing, so it reports 0 like the default).
+            cfg_crc = ocbm_proto::crc32(&bytes);
+            println!(
+                // mainBuffered is logged because it is the one arm here whose failure mode is
+                // SILENT MEDIA — an operator diagnosing dead audio must be able to see whether
+                // this session advertised it, without capturing /info.
+                "[carplayd] cfg: {cfg_path} ({} B) → {}×{}@{} hevc={} dpad={} viewAreas={} viewAreaAnim={}ms mainBuffered={} safe={:?} cornerMasks={} logTransfer={} appSetup={}",
+                bytes.len(),
+                dev.display_width,
+                dev.display_height,
+                dev.max_fps,
+                vc.accessory_config.enables_hevc,
+                vc.dpad_support(),
+                vc.view_areas_enabled(),
+                anim_ms,
+                vc.accessory_config.enables_main_buffered_audio,
+                dev.main_safe_area,
+                // Appended (not inserted) so greps on the older prefix keep matching. These are
+                // the values ARMED — post-resolve — so a `/tmp/*_test` flag losing to the push
+                // reads here as `false`, beside the IGNORED line above.
+                levers::cornermasks(),
+                levers::logtransfer(),
+                levers::appsetup(),
+            );
+            dev
+        }
+        PushedCfgRead::Rejected(e) => {
+            // LOUD ON PURPOSE (docs/carplay/04_CAPABILITIES_AND_CONFIG.md #26). This is not a routine fallback — it is the OWNER'S
+            // SETTINGS BEING DISCARDED, and the blast radius is the whole document, not the one
+            // bad key. This exact path fired on 2026-08-11 when a glued newline in the app's
+            // emitter made the alt-ON document unparseable: resolution, HEVC, appDrivenSetup,
+            // audio AND the metadata tier all reverted at once, and the single quiet line here
+            // read like normal operation. serde_yaml reports line and column — print them.
+            eprintln!("[carplayd] *** PUSHED CONFIG REJECTED — {e} ***");
+            eprintln!(
+                "[carplayd] *** the ENTIRE document was discarded, not just the bad key: \
+                 reverting to {}×{}, HEVC off, box-driven SETUP, default audio, compiled \
+                 metadata tier ***",
+                base.display_width, base.display_height
+            );
+            clear_levers(); // a bad config never leaves a stale lever armed
+            base
+        }
         // EMPTY file. Distinct from absent: something wrote a zero-byte config, which means a push
         // produced nothing rather than the box simply being idle. Previously indistinguishable.
-        Ok(bytes) if bytes.is_empty() => {
+        PushedCfgRead::Empty => {
             eprintln!(
                 "[carplayd] *** PUSHED CONFIG IS EMPTY (0 bytes) — falling back to compiled \
                  defaults; an app that pushed this sent nothing usable ***"
@@ -894,18 +875,17 @@ fn load_device_config() -> (DeviceConfig, u32) {
         }
         // OVERSIZED — refused before parsing (serde_yaml is recursive-descent; see the cap above).
         // Silently treating this as "absent" hid a config the owner really did push.
-        Ok(bytes) => {
+        PushedCfgRead::Oversized(len) => {
             eprintln!(
-                "[carplayd] *** PUSHED CONFIG REFUSED: {} bytes exceeds the {MAX_CFG_BYTES}-byte \
-                 cap — not parsed, compiled defaults used ***",
-                bytes.len()
+                "[carplayd] *** PUSHED CONFIG REFUSED: {len} bytes exceeds the {MAX_CFG_BYTES}-byte \
+                 cap — not parsed, compiled defaults used ***"
             );
             clear_levers();
             base
         }
         // A read error that is NOT "no such file" — permissions, I/O, a truncated tmpfs. Absence is
         // the normal idle state and stays quiet; anything else is worth saying out loud.
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+        PushedCfgRead::Unreadable(e) => {
             eprintln!("[carplayd] *** cannot read {cfg_path}: {e} — compiled defaults ***");
             clear_levers();
             base
@@ -926,7 +906,7 @@ fn load_device_config() -> (DeviceConfig, u32) {
         // to the accessory gadget, an absent config is a pushed config that is NOT IN FORCE, and it
         // gets the same `***` treatment as the other fallback arms. The house-style loudness is the
         // fix — the geometry it names is the compiled fallback the phone is about to be served.
-        Err(_) => {
+        PushedCfgRead::Absent => {
             if accessory_host_attached() {
                 eprintln!(
                     "[carplayd] *** NO PUSHED CONFIG at {cfg_path} but a host IS attached ({} \
@@ -1705,7 +1685,14 @@ fn main() {
         // path is untouched. ocbmd relays host mic PCM here as `mic <len>\n<pcm>` and reads the
         // `uplink on <rate> <ch>` / `uplink off` back-channel. The RTP uplink itself is armed by the
         // type-100 `input=true` MainAudio SETUP inside receiver::session (feature `mic-uplink`).
-        receiver::uplink::start_control_listener(MIC_INGEST_ADDR.to_string());
+        // `None` = no auth token (F136, 2026-10-07): the only client is ocbmd, a separate process with
+        // no channel to receive one. The receiver's line cap and 2-connection cap still apply. The
+        // gm_ccpa Android app, where any INTERNET-permission app shares the loopback, passes a token.
+        // The bind is synchronous (F136 fix round 1); a failure is logged and carplayd runs on without
+        // the mic seam, as before. The handle is not needed: the accept thread owns the socket.
+        if let Err(e) = receiver::uplink::start_control_listener(MIC_INGEST_ADDR, None) {
+            eprintln!("[carplayd] mic-uplink ingest bind {MIC_INGEST_ADDR} failed: {e} — no host mic this run");
+        }
         // App-driven-SETUP relay seam (plan P1) — process-lifetime like the two listeners above.
         // ocbmd connects OUT to :9106 while a host is subscribed (its eager-connect tick); with no
         // host the seam stays down and the per-connection selection falls back to plain AvSession.

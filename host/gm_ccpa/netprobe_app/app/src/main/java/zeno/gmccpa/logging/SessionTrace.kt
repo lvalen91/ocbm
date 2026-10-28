@@ -64,15 +64,20 @@ object SessionTrace {
     /**
      * An armed expectation. Held only so [met] and [cancel] can find it by name; the scheduler owns
      * the firing.
+     *
+     * Deliberately a plain class, never a `data class`: the timer body removes itself with the
+     * two-arg `pending.remove(what, p)`, which relies on identity equality to leave a newer Pending
+     * of the same name untouched. [future] is null between the map put and the schedule call.
      */
     private class Pending(
         val what: String,
         val because: String,
         val armedAt: Long,
         val withinMs: Long,
-        val future: ScheduledFuture<*>,
         val onMiss: (() -> Unit)? = null,
-    )
+    ) {
+        @Volatile var future: ScheduledFuture<*>? = null
+    }
 
     private val pending = ConcurrentHashMap<String, Pending>()
 
@@ -93,11 +98,17 @@ object SessionTrace {
      */
     fun expect(what: String, withinMs: Long, because: String, onMiss: (() -> Unit)? = null) {
         val armedAt = SystemClock.elapsedRealtime()
+        val p = Pending(what, because, armedAt, withinMs, onMiss)
+        // Registered BEFORE the timer is scheduled: a met() that lands between the two now finds
+        // the entry instead of being lost (2026-10-06: false EXPECTED-MISSING advert-registered
+        // after a fast onServiceRegistered). The timer then no-ops via the two-arg remove.
+        pending.put(what, p)?.future?.cancel(false)
         val future = try {
             sched.schedule({
                 // Removed by the timer itself, not by met(): if this fires, the expectation is
                 // resolved (as a miss) and must not also be reported met by a very late arrival.
-                val p = pending.remove(what) ?: return@schedule
+                // Two-arg remove: a no-op if this Pending was already met or replaced by a re-arm.
+                if (!pending.remove(what, p)) return@schedule
                 log.e("$TAG_MISSING $what after ${p.withinMs}ms — ${p.because}")
                 // Let the owner reflect the miss in its own state — typically a Board entry, so a
                 // later `## STATUS` dump agrees with the EXPECTED-MISSING line instead of still
@@ -114,9 +125,10 @@ object SessionTrace {
             // Scheduler shut down during teardown. An expectation nobody can fire is not worth a
             // line, but silently dropping one IS the failure mode this class exists to end.
             log.w("could not arm expectation '$what' — trace scheduler is shut down")
+            pending.remove(what, p)
             return
         }
-        pending.put(what, Pending(what, because, armedAt, withinMs, future, onMiss))?.future?.cancel(false)
+        p.future = future
     }
 
     /**
@@ -129,7 +141,7 @@ object SessionTrace {
      */
     fun met(what: String, lateAboveMs: Float = 0.5f) {
         val p = pending.remove(what) ?: return
-        p.future.cancel(false)
+        p.future?.cancel(false)
         val took = SystemClock.elapsedRealtime() - p.armedAt
         if (took > p.withinMs * lateAboveMs) {
             log.w("$TAG_LATE $what arrived after ${took}ms of a ${p.withinMs}ms budget — ${p.because}")
@@ -145,7 +157,7 @@ object SessionTrace {
      */
     fun cancel(what: String, why: String) {
         val p = pending.remove(what) ?: return
-        p.future.cancel(false)
+        p.future?.cancel(false)
         log.i("expectation '$what' dropped — $why")
     }
 

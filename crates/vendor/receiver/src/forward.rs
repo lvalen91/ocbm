@@ -108,6 +108,147 @@ pub fn tag_voice(au: &[u8], rate: u32, channels: u16, atype: u8) -> Vec<u8> {
     v
 }
 
+// ---- voice tag v2 (plan v5.8 V1a; feature `voice-tag-v2`, enabled only by carplay-jni) ----------
+//
+// Every v2 frame keeps the 11-byte v1 head `[rate u32 BE][ch u16 BE][atype u8][len u32 BE]`, so a
+// reader always knows how many bytes follow. Two head forms are new:
+//
+// - **AU, v2**: `atype | 0x80`, and `len` covers the 23-byte extension PLUS the AU:
+//   `[scid u64 BE][rx_us u64 BE][seq u16 BE][rtp_ts u32 BE][stream_type u8][AU]`.
+//   `rx_us` is `session::voice_clock_us()` when the RTP packet was received; `seq`/`rtp_ts` are the
+//   packet's RTP header fields (bytes 2..4 and 4..8), which tag v1 dropped.
+// - **control**, `atype = 0xFF`: rate/ch are the stream's values; the payload is
+//   `[kind u8][write_us u64 BE]…` (see [`voice_begin_v2`], [`voice_end_v2`]).
+//
+// Every multi-byte field is BIG endian, like the v1 head (the seam-v2 SEAM_* messages are a
+// different, little-endian wire and are not touched).
+
+/// Bytes between the v2 head and the AU.
+#[cfg(feature = "voice-tag-v2")]
+pub const VOICE_V2_EXT_LEN: usize = 23;
+/// `atype` bit marking a v2 AU frame (the low 7 bits are the v1 purpose code).
+#[cfg(feature = "voice-tag-v2")]
+pub const VOICE_V2_AU_FLAG: u8 = 0x80;
+/// `atype` of a v2 control frame.
+#[cfg(feature = "voice-tag-v2")]
+pub const VOICE_V2_CONTROL: u8 = 0xFF;
+/// Control kinds.
+#[cfg(feature = "voice-tag-v2")]
+pub const VOICE_V2_BEGIN: u8 = 1;
+#[cfg(feature = "voice-tag-v2")]
+pub const VOICE_V2_END: u8 = 2;
+/// END reasons — the cause stored with the stream's liveness flag before it is cleared.
+#[cfg(feature = "voice-tag-v2")]
+pub const END_UNKNOWN: u8 = 0;
+#[cfg(feature = "voice-tag-v2")]
+pub const END_TEARDOWN: u8 = 1;
+#[cfg(feature = "voice-tag-v2")]
+pub const END_SESSION_RESET: u8 = 2;
+#[cfg(feature = "voice-tag-v2")]
+pub const END_SUPERSEDED: u8 = 3;
+#[cfg(feature = "voice-tag-v2")]
+pub const END_SOCKET_ERROR: u8 = 4;
+
+/// One v2 AU frame: v1 head with `atype | 0x80`, the 23-byte extension, then the AU.
+#[cfg(feature = "voice-tag-v2")]
+#[allow(clippy::too_many_arguments)]
+pub fn tag_voice_v2(
+    au: &[u8],
+    rate: u32,
+    channels: u16,
+    atype: u8,
+    scid: u64,
+    rx_us: u64,
+    seq: u16,
+    rtp_ts: u32,
+    stream_type: u8,
+) -> Vec<u8> {
+    let mut v = Vec::with_capacity(11 + VOICE_V2_EXT_LEN + au.len());
+    v.extend_from_slice(&rate.to_be_bytes());
+    v.extend_from_slice(&channels.to_be_bytes());
+    v.push((atype & 0x7F) | VOICE_V2_AU_FLAG);
+    v.extend_from_slice(&((VOICE_V2_EXT_LEN + au.len()) as u32).to_be_bytes());
+    v.extend_from_slice(&scid.to_be_bytes());
+    v.extend_from_slice(&rx_us.to_be_bytes());
+    v.extend_from_slice(&seq.to_be_bytes());
+    v.extend_from_slice(&rtp_ts.to_be_bytes());
+    v.push(stream_type);
+    v.extend_from_slice(au);
+    v
+}
+
+/// A control frame: v1 head with `atype = 0xFF` and `len = payload.len()`.
+#[cfg(feature = "voice-tag-v2")]
+fn voice_control_v2(rate: u32, channels: u16, payload: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(11 + payload.len());
+    v.extend_from_slice(&rate.to_be_bytes());
+    v.extend_from_slice(&channels.to_be_bytes());
+    v.push(VOICE_V2_CONTROL);
+    v.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    v.extend_from_slice(payload);
+    v
+}
+
+/// The BEGIN a voice stream writes on entry to its thread (and re-sends after a seam reconnect):
+/// payload `[kind=1][write_us u64][scid u64][stream_type u8][audio_type u8][codec u8][rate u32]
+/// [ch u16][audio_latency_ms i32 (-1 = absent)][input u8][begin_seq u32]` — 35 bytes.
+/// `codec` uses the SEAM_FORMAT codes (0 PCM, 1 AAC-LC, 2 AAC-ELD, 3 Opus).
+#[cfg(feature = "voice-tag-v2")]
+#[allow(clippy::too_many_arguments)]
+pub fn voice_begin_v2(
+    write_us: u64,
+    scid: u64,
+    stream_type: u8,
+    audio_type: u8,
+    codec: u8,
+    rate: u32,
+    channels: u16,
+    audio_latency_ms: i32,
+    input: bool,
+    begin_seq: u32,
+) -> Vec<u8> {
+    let mut p = Vec::with_capacity(35);
+    p.push(VOICE_V2_BEGIN);
+    p.extend_from_slice(&write_us.to_be_bytes());
+    p.extend_from_slice(&scid.to_be_bytes());
+    p.push(stream_type);
+    p.push(audio_type);
+    p.push(codec);
+    p.extend_from_slice(&rate.to_be_bytes());
+    p.extend_from_slice(&channels.to_be_bytes());
+    p.extend_from_slice(&audio_latency_ms.to_be_bytes());
+    p.push(u8::from(input));
+    p.extend_from_slice(&begin_seq.to_be_bytes());
+    voice_control_v2(rate, channels, &p)
+}
+
+/// The END a voice stream writes when its thread leaves: payload `[kind=2][write_us u64][scid u64]
+/// [reason u8][frames u32][drops u32][seq_gaps u32][max_inter_arrival_ms u32]` — 34 bytes.
+#[cfg(feature = "voice-tag-v2")]
+#[allow(clippy::too_many_arguments)]
+pub fn voice_end_v2(
+    rate: u32,
+    channels: u16,
+    write_us: u64,
+    scid: u64,
+    reason: u8,
+    frames: u32,
+    drops: u32,
+    seq_gaps: u32,
+    max_inter_arrival_ms: u32,
+) -> Vec<u8> {
+    let mut p = Vec::with_capacity(34);
+    p.push(VOICE_V2_END);
+    p.extend_from_slice(&write_us.to_be_bytes());
+    p.extend_from_slice(&scid.to_be_bytes());
+    p.push(reason);
+    p.extend_from_slice(&frames.to_be_bytes());
+    p.extend_from_slice(&drops.to_be_bytes());
+    p.extend_from_slice(&seq_gaps.to_be_bytes());
+    p.extend_from_slice(&max_inter_arrival_ms.to_be_bytes());
+    voice_control_v2(rate, channels, &p)
+}
+
 #[cfg(test)]
 mod tests {
     /// A NAL length field large enough to wrap `usize` must terminate the walk, not produce reversed
@@ -169,5 +310,65 @@ mod tests {
         assert_eq!(&t[11..], &au);
         // Header is 11 bytes, not the original 10 — the byte a consumer must be updated for.
         assert_eq!(t.len(), 11 + au.len());
+    }
+
+    /// Golden vectors for the v2 voice wire (plan v5.8 V1a). The Kotlin parser's VoiceFrameTest
+    /// carries the SAME bytes; a change on either side must change both.
+    #[cfg(feature = "voice-tag-v2")]
+    #[test]
+    fn voice_v2_golden_vectors() {
+        let au = [0xA1, 0xA2, 0xA3];
+        let t = tag_voice_v2(&au, 16_000, 1, 1, 0x0102_0304_0506_0708, 0x1122_3344_5566_7788, 0xBEEF, 0xCAFE_F00D, 100);
+        let want: Vec<u8> = [
+            &[0x00, 0x00, 0x3E, 0x80][..],              // rate 16000
+            &[0x00, 0x01],                              // ch 1
+            &[0x81],                                    // atype telephony | 0x80
+            &[0x00, 0x00, 0x00, 0x1A],                  // len = 23 + 3
+            &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08], // scid
+            &[0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88], // rx_us
+            &[0xBE, 0xEF],                              // seq
+            &[0xCA, 0xFE, 0xF0, 0x0D],                  // rtp_ts
+            &[100],                                     // stream_type
+            &au,
+        ]
+        .concat();
+        assert_eq!(t, want);
+
+        let b = voice_begin_v2(0x10, 0x0102_0304_0506_0708, 101, 4, 2, 48_000, 2, -1, false, 3);
+        let want_b: Vec<u8> = [
+            &[0x00, 0x00, 0xBB, 0x80][..],              // rate 48000
+            &[0x00, 0x02],
+            &[0xFF],
+            &[0x00, 0x00, 0x00, 0x23],                  // len 35
+            &[0x01],                                    // BEGIN
+            &[0, 0, 0, 0, 0, 0, 0, 0x10],               // write_us
+            &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08],
+            &[101, 4, 2],                               // stream_type, audio_type default, codec ELD
+            &[0x00, 0x00, 0xBB, 0x80],                  // rate
+            &[0x00, 0x02],                              // ch
+            &[0xFF, 0xFF, 0xFF, 0xFF],                  // audioLatencyMs absent = -1
+            &[0x00],                                    // input
+            &[0x00, 0x00, 0x00, 0x03],                  // begin_seq
+        ]
+        .concat();
+        assert_eq!(b, want_b);
+
+        let e = voice_end_v2(16_000, 1, 0x20, 0x0102_0304_0506_0708, END_SUPERSEDED, 757, 2, 1, 480);
+        let want_e: Vec<u8> = [
+            &[0x00, 0x00, 0x3E, 0x80][..],
+            &[0x00, 0x01],
+            &[0xFF],
+            &[0x00, 0x00, 0x00, 0x22],                  // len 34
+            &[0x02],                                    // END
+            &[0, 0, 0, 0, 0, 0, 0, 0x20],
+            &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08],
+            &[0x03],                                    // superseded
+            &[0x00, 0x00, 0x02, 0xF5],                  // frames 757
+            &[0x00, 0x00, 0x00, 0x02],                  // drops
+            &[0x00, 0x00, 0x00, 0x01],                  // seq gaps
+            &[0x00, 0x00, 0x01, 0xE0],                  // max inter-arrival 480 ms
+        ]
+        .concat();
+        assert_eq!(e, want_e);
     }
 }

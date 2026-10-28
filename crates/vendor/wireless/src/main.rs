@@ -35,6 +35,7 @@ mod wifi_handoff;
 // this extraction stays a move rather than a rewrite.
 pub use bt_common::{cloexec, hci, rfcomm, rfcomm_uspace, sdp_server, ssp_agent};
 
+use box_common::cfg;
 use std::io::BufReader;
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -84,6 +85,24 @@ fn log(m: &str) {
 /// non-bridge box on exactly today's path.
 fn wifi_ap_enabled() -> bool {
     box_common::lever("BOX_WIFI_AP", "CARPLAY_WIFI_AP").as_deref() != Some("0")
+}
+
+/// btd's two Android Auto gates, as named sites (D1). Both are LAUNCH gates: each starts
+/// something (a record a phone will act on; a session), and an absent config means nobody asked.
+/// `aa_gate_tests` asserts the kind of each, driven through the real document classifier.
+const SDP_RECORD_GATE: cfg::AaGate = cfg::AaGate::Launch;
+const CH4_ACCEPT_GATE: cfg::AaGate = cfg::AaGate::Launch;
+
+/// Advertise the Android Auto SDP record? Both conditions: a SoftAP to bootstrap the phone onto
+/// (`wifi_ap_enabled`) AND the pushed config's explicit `android_auto: true` ([`SDP_RECORD_GATE`]).
+/// Pure so the gate's truth table is testable.
+fn aa_advertised(wifi_ap: bool, lever: cfg::AaLever) -> bool {
+    wifi_ap && SDP_RECORD_GATE.allows(lever)
+}
+
+/// Accept a phone that dialled RFCOMM channel 4? ([`CH4_ACCEPT_GATE`].) Pure, for the same reason.
+fn aa_ch4_accepts(lever: cfg::AaLever) -> bool {
+    CH4_ACCEPT_GATE.allows(lever)
 }
 
 fn now_ms() -> u64 {
@@ -363,7 +382,22 @@ fn run_active_session(
             // has already seen "Connecting to Android Auto". Do not advertise what we cannot serve.
             // HFP/HSP below are NOT gated with it — in this role the adapter IS the vehicle
             // Bluetooth radio, and call audio is the point of the role.
-            if wifi_ap_enabled() {
+            //
+            // AND gated on the pushed `android_auto: true` (D1, 2026-10-19: Android Auto is
+            // explicit opt-in on the box). Before that an app with AA switched off still had this
+            // record browsed by every Android phone in range, which then dialled channel 4 and saw
+            // "Connecting to Android Auto" for a session the box was going to refuse. Evaluated
+            // per (re)start of the SDP server — btd itself is (re)spawned by wireless_up after the
+            // SUBSCRIBE that wrote the config, so an AA toggle lands at the next wireless bring-up;
+            // the channel-4 accept below re-checks on every connect regardless.
+            let (ap, lever) = (wifi_ap_enabled(), cfg::aa_lever());
+            let aa = aa_advertised(ap, lever);
+            log(&format!(
+                "SDP: Android Auto record {} (wifi_ap={ap} android_auto requested={})",
+                if aa { "ADVERTISED" } else { "omitted" },
+                lever == cfg::AaLever::Requested,
+            ));
+            if aa {
                 services.push(sdp_server::android_auto_service(AA_RFCOMM_CHANNEL));
             }
             services.extend([
@@ -474,6 +508,16 @@ fn run_active_session(
             }
             match rfcomm_accept(AA_RFCOMM_CHANNEL, &t) {
                 Ok(Some(mut sock)) => {
+                    // Re-check the opt-in on EVERY connect (D1): the SDP record is only evaluated
+                    // when the SDP server (re)starts, and a phone that remembers this box can dial
+                    // channel 4 without browsing at all. Dropping `sock` closes the DLC before any
+                    // bootstrap byte or session claim. Requested-gate (not withdrawn): this STARTS
+                    // a session, and an absent config means nobody asked for one.
+                    if !aa_ch4_accepts(cfg::aa_lever()) {
+                        log("AA: android_auto not requested by the pushed config -- dropping channel-4 connect");
+                        drop(sock);
+                        continue;
+                    }
                     let Some(_claim) =
                         control::SessionClaim::try_claim(&aa_active, &aa_ctrl, None)
                     else {
@@ -755,4 +799,38 @@ fn main() {
         }
     }
     log("SIGTERM received -- exiting");
+}
+
+#[cfg(test)]
+mod aa_gate_tests {
+    use super::{aa_advertised, aa_ch4_accepts};
+    use box_common::cfg::aa_lever_of;
+
+    // Documents as ocbmd lands them, classified by the SAME function the live gate reads the file
+    // through (`cfg::aa_lever` = `aa_lever_of` over /tmp/carplay_cfg.yaml).
+    const ON: Option<&str> = Some("name: CarLink\nwireless: true\nandroid_auto: true\nwifi_ap: true\n");
+    const OFF: Option<&str> = Some("name: CarLink\nwireless: true\nandroid_auto: false\nwifi_ap: true\n");
+    const NO_KEY: Option<&str> = Some("name: CarLink\nwireless: true\nwifi_ap: true\n"); // older / AA-unaware host
+    const NO_DOC: Option<&str> = None; // between apps, or ocbmd just restarted
+
+    /// D1: the Android Auto SDP record needs BOTH a SoftAP and an explicit `android_auto: true`.
+    #[test]
+    fn aa_record_needs_a_softap_and_an_explicit_request() {
+        assert!(aa_advertised(true, aa_lever_of(ON)));
+        for (name, doc) in [("false", OFF), ("no key", NO_KEY), ("no document", NO_DOC)] {
+            assert!(!aa_advertised(true, aa_lever_of(doc)), "{name}: must omit the record");
+        }
+        assert!(!aa_advertised(false, aa_lever_of(ON)), "BT-only bridge role has no AP to bootstrap onto");
+        assert!(!aa_advertised(false, aa_lever_of(NO_DOC)));
+    }
+
+    /// D1: channel 4 is a LAUNCH gate. An absent document must REFUSE (a stand-down reading would
+    /// accept it — that is the revert this catches), as must an explicit false or a missing key.
+    #[test]
+    fn ch4_accepts_only_an_explicit_request() {
+        assert!(aa_ch4_accepts(aa_lever_of(ON)));
+        assert!(!aa_ch4_accepts(aa_lever_of(OFF)));
+        assert!(!aa_ch4_accepts(aa_lever_of(NO_KEY)));
+        assert!(!aa_ch4_accepts(aa_lever_of(NO_DOC)), "no config is not a request");
+    }
 }

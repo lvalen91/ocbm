@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Based on LIVI by Lasse Heitgres (https://github.com/f-io/LIVI)
+# Modified 2026-10-19: the changes against LIVI are stated in this header.
+# Derived from LIVI scripts/livi-link/common/rootfs/etc/inittab (GPL-3.0-or-later). Change: the console
+# shell goes through cttyhack (job control on the real tty) and is a login shell (reads /etc/profile).
+# The UART shell is unauthenticated: physical access to the pads is the credential.
+::sysinit:/etc/init.d/rcS
+::respawn:/bin/cttyhack /bin/sh -l
+::ctrlaltdel:/sbin/reboot
+::shutdown:/bin/umount -a -r

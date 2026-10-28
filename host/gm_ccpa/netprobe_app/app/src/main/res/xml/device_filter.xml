@@ -1,11 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- OCBM accessory gadget. In a wireless-only design the app is the ignition — the box's radios
-         are off at boot and wake on our CT_SUBSCRIBE — so plugging the adapter in IS the trigger.
+    <!-- OCBM accessory gadget only. This filter serves the UsbAttachActivity resolver route (its
+         USB_DEVICE_ATTACHED meta-data in the manifest), which is unreachable while GM's fixed USB
+         handler is configured; it is kept as that route's filter for the dormant fallback. The
+         D6 attach receiver does not use it: USB device filters are matched only against activity
+         resolution, so the receiver checks VID/PID in code.
+         The stock Carlinkit PIDs (0x1520/0x1521) were removed in v5.9 (D007): UsbAttachActivity
+         returned silently for them, and the "wrong mode" status comes from UsbManager.deviceList
+         (SessionCore.readAdapterState), which needs no filter.
          vendor-id/product-id are DECIMAL here: 0x1314 = 4884, 0x2d00 = 11520. -->
     <usb-device vendor-id="4884" product-id="11520" />
-    <!-- Stock Carlinkit PIDs, matched only so the app can say "wrong mode" instead of staying silent.
-         0x1520 = 5408, 0x1521 = 5409. -->
-    <usb-device vendor-id="4884" product-id="5408" />
-    <usb-device vendor-id="4884" product-id="5409" />
 </resources>

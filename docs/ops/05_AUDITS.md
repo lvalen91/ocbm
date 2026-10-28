@@ -39,7 +39,8 @@ the `features.rs` generation contract, or `SENT_MSG_IDS`/`RCV_MSG_IDS`. The NEON
   nonce). No divergence except the latent sub-16-byte opcode-0 case (see below).
 - **Recently-fixed areas verified intact:** TEARDOWN empty-array semantics, EVENT-mutex poison
   tolerance (all four sites), Zero-Ack, and the docs/wireless/00_WIRELESS_CARPLAY.md/41 wireless fixes.
-- 266 Rust tests + the Swift build pass after Phase 1.
+- 266 Rust tests + the Swift build pass after Phase 1 (count as of the 2026-07 pass; on 2026-10-28 a
+  static count finds 758 `#[test]` functions in the Rust tree and `host/MacHost/tests/run_tests.sh` passes 1415 checks).
 
 ### The lost-command mechanism (handoff Open item 1) — solved
 
@@ -95,7 +96,7 @@ wire behavior change that needs the phone to confirm ELD acceptance — **deferr
 
 | Commit | Area |
 |---|---|
-| `5ce9d1c` | Baseline — the uncommitted 07-29/30 review + Simulator-verification work (92 files) |
+| `5ce9d1c` *(see note below table)* | Baseline — the uncommitted 07-29/30 review + Simulator-verification work (92 files) |
 | `9022eaf` | Build system — eld-codec cc-rs toolchain lookup + rerun-if-env-changed; build.sh builds all 6 box binaries |
 | `1d67278` | ocbmd/ocbm-proto — hoisted 64K per-wake buffers, table CRC-32, poll(POLLOUT) pacing, bounded ssp_enabled, truncated-FILE_CLOSE reject, Pty let-else, one Instant/pass |
 | `871384a` | iap2d/carplayd/iap2-core — bounded tx(), fatal i2c-open, empty-challenge Ignore, hermetic policy test, clippy; carplayd plock folded in |
@@ -104,7 +105,12 @@ wire behavior change that needs the phone to confirm ELD acceptance — **deferr
 | `75dde09` | host OCBM/USB/audio — heartbeatTimer race, CT_STOP logging, stats Mutex, frame oversize guard, unhandled-frame logs, device-manager logs, Sendable hygiene, V5 decrypt-fail keyframe, V6 short-body, V9 dead code, A1/A2/A3/A5 audio |
 | `3e40b90` | host UI — CCPABridge sessionEnded+stale, refresh timeout, committed-config geometry, inert "Name", off-main log export, Siri strong-capture, stderr redirect, captioned limitedUI keys, dPad tooltip, artwork-id byte compare, Adapter Info placeholder |
 
-Verification: clean tree, all 6 box binaries build, 266 Rust tests pass (five new regression tests),
+*Corrected 2026-10-19: of the eight SHAs above, none resolves in this repository (`git cat-file -t`
+fails for each) — they predate the `18ba44b` squash. `5ce9d1c`'s content now lives in `f88989d`
+("Baseline: commit the 2026-07-29/30 review + Simulator-verification work"). Row contents are kept as
+the record; do not cite these SHAs as checkable.*
+
+Verification (as of 2026-07-30; counts are point-in-time): clean tree, all 6 box binaries build, 266 Rust tests pass (five new regression tests),
 `xcodebuild` clean.
 
 Note: the ocbmd and receiver areas were double-dispatched by the harness (duplicate agents on the same
@@ -115,7 +121,10 @@ files); they converged on identical verified state and the union was committed.
 > **⚠️ EVERYTHING IN THIS SECTION SHIPPED — do not treat any item below as outstanding work.**
 > The desk-side batch, the `SendOutcome` enum, the `OCBMSessionCoordinator.swift` split and the
 > `Protocol/`-layer deletion all landed; the text below is kept only as the record of what was
-> planned. Item-by-item detail: [../ops/06_CORRECTIONS_LEDGER.md](../ops/06_CORRECTIONS_LEDGER.md) `R-50-2`.
+> planned. *(Corrected 2026-10-28: "everything" over-closes. I2 link dedupe, `CT_INPUT_NACK`, the
+> cross-language ChaCha20 known-answer test (Swift half only) and `ocbmd` `opt-level=2` have not
+> shipped; `connect_seam` numeric-only and W9 shipped 2026-09-03. `docs/ops/04_OPEN_ITEMS.md` is
+> authoritative.)* Item-by-item detail: [../ops/06_CORRECTIONS_LEDGER.md](../ops/06_CORRECTIONS_LEDGER.md) `R-50-2`.
 
 #### Desk-side prep (unit-testable, no hardware)
 - **ocbmd OutQueue/`frame_into` refactor** (proposal B+C): convert `out_hi`/`out_lo` to the OutQueue
@@ -176,8 +185,8 @@ written to `/etc/carplay/bt_link_keys` (JFFS2) and reloaded via `LOAD_LINK_KEYS`
 loss is NOT the cause. The gap is initiation: bring-up ends at `hciconfig hci0 piscan` (connectable+
 discoverable) and ssp_agent's mgmt setup does only POWERED/BONDABLE/CONNECTABLE/SSP — no mgmt Add
 Device / accept-list / auto-connect, and RFCOMM is listen/accept-only (never `connect`). Apple's model
-is head-unit-anchored (../wireless/00_WIRELESS_CARPLAY.md:292 lists an accessory-initiated "BT connect → raise AP → hand off" as a
-supervisor job); that page-the-known-device step was never built. **Fix:** mgmt Add Device (0x0021,
+is head-unit-anchored (`docs/wireless/00_WIRELESS_CARPLAY.md` once listed an accessory-initiated "BT connect → raise AP → hand off" as a
+supervisor job; the old `:292` cite no longer matches any text there); that page-the-known-device step was never built. **Fix:** mgmt Add Device (0x0021,
 action=0x02 auto-connect) for each stored bond right after `LOAD_LINK_KEYS` in `ssp_agent::run` — the
 store already has each BD_ADDR; no persistence change needed.
 
@@ -187,22 +196,21 @@ store already has each BD_ADDR; no persistence change needed.
 checking the USB bus" diagnosis; `preempt_wireless_for_wired()` exists; and the `pkill -x rx-connect`
 reap landed. Only fix direction 3 is unlanded, deliberately. Text kept as the record.)* The
 dual-transport design assumed a session
-arbiter that preempts the loser; that arbiter *server was never implemented* (`wireless/src/main.rs:10-13`),
+arbiter that preempts the loser; that arbiter *server was never implemented* (`crates/vendor/wireless/src/main.rs`, module header),
 so `btd` runs `GrantedStandalone` and only tears down on SIGTERM (host-app-absent or the
 CCPA "restart wireless" button) — never on a USB plug. Concrete stale-state:
-  1. `/tmp/carplay_transport` sticks at `"wireless"`: `av.rs:236` (`ensure_av_layer`) writes it at entry
+  1. `/tmp/carplay_transport` sticks at `"wireless"`: `crates/vendor/wireless/src/av.rs` `ensure_av_layer` writes it at entry
      before the spawn is confirmed; the only authoritative clear is `teardown_av_layer()` (SIGTERM-gated).
-     And `phone_on_bus()` (session_supervisor.sh:92) short-circuits `true` on flag==`"wireless"` *before*
+     And `phone_on_bus()` (`tools/session_supervisor.sh`) short-circuits `true` on flag==`"wireless"` *before*
      checking the USB bus, so the supervisor is structurally blind to a USB plug during wireless →
      `arm()`/`projection_up` never run → wired can't take over while the app stays present.
-  2. Leaked wired `rx-connect`: supervisor spawns it bare-name (`arm()`, `tools/session_supervisor.sh:209`
-     — not :168, which is inside `kill_session`'s pkill) but the wireless side reaps by full path
-     (`av.rs:148` in `teardown_av_layer`, `av.rs:349-351` in `ensure_av_layer` — not :336) → two
-     `_airplay._tcp` advertisers.
+  2. Leaked wired `rx-connect`: supervisor spawns it bare-name (`arm()` in `tools/session_supervisor.sh`, not `kill_session`'s pkill) but the wireless side reaps by full path
+     (`teardown_av_layer` and `ensure_av_layer` in `crates/vendor/wireless/src/av.rs`) → two
+     `_airplay._tcp` advertisers. *(`rx-connect` was merged into `carplayd` on 2026-09-08; this finding is history.)*
   **Fix directions:** a supervisor preempt edge (genuine 05ac iPhone on USB + flag==wireless → SIGTERM
   btd → teardown clears flag+latch+daemons → `arm()`; stop `phone_on_bus` short-circuiting
   so the raw USB check is still consulted); write the transport flag only in the `carplayd_up` success
-  branch (av.rs:364), not at entry; reap rx-connect by both name forms. These are their own work items
+  branch (`ensure_av_layer`), not at entry; reap rx-connect by both name forms. These are their own work items
   (touch the byte-pinned-Identify-adjacent wireless crate + supervisor — validate on a wireless session).
 
 ---
@@ -353,10 +361,10 @@ that baked the wrong shape into their fixtures were rewritten, and
   after a later verification pass caught the discrepancy between this document and the tree. A review
   document asserting a fix that did not land is the same failure it exists to prevent.
 - **Correction, 2026-08-01:** this entry originally claimed docs/ops/02_TESTING.md's grep string `key probe exhausted`
-  "could never match" the emitted `EXHAUSTED`. That claim was itself wrong: docs/ops/02_TESTING.md:135 already quotes
-  `key probe EXHAUSTED` (uppercase), which matches the string emitted at `session.rs:1142` verbatim.
+  "could never match" the emitted `EXHAUSTED`. That claim was itself wrong: docs/ops/02_TESTING.md (Negative checks list) already quotes
+  `key probe EXHAUSTED` (uppercase), which matches the string emitted in `crates/vendor/receiver/src/session.rs` verbatim.
   There is a separate, differently-worded lowercase message, `key probe exhausted with no match —
-  closing the undecryptable connection`, at `session.rs:1170` — but docs/ops/02_TESTING.md never quoted that one, so
+  closing the undecryptable connection`, in the same file — but docs/ops/02_TESTING.md never quoted that one, so
   there was no mismatch to fix.
 - Stale md5s, test counts and line references across the docs.
 
@@ -428,7 +436,7 @@ re-dispatched. Artwork is simply the one payload where that is not idempotent.
 
 Verified by mutation — each change below left the whole suite green:
 
-- `EMITTED_KEYS` is an allowlist, not a contract. The host reads 69 keys; the list covers 27. *(**CORRECTED 2026-08-16:** `EMITTED_KEYS` is now 36 and `MetadataWindow.swift` reads 76 distinct keys — §9 of this doc records the additions, §6 was never restated. The finding itself, that an allowlist is not a contract, still stands.)* Renaming
+- `EMITTED_KEYS` is an allowlist, not a contract. The host reads 69 keys; the list covers 27. *(**CORRECTED 2026-08-16:** `EMITTED_KEYS` is now 36 and `MetadataWindow.swift` reads 76 distinct keys (77 on 2026-10-19 by the same grep) — §9 of this doc records the additions, §6 was never restated. The finding itself, that an allowlist is not a contract, still stands.)* Renaming
   `currentRoadName` and `destinationName` in `route_guidance` blanks the Navigation pane and passes.
 - `host_app_reads_every_emitted_key` scans the whole Swift file unscoped, so `("voiceOver","enabled")`
   is satisfied by an unrelated telephony display literal. It reports a contract satisfied that is not.
@@ -448,7 +456,9 @@ Verified by mutation — each change below left the whole suite green:
 
 ### 7. Outside the review's scope, for the owner
 
-The box's AP uses the default PSK `12345678` in `/etc/hostapd.conf`, with no AP isolation and no
+*(Scope, 2026-10-28: this describes the stock-derived CCPA rootfs. The separate `baseline/` image differs:
+its telnetd is rescue-only and bound to the NCM address, and dropbear accepts a key or a documented dev
+password; see `baseline/README.md`.)* The box's AP uses the default PSK `12345678` in `/etc/hostapd.conf`, with no AP isolation and no
 `iptables` binary present. Busybox `telnetd` listens on `:23` with no authentication, alongside
 dropbear with a blank root password. Anyone positioned to reach a session's dataPort already has an
 unauthenticated root shell.
@@ -459,7 +469,9 @@ unauthenticated root shell.
 ### 8. Follow-up pass, 2026-07-29 — six proposals verified, three refuted
 
 > **⚠️ THE `/tmp/carplay_metadata` LEVER IS NOT THE CANONICAL CONTROL.** Per docs/carplay/04_CAPABILITIES_AND_CONFIG.md the levers are
-> interim, box-side scaffolding pending migration to app-pushed config — which also removes the
+> interim, box-side scaffolding. *(Corrected 2026-10-19: the migration to app-pushed config landed
+> 2026-08-10 in `f3fa61d` — `iap2-core/src/config.rs`, but for the metadata `tier` and `skip` list
+> ONLY (`config.rs:105-116`); the other levers remain box-side.)* The app-pushed path also removes the
 > orphaned-rider footgun class "The live hazard" below documents, since the app validates before
 > pushing. The verified/refuted proposals and the landed fixes themselves stand. Full reasoning:
 > [../ops/06_CORRECTIONS_LEDGER.md](../ops/06_CORRECTIONS_LEDGER.md) `R-48-1`.
@@ -555,6 +567,24 @@ The 2026-07-29 session delivered `0x5204 LaneGuidanceInformation` x12 alongside 
 first live confirmation that a subscribe-less `Trigger::RidesOn` feature receives data. Lane guidance
 has no `Start*` of its own; it is declared in param 7 and rides `route_guidance`'s subscribe.
 
+**Corrected 2026-10-19: the x12 / x574 counts are UNVERIFIED (no archived evidence)** — the paragraph
+above is a recorded claim, not a checkable fact. No file in
+`docs/ops/captures/` contains a `0x5204` record (`rg -c '5204|LaneGuidance' docs/ops/captures` → only
+`2026-07-25_SUCCESS_metadata_declaration_accepted.txt:22`, which shows `lane_guidance` in the
+ACCEPTED DECLARATION, not data received). Archived and checkable: `0x5201`/`0x5202` RX in
+`2026-07-24_iap2d_wired_metadata_session.log` (wired). The code design (`features.rs:496-499`,
+`Trigger::RidesOn("route_guidance")`) is verified; the "first live confirmation" heading is not. Note
+the Identify still declares param 30 with subs 0/1 only (`message.rs:800-808`), unchanged.
+
+**Update 2026-10-19 (live session, ledger `R-49-10`, `R-49-9`):** on the tunnel arm at tier `extended`, with Identify param 30 still
+subs 0/1 only (no sub 8), `0x5204` WAS delivered (9 and 16 messages in two bursts; the macOS Lanes card populated). This is
+live-observed and **not archived** (no raw capture filed; route data kept out of the repo), so the heading's "confirmed" now
+has one fresh unarchived observation behind it; the x12 / x574 counts above remain UNVERIFIED (no archived evidence).
+In the same session ExitInfo (`0x5202` id 13) was VERIFIED gated by `0x5200` selector 3: with selectors 1,2 only the `0x5202`
+burst carried ids 0..11; after adding selector 3 the app's Exit Info (raw) card showed `exitInfo: Exit 9` on a Change Highway
+Right maneuver (one route, one exit; id 13 as raw wire bytes UNVERIFIED on this OCBM box — the iPhone-side capture dropped the burst frames; seen as raw wire bytes on a stock CPC200 with patched ARMiPhoneIAP2 v6, ledger `R-49-13`, also unarchived).
+Maneuvers were not linked to lane records on the wire (no id 12 although 5 lane records arrived).
+
 ---
 
 ## HISTORICAL — first code audit
@@ -573,7 +603,12 @@ No memory-safety defect (no leak, double-free, data race) survived verification.
 
 ### HIGH
 
-#### H1 — Video cut-out ROOT CAUSE: shared A/V queue couples the streams  `ocbmd/main.rs:998-1006` [CONFIRMED coupling / SUSPECTED exact-fps]
+> Path note (2026-10-28): citations in this section named files without their directory and with the line
+> numbers of the 2026-07 tree. Full paths used below: `ccpa/ocbmd/src/main.rs`, `ccpa/carplayd/src/main.rs`,
+> `crates/vendor/receiver/src/{session,uplink}.rs`, `crates/vendor/iap2-core/src/metadata.rs`,
+> `host/MacHost/carlink_macOS/{App,USB}/...`. Line numbers are historical; find the code by symbol.
+
+#### H1 — Video cut-out ROOT CAUSE: shared A/V queue couples the streams  `ccpa/ocbmd/src/main.rs` (read-gate on `out_av`) [CONFIRMED coupling / SUSPECTED exact-fps]
 The read-gate `if matches!(ch, CH_VIDEO|CH_ALT_VIDEO) && !out_av.is_empty() { continue }` keys on a
 **single shared FIFO** (`out_av`) carrying CH_VIDEO + CH_ALT_VIDEO + CH_MEDIA_AUDIO + CH_ALT_AUDIO.
 So the main 4K video seam is not read whenever ANY byte from the cluster or audio is still queued. The
@@ -583,7 +618,7 @@ low-bitrate cluster (:9005) + audio keep `out_av` almost continuously non-empty 
 **M-a** below (`:1077` av_conns index-shift can misroute bytes onto the wrong channel during :9005
 reconnects the toggle triggers).
 
-#### H2 — `setupDevice` has no re-entry guard  `AppDelegate.swift:358` [SUSPECTED]
+#### H2 — `setupDevice` has no re-entry guard  `host/MacHost/carlink_macOS/App/AppDelegate.swift` (`setupDevice`) [SUSPECTED]
 Overwrites transport/decoders/client/bridge/coordinator with no `endSession()` first. Normal flows are
 serialized (detach precedes attach), but a duplicate `usbDeviceDidConnect` would abandon the previous
 `OCBMClient` (its bulk-read loop still running) → leak + two clients on the USB pipe.
@@ -601,51 +636,51 @@ be re-wired?** (Live call state IS shown in the MetadataStore Phone pane; Now-Pl
 
 ### MEDIUM
 
-- **M-a** `ocbmd/main.rs:1077-1087` [CONFIRMED shift] — `av_conns.retain()+push()` during the same
+- **M-a** `ccpa/ocbmd/src/main.rs` (`av_conns`) [CONFIRMED shift] — `av_conns.retain()+push()` during the same
   dispatch pass shifts pre-captured `AvConn(idx)` → same-wake re-accept can frame one stream's bytes
   onto the wrong OCBM channel (e.g. 4K bytes as CH_ALT_VIDEO). Overlaps the :9005 reconnect path.
-- **M-b** `ocbmd/main.rs:529` [CONFIRMED] — `drain_q` uses `q.drain(0..w)` (O(n) front-shift) → O(n²)
+- **M-b** `ccpa/ocbmd/src/main.rs` (`drain_q`) [CONFIRMED] — `drain_q` uses `q.drain(0..w)` (O(n) front-shift) → O(n²)
   draining a 4K-frame `out_av` on the ARM box. (rx path was fixed with a cursor; tx wasn't.)
-- **M-c** `carplayd/main.rs:380-430` [CONFIRMED] — `CARPLAY_ALT_W/H` set but **never cleared** on any
+- **M-c** `ccpa/carplayd/src/main.rs` (`CARPLAY_ALT_W/H` handling) [CONFIRMED] — `CARPLAY_ALT_W/H` set but **never cleared** on any
   path (else/parse-fail/no-config). Stale cluster dims from a prior connection leak into the next →
   wrong cluster resolution advertised to iOS.
 - **M-d** `AppDelegate.swift` [CONFIRMED] — **window-title state machine broken** ("stuck at
   Disconnected"): only the dead `adapterDidDetectPhoneType` sets the phone-type title, so over OCBM it
   never advances; a replug leaves "CarLink — Disconnected". Live user-visible bug.
-- **M-e** `session.rs:254` [SUSPECTED] — the type-111 default-OFF **`stopUI` is a no-op at initial
+- **M-e** `crates/vendor/receiver/src/session.rs` (type-111 SETUP) [SUSPECTED] — the type-111 default-OFF **`stopUI` is a no-op at initial
   SETUP** (EVENT channel isn't wired until RECORD, which runs after SETUP) → returns false, never sent.
   iOS keeps encoding the cluster; only the box `nav_forward()` gate drops the frames. Comment claiming
   "iOS sends no frames" is wrong/misleading. (Confirms stopUI never stopped the encoder.)
-- **M-f** `SettingsWindow.swift:162-183` [CONFIRMED] — `nightMode` + `rightHandDrive` **not persisted**
+- **M-f** `host/MacHost/carlink_macOS/App/SettingsWindow.swift` (`save()`) [CONFIRMED] — `nightMode` + `rightHandDrive` **not persisted**
   in `save()`; revert to false on next launch (silent data loss). Bounded today (box doesn't parse them).
-- **M-g** `MetadataWindow.swift:230` [CONFIRMED] — `MetadataStore.resetSession()` **never called**;
+- **M-g** `host/MacHost/carlink_macOS/App/MetadataWindow.swift` (`MetadataStore`) [CONFIRMED] — `MetadataStore.resetSession()` **never called**;
   `AppDelegate.resetSession` doesn't clear the store → stale metadata/artwork across a session reset.
 - **M-h** `CallManager.handleCallStatusJSON` [CONFIRMED] — doubly unreachable (`onCallStatus` never
   assigned + no external caller). (Moot while CallManager is dead — H5.)
-- **M-i** `CarPlayView.swift:523-531` [CONFIRMED] — **Android-Auto** crop-mode vertical touch mapping
+- **M-i** `host/MacHost/carlink_macOS/App/CarPlayView.swift` (AA crop-mode touch mapping) [CONFIRMED] — **Android-Auto** crop-mode vertical touch mapping
   ignores the symmetric top crop (taps land too high, error grows toward the bottom). AA-only; the
   primary CarPlay touch path is correct.
 - **M-j** `ProtocolSessionRecorder.swift` [CONFIRMED] — the binary session recorder is **never armed**
   in the shipping app (start/stopRecording only in tests). Dormant infra.
-- **M-k** `uplink.rs:95-115` [SUSPECTED] — stereo PCM uplink RTP timestamp advances 2× too fast
+- **M-k** `crates/vendor/receiver/src/uplink.rs` (PCM RTP timestamp) [SUSPECTED] — stereo PCM uplink RTP timestamp advances 2× too fast
   (interleaved count instead of samples-per-channel). Unreachable today (voice uplink is mono).
 
 ---
 
 ### LOW — behavioral / robustness (selected; ~15 total)
-- `carplayd/main.rs` — `NAV_FORWARD` not reset on session teardown → a `CMD_NAV_START` then disconnect
+- `ccpa/carplayd/src/main.rs` — `NAV_FORWARD` not reset on session teardown → a `CMD_NAV_START` then disconnect
   leaves the next session forwarding the cluster from the start [CONFIRMED]. `INPUT_NAV` sent to uid-3
   unconditionally regardless of `CARPLAY_DPAD` → silent no-op when D-pad off [CONFIRMED]. Media-btn
   index not range-validated [CONFIRMED].
-- `ocbmd/main.rs` — `av_backpressured` set once never reset; `forward_input` claims non-blocking but
+- `ccpa/ocbmd/src/main.rs` — `av_backpressured` set once never reset; `forward_input` claims non-blocking but
   the socket is blocking (can stall the poll loop); `CT_SRC` srcbench blocks the loop up to 30s; `eth`
   AF_PACKET socket / CH_IP `conns` leak across sessions [all CONFIRMED].
-- `metadata.rs:315` — RouteGuidance param id 24 mislabeled (maps ArrivalBatteryLevel to
+- `crates/vendor/iap2-core/src/metadata.rs` — RouteGuidance param id 24 mislabeled (maps ArrivalBatteryLevel to
   "destTimeZoneOffsetMin"; real tz offset is id 21, never parsed) [CONFIRMED].
-- `MetadataWindow.swift:124/356/386` — array-index by a negative JSON value would trap (box-generated
+- `host/MacHost/carlink_macOS/App/MetadataWindow.swift` — array-index by a negative JSON value would trap (box-generated
   feed, low risk) [SUSPECTED]. Metadata deltas hop to main via fresh unstructured Tasks → possible
   out-of-order apply across chunks [SUSPECTED].
-- `USBTransport.swift:201` — idle-timeout path doesn't reset `consecutiveErrors` (disconnect slightly
+- `host/MacHost/carlink_macOS/USB/USBTransport.swift` — idle-timeout path doesn't reset `consecutiveErrors` (disconnect slightly
   eager) [CONFIRMED]. `FileLogger` — no in-session size/rotation cap [CONFIRMED].
 - Validator disagreement `vehicle_config` vs `info.rs` on OOB insets (feature flips on but emits
   full-bleed) [SUSPECTED]. `net.rs:37` pre-A/V idle tears down after one read-timeout [SUSPECTED].
@@ -667,7 +702,10 @@ naviScreenInfo binary builders), `SessionTokenDecryptor` (only the dead adapter 
 `MediaMetadata.MediaAPPName` (MetadataWindow/NowPlaying); vehicle_config `HidConfig.knob_support`,
 `AltVideoStream.max_fps`, `ViewAreaEntry.view_area`/`AreaRect` (parsed but never applied); stream.rs
 non-`_aad` crypto + `RtpHeader` (test-only); iap2d `group()` (test-only); Communications 0x4158 + List
-0x4171 subscribe/parse paths (unreachable — ids not in RCV_MSG_IDS).
+0x4171 subscribe/parse paths (*corrected 2026-10-19: NOT unreachable — the ids are absent from the
+static `RCV_MSG_IDS` (`message.rs:148`), but `communications` and `call_history` are `Tier::Extended`
+features (`features.rs:455-468`) and `message.rs:543` unions `received_ids()` into param 7, so they are
+declared/subscribed at tier `extended`/`all`; unreachable only at the default `proven` tier*).
 
 **Stale comments (code correct):** ocbm-proto `INPUT_MEDIA_BTN` (claims no 3rd HID device; there is a
 uid-3 D-pad); ControlsWindow header (nav on uid2 → actually uid3); CH_METADATA comments

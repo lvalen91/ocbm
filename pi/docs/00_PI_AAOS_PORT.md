@@ -1,5 +1,9 @@
 # Raspberry Pi 4 + AAOS 16 — wireless CarPlay port
 
+**Light testing.** The Pi 4 AAOS build reached full CarPlay A/V using a CCPA in NCM mode as the MFi
+source only (`ccpa/mfid` over USB-NCM, `CARPLAY_MFI_ADDR`); the Pi's own Bluetooth and Wi-Fi are used.
+Treat results here as a bench port, not a hardened product.
+
 **Status 2026-08-16 (end of session, Pi powered down): wireless CarPlay works on this Pi.**
 Video, audio, Siri, metadata and touch are all device-proven. An iPhone (iPhone18,4, iOS 27.0)
 pairs over Bluetooth, authenticates against the CCPA's MFi coprocessor **over USB-NCM**, takes the
@@ -257,7 +261,7 @@ Two habits that actually catch it, both now in the code:
 
 **`pi/docs/04_IMAGE_REBUILD_GUIDE.md` is the actionable version**, organised by where each change
 goes in the AOSP tree, with per-item confidence and post-rebuild verification commands.
-`pi/docs/02` holds the device observations behind it, and the earlier round is in
+`pi/docs/04` ("Measured notes") holds the device observations behind it, and the earlier round is in
 `/Volumes/stuff/rpi/aaos/docs/os-corrections-2026-08-16.md` (external volume).
 
 The two with the largest payoff both **delete code this port had to write**: `CONFIG_BT_RFCOMM=y`

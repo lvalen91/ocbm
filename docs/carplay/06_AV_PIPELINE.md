@@ -69,7 +69,7 @@ implements. Apple's enum is larger, and the bits it omits are not gaps in the pr
 
 Source: `AppleCarPlay/Sources/AirPlayCommon.h` lines 335–368 in the licensed R14G17 drop —
 **34 defines, top bit 32.** (Path updated 2026-08-16 to the copy CLAUDE.md designates,
-`~/carlink/local_carplay_sdk/reference/apple_carplay_sdk_R14G17/AppleCarPlay/Sources/AirPlayCommon.h`.
+`~/Documents/carlink/old/carplay_RE/carplay_sdk/reference/apple_carplay_sdk_R14G17/AppleCarPlay/Sources/AirPlayCommon.h`.
 The originally-cited `old/carplay_RE/carplay_sdk/reference/…` copy is NOT gone — it still exists under the
 workspace root, `…/carlink/old/carplay_RE/…`, and is byte-identical over this range; it is simply no longer
 the designated drop. The line range and every row of the table below were re-verified define-for-define
@@ -94,11 +94,11 @@ Apple's enum is already in the token table.
 #### Two findings from diffing against the current SDK
 
 The CarPlay Simulator bundle ships Apple's **current** format-name table
-(`~/Downloads/Carplay WWDC/Hardware/CarPlay Simulator.app/Contents/Frameworks/CarPlaySDK.framework/Versions/A/CarPlaySDK`,
+(`~/Documents/carlink/carplay_simulator/CarPlay Simulator.app/Contents/Frameworks/CarPlaySDK.framework/Versions/A/CarPlaySDK`,
 extractable with `strings`). Diffed against R14G17:
 
 *(Path rooted 2026-08-16 — it was written bundle-relative, and the `/Volumes/Additional Tools` image it was
-originally read from is no longer mounted; the bundle itself has been copied to `~/Downloads/Carplay WWDC/`
+originally read from is no longer mounted; the bundle itself was copied to `~/Downloads/Carplay WWDC/` (gone as of 2026-10-19; now `~/Documents/carlink/carplay_simulator/CarPlay Simulator.app`)
 and is indexed in [`../ops/03_REFERENCE_INDEX.md`](../ops/03_REFERENCE_INDEX.md) §D. Xcode's
 `CarPlaySimulator.devicekitplugin` ships its OWN, separate copy of `CarPlaySDK.framework` — per CLAUDE.md's
 order of authority §1 — so do not treat the two as interchangeable when quoting a `strings` extraction.)*
@@ -120,7 +120,7 @@ wire, in any SDK revision on disk (R11B 27 defines → intermediate 32 → R14G1
 best media path CarPlay offers is AAC-LC 48 kHz stereo**, and the direction of travel across revisions is
 more mono voice codecs, not higher fidelity.
 
-**Corroborated by Apple's own sessions** (`~/Downloads/Carplay WWDC/`, indexed at
+**Corroborated by Apple's own sessions** (`reference/wwdc_transcripts/`; the old `~/Downloads/Carplay WWDC/` is gone as of 2026-10-19, indexed at
 [`../ops/03_REFERENCE_INDEX.md`](../ops/03_REFERENCE_INDEX.md) §E). The entire CarPlay audio-format
 story Apple has ever told publicly is three sentences, `wwdc2016-722.txt:80-82`:
 
@@ -156,7 +156,7 @@ introduced in `wwdc2023-10150.txt:136-142`:
 ahead of playout; the vehicle accumulates up to two minutes and drains it against its own clock.
 
 Every symbol in the Simulator confirms the direction — all of it receiver-side
-(`~/Downloads/Carplay WWDC/Hardware/CarPlay Simulator.app/Contents/Frameworks/CarPlaySDK.framework/Versions/A/CarPlaySDK`,
+(`~/Documents/carlink/carplay_simulator/CarPlay Simulator.app/Contents/Frameworks/CarPlaySDK.framework/Versions/A/CarPlaySDK`,
 via `strings`; path rooted 2026-08-16 — see the path note under "Two findings from diffing against the
 current SDK" above, and do not substitute Xcode's separate `CarPlaySimulator.devicekitplugin` copy):
 
@@ -231,7 +231,7 @@ channel it can advertise."* Both describe this project's surface, not CarPlay's.
 
 ### App UI
 
-macOS Settings ▸ Configuration ▸ **Audio** (`host/MacHost/carlink_macOS/App/SettingsWindow.swift`):
+macOS Settings ▸ Vehicle ▸ **Audio formats** (`host/MacHost/carlink_macOS/App/Settings/VehicleTab.swift`; the tab was called Configuration until 2026-09-04):
 
 - **Audio formats** mode picker: *Auto — match transport* / *Wired — PCM* / *Wireless — AAC (full 8)* /
   *Custom…*. Non-custom modes show a one-line summary of the resolved set.
@@ -337,6 +337,16 @@ voice silence.
 - voice :9003 — every AU tagged `[rate u32 BE][ch u16 BE][atype u8][len u32 BE][AU]`
   (`forward::tag_voice`), because one socket multiplexes mixed formats. Opus is forwarded tagged, not
   decoded — the box has no Opus decoder.
+  **Voice tag v2 (plan v5.8 V1a, 2026-10-07; receiver feature `voice-tag-v2`, enabled ONLY by the
+  gm_ccpa app's `carplay-jni`, so box builds keep v1):** same 11-byte head; an AU frame has
+  `atype | 0x80` and `len` = 23 + AU, the 23 bytes being `[scid u64][rx_us u64][seq u16][rtp_ts u32]
+  [stream_type u8]` (BE; `rx_us` on the receiver's `voice_clock_us()`, which the app reads in-process
+  via `nativeVoiceClockUs()`); a control frame has `atype = 0xFF` and carries BEGIN (written on entry
+  to the stream's thread, re-sent after a seam reconnect, `begin_seq` counting re-sends) or END
+  (reason teardown | session reset | superseded | socket error, frame/drop/seq-gap counts) — END only
+  on the connection that carried that stream's BEGIN, never opening one. Voice streams only, on this
+  on-box path; media (:9002) is byte-identical. Non-media AAC-LC is v2-tagged instead of raw ADTS.
+  Golden vectors: `forward.rs` `voice_v2_golden_vectors` = the app's `VoiceFrameTest`.
 
 ### 3 · ocbmd — seam to USB
 
@@ -376,7 +386,7 @@ Delivery philosophy is **not uniform**, and this is the single most consequentia
 
 | Class | Streams | Queue cap | Pre-roll |
 |---|---|---|---|
-| Voice / telephony | MainAudio 100, AltAudio 101 | 150 ms | none — arrival-paced is correct |
+| Voice / telephony | MainAudio 100, AltAudio 101 | 250 ms (150 ms until 2026-09-04; raised so Android Auto prompt bursts are not dropped, `AudioPlayer.swift` `voiceMaxQueuedSeconds`) | none for CarPlay voice — arrival-paced is correct |
 | Media | MainHighAudio 102 | 1000 ms | 400 ms |
 
 Media is delivered in **bursts ahead of realtime** (~750 ms fast, then a ~200 ms pause). Under the old
@@ -413,10 +423,11 @@ The uplink is the **input leg of the type-100 MainAudio stream** and dies with i
 5. **Encode + send.** `push_pcm` packetizes and `send_au` builds the RTP header (`ssrc = 0`, seq
    incrementing), encrypts with `encrypt_audio_aad` (same `ts‖ssrc` AAD as the downlink) and sends to
    the iPhone's port. Codec is transport-determined:
-   - **wired** — raw **big-endian** PCM in fixed sample-count packets, no encoder. This is the only
-     path the box builds (feature `mic-uplink`);
+   - **wired** — raw **big-endian** PCM in fixed sample-count packets, no encoder (feature `mic-uplink`);
    - **wireless** — AAC-ELD via `crates/vendor/eld-codec` (libfdk-aac shim), feature
-     `mic-uplink-eld`. fdk-aac is not available on the box, so **carplayd never enables it**. 16 kHz
+     `mic-uplink-eld`. carplayd builds **both legs by default** (`ccpa/carplayd/Cargo.toml`:
+     `default = ["mic-uplink-eld"]`, libfdk-aac statically linked; owner decision: stays default-on). The
+     Raspberry Pi (aarch64) build opts out with `--no-default-features` and keeps only the wired PCM leg. 16 kHz
      mono produces ASC `f8f03000`, byte-identical to the iPhone's own `speechRecognition` stream
      (`eld_16k_mono_asc_matches_iphone`).
 6. **One uplink at a time.** iOS re-SETUPs MainAudio each Siri turn; the newest instance's
@@ -461,7 +472,7 @@ has exercised either path on a device.
   the box advertises the formats, but the ○-marked entries in docs/carplay/06_AV_PIPELINE.md have never been through a live
   wireless session on this bench.
 - **No rate-matched ring buffer for long-session clock drift; the behaviour on drift is to DROP.**
-- **`OCBMAudioStreamFormat.bits` is parsed and stored but never read.**
+- **`OCBMAudioStreamFormat.bits` is parsed and stored but not used for decode** (it is read only for the rx-telemetry byte arithmetic in `OCBMAVBridge.swift`).
 - **Opus is never decoded on the box** by design; in the legacy on-box mode it is tag-forwarded raw.
 
 ### 8 · Bench levers and evidence
@@ -487,10 +498,295 @@ Comment-only fixes, no behaviour change:
 - `crates/vendor/receiver/src/uplink.rs` — `start_control_listener`'s doc said "the control-in
   (`:9110`) listener". `:9110` is the **HID input** seam; carplayd passes `127.0.0.1:9112`
   (`MIC_INGEST_ADDR`). Corrected to name the caller-supplied address.
+  That signature has since changed — see §9a.
 - `crates/ocbm-proto/src/lib.rs` — the `SEAM_FORMAT audio_type` legend stopped at `4 default`,
   omitting `5 compatibility`, which `session.rs` has emitted since the compatibility split.
 - `host/MacHost/carlink_macOS/OCBM/OCBMAVDecrypt.swift` — same legend, same omission; the
   `isVoice` comment now names the misrouting recorded in §7 rather than implying it is intended.
+
+### 9a · Mic-ingest auth on the `:9112` seam (F136, 2026-10-07) — a behaviour change
+
+Unlike the comment-only fixes in §9, this changes behaviour. (Moved here 2026-10-07 from the §9
+`start_control_listener` bullet, where it had been placed under §9's "no behaviour change" heading.)
+
+`start_control_listener` is now
+`start_control_listener(addr: &str, token: Option<[u8; 16]>) -> io::Result<ControlListener>`. The bind
+is **synchronous**, so a held port returns `Err` to the caller instead of being logged on a
+background thread.
+
+- **carplayd** passes `None`: no auth. The protocol ocbmd sees is unchanged apart from the line and
+  connection caps.
+- **The gm_ccpa Android app** (`carplay-jni` `JNI_OnLoad`) passes a per-process 128-bit `getrandom`
+  token. It publishes the listener, and with it the token, only after the bind returns `Ok`. If
+  another app holds `:9112`, the app never hands the token out.
+
+**Token-mode handshake:**
+1. `MicUplink` binds its socket to `127.0.0.1:0`.
+2. It calls `NativeCore.micAuth(localPort)`, which reserves that source port through
+   `ControlListener::admit` and returns the token. The reservation matches only a peer at exactly
+   `127.0.0.1:<port>`. On Linux another app can bind `127.0.0.2:<port>`, so `is_loopback()` would not
+   be enough.
+3. It connects and sends `auth <32 hex>\n`.
+4. The listener replies `auth ok\n`, always before any `uplink on/off` line.
+5. `MicUplink` counts the seam as up only after that ack. If the token is wrong or both live slots
+   are taken, the listener closes the connection without sending the ack.
+6. Every attempt ends with `NativeCore.micRelease(localPort)` **before** the socket closes. A
+   reservation left by a failed connect cannot outlive our hold on the port. The 5 s reservation
+   TTL is only the backstop for a stale `.so`.
+
+**Connection budgets.** Only authenticated peers count against the cap of 2 live connections.
+Unauthenticated connections are limited separately:
+- 4 slots for reserved source ports, with a 1 s auth window. Only this process can create a
+  reservation.
+- 4 slots for all other ports, with a 250 ms auth window. A flood can fill this pool but never the
+  reserved one.
+
+Rejections are logged at most once per second, with a count.
+
+### 10 · Per-stream lifecycle signals, timing, and the stock GM/Cinemo reference (2026-10-07)
+
+Read-only research, no code changed. The question was whether CarPlay tells the receiver when each
+audio stream starts and ends, what timing it carries, and how stock GM CarPlay (Cinemo) acts on it.
+Evidence tags: **[J]** decompiled Java, **[N]** native strings or disassembly, **[L]** live bench
+log. **[1-src]** marks a claim with only one line of evidence (not cross-checked); treat it as
+provisional.
+
+**Sources.**
+- **Silverado/AAOS12 (bench-class).** The CarPlay service lives in
+  `com.gm.domain.server.delayed.apk`, running as process `com.gm.domain.server.delayed:CarplayService`
+  (`gminfo_resources/enumeration/Y181/jun2026/raw/processes.txt`). The APK was taken from
+  `GM_research/.../2024_Silverado_ICE/emu/hy/re/apks/`, which is the Y181 image the hybrid emulator
+  uses. To reproduce the decompile, run
+  `jadx --no-res -d /tmp/cin_audio/delayed_jadx <apk>`. In this section, "SD:" stands for
+  `sources/com/gm/server/carplay/service/internals/`. **`GMCarPlay.apk` (the jadx tree in
+  `reference/gm_cinemo`) is only the HMI shell. The audio logic is in this APK.**
+- **Native layer.** Silverado r14 `libNmeCarPlay.so` (x86-64). Offsets below are file
+  virtual addresses as reported by r2.
+- **CT5/AAOS14.** "CT5:" stands for
+  `reference/gm_cinemo/jadx_GMCarPlay_CT5_AAOS14/sources/com/gm/server/carplay/service/internals/`.
+- **Bench.** `/tmp/ccpa_sess/logcat_cp8.txt` (the gm_ccpa receiver's clock) and
+  `/tmp/ccpa_sess/ios/ios_cp6.txt` (the iPhone's clock, about 0.1 s ahead).
+- **Cross-check.** Apple R14G17 (`~/Documents/carlink/old/carplay_RE/carplay_sdk/reference/apple_carplay_sdk_R14G17/AppleCarPlay/`).
+  Cinemo r14 embeds this receiver core. Where a native finding matches R14G17 source, it is cited as
+  confirmed.
+
+#### 10.1 · Explicit per-stream signals (yes, they exist)
+
+| Signal | Marks | Timing vs. audio packets (bench, gm_ccpa receiver) |
+|---|---|---|
+| RTSP **SETUP** (phase 2) carrying a `streams[]` entry with `type` (100 Main / 101 Alt / 102 MainHigh), `audioType`, `audioFormat`, `audioLatencyMs`, `input`, `supportsRTPPacketRedundancy`, `supportsHighAccuracyTimestamps` (102 also carries `controlPort` and `spf`) | **Start** of a stream, plus its purpose. A Siri turn is a fresh SETUP of type 100 with `audioType=speechRecognition`. A call is type 100 with `telephony` and `input=true`. Nav is type 101 with `default`. Media is type 102 with `media` | First RTP packet arrives after SETUP by **40–56 ms** (type 101), **57–132 ms** (type 100), and **49–105 ms** (type 102). Measured over every SETUP in cp8 **[L]**. *Corrected 2026-10-07 (plan v5.8 review round 1, reviewer 1): first RTP is not logged; the proxy, rust's `first AU forwarded`, comes 39–109 ms after SETUP on 101 (103–109 ms at 18:32:12.015, 18:32:45.223 and 18:33:19.683, all during a call), 60–136 ms on 100 and 49–105 ms on 102. These are typical values, not bounds* |
+| RTSP **TEARDOWN** carrying `streams[{type}]`, i.e. a *partial* teardown | **End** of that stream. The session stays up | Arrives after the stream's last packet. Example: Siri SETUP 100 at 17:04:20.250, TEARDOWN [100] at 17:04:26.754 **[L]** |
+| `POST /command` **`modesChanged`** (`appStates`: `speech` with `speechMode`, `phoneCall`, `turnByTurn`; `resources`: `mainAudio`/`screen`) | Ownership and app state. It does **not** describe any single stream | Comes before the Siri SETUP. modesChanged reporting speech "iOS (Speaking)" was logged at iOS 17:04:20.287. The iPhone switched `media -> speechRecognition` at 17:04:20.301 and raised IsActive at 20.340 (`ios_cp6.txt` around line 3043927). On the receiver, the SETUP followed the last modesChanged by about 67 ms **[L]** |
+| `POST /command` **`duckAudio`** (`durationMs`, `volume`) / **`unduckAudio`** (`durationMs`) | A request to duck or unduck *other* audio, almost always for nav on 101 | `duckAudio` comes **17–126 ms before** the SETUP of 101 in 51 of 57 SETUPs, and `unduckAudio` comes **1.88–1.99 s before** the TEARDOWN of 101 in 51 of 57 (cp8) **[L]**. *Corrected 2026-10-07 (plan v5.8 review round 1, reviewers 1 and 3; counts re-checked by the planner), replacing "17–56 ms" and "about 1.96–1.99 s (n≈30)". Counts cover cp8 up to 20:10; the log grew afterwards (round-2 reviewer: 60 SETUP-101s to 20:19, 54 with duck). Exceptions: (1) 6 SETUP-101s had no duckAudio, all 6 between 18:31:20 and 18:33:20 (18:31:20.349, 18:31:42.327, 18:32:12.015, 18:32:42.836, 18:32:45.223, 18:33:19.683). Round-3 correction (2026-10-07, reviewer 2, confirmed by the planner from the type-100 SETUP/TEARDOWN and phone edges; this replaces the round-2 "4 inside / 2 between"): at SETUP time, 2 fall inside a live CALL or ASSISTANT stream (18:31:42.327, 18:32:42.836) and 4 fall between streams. Of those 4, two later overlap a CALL/Siri stream (18:31:20.349 → phone=1 18:31:22.292, telephony SETUP 18:31:23.059; 18:32:12.015 → Siri SETUP 18:32:17.144), 18:32:45.223 receives a duck later (18:32:49.731), and 18:33:19.683 stays between. (2) One unduck→TEARDOWN took 27.0 s (TEARDOWN 18:33:19.640; 101 kept delivering, 3432 frames). (3) 5 TEARDOWNs had no unduck; those are the TEARDOWNs of the duck-less streams, so no duck was ever left without an unduck; (4) back-to-back prompts reuse one 101 stream, with a duckAudio and no new SETUP (e.g. 18:20:33.807)*. Key names come from `libNmeCarPlay` strings near 0x2c61c **[N]**. Values on the bench are not logged and remain **unknown** |
+| `audioType` change on a live stream | No separate wire signal was observed. The log line "HALCarAudioDevice-AudioMain Changing Audio Type: media -> speechRecognition" (`ios_cp6`) is internal to the **sender**. On the receiver, the change appears as a new SETUP whose `audioType` differs | — |
+
+Stream classes seen in cp8, counted once per SETUP dict **[L]**:
+
+| Type | `audioType` | Format | `audioLatencyMs` |
+|---|---|---|---|
+| 101 | `default` | ELD 48k/2 | 80 |
+| 100 | `telephony` | ELD 16k/1 | 80 |
+| 100 | `speechRecognition` | ELD 16k/1 | 80 |
+| 102 | `media` | AAC-LC 48k/2, spf 1024 | **1000** |
+
+These values were sent while gm_ccpa advertised one catch-all `audioLatencies` entry of 0/0
+(`info.rs` `build_info`, `audioLatencies`). **Unknown:** whether iOS sends different `audioLatencyMs` values to a receiver
+that advertises the stock per-type latencies below.
+
+#### 10.2 · Timing the streams carry, and the targets the stock receiver uses
+
+- **Per packet.** Each packet carries an RTP timestamp in the sample clock, plus a sequence number.
+  - Stock Main/Alt playout is timestamp-driven. `_MainAltAudioProcessPacket`
+    (fcn 0xd9860) feeds `RTPJitterBuffer` put (fcn 0xdc300), which logs "%s: Starting audio in %u
+    ms".
+  - Reads happen in fcn 0xdc780, which is called from fcn 0xd45a0. They log "Buffering complete",
+    "Gap", "Late", "Skip", and "Re-buffering … missing … nowTS".
+  - fcn 0xdc510 ("Jitter Buffer Discard Excess, prevSize … newSize") trims buffered audio down to
+    the high watermark W = max(bufferMs + 20, 200) ms, not to the target. It is called from both put
+    and read **[N]**.
+    - *Corrected 2026-10-07 (plan v5.8 review rounds 1-2, three reviewers): this line said "trims
+      buffered audio above target".*
+    - R14G17 AirPlayUtils.c:657-660 computes highWatermarkMs, :662 sets desired = W × rate, and the loop at :673 stops at
+      `BufferedSamples <= desired`. Cinemo computes the same, max(+20, 200) × rate, at 0xdc563–0xdc570,
+      and exits at 0xdc618.
+    - It runs only at the buffering → playing transition (:1063) and when the node pool is nearly
+      exhausted (:757; pool = max(50, 2 × packets(bufferMs)) nodes, :503-505; trigger at
+      nodesUsed ≥ allocated − 3, :755). Main/Alt does not maintain the size continuously (the FIXME at
+      :753; line refs re-anchored 2026-10-07, review round 3).
+    - **The transition trim does not cut delay.** *Added 2026-10-07 (plan v5.8 review round 3, reviewer 3;
+      re-checked by the planner in R14).*
+      - AirPlayUtils.c:1058 takes the head node BEFORE the discard. :1063 discards from the head. :1065
+        then sets the play position `nowTS` from that pre-discard node's timestamp.
+      - The next reads therefore find the surviving nodes "too early" and output silence for the
+        discarded span. Playout delay stays at stall + bufferMs; the trim only frees memory.
+      - Cinemo has the same order: head loaded at 0xdc7e0–0xdc7ec, discard called at 0xdc804, ts read
+        from the pre-discard node at 0xdc809. That its read loop also fills silence is inferred by
+        analogy with R14 **[N][1-src]**.
+  - Policy: **late packets are skipped, gaps are concealed, and excess is discarded**.
+- **Main/Alt jitter target** (`_MainAltAudioSetup`, fcn 0xd1660, at 0xd1967–0xd19b6) **[N]**,
+  confirmed against Apple R14G17 `AirPlayReceiverSession.c:3340-3370` and `AirPlayCommon.h:154-156`:
+  - `bufferMs` is taken from SETUP `audioLatencyMs` (CFString key at 0x2d31b, which points to the
+    text at 0x2d323).
+  - If the key is absent or negative, the default is **32 ms** for `kNetTransportType_DirectLink`
+    (0x10, wired; `NetUtils.h:621`) and **80 ms** for any other transport (WiFi).
+  - The result is clamped to **at least 32 ms**, then passed to `RTPJitterBufferInit`.
+  - With iOS sending 80, the stock receiver buffers about **80 ms** on 100 and 101.
+- **MainHigh (102) uses a different path.** The SETUP dispatch (fcn 0xd02a0) sends types 100–101 to
+  `_MainAltAudioSetup`, 0x66 (102) to `_GeneralAudioSetup` (fcn 0xd0a20), and 0x6e (110) to the
+  screen setup **[N]**.
+  - The General path ("audio set up for %s on port %d, **RTCP** on port %d") converts
+    `audioLatencyMs × rate / 1000` into a sample latency (0xd0c87–0xd0cae).
+  - If `audioLatencyMs` is absent, it falls back to `latencyMin`/`latencyMax`. It reads
+    `controlPort` with a default of 6001 **[N]**. Confirmed by R14G17
+    `AirPlayReceiverSession.c:1970-1984`, where 6001 is `kAirPlayFixedPort_RTCPLegacy`.
+  - With iOS's value this means a **1000 ms buffered** media target.
+- **Session clock.** The stock binary contains an NTP **client**: `_TimingNegotiate`,
+  `_TimingSendRequest`, "### NTP send request failed", and `_TimingThread` **[N]**. gm_ccpa only
+  *answers* timing packets 210→211 (`session.rs`, the 210→211 timing handler) and plays audio on arrival.
+  **Unknown:** whether the stock client is exercised on CarPlay sessions. No stock runtime log
+  exists.
+- **Advertised `audioLatencies` (stock).** Built by Silverado `SD:CarPlayManager.java:868-976`.
+  Values are µs, outputLatency / inputLatency, non-Bose, with the Bose ext-amp value in brackets:
+
+  | Stream | Output µs | Input µs |
+  |---|---|---|
+  | Main/default | 160000 [200000] | 150000 |
+  | alert | 100000 [180000] | — |
+  | media | 120000 [270000] | — |
+  | telephony | 180000 [290000] | 150000 |
+  | speechRecognition | 160000 [220000] | 200000 |
+  | compatibility | 120000 [270000] (*corrected 2026-10-07, review round 1: Bose-dependent, LATENCY_MEDIA_EXT_AMP*) | — |
+  | Alt/default and Alt/compatibility | 100000 [200000] | — |
+
+  - Silverado has **no** entry for 102.
+  - CT5 differs (`CT5:CarPlayManager.java:1534-1556`): media and 102 143000, alert 86000, Alt 93000,
+    telephony 105000, speech 96000, default 160000, input 58000.
+  - Whether the bench radio is Bose-flagged (`isBoseAmplifier`) is **unknown**.
+- **Device (AAudio) buffer and period, per type.** Both builds use Cinemo `NmeDeviceAsyncAAudio`
+  and `NmeAudioCaptureAAudio` (Silverado `SD:GMCinemoManager.java:246-247`; CT5
+  `GMCinemoManager.java:216-217`) **[J]**. Silverado defaults are set in
+  `SD:resmanagement/CarPlayAudioManager.java:227-268`. Each can be overridden by a
+  `persist.sys.carplay.*` property, and the bench values are **unknown**:
+
+  | Type | Playback buffer / period (ms) | Capture buffer / period (ms) |
+  |---|---|---|
+  | media | 256 / 8 | — |
+  | phone | 32 / 8 | 64 / 16 |
+  | Siri | 128 / 8 | 32 / 8 |
+  | alert | 48 / 8 | — |
+  | alt | 48 / 8 | — |
+  | other | — | 50 / 25 |
+
+  - `frames_per_burst` (`:394-428`): phone 320 at 16k or 480 at 24k; Siri 480 at 24k;
+    media, alt and alert 384 at 48k.
+  - CT5 is tighter (`CT5:resmanagement/CarPlayAudioManager.java:779-832`): music 64 ms, call 32 ms,
+    alert/alt/Siri 16 ms, all with an 8 ms period.
+
+#### 10.3 · How stock GM acts on it (Silverado [J] unless noted; CT5 differences inline)
+
+- **Callback chain.**
+  1. Cinemo `NmeCarPlayAudio::PrepareInternal` (fcn 0xe6a70) calls `OnAudioPrepare`. It also starts
+     an "Audio feeding thread %s running on prio %I64d; AudioStream %s".
+  2. `StartInternal` (fcn 0xe7540) initialises capture and the sink, then calls `OnAudioStart`.
+  3. Stop (fcn 0xe7bd0) calls `OnAudioStop` **[N]**.
+  4. In Java, Prepare is handled by `SD:cinemoWrapper/CarPlayCinemoHandler.java:147-157`, which
+     calls `onPhoneAudioInit`, which calls `CarPlayAudio.startAudio`. Stop is handled at `:122-130`,
+     which calls `onPhoneAudioStopped`, which calls `stopAudio`. Silverado has no Start handler. CT5
+     has one, and uses it only to set Siri `setPrivacySensitive`
+     (`CT5:resmanagement/CarPlayAudioManager.java:1059-1067`).
+  5. The stream-level platform handler (fcn 0xc8390) logs "Main audio setting up %s for %@, input
+     %s, loopback %s", "Alt audio setting up %s", and "Main/Alt audio torn down".
+- **Sinks are bound to SETUP and TEARDOWN, not to data.** This comes from R14G17, and Cinemo r14
+  carries the same log strings in fcn 0xc8390:
+  1. The SETUP handler calls `PlatformControl(setUpStreams)` (`AirPlayReceiverSession.c:962`).
+  2. That reaches `_UpdateStreams` (`AirPlayReceiverPOSIX.c:677-790`), which logs "Main/Alt audio
+     setting up" and calls **`AudioStreamPrepare`**.
+  3. **`AudioStreamStart`** follows at once if the session is already started (after RECORD).
+  4. Partial TEARDOWN sets the type to Invalid, which calls `AudioStreamForget` and logs "… audio
+     torn down".
+  - **Not traced** inside the Cinemo binary: the edge from `AudioStreamPrepare` to
+    `NmeCarPlayAudio::PrepareInternal`, which is reached through function pointers **[1-src]**.
+- **Type mapping.**
+  - `getAudioType(streamType, audioType)` (`SD:…/CarPlayAudioManager.java:208-225`):
+    MainAudio, MainHighAudio or GeneralAudio map to Phone (`telephony`), Siri
+    (`speechRecognition`), Alert (`alert`), or else Media. AltAudio maps to Alt.
+  - CT5 does the same with ints: 2 is telephony, 3 is speech, 4 is alert, and 103 is included
+    (`CT5:…:629-647`).
+- **Audio attributes** (`prepareAudioAttributes` `:108-138`), confirmed identically in CT5
+  `:728-755`:
+
+  | Type | Usage | Content type |
+  |---|---|---|
+  | Phone | 2 VOICE_COMMUNICATION | 1 SPEECH |
+  | Siri | 16 ASSISTANT | 1 SPEECH |
+  | Alert | 6 NOTIFICATION_RINGTONE | 0 |
+  | Media | 1 MEDIA | 2 MUSIC |
+  | Alt | 12 NAVIGATION_GUIDANCE | 0 |
+
+  Output is an AAudio device string,
+  `?usage=..&content_type=..&use_audio_format=1&use_buffer_conf=1&frames_per_burst=..`, passed
+  through `SetMainAudioParams` or `SetAlternateAudioParams` (`:348-392`).
+- **Permanent Media loss -> MainAudio Take (added 2026-10-08).** Stock answers a permanent `AUDIOFOCUS_LOSS` on Media with a MainAudio Take (owner ACCESSORY, TAKE, USER_INITIATED, take constraint USER, borrow ANYTIME: `SD:resmanagement/AudioStateMachine.java:81-100,572-577`; `ResourceMode.java:279-316`) and returns it with an Untake on GAIN. The Cinemo-enum -> wire-value step is native and was not read; gm_ccpa sends Apple's constants for the same names (`events.rs` `main_audio_mode_body`).
+- **Focus** (`startAudio` `:936-1022`, `requestFocus` `:744-813`).
+  - Phone, Siri and Alert use `GAIN_TRANSIENT` and a mono device.
+  - Media uses `GAIN`, or `GAIN_TRANSIENT` when the accessory owns permanent audio.
+    `setAcceptsDelayedFocusGain` is set only for Media while another CarPlay focus is held.
+  - **Alt (nav) never requests Android focus:** "requestAudioFocus(): skipped for Alt" at `:750`,
+    and abandon is skipped at `:888`. CT5 does the same for every non-main type
+    (`CT5:…:236-242`).
+  - A Siri request first abandons a held-but-idle telephony focus (`:751-756`).
+  - Focus is requested once per stream, inside `startAudio` (reached from Prepare through `onPhoneAudioInit`), and only if `!hasFocus()` (`:997-998`). *Wording corrected 2026-10-07 (plan v5.8 review round 2): it said "once per Prepare".*
+  - `stopAudio` (`:1024-1054`) abandons focus as follows:
+    - Phone and Alert: only when `callMode == 0`.
+    - Siri: unless the state is `CONTROLLER_WITHMIC`.
+    - Media: not on stop, so focus follows `modesChanged`.
+- **Nav during Siri.** Because Alt holds no focus, Siri's `GAIN_TRANSIENT` cannot pause or kill
+  nav. Nav plays on its own AAudio stream, usage 12. While Alt streams and is not ducked, it switches
+  GM's volume knob route (`setCPMainVolumeRoute(true)`, `:1087-1159`). How the two are mixed is left
+  to the platform audio policy. This is **unmeasured** on the stock radio.
+- **Ducking** (`onPhoneAudioRampVolume` `:540-557`, Cinemo `RampVolume` fcn 0xe7e20 **[N]**).
+  1. On any ramp below 1.0, Alt's ducking flag is set.
+  2. If any non-Alt stream is streaming, the GM platform `setDuckingState(true)` is set and the
+     handler returns `NotImplemented` (=16).
+  3. On 0x10, Cinemo ramps its own sink (0xe7ea6–0xe7ed9). `NoError` means the app handled it.
+  4. The `duckAudio` parameters are parsed as in R14G17 `AirPlayReceiverPOSIX.c:387-418`.
+     `durationMs` defaults to 500. `volume` is in **dB**, converted with `DBtoLinear`; it defaults to
+     0.2 linear and is clamped to 0..1.
+  5. The R14G17 handler only delegates. Cinemo r14 (fcn 0xc7b40) adds a second branch. It ramps
+     internally ("Ducking audio to %f within %f seconds") when `[ctx+0x40]` is non-null and the byte
+     at `[ctx+0x48]` is set. Otherwise it delegates ("Delegating ducking…"). What those two fields
+     represent is **unknown** **[N][1-src]**.
+  6. CT5 is similar: `setPlatformDucking`, and "Cinemo handles duck" only when a non-media main
+     stream plays (`CT5:…:1039-1057`).
+- **Call path.**
+  - Input params come from `setCinemoInputParams` `:270-292`:
+    - Phone uses device `Voice_Uplink` + `input_preset=7` (VOICE_COMMUNICATION).
+    - Siri uses `input_preset=6` (VOICE_RECOGNITION) + `use_channel_count=2`.
+  - Output is forced to `&samplerate=48000` for Phone (`:383`).
+  - ECNR is selected by rate (`setECNRUseCase` `:904-934`): 8k is NB, 24k is FaceTime, otherwise
+    wideband, with separate wireless variants.
+  - CT5 uses exclusive AAudio on `bus4_call_out` with `Call_In_Mic`.
+- **Threads and priority.**
+  - `startAudio` sets Cinemo `SCHED_POLICY_AUDIO_DEVICE=RR`, `PRIO_AUDIO_DEVICE=49`, and channels
+    mono or stereo per type.
+  - Native threads: `_MainAltAudioThread` ("MainAltAudio select() %d, %d ms") for 100/101,
+    `_GeneralAudioThread` for 102, and the per-AudioStream feeding thread **[N]**.
+  - **Unresolved:** whether one MainAlt thread serves both streams or each stream has its own.
+
+#### 10.4 · What gm_ccpa does differently (rewritten 2026-10-08 against the v5.8/v5.9 working tree; the 2026-10-07 table described the pre-v5.8 build)
+
+Paths are under `host/gm_ccpa/netprobe_app/app/src/main/java/zeno/gmccpa/av/`.
+
+| Area | Stock GM/Cinemo | gm_ccpa now |
+|---|---|---|
+| Stream start/end | Acts on SETUP and TEARDOWN through the Prepare/Stop callbacks | Acts on them too: voice-tag v2 carries a BEGIN per stream and an END (reason, counts) from the receiver (`VoiceFrame.kt`); a sink lives BEGIN..END. A 3 s no-AU stall (`VoiceLatency.STREAM_STALL_MS`) infers a missing END. The per-purpose idle timers, `ASSISTANT_HOLD_MS` and `DUCK_RELEASE_MS` are gone |
+| `audioLatencyMs` | Sets the jitter target | Read: target = value, absent/negative -> 80 ms, floor 32 ms (`VoiceLatency.targetMs`, `VoiceStreams.kt`) |
+| Playout clock | RTP-timestamp jitter buffer: late skip, gap conceal, dry re-buffer, Discard Excess to W | Same model per stream (`VoiceJitterBuffer.kt`), with two owner-directed departures: re-anchor on the first surviving node after a trim, and a continuous trim to W while playing. Start-stall allowance paid back from silence only (`VoiceJitterBuffer.kt`) |
+| Device buffer | 32 ms phone, 128 Siri, 48 alert/alt, 8 ms period | The same values (`VoiceLatency.deviceBufferMs`, `PERIOD_MS`), primed with silence; `TRACK_BUFFER_MIN_MS` no longer exists |
+| Nav (Alt) focus | **None** | **None** (OD-8C). CALL, ASSISTANT and ALERT request focus (`FocusSlot.kt`) |
+| Usage per purpose | As in §10.3 | Call `VOICE_COMMUNICATION`/SPEECH, Siri `ASSISTANT`/SPEECH, alert `NOTIFICATION_RINGTONE`/SONIFICATION, nav `ASSISTANCE_NAVIGATION_GUIDANCE`/SPEECH (`VoiceRouter.kt` `Usage` enum). Content type still differs from stock's 0 for ALERT and NAV |
+| `duckAudio` / `unduckAudio` | Platform duck plus a Cinemo ramp | Followed with their volume (dB, default 0.2) and duration (default 500 ms) through one shaper (`DuckRamp.kt`); an unduck returns media to 1.0 at once and the platform duck carries the tail; stock-style lift of our own duck once the nav track plays (`VoiceStreams.kt`, owner 2026-10-08); `NAV_UNDUCK_HOLD` off |
+| Permanent Media focus loss | Answers with a MainAudio Take and returns it on GAIN | Same since OD-9C (`MainAudioHandover.kt`; `events.rs` Take {resourceID 2, transferType 1, priority 500, take 500, borrow 100} / Untake {2, 2}; JNI `nativeTakeMainAudio` / `nativeReleaseMainAudio`). UNKNOWN until bench (plan B-MED-9): whether iOS pauses on the take and whether a HID PLAY alone resumes |
 
 ---
 
@@ -506,20 +802,20 @@ live validation.
 `~/Documents/carlink/ccpa_custom/ccpa/carplayd/src/main.rs` (the daemon the box actually runs)
 constructs `DeviceConfig::default()` (1920×720) and then **overrides it to 800×480** before building `/info`:
 ```rust
-let mut dev = DeviceConfig::default();   // 1920×720 (`impl Default for DeviceConfig` — info.rs:114-115 in today's `crates/vendor/receiver/src/info.rs`; was cited as info.rs:62-63 against the then-sibling `ncm_carplayd` tree)
-dev.display_width  = 800;                // ← the override (was line 342)
-dev.display_height = 480;                // ← (was line 343)
+let mut dev = DeviceConfig::default();   // 1920×720 (`impl Default for DeviceConfig` in `crates/vendor/receiver/src/info.rs`)
+dev.display_width  = 800;                // ← the override
+dev.display_height = 480;                // ←
 let info = build_info(&dev);
 ```
 `build_info` (then `old/ncm_carplayd/receiver_core/crates/receiver/src/info.rs` — that tree is archived at
 `~/Documents/carlink/old/ncm_carplayd`; the LIVE copy is vendored in-repo at
 `crates/vendor/receiver/src/info.rs`) bakes those into three iPhone-facing `/info` fields simultaneously
-(anchors below re-verified against the vendored copy 2026-08-16; the 2026-07-10 numbers were the old tree's):
-- `displays[0].widthPixels`/`heightPixels` — **`build_info`, info.rs:572-579** (the field the iPhone reads
+(anchors converted to symbols 2026-10-28; the 2026-07-10 line numbers were the old tree's):
+- `displays[0].widthPixels`/`heightPixels` — **`build_info`, the main `displays[]` block in `info.rs`** (the field the iPhone reads
   to choose the H.264 coded resolution)
-- the `viewAreas`/`safeArea` rect — `info.rs::view_areas()` (defined info.rs:375, inserted info.rs:586-595)
+- the `viewAreas`/`safeArea` rect — `info.rs::view_areas()` (defined in `info.rs`, inserted by `build_info`)
 - the HID touchscreen descriptor X/Y logical maxima — `info.rs::touchscreen_descriptor()` /
-  `touchscreen_multi_descriptor()` (info.rs:138, :172), fed `cfg.display_width/height` at info.rs:771-774
+  `touchscreen_multi_descriptor()` (`info.rs`), fed `cfg.display_width/height` in `build_info`'s `hids` vec
 
 The iPhone encodes exactly what `/info` advertises — **proven by the 1:1 match**: advertised 800×480 =
 observed SPS 800×480.
@@ -534,19 +830,17 @@ observed SPS 800×480.
   the 1920×720 *struct default*, not the carplayd override it couldn't see.) The "forget" done on
   2026-07-09 was chasing a wrong hypothesis.
 - No competing 800×480 literal existed anywhere else at the time of this sweep (2026-07-10, exhaustive):
-  the only `800`/`480` / `0x320`/`0x1E0` were `carplayd:342-343` (the override, since removed) and a
-  `hid.rs` unit-test constant. **Anchors re-verified 2026-08-16:** that test constant is now
-  `crates/vendor/receiver/src/hid.rs:129-130` (`touch_is_little_endian_xy`; the same two values also occur
-  at `hid.rs:111` in `multi_report_matches_apple_fill_order`), and the receiver's `DISPLAY_WH=(1920,720)`
-  is `crates/vendor/receiver/src/uplink.rs:83` — touch-scaling only. The sweep's "nowhere else" is a
+  the only `800`/`480` / `0x320`/`0x1E0` were the `carplayd` display override (since removed) and a
+  `hid.rs` unit-test constant (now in `touch_is_little_endian_xy` and `multi_report_matches_apple_fill_order` in
+  `crates/vendor/receiver/src/hid.rs`). The sweep's "nowhere else" is a
   statement about the 2026-07-10 tree: features added since carry their own 800×480 (the ALT/cluster
-  fallback dims at `info.rs:612-613`).
-  **Latent, flagged, not fixed:** `uplink.rs::set_display` has **no caller anywhere in the repo**.
-  What tracks the resolution is carplayd's own `DISPLAY_WH` static; the receiver's
-  `uplink::handle_touch` path still scales against the never-updated 1920×720 default.
+  fallback dims in `info.rs` `build_info`).
+  **Resolved (checked 2026-10-28):** the earlier "latent, not fixed" note about `uplink.rs::set_display` and a
+  receiver `DISPLAY_WH` no longer applies: neither exists in `uplink.rs`. Touch scaling uses carplayd's own
+  `DISPLAY_WH` static, set from the loaded `DeviceConfig`.
 
 ### The fix (deployed + validated)
-Changed `carplayd/src/main.rs:342-343` to **1920×720**, cross-compiled (armv7-musl), deployed to
+Changed the `carplayd/src/main.rs` override to **1920×720**, cross-compiled (armv7-musl), deployed to
 `/usr/sbin/carplayd` (old binary backed up `/usr/sbin/carplayd.res800bak`).
 
 **On-hardware proof (2026-07-10):** a fresh session — *no iPhone "forget"* — produced:
@@ -594,7 +888,7 @@ Three things must not be conflated:
 
 | Channel | What it is | Identity | Evidence |
 |---|---|---|---|
-| **Main screen** | The CarPlay app UI (springboard, apps) | `VideoStream.Main`, `DisplayPanel.Main`, display `type` **110**, screen stream **type 110** | `mainVideoStream`/`DisplayPanel.Main` in every YAML; info.rs:603 `type=110`; SDK `getPlatformLayer` @type 0x6e **[E]** |
+| **Main screen** | The CarPlay app UI (springboard, apps) | `VideoStream.Main`, `DisplayPanel.Main`, display `type` **110**, screen stream **type 110** | `mainVideoStream`/`DisplayPanel.Main` in every YAML; `info.rs` `build_info` `type=110`; SDK `getPlatformLayer` @type 0x6e **[E]** |
 | **Alt / cluster video** | Second screen = the Maps cluster map | `VideoStream.Alt1`, `DisplayPanel.Alt1 {showsInstruments}`, screen stream **type 111** | `altVideoStreams`/`altDisplayPanels` in cluster+nav YAMLs; SDK `getClusterLayer:` @type 0x6f **[E]** |
 | **VDC nav telemetry** | Turn/route data over the Vehicle Data / CARP channel — *not video* | `carpConfig.carpIdentifier: Navigation`, `Navigation.vdc.json` (RouteStatus, Legs, Destination…) | `Navigation.yaml` `carpConfig`; `Navigation.vdc.json` **[E]** |
 
@@ -618,7 +912,7 @@ Note the template split: **Instrument Cluster** configs give you the alt video *
 **changeModes / resource model** (from `_AirPlayReceiverSessionMakeModeStateFromDictionary` + `Modes changed:` log + events.rs shipped wire):
 - Modes dict = `appStates[]{appStateID, entity, speechMode}` + `resources[]{resourceID, entity, permanentEntity}`.
 - Live resource ownership entities logged: **`screen` (+ `permScreen`), `mainAudio` (+ `permMainAudio`), `speech`, `phone`, `turns`**.
-- **resourceID 1 = MainScreen, resourceID 2 = MainAudio** (`events.rs::send_take_screen`, events.rs:732–742, shipped). `transferType` **1 = Take, 2 = Untake**; `transferPriority` (500 = UserInitiated); `takeConstraint`/`borrowConstraint` (100 = Anytime); reason under `reasonStr`.
+- **resourceID 1 = MainScreen, resourceID 2 = MainAudio** (`events.rs::send_take_screen`, shipped). `transferType` **1 = Take, 2 = Untake**; `transferPriority` (500 = UserInitiated); `takeConstraint`/`borrowConstraint` (100 = Anytime); reason under `reasonStr`.
 - **There is NO separate `resourceID` for the alt/cluster screen.** `MainScreen/MainAudio/MainHighAudio/Speech/Phone` are the only resource entities; `altScreen`/`AltScreen` appear **only** as a SETUP *feature* name and a *stream-type* name — never as a modes resource. **[E]**
 
 **Command surface** (SDK exported symbols):
@@ -668,16 +962,16 @@ the picker uses **`showUI`/`stopUI`, keyed by `params["uuid"]`** — not `reques
 - **Show:** `showUI` with the cluster stream's uuid (+ optional url) → `AirPlayReceiverSessionShowUI`. Wire: `{ type: "showUI", params: { uuid: <cluster stream uuid>, url: "maps:/car/instrumentcluster/map" } }`. `uuid` is REQUIRED; `url` optional. The URL must be in the advertised `altScreenURLs`/`approvedClusterURLs` allowlist or it is rejected. **[E]**
 - **Hide:** `stopUI` → `AirPlayReceiverSessionStopUI` → `{ type: "stopUI", params: { uuid: <cluster stream uuid> } }` (no url — a url here is ignored). **[E]**
 - `suggestUI` is the softer variant (`altScreenSuggestUIURLs`).
-- `requestUI` still exists in `events.rs` as **`send_request_ui()`** (events.rs:755) — the no-URL, no-uuid "bring our UI forward" nudge emitted after RECORD, wire `{type:"requestUI", params:{}}` — but it is NOT what the Simulator's content picker sends for cluster content.
+- `requestUI` still exists in `events.rs` as **`send_request_ui()`** — the no-URL, no-uuid "bring our UI forward" nudge emitted after RECORD, wire `{type:"requestUI", params:{}}` — but it is NOT what the Simulator's content picker sends for cluster content.
   (The URL-addressed `send_request_ui_url`/`send_stop_ui_url` pair was deleted in a dead-code sweep;
   today's only cluster-addressed emitters are `send_show_ui` and `send_stop_ui`.)
 
 #### Mechanism 2 — SETUP / partial-TEARDOWN the type-111 stream  [E]
-- Because iOS SETUPs the alt screen as its own `streams[]` entry, the stream can be torn down independently via a **partial TEARDOWN** (a TEARDOWN whose body carries a `streams` array → tears only those streams, session stays alive — `session.rs::teardown`, the `streams`-array branch at session.rs:1681) and re-SETUP later. This is the hard on/off of the video pipe itself. Receiver `STScreenStreamAltStopped` marks the stop.
+- Because iOS SETUPs the alt screen as its own `streams[]` entry, the stream can be torn down independently via a **partial TEARDOWN** (a TEARDOWN whose body carries a `streams` array → tears only those streams, session stays alive — `session.rs::teardown`, the `streams`-array branch) and re-SETUP later. This is the hard on/off of the video pipe itself. Receiver `STScreenStreamAltStopped` marks the stop.
 
 #### On `changeResourceMode` / `changeModes` and the cluster
 - `AirPlayReceiverSessionChangeResourceMode(session, selector∈{1,2}, resourceID, …)` → builds a one-resource modes dict and calls `ChangeModes`. Valid **only** for resourceIDs 1 (MainScreen) / 2 (MainAudio) / speech / phone. **You cannot Take/Untake "the cluster" this way — no such resourceID exists.** Use Mechanism 1/2. **[E]**
-- Shipped Take template (for reference, MAIN screen focus): `{type:"changeModes", params:{ resources:[{ resourceID:1, transferType:1, transferPriority:500, takeConstraint:100, borrowConstraint:100 }], reasonStr:"video focus" }}` (`events.rs::send_take_screen`, events.rs:732). The cluster relies on this main-screen focus being held (see §5), but toggling it is done via showUI/stopUI (§3 Mechanism 1).
+- Shipped Take template (for reference, MAIN screen focus): `{type:"changeModes", params:{ resources:[{ resourceID:1, transferType:1, transferPriority:500, takeConstraint:100, borrowConstraint:100 }], reasonStr:"video focus" }}` (`events.rs::send_take_screen`). The cluster relies on this main-screen focus being held (see §5), but toggling it is done via showUI/stopUI (§3 Mechanism 1).
 
 ---
 
@@ -689,19 +983,19 @@ the picker uses **`showUI`/`stopUI`, keyed by `params["uuid"]`** — not `reques
 > `events::nav_forward()` (default-OFF). The `ncm_carplayd` line numbers in §4 below are historical.
 > Full account: [../ops/06_CORRECTIONS_LEDGER.md](../ops/06_CORRECTIONS_LEDGER.md) `R-23-2`.
 
-Today the receiver is a **single flat main display** (info.rs:260 one `displays[]` type-110 entry; session.rs:196 `setup_phase2` handles screen type **110** + audio 100/101/102 only; type-111 hits the `_ => … not yet handled` arm at session.rs:305). To carry the cluster:
+Today the receiver is a **single flat main display** (`info.rs` had one `displays[]` type-110 entry; `session.rs` `setup_phase2` handled screen type **110** + audio 100/101/102 only; type-111 hit the `_ => … not yet handled` arm). To carry the cluster:
 
 1. **`/info` (info.rs):**
    - Add a **second `displays[]` entry** with a cluster role and a distinct `uuid` (+ matching HID `displayUUID`), its own `viewAreas`/`safeArea` (inset), and appropriate feature bits (display-only, no touch needed).
    - Add **`altScreenURLs`** (incl. `maps:/car/instrumentcluster/map`) and advertise `enablesMapAppearance`/`mapAppearance`.
-   - Add the **`altScreen`** feature bit to the advertised `features`/`extendedFeatures` superset. (info.rs:169–175 currently *deliberately* keeps `altScreen` OUT of the negotiated echo because ncm is single-display — that guard must be lifted and the type-111 path built first.)
+   - Add the **`altScreen`** feature bit to the advertised `features`/`extendedFeatures` superset. (the then-current `info.rs` *deliberately* kept `altScreen` OUT of the negotiated echo because ncm is single-display — that guard must be lifted and the type-111 path built first.)
 
 2. **SETUP negotiation (session.rs `setup_phase2`):**
-   - Handle `streams[]` entry `type == 111`: open a **second screen data socket** (TCP listener, same as the 110 leg at session.rs:213), spawn a **second screen receive/decode loop**, and echo `{type:111, dataPort, …}`.
+   - Handle `streams[]` entry `type == 111`: open a **second screen data socket** (TCP listener, same as the 110 leg in `setup_phase2`), spawn a **second screen receive/decode loop**, and echo `{type:111, dataPort, …}`.
    - Keep the `uuid` from the SETUP so frames on that stream are tagged as cluster vs main.
-   - Support **partial TEARDOWN** of just the 111 stream (the partial-teardown path already exists at session.rs:349 — extend it to close the alt screen loop).
+   - Support **partial TEARDOWN** of just the 111 stream (the partial-teardown path already existed in `session.rs::teardown` — extend it to close the alt screen loop).
 
-3. **SETUP-phase1 feature echo (session.rs:162–185):** include `altScreen` (and `viewAreas`) in the negotiated features **only** once 1+2 exist — otherwise iOS may SETUP a 111 stream the receiver can't service.
+3. **SETUP-phase1 feature echo (`session.rs` phase-1 SETUP):** include `altScreen` (and `viewAreas`) in the negotiated features **only** once 1+2 exist — otherwise iOS may SETUP a 111 stream the receiver can't service.
 
 4. **Forwarding (forward.rs / IPC):** route the type-111 decoded frames to a **second sink** (a second IPC video port / a "cluster" surface) distinct from the main-screen sink, so the head unit can paint the cluster display separately.
 
@@ -712,10 +1006,10 @@ Today the receiver is a **single flat main display** (info.rs:260 one `displays[
 ### 5. (d) Runtime KEEP-ALIVE / focus requirements
 
 - **`enablesMapAppearance` capability** must be present and negotiated — without the map-appearance capability iOS will not render the cluster map into the type-111 stream. **[E]** (`enablesMapAppearance` template flag; `mapAppearance`/`mapAppearanceModes`/`SessionClusterMapAppearanceView` in the simulator.)
-- **Main-screen focus held.** The cluster is secondary to the CarPlay session; the accessory must hold the **MainScreen resource** (changeModes Take resourceID 1) so iOS keeps an app/Maps foregrounded and producing cluster content. If the receiver *untakes* the screen, iOS stops encoding (this exact regression is documented in `events.rs::send_take_screen`'s doc comment, events.rs:721–724, for the main stream). **[E]**
+- **Main-screen focus held.** The cluster is secondary to the CarPlay session; the accessory must hold the **MainScreen resource** (changeModes Take resourceID 1) so iOS keeps an app/Maps foregrounded and producing cluster content. If the receiver *untakes* the screen, iOS stops encoding (this exact regression is documented in `events.rs::send_take_screen`'s doc comment, for the main stream). **[E]**
 - **URL presented.** The type-111 stream only carries frames while a cluster URL from the `altScreenURLs`/`approvedClusterURLs` allowlist is presented (`initialURL`/`requestUI`); `stopUI` blanks it. **[E/I]**
 - **AirPlay keep-alive.** Same session keep-alive as the main stream (`keepAlive{SendStatsAsBody,LowPower}` `/info` keys, event-channel liveness). `forceKeyFrame` is available per-stream to recover a decoder. **[E]** (docs/carplay/03_SDK_GROUND_TRUTH.md §3; events.rs ForceKeyFrame.)
-- **Data staleness.** Receiver stamps last-A/V activity into ONE session-wide `activity: Arc<AtomicU64>` (then `session.rs:82`; today `crates/vendor/receiver/src/session.rs:349`, doc `:301-303` — the old anchor was correct against the archived `ncm_carplayd` tree and rotted when the receiver was vendored) that is cloned into every stream thread, the alt loop included (`spawn_screen(… 9005 …, self.activity.clone())`, session.rs:841–842), while per-stream liveness rides its own `stream_flag` (session.rs:441). **UPDATED 2026-08-16:** the stamp is session-wide, not per-stream, and the "the alt loop must feed the same liveness" requirement is now MET — the idle watchdog already sees cluster traffic.
+- **Data staleness.** Receiver stamps last-A/V activity into ONE session-wide `activity: Arc<AtomicU64>` (the `activity` field of the session struct in `crates/vendor/receiver/src/session.rs`) that is cloned into every stream thread, the alt loop included (`spawn_screen(… 9005 …, self.activity.clone())`, `session.rs` `setup_phase2`), while per-stream liveness rides its own `stream_flag`. **UPDATED 2026-08-16:** the stamp is session-wide, not per-stream, and the "the alt loop must feed the same liveness" requirement is now MET — the idle watchdog already sees cluster traffic.
 
 ---
 
@@ -723,15 +1017,15 @@ Today the receiver is a **single flat main display** (info.rs:260 one `displays[
 - Stream types 110/111 + selectors: `otool -tvV CarPlaySDK` `ScreenStreamStart` @0x1d04c/0x1d08c → cfstrings `getPlatformLayer`(0x3ee030)/`getClusterLayer:`(0x3ee050)/`STScreenStreamAltStopped`(0x3ee070).
 - SETUP keys `type`/`uuid`/`latencyMs`: `_AirPlayReceiverSessionScreen_Setup` @0x12cdc, cfstrings 0x31ae43/0x319525/0x3213e2.
 - Modes struct: `_AirPlayReceiverSessionMakeModeStateFromDictionary` cfstrings `appStates/appStateID/entity/speechMode/resources/resourceID/permanentEntity`; `Modes changed:` log string.
-- resourceID 1/2 + transferType 1/2: `crates/vendor/receiver/src/events.rs::send_take_screen` (events.rs:732–742, shipped wire).
+- resourceID 1/2 + transferType 1/2: `crates/vendor/receiver/src/events.rs::send_take_screen` (shipped wire).
 - ChangeResourceMode→ChangeModes: `_AirPlayReceiverSessionChangeResourceMode` @0xb618 tail-calls `_AirPlayReceiverSessionChangeModes`.
 - /info + capability strings: `strings CarPlaySDK`/`CarPlaySimulator` → `altScreenURLs`, `altScreenSuggestUIURLs`, `supportsAltScreen`, `approvedClusterURLs`, `enablesMapAppearance`, `maps:/car/instrumentcluster{,/map,/instructioncard}`.
 - Templates: `Standard/Widescreen Instrument Cluster.yaml`, `Standard/Widescreen Navigation.yaml`, `Navigation.vdc.json`.
 - Receiver gaps (HISTORICAL — old `ncm_carplayd` line numbers; the gaps themselves are CLOSED, see the §4
-  STATUS block). Current anchors, `crates/vendor/receiver/src/`: `session.rs::setup_phase2` (:690), its
-  type-111 arm (:841–842, `spawn_screen(… 9005 …)`) and the partial-TEARDOWN branch (:1681);
-  `info.rs` main type-110 display (:603), alt type-111 entry (:632) and `altScreenURLs` (:651);
-  `events.rs::send_take_screen` (:732), `send_show_ui`/`send_stop_ui` (:791/:814), `nav_forward()` (:843).
+  STATUS block). Current anchors, `crates/vendor/receiver/src/`: `session.rs::setup_phase2`, its
+  type-111 arm (`spawn_screen(… 9005 …)`) and the partial-TEARDOWN branch (`session.rs::teardown`);
+  `info.rs::build_info` main type-110 display, alt type-111 entry and `altScreenURLs`;
+  `events.rs::send_take_screen`, `send_show_ui`/`send_stop_ui`, `nav_forward()`.
 
 ---
 
@@ -789,15 +1083,19 @@ command needed.** The dedicated alt decoder + isolated floating window behave ex
 
 <!-- absorbed: ../carplay/06_AV_PIPELINE.md -->
 
-Status: **REFERENCE ONLY.** Grounded in WWDC 2019-252 & 2023-10150 + the local Xcode 27 CarPlay
+Status: **IMPLEMENTED for the main-screen second view area and runtime switching (box + macOS Settings arm, device-proven 2026-09-05 / 2026-09-09); REFERENCE ONLY for the type-112 third stream.** Grounded in WWDC 2019-252 & 2023-10150 + the local Xcode 27 CarPlay
 Simulator (`CarPlaySimulator.devicekitplugin`, BuildVersion 456) + the CarPlaySDK protocol reference notes and the wired
 CPC200-CCPA session capture (`old/ncm_carplayd/research/**`, that tree archived at
 `~/Documents/carlink/old/ncm_carplayd`). Labels: [CAP] wire-verified · [SIM] in the local
 Simulator · [SDK] SDK-symbol reference · [I] inferred.
 
-The macOS host app does NOT implement dynamic resizing (runtime view-area switching). It is documented
-here for a future **Android** implementation where it would apply. The other two topics (a 3rd stream,
-static multi-view-area) are documented with their implementation cost + teardown risk.
+Runtime view-area switching is implemented on the box (`events::switch_view_area`, which answers an inbound
+`requestViewArea` with `updateViewArea`) and armed from the macOS Settings arm (`ViewArea2Rule`, ControlServer
+`viewarea`); the Dock-button resize is device-proven (see "Bench lever" below). What the macOS host does with the
+in-band view-area rect is limited: it parses and logs it and exposes it through ControlServer `get viewarea`
+(`OCBMAVDecrypt.swift` `ScreenGeometry`); no code was found that applies it to rendering (**UNVERIFIED** beyond that
+search). The Android host is the other consumer to design for. The 3rd stream (type 112) is documented with its
+implementation cost + teardown risk.
 
 ### 1. How many video streams (the "three streams" clarified)
 - Stream/display discriminator on the wire = the integer **`type`** on both the `/info` `displays[]`
@@ -876,9 +1174,10 @@ static multi-view-area) are documented with their implementation cost + teardown
   status bar pins to for this area; 2023 status-bar override), and the nested `safeArea`. [CAP]
 - Simulator ships multi-area templates (`Widescreen Instrument Cluster.yaml` main=2 areas, cluster=3;
   `Portrait.yaml` main=2). ncm currently emits a single-element array only. [SIM]
-- Implementation cost (LOW risk): `info.rs::view_areas()` return N entries; set `initialViewArea` +
-  `adjacentViewAreas`; `vehicle_config.rs` already parses multiple `viewAreas[]` (only `[0]` consumed
-  today). Additive; risk only if an index is out of range or a safeArea exceeds the panel.
+- Status: `info.rs::view_areas()` now emits a second MAIN area when the pushed YAML carries `viewAreas[1]`
+  (`vehicle_config.rs::second_main_view_area`), with `initialViewArea` and a derived `adjacentViewAreas`; cluster
+  displays still emit one area. Risk remains if an index is out of range, a value is odd, or a safeArea exceeds
+  the panel (see the bench-lever record below).
 
 ### 3. Dynamic resizing / runtime view-area switching (DOCUMENT-ONLY here; for the Android port)
 > **DIRECTION CORRECTED 2026-09-05.** This section previously said
@@ -963,9 +1262,11 @@ static multi-view-area) are documented with their implementation cost + teardown
 
   **This matters for us more than it looks.** The box already forwards the WHOLE 128-byte header —
   the SEAV frame is `[hdr 128B][body]` (`01_OCBM_PROTOCOL.md`), and the header is also the AEAD AAD
-  (`OCBM/OCBMAVDecrypt.swift:12`), so the host cannot avoid having it. `session.rs:2356-2357` reads
+  (`OCBM/OCBMAVDecrypt.swift`), so the host cannot avoid having it. `session.rs` `forward_screen` reads
   only `body_size` and `opcode` and forwards the rest verbatim. **The view-area rect is already on
-  the wire, already reaching the app, and currently discarded.** Consuming it needs no new OCBM
+  the wire and already reaching the app.** The macOS host now reads it (`OCBMAVDecrypt.swift`
+  `ScreenGeometry`, logged and exposed via ControlServer `get viewarea`); whether it is applied to rendering is
+  **UNVERIFIED** (no consumer found). Consuming it needs no new OCBM
   opcode, no relay route and no box-side change — four `f32` reads in the host's existing header
   parse. Any plan that adds a box→host event to carry this rect is solving a problem that does not
   exist.
@@ -986,8 +1287,13 @@ static multi-view-area) are documented with their implementation cost + teardown
   **APP-DRIVEN since later the same day (2026-09-05):** the pushed YAML's
   `mainVideoStream.viewAreas[1].viewArea` (+ our `initial: true` extension key) is the source
   (`vehicle_config.rs::second_main_view_area` → `DeviceConfig::main_view_area_2`); the lever is
-  consulted ONLY when the config carries no second area, and a config rect that fails containment
-  declares one area rather than falling through to the lever. Host: `VehicleConfigModel.viewArea2*`
+  consulted ONLY when NO host config is in force (`DeviceConfig::host_configured` false — absent or
+  rejected config), and a config rect that fails containment declares one area rather than falling
+  through to the lever. *(Corrected 2026-10-19, owner decision D3: until then the lever was read
+  whenever the pushed config carried no second area, i.e. with the app connected; it is now
+  ignored there and carplayd logs `CARPLAY_VIEWAREA2 bench lever … IGNORED`. With the app
+  connected arm a rect with the ControlServer's `viewarea arm` + `save`; `:initial` has no app
+  equivalent and is app-less only.)* Host: `VehicleConfigModel.viewArea2*`
   + `ViewArea2Rule` (App/VehicleConfig.swift). Every rule below holds for both sources.
   - **What `ViewArea2Rule` enforces, in severity order** (CORRECTED 2026-09-05, same day — an
     earlier revision of this bullet stated the `385 * 0.65 * scale` formula as the floor; that
@@ -1111,7 +1417,7 @@ static multi-view-area) are documented with their implementation cost + teardown
   are present in the Xcode 27 Simulator and testable there — except exercising type-112 needs a
   hand-authored 2-cluster config (no stock template ships two clusters). [SIM]
 
-### 4. Recommended order if/when implemented
+### 4. Order of implementation (steps 1 and 2 are done; step 3 is open)
 1. Static multi-view-area (LOW risk) — additive `/info`, Simulator-testable with a stock template.
 2. Runtime `ViewAreaUpdate` switching (MED risk) — needs the command emitter + the dimensions-changed
    inbound callback; only meaningful with non-empty `adjacentViewAreas`. **← the Android-port feature.**
@@ -1200,11 +1506,11 @@ unrecoverable, drop that frame and `forceKeyFrame` to repaint.**
 
 **Status: Phase 1 device-proven.** The accessory advertises `cornerMasks`, the session survives, and
 iOS streams the corner-mask bitmap. Off by default; armed primarily by the app config switch
-`accessoryConfig.enablesCornerMasks` (§4), with the env `CARPLAY_CORNERMASKS` as a dev override for
-testing without the app. Verified on
+`accessoryConfig.enablesCornerMasks` (§4), with the env `CARPLAY_CORNERMASKS` as an app-less
+bench fallback (no-config-only since 2026-10-19). Verified on
 iOS 27.0 build `24A5390f` (iPhone18,4), wireless transport, at both 1920×1080 and 1280×480.
 
-Commits: `6a4d2db` (advertise + capture), `71ba56b` (Apple-faithful `/info` cleanup).
+Commits: "cornerMasks: advertise + capture the CarPlay corner-mask (device-proven)" (850bccb) and the Apple-faithful `/info` cleanup that followed (original hashes no longer resolve after the history rewrite).
 
 ---
 
@@ -1238,7 +1544,7 @@ The phone always offers it: the SETUP-request `features` array includes `cornerM
 
 **The validator (`carEndpoint_checkCarPlayFeatureAcceptance`, inlined in `carEndpoint_Activate…`,
 `AirPlaySender` arm64e) reads the flag ONLY from `displays[]`** — offsets from
-`~/Downloads/ios27_extract_24A5390f/split/AirPlaySender`:
+`reference/ios27_extract` (in-repo; the earlier `~/Downloads/ios27_extract_24A5390f` copy is gone; whether a `split/AirPlaySender` is in it is unchecked):
 - enumerates `infoDict["displays"]` (`@0x2516cfd60`); per display dict it tests the `"cornerMasks"` key
   and sets a run-wide SEEN flag (`@0x2516cfff8`). Same object also yields `widthPixels`/`viewAreas`/… →
   it is the display dict, not a viewArea entry.
@@ -1306,17 +1612,24 @@ byte format is defined solely by the sender and had to be captured, not read fro
 
 ### 4. Arming (config-driven toggle — device-verified)
 
-**Primary: the macOS Settings switch "Corner masks (cutout)"** (Settings ▸ Configuration). It writes
+**Primary: the macOS Settings switch "Corner masks (cutout)"** (Settings ▸ Vehicle). It writes
 `accessoryConfig.enablesCornerMasks: true` into the pushed YAML; `carplayd` reads it via
 `VehicleConfig::corner_masks_enabled()` and calls `levers::set_cornermasks(...)` (same pattern as
 `set_viewareas`). **Persistent** — the app re-pushes config on every connect, so it survives box reboots
 (unlike `/tmp`). Verified end-to-end 2026-08-02: toggle ON → wallpaper extends to full frame + iOS
 streams `topLeftCornerMask`; toggle OFF → Apple radius + black corner fill.
 
-**Dev override:** the env `CARPLAY_CORNERMASKS` still force-arms it —
-`set_cornermasks(vc.corner_masks_enabled() || env)`. It is injected at both spawn sites
-(`tools/session_supervisor.sh`, `crates/vendor/wireless/src/av.rs`) when the on-box file
-`/tmp/cornermask_test` exists (tmpfs → cleared on reboot). Use only for testing without the app.
+**App-less bench fallback (subordinate):** the env `CARPLAY_CORNERMASKS`, injected at both spawn
+sites (`tools/session_supervisor.sh`, `crates/vendor/wireless/src/av.rs`) when the on-box file
+`/tmp/cornermask_test` exists (tmpfs → cleared on reboot), arms the lever ONLY when no host config
+is in force (no / empty / oversized / unreadable / rejected config — carplayd's `clear_levers`). Any
+parsed pushed config sets it from `enablesCornerMasks` alone, in both directions
+(`levers::SubordinateLevers::resolve`), and an armed flag that loses is logged as
+`[carplayd] bench lever(s) CARPLAY_CORNERMASKS IGNORED`. *(Corrected 2026-10-19, owner decision D2:
+this was a force-arm, `set_cornermasks(vc.corner_masks_enabled() || env)`. Because a cornerMasks
+display must OMIT the main view's `safeArea` (above), a stale `/tmp/cornermask_test` silently
+stripped the app's pushed curved-panel inset.)* `CARPLAY_CORNERMASK_CAPTURE` still rides the same
+flag and is independent of arming.
 
 - `CARPLAY_CORNERMASK_CAPTURE=<dir>` — debug only: dumps `topLeftCornerMask` to
   `<dir>/cornermask_<route>.bin` + logs `len`/magic; also dumps the served `/info`
@@ -1378,7 +1691,7 @@ Phase 3 (§6) rendered the corner from the BUNDLED `carplay_corner_mask` asset s
   opaque bytes (Apple's SDK `memcpy`s it to `handleCornerMaskDataReceived:` — see §3). The curve law lives
   only on the iPhone, so the exact answer is to render iOS's own streamed bitmap — not to reverse a formula.
 
-**The fix (commit eac9b09):** the box now FORWARDS iOS's streamed `topLeftCornerMask` to the host and the
+**The fix (the box→host corner-mask forwarding commit, 2026-08-07; original hash no longer resolves):** the box now FORWARDS iOS's streamed `topLeftCornerMask` to the host and the
 app renders from it:
 - Box: `server.rs::forward_corner_mask` extracts the PNG from the type-110 SETUP dict AND the runtime
   SET_PARAMETER (`carEndpoint_updateDisplayCornerMasks`), gated on `levers::cornermasks()`, and sends it
@@ -1433,7 +1746,7 @@ transport between them.**
   = the config resolution and `displayUUID` = the display — and since task #5 that tracks the pushed
   VehicleConfig resolution. *(CORRECTED 2026-08-16 — this said "2400×960 now". That was a one-session
   bench config, not the shipped value: the macOS app defaults to **1920×1080**
-  (`VehicleConfig.swift:38-39`) and the box's app-less fallback is **1920×720** (`info.rs`, the
+  (`VehicleConfig.swift` `mainWidth`/`mainHeight`) and the box's app-less fallback is **1920×720** (`info.rs`, the
   `display_width` default). 2400×960 survives only as a receiver unit-test constant and the
   2026-07-10 capture.)* Media-buttons descriptor (`uuid=2`) is advertised too.
 - **Missing:** anything that *feeds* `send_hid_report`. The only ingest in receiver_core is
@@ -1540,3 +1853,14 @@ transport (§4) is proven.
 - `ccpa/carplayd/src/main.rs` (+ small `input` fn) — ingest → `hid`/`events`; share `W,H` from `load_device_config`.
 - Host `OCBM/OCBMClient.swift` (send), `App/AppDelegate.swift` (delegate → OCBM), reuse `CarPlayView.swift` as-is.
 - Emitter unchanged: `receiver/hid.rs`, `receiver/events.rs`, `receiver/info.rs`.
+
+### 10.x · Stock runtime observations on the bench (2026-10-07)
+
+Runtime evidence for §10 from a stock (Cinemo) wireless CarPlay session on the gminfo3.7 bench. Extracts and line pointers: `/tmp/ccpa_sess/stock_runtime/` (README.md; radio = logcat, iPhone = idevicesyslog, iPhone clock = radio + 0.90-0.92 s for T1, + 2.41-2.43 s for T2/T3 (radio TIME_SET at radio 21:23:28), + 2.44 s for T5, ≈ + 0.1 s for BG (corrected 2026-10-07, 3-Opus check); the radio clock free-runs without NTP, so the offset is derived per segment from matched stream start/stop pairs).
+
+- **Nav prompt over music (T1).** Stock ramps CarPlay media to 0.2 on `duckAudio`, about 60 ms before the AltAudio SETUP, and disables the GM platform duck. AltAudio is unmuted with no CarAudioFocus request (matches SD:CarPlayAudioManager.java:748-750, "nav requests no focus"). On `unduckAudio` media ramps to 1.0 and the GM platform duck (~-14 dB) is enabled until AltAudio TEARDOWN; full volume returns 1.87-1.90 s after the unduck (n=3).
+- **Nav while Siri is recording (T2).** The iPhone drops the prompt itself: `Announcement not spoken, MNAudioCompletionStatus code=Not Played - Busy - Recording` (2 events); no AltAudio stream is opened and nothing is replayed after Siri.
+- **Nav during a call (T3).** The iPhone replaces speech with a short tone (`Finished sound effect announcement in 1.74 seconds`). It arrives on AltAudio; stock unmutes it without a focus request; the Harman HAL activates `bus1_navigation_out` with action `MIX` while `bus4_call_out` stays routed, so the tone is mixed over the call and the call's focus is untouched.
+- **Call end (T3).** Telephony TEARDOWN → `phoneOwner=NONE` (+0.32 s) → media unmuted and focus regained (+0.33 s from TEARDOWN).
+- **Texts, missed call, answered call (T5).** The duck ramp level differs by source (whether it is iOS's duckAudio parameter or a Cinemo choice: UNKNOWN): nav speech gives `onPhoneAudioRampVolume(0.2)` and the SMS alert (iOS system sound `SMSReceived_Alert`, played on AltAudio) gives `0.1` (n=2 each). The Alt path is otherwise the same as T1, with the platform duck at -15.80 dB. Ringing: on `phoneOwner=CONTROLLER`, stock calls `requestFocusWithoutStream(callMode=1)`, which takes GAIN_TRANSIENT `USAGE_NOTIFICATION_RINGTONE` and mutes Media *before* any stream exists. The ringtone (callservicesd `Ringtone` session) then arrives as MainAudio/alert, usage=6, on `bus3_call_ring_out` MIX. On answer, `speechOwner=CONTROLLER` leads to `callMode=2`, a GAIN_TRANSIENT `USAGE_VOICE_COMMUNICATION` request, and Alert being abandoned. Telephony (usage=2, input_preset=7) goes to `bus4_call_out` about 0.8 s after the request. In-call nav prompts are tones on AltAudio (no focus request; `requestAudioFocus(): skipped for Alt` is logged only on the first, answer-time Alt open at radio 21:42:14.001, whose sound effect was interrupted; the later two log `hasFocus(Alt):3` — corrected 2026-10-07, 3-Opus check), no ramp). Media comes back after a missed call 0.15 s after DISCONNECTED and after an answered call 0.28 s after the telephony TEARDOWN (focus regained + unmute; the media stream follows 0.4-0.5 s later). Telecom labels both disconnects `LOCAL`.
+- **Backgrounded (stock).** On HOME, stock sends `changeModes` with display owner ACCESSORY ("take screen", `RequestUi=false`); the iPhone stops video (`notifyPhoneVideoStopped`), the surface is released and the HW decoder idles (0 % CPU, Wi-Fi rx 298 kbit/s = audio/control only). On reopen it sends a changeModes UNBORROW (Cinemo log: "untake screen") and video resumes (rx 3.2 Mbit/s). The rx/CPU figures are UNVERIFIED (raw samples not saved). gm_ccpa sends `send_take_screen` only at session start (receiver `session.rs`, at RECORD) and has no background/foreground screen handover; whether the iPhone keeps streaming video while gm_ccpa is backgrounded is UNKNOWN until measured.

@@ -50,7 +50,18 @@ fn emit(marker: u8, payload: &[u8]) {
     // Recover from a poisoned lock rather than panicking: a panic in any other holder would
     // otherwise wedge the entire metadata plane at this .unwrap() for the process lifetime.
     let mut guard = SINK.lock().unwrap_or_else(|e| e.into_inner());
-    emit_locked(&mut guard, marker, payload);
+    emit_locked(&mut guard, marker, payload, Retry::Once);
+}
+
+/// Whether a failed seam write may be retried ONCE on a fresh connection (plan v5.9 MED M3, rev c C3).
+///
+/// `Never` is for the two RTSP-control-thread emitters ([`emit_command_plist`], [`emit_cornermask`]):
+/// a stalled control thread tears the CarPlay session down, so they keep today's worst case (one
+/// connect + one write, each 2 s) and get only the EOF peek.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Retry {
+    Once,
+    Never,
 }
 
 /// The body of [`emit`], with the lock already held.
@@ -60,48 +71,151 @@ fn emit(marker: u8, payload: &[u8]) {
 /// the drop and the re-acquire the RCS reader thread could take it and the control thread would wait
 /// the full connect+write anyway. On a single-core 528 MHz box that preemption window is wide, and
 /// `std::sync::Mutex` is unfair, which is precisely the premise that made the reacquire unsafe.
-fn emit_locked(guard: &mut Option<TcpStream>, marker: u8, payload: &[u8]) {
-    let mut body = Vec::with_capacity(1 + payload.len());
-    body.push(marker);
-    body.extend_from_slice(payload);
-    // [u32 BE MAGIC][u32 BE len][marker][payload] — the magic lets the host resync after a truncation
-    // (audit Fix #17). `body` already = [marker][payload]; `len` = body.len() as before.
-    let mut framed = SEAM_MAGIC.to_be_bytes().to_vec();
-    framed.extend_from_slice(&(body.len() as u32).to_be_bytes());
-    framed.extend_from_slice(&body);
+fn emit_locked(guard: &mut Option<TcpStream>, marker: u8, payload: &[u8], retry: Retry) -> bool {
+    emit_locked_at(guard, SEAM_ADDR, marker, payload, retry)
+}
 
-    if guard.is_none() {
-        let connected = match SEAM_ADDR.parse::<std::net::SocketAddr>() {
-            Ok(sa) => TcpStream::connect_timeout(&sa, std::time::Duration::from_secs(2)),
-            Err(_) => TcpStream::connect(SEAM_ADDR),
-        };
-        match connected {
-            Ok(s) => {
-                let _ = s.set_nodelay(true);
-                let _ = s.set_write_timeout(Some(std::time::Duration::from_secs(2)));
-                let _ = writeln!(std::io::stderr(), "[meta] connected to ocbmd metadata seam {SEAM_ADDR}");
-                *guard = Some(s);
-            }
-            Err(e) => {
-                static WARNED: std::sync::atomic::AtomicBool =
-                    std::sync::atomic::AtomicBool::new(false);
-                if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                    let _ = writeln!(std::io::stderr(), "[meta] seam {SEAM_ADDR} unavailable ({e}) — metadata dropped until ocbmd accepts");
-                }
-                return;
-            }
+/// `[u32 BE MAGIC][u32 BE len][marker][payload]` — the magic lets the host resync after a truncation
+/// (audit Fix #17); `len` covers `[marker][payload]`.
+fn frame(marker: u8, payload: &[u8]) -> Vec<u8> {
+    let len = 1 + payload.len();
+    let mut framed = Vec::with_capacity(8 + len);
+    framed.extend_from_slice(&SEAM_MAGIC.to_be_bytes());
+    framed.extend_from_slice(&(len as u32).to_be_bytes());
+    framed.push(marker);
+    framed.extend_from_slice(payload);
+    framed
+}
+
+/// [`emit_locked`] against an explicit address (the unit tests use an ephemeral listener).
+/// Returns whether the frame was written in full.
+///
+/// No silent loss on a consumer restart (plan v5.9 MED M3, media_audit D3). Before this, a write
+/// failure dropped the record and reconnected on the NEXT message — and on TCP the first write into a
+/// FIN'd socket usually SUCCEEDS (only a later one fails), so the first record after every consumer
+/// restart vanished with no error at all. Now:
+/// - (a) every write is preceded by a non-blocking `peek` ([`seam_alive`]); a closed or reset peer
+///   is dropped and re-dialled BEFORE the write, so that record lands on the new connection;
+/// - (b) a write that still fails with a reset-type error ([`is_reset_type`]) is retried ONCE on a
+///   fresh connection — never after `TimedOut`/`WouldBlock` (a stalled consumer gets no second 2 s
+///   write), and never for [`Retry::Never`] (the control-thread emitters);
+/// - (c) there is NO producer-side cache and nothing is replayed on a new connection: the producer
+///   outlives sessions (static [`SINK`]), so a replay could hand a new session the previous one's
+///   track. A connection that dies between the peek and the write still loses that one record
+///   (U59-15).
+///
+/// Worst-case lock hold: `Retry::Never` = one peek + one connect (2 s) + one write (2 s), as before;
+/// `Retry::Once` = up to two connects + two writes (8 s), and only after a reset-type error, which
+/// on loopback fails at once.
+fn emit_locked_at(
+    guard: &mut Option<TcpStream>,
+    addr: &str,
+    marker: u8,
+    payload: &[u8],
+    retry: Retry,
+) -> bool {
+    let framed = frame(marker, payload);
+    if let Some(s) = guard.as_ref() {
+        if !seam_alive(s) {
+            let _ = writeln!(std::io::stderr(), "[meta] seam peer closed — re-dialling before the write");
+            *guard = None;
         }
     }
-    let ok = matches!(guard.as_mut().map(|s| s.write_all(&framed)), Some(Ok(())));
-    if !ok {
-        let _ = writeln!(std::io::stderr(), "[meta] seam write failed — reconnecting on next message");
-        *guard = None; // dead seam → reconnect on the next message
-    } else {
-        static COUNT: portable_atomic::AtomicU64 = portable_atomic::AtomicU64::new(0);
-        let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-        if n == 1 || n.is_multiple_of(100) {
-            let _ = writeln!(std::io::stderr(), "[meta] forwarded {n} metadata messages to the host");
+    if !ensure_connected(guard, addr) {
+        return false;
+    }
+    let err = match guard.as_mut().map(|s| s.write_all(&framed)) {
+        Some(Ok(())) => {
+            count_forwarded();
+            return true;
         }
+        Some(Err(e)) => e,
+        None => return false,
+    };
+    *guard = None; // dead seam
+    if retry == Retry::Once && is_reset_type(err.kind()) {
+        if ensure_connected(guard, addr) {
+            match guard.as_mut().map(|s| s.write_all(&framed)) {
+                Some(Ok(())) => {
+                    let _ = writeln!(std::io::stderr(), "[meta] seam write error ({err}) — retried once on a fresh connection, delivered");
+                    count_forwarded();
+                    return true;
+                }
+                Some(Err(e2)) => {
+                    *guard = None;
+                    let _ = writeln!(std::io::stderr(), "[meta] seam write failed ({err}; retry: {e2}) — record dropped, reconnecting on next message");
+                    return false;
+                }
+                None => {}
+            }
+        }
+        let _ = writeln!(std::io::stderr(), "[meta] seam write failed ({err}; retry could not connect) — record dropped");
+        return false;
+    }
+    let _ = writeln!(std::io::stderr(), "[meta] seam write failed ({err}) — record dropped, reconnecting on next message");
+    false
+}
+
+/// Connect if there is no connection. Best-effort: false (and one warning per process) when the
+/// consumer is not accepting.
+fn ensure_connected(guard: &mut Option<TcpStream>, addr: &str) -> bool {
+    if guard.is_some() {
+        return true;
+    }
+    let connected = match addr.parse::<std::net::SocketAddr>() {
+        Ok(sa) => TcpStream::connect_timeout(&sa, std::time::Duration::from_secs(2)),
+        Err(_) => TcpStream::connect(addr),
+    };
+    match connected {
+        Ok(s) => {
+            let _ = s.set_nodelay(true);
+            let _ = s.set_write_timeout(Some(std::time::Duration::from_secs(2)));
+            let _ = writeln!(std::io::stderr(), "[meta] connected to ocbmd metadata seam {addr}");
+            *guard = Some(s);
+            true
+        }
+        Err(e) => {
+            static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                let _ = writeln!(std::io::stderr(), "[meta] seam {addr} unavailable ({e}) — metadata dropped until ocbmd accepts");
+            }
+            false
+        }
+    }
+}
+
+/// The EOF check before every write (rev c, C3): `Ok(0)` = peer closed → dead; `Ok(n > 0)` = the
+/// consumer sent bytes → alive; `WouldBlock` → alive; any other error (e.g. `ConnectionReset`) → dead.
+/// The socket is put back in blocking mode on every arm; if that fails it is treated as dead.
+fn seam_alive(s: &TcpStream) -> bool {
+    if s.set_nonblocking(true).is_err() {
+        return false;
+    }
+    let mut b = [0u8; 1];
+    let alive = match s.peek(&mut b) {
+        Ok(0) => false,
+        Ok(_) => true,
+        Err(e) => e.kind() == std::io::ErrorKind::WouldBlock,
+    };
+    if s.set_nonblocking(false).is_err() {
+        return false;
+    }
+    alive
+}
+
+/// The write errors a dead LOOPBACK peer produces at once — the only ones worth one retry. Never
+/// `TimedOut`/`WouldBlock`: that is a stalled consumer, and a second 2 s write would only double the
+/// stall.
+fn is_reset_type(k: std::io::ErrorKind) -> bool {
+    use std::io::ErrorKind::*;
+    matches!(k, BrokenPipe | ConnectionReset | ConnectionAborted | NotConnected)
+}
+
+fn count_forwarded() {
+    static COUNT: portable_atomic::AtomicU64 = portable_atomic::AtomicU64::new(0);
+    let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    if n == 1 || n.is_multiple_of(100) {
+        let _ = writeln!(std::io::stderr(), "[meta] forwarded {n} metadata messages to the host");
     }
 }
 
@@ -144,8 +258,8 @@ pub fn emit_command_plist(plist: &[u8]) {
             return;
         }
     };
-    // Under the guard `try_lock` returned — NOT re-acquired.
-    emit_locked(&mut guard, META_CMD, plist);
+    // Under the guard `try_lock` returned — NOT re-acquired. Peek only, no retry (see [`Retry`]).
+    emit_locked(&mut guard, META_CMD, plist, Retry::Never);
 }
 
 /// Emit iOS's exact per-session corner-mask PNG to the host: `[u32 BE display_width][png bytes]`.
@@ -170,7 +284,7 @@ pub fn emit_cornermask(display_width: u32, png: &[u8]) {
     p.extend_from_slice(&display_width.to_be_bytes());
     p.extend_from_slice(png);
     // Under the guard `try_lock` returned — NOT re-acquired (same reason as emit_command_plist).
-    emit_locked(&mut guard, META_CORNERMASK, &p);
+    emit_locked(&mut guard, META_CORNERMASK, &p, Retry::Never);
 }
 
 /// Emit a complete artwork image: `[transfer id][JPEG bytes]`.
@@ -231,13 +345,81 @@ pub fn start_now_playing() -> Vec<u8> {
 
 /// `0x5200 StartRouteGuidanceUpdates` — echoes the RouteGuidanceDisplayComponent id (42) the
 /// identify declared (param 30); iOS withholds guidance unless both match (docs/carplay/05_METADATA_AND_CONTROLS.md).
+///
+/// Body = 18 B: component id (6 B) + three empty selector TLVs (4 B each).
 pub fn start_route_guidance() -> Vec<u8> {
     let mut o = tlv(0x0000, &42u16.to_be_bytes()); // RouteGuidanceDisplayComponentID
                                                    // Spec 0x5200 selectors: id 1 = SourceName, id 2 = SourceSupportsRouteGuidance (NOT
                                                    // "maneuver"/"lane" as previously commented). ExitInfo/timezone/EV are gated by ids 3/4/5.
     o.extend_from_slice(&tlv(0x0001, &[])); // SourceName
     o.extend_from_slice(&tlv(0x0002, &[])); // SourceSupportsRouteGuidance
+    // id 3 = SupportsExitInfo (empty TLV). Apple's spec note: "Must be included to receive ExitInfo
+    // in RouteGuidanceManeuverInformation" (`tools/i2mspec_dump.py --message 0x5200 --text`), i.e. it
+    // gates 0x5202 id 13 ExitInfo (parsed below as "exitInfo"). Without it, a 2026-10-19 highway
+    // route sent 0x5202 ids 0..11 only while the iPhone itself showed "Exit 9".
+    // TEST / INTERIM (2026-10-19): sent UNCONDITIONALLY to test whether iOS then sends ExitInfo. Per
+    // docs/carplay/04_CAPABILITIES_AND_CONFIG.md this selector set should become app-driven (pushed
+    // config) once the test settles it; ids 4 (timezone) and 5 (EVChargeInfo) are still not sent.
+    o.extend_from_slice(&tlv(0x0003, &[])); // SupportsExitInfo
     o
+}
+
+/// Bench lever: hex-dump received route-guidance message bodies (0x5201 RouteGuidanceUpdate, 0x5202
+/// RouteGuidanceManeuverInformation, 0x5204 LaneGuidanceInformation) to stderr. LOGGING ONLY — no
+/// behaviour reads it. OFF by default. Armed by EITHER:
+///   - env `CARPLAY_RG_HEX` (any value; read once per process), or
+///   - the on-box flag file [`RG_HEX_FILE`] `/tmp/carplay_rg_hex` existing (`touch` to arm, `rm` to
+///     disarm) — checked per route-guidance message (a single `stat`, only for these three ids, ~1 Hz),
+///     so it switches at runtime without a rebuild or a daemon restart.
+/// Output: `[<tag>] rg-hex 0x5202 (N B) off=0000: <hex>` — 128 B (256 hex chars) per line, capped at
+/// [`RG_HEX_MAX`] bytes total with a `...(+K B truncated)` marker. Privacy: the bodies carry
+/// destination/road names in UTF-8; arm it only for a bench capture.
+pub const RG_HEX_FILE: &str = "/tmp/carplay_rg_hex";
+/// Total bytes dumped per message before truncating.
+pub const RG_HEX_MAX: usize = 1024;
+
+fn rg_hex_armed() -> bool {
+    static ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENV.get_or_init(|| std::env::var_os("CARPLAY_RG_HEX").is_some())
+        || std::path::Path::new(RG_HEX_FILE).exists()
+}
+
+/// Format the hex-dump lines for [`log_route_guidance_hex`] (pure; unit-tested).
+fn rg_hex_lines(tag: &str, msg_id: u16, body: &[u8]) -> Vec<String> {
+    const PER_LINE: usize = 128;
+    let shown = &body[..body.len().min(RG_HEX_MAX)];
+    let mut out = Vec::new();
+    for (i, chunk) in shown.chunks(PER_LINE).enumerate() {
+        let mut hex = String::with_capacity(chunk.len() * 2);
+        for b in chunk {
+            hex.push_str(&format!("{b:02x}"));
+        }
+        out.push(format!(
+            "[{tag}] rg-hex 0x{msg_id:04x} ({} B) off={:04x}: {hex}",
+            body.len(),
+            i * PER_LINE
+        ));
+    }
+    if shown.is_empty() {
+        out.push(format!("[{tag}] rg-hex 0x{msg_id:04x} (0 B)"));
+    }
+    if body.len() > shown.len() {
+        out.push(format!(
+            "[{tag}] rg-hex 0x{msg_id:04x} ...(+{} B truncated)",
+            body.len() - shown.len()
+        ));
+    }
+    out
+}
+
+/// See [`RG_HEX_FILE`]. Called by both receive paths (wired `iap2d`, wireless `receiver::events`).
+pub fn log_route_guidance_hex(tag: &str, msg_id: u16, body: &[u8]) {
+    if !matches!(msg_id, 0x5201 | 0x5202 | 0x5204) || !rg_hex_armed() {
+        return;
+    }
+    for l in rg_hex_lines(tag, msg_id, body) {
+        eprintln!("{l}");
+    }
 }
 
 // `0x4154 StartCallStateUpdates`, `0x4157 StartCommunicationsUpdates` and `0x4170 StartListUpdates`
@@ -1438,6 +1620,27 @@ mod tests {
         // The route-guidance subscribe must echo component id 42 (the identify's param-30 id).
         let rg = start_route_guidance();
         assert_eq!(&rg[0..6], &[0x00, 0x06, 0x00, 0x00, 0x00, 0x2a]);
+        // Full body pinned: selectors 1 SourceName, 2 SourceSupportsRouteGuidance, 3 SupportsExitInfo
+        // (2026-10-19 ExitInfo test; was 14 B with selectors 1,2 only).
+        assert_eq!(
+            rg,
+            vec![
+                0x00, 0x06, 0x00, 0x00, 0x00, 0x2a, 0x00, 0x04, 0x00, 0x01, 0x00, 0x04, 0x00, 0x02,
+                0x00, 0x04, 0x00, 0x03,
+            ]
+        );
+    }
+
+    #[test]
+    fn rg_hex_lines_chunk_and_truncate() {
+        let small = rg_hex_lines("t", 0x5202, &[0xde, 0xad]);
+        assert_eq!(small, vec!["[t] rg-hex 0x5202 (2 B) off=0000: dead".to_string()]);
+        let big = vec![0xabu8; RG_HEX_MAX + 5];
+        let l = rg_hex_lines("t", 0x5201, &big);
+        assert_eq!(l.len(), RG_HEX_MAX / 128 + 1);
+        assert!(l[1].contains("off=0080: "), "{}", l[1]);
+        assert_eq!(l.last().unwrap(), "[t] rg-hex 0x5201 ...(+5 B truncated)");
+        assert_eq!(rg_hex_lines("t", 0x5204, &[]), vec!["[t] rg-hex 0x5204 (0 B)".to_string()]);
     }
 
     // ---- Extended metadata parsers (docs/carplay/05_METADATA_AND_CONTROLS.md). Bodies are built from Apple's declared parameter
@@ -1888,5 +2091,170 @@ mod tests {
         let j = call_state(&body);
         assert!(j.contains("\"displayName\":\"Jane\""), "{j}");
         assert!(j.contains("\"status\":3"), "{j}");
+    }
+
+    // ---- plan v5.9 MED M3: the :9004 producer on a consumer restart ----------------------------
+    // Each test owns its listener and its own `Option<TcpStream>`, never the process-wide SINK.
+
+    fn seam_listener() -> (std::net::TcpListener, String) {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let a = l.local_addr().unwrap().to_string();
+        (l, a)
+    }
+
+    /// Accept with a deadline, so "no new connection" is a clean `None`, not a hung test.
+    fn accept_within(l: &std::net::TcpListener, ms: u64) -> Option<TcpStream> {
+        l.set_nonblocking(true).unwrap();
+        let end = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+        loop {
+            match l.accept() {
+                Ok((s, _)) => {
+                    s.set_nonblocking(false).unwrap();
+                    return Some(s);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    if std::time::Instant::now() >= end {
+                        return None;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(e) => panic!("accept: {e}"),
+            }
+        }
+    }
+
+    /// Exactly [n] bytes, or panic on a short read within 2 s.
+    fn read_n(s: &mut TcpStream, n: usize) -> Vec<u8> {
+        use std::io::Read;
+        s.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+        let mut v = vec![0u8; n];
+        s.read_exact(&mut v).unwrap();
+        v
+    }
+
+    /// Nothing further arrives within [ms] (a read timeout, not EOF and not data).
+    fn assert_quiet(s: &mut TcpStream, ms: u64) {
+        use std::io::Read;
+        s.set_read_timeout(Some(std::time::Duration::from_millis(ms))).unwrap();
+        let mut b = [0u8; 64];
+        match s.read(&mut b) {
+            Ok(0) => panic!("unexpected EOF"),
+            Ok(n) => panic!("unexpected extra {n} bytes: {:?}", &b[..n]),
+            Err(e) => assert!(
+                matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut),
+                "{e}"
+            ),
+        }
+    }
+
+    /// Let the FIN land in the producer's receive queue before the next emit (loopback: µs).
+    fn settle() {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    #[test]
+    fn seam_frame_layout_unchanged() {
+        assert_eq!(
+            frame(META_JSON, b"{}"),
+            vec![0x4D, 0x45, 0x54, 0x41, 0, 0, 0, 3, META_JSON, b'{', b'}']
+        );
+    }
+
+    #[test]
+    fn seam_peer_close_redials_before_the_write() {
+        // (i) The consumer accepts, takes one record and closes. The next emit must land on a FRESH
+        // accept. Without the peek, the kernel accepts this write into the FIN'd socket and returns
+        // Ok, so no second connection is made and the record is gone — accept_within sees None.
+        let (l, a) = seam_listener();
+        let mut g: Option<TcpStream> = None;
+        assert!(emit_locked_at(&mut g, &a, META_JSON, b"one", Retry::Once));
+        let mut c1 = accept_within(&l, 2000).expect("first accept");
+        assert_eq!(read_n(&mut c1, 12), frame(META_JSON, b"one"));
+        drop(c1);
+        settle();
+        assert!(emit_locked_at(&mut g, &a, META_JSON, b"two", Retry::Once));
+        let mut c2 = accept_within(&l, 2000).expect("the record after the close must re-dial");
+        assert_eq!(read_n(&mut c2, 12), frame(META_JSON, b"two"));
+    }
+
+    #[test]
+    fn seam_record_after_consumer_restart_arrives_complete_and_in_order() {
+        // (ii) The consumer process restarts: connection AND listener go, a new listener takes the
+        // same port. Every record emitted after the restart reaches it complete and in order.
+        // c1 is dropped UNREAD, so its close is an RST (test (i) is the FIN case): the peek sees the
+        // reset; without the peek the write fails at once and the one retry must deliver it.
+        let (l1, a) = seam_listener();
+        let mut g: Option<TcpStream> = None;
+        assert!(emit_locked_at(&mut g, &a, META_JSON, b"old", Retry::Once));
+        let c1 = accept_within(&l1, 2000).expect("first accept");
+        drop(c1);
+        drop(l1);
+        let l2 = std::net::TcpListener::bind(&a).expect("rebind the same port");
+        settle();
+        let art: Vec<u8> = (0..5000u32).map(|i| i as u8).collect();
+        assert!(emit_locked_at(&mut g, &a, META_JSON, b"r1", Retry::Once));
+        assert!(emit_locked_at(&mut g, &a, META_ARTWORK, &art, Retry::Once));
+        assert!(emit_locked_at(&mut g, &a, META_CMD, b"r3", Retry::Never));
+        let mut c2 = accept_within(&l2, 2000).expect("second listener accept");
+        let mut want = frame(META_JSON, b"r1");
+        want.extend(frame(META_ARTWORK, &art));
+        want.extend(frame(META_CMD, b"r3"));
+        assert_eq!(read_n(&mut c2, want.len()), want);
+        assert!(accept_within(&l2, 200).is_none(), "one connection only");
+    }
+
+    #[test]
+    fn seam_new_connection_carries_no_replay() {
+        // (iii) No producer-side cache: a new connection sees ONLY what is emitted after it, never
+        // the previous connection's records (the previous session's track, after M1's carry-over).
+        let (l, a) = seam_listener();
+        let mut g: Option<TcpStream> = None;
+        assert!(emit_locked_at(&mut g, &a, META_JSON, br#"{"kind":"nowPlaying","title":"A"}"#, Retry::Once));
+        let c1 = accept_within(&l, 2000).expect("first accept");
+        drop(c1);
+        settle();
+        assert!(emit_locked_at(&mut g, &a, META_JSON, b"next", Retry::Once));
+        let mut c2 = accept_within(&l, 2000).expect("re-dial");
+        assert_eq!(read_n(&mut c2, 13), frame(META_JSON, b"next"));
+        assert_quiet(&mut c2, 300);
+    }
+
+    #[test]
+    fn seam_consumer_bytes_keep_the_connection() {
+        // peek Ok(n > 0): the consumer wrote something — alive, same connection, no re-dial.
+        let (l, a) = seam_listener();
+        let mut g: Option<TcpStream> = None;
+        assert!(emit_locked_at(&mut g, &a, META_JSON, b"x", Retry::Once));
+        let mut c1 = accept_within(&l, 2000).expect("accept");
+        c1.write_all(b"?").unwrap();
+        settle();
+        assert!(emit_locked_at(&mut g, &a, META_JSON, b"y", Retry::Once));
+        let mut want = frame(META_JSON, b"x");
+        want.extend(frame(META_JSON, b"y"));
+        assert_eq!(read_n(&mut c1, want.len()), want);
+        assert!(accept_within(&l, 200).is_none(), "an alive seam must not be re-dialled");
+        // and the socket is back in blocking mode after the peek
+        let mut probe = [0u8; 1];
+        assert!(g.as_ref().unwrap().peek(&mut probe).is_ok(), "blocking peek sees the pending byte");
+    }
+
+    #[test]
+    fn seam_no_consumer_drops_quietly() {
+        let (l, a) = seam_listener();
+        drop(l);
+        let mut g: Option<TcpStream> = None;
+        assert!(!emit_locked_at(&mut g, &a, META_JSON, b"z", Retry::Once));
+        assert!(g.is_none());
+    }
+
+    #[test]
+    fn seam_retry_only_on_reset_type_errors() {
+        use std::io::ErrorKind::*;
+        for k in [BrokenPipe, ConnectionReset, ConnectionAborted, NotConnected] {
+            assert!(is_reset_type(k), "{k:?}");
+        }
+        for k in [TimedOut, WouldBlock, Interrupted, Other, ConnectionRefused] {
+            assert!(!is_reset_type(k), "{k:?}");
+        }
     }
 }

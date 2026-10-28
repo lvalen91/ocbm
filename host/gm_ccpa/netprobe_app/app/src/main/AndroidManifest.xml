@@ -1,6 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Install package is zeno.gmccpa, matching the source package.
+  INSTALL PACKAGE IS android.car.usb.handler AGAIN, DELIBERATELY (owner request 2026-10-15: recent bench
+  testing used that package name). package="zeno.gmccpa" below is the CLASS package / Gradle namespace
+  and stays; tools/build_apk.sh renames the installed id at link time (aapt2 link rename-manifest-package,
+  = Gradle applicationId). Every component name is fully qualified, so nothing below moves. Use
+  android.car.usb.handler/zeno.gmccpa.<Class> in am commands (a short ".<Class>" would resolve against
+  android.car.usb.handler and miss). The history below is kept as history: between 2026-09-08 and
+  2026-10-15 the install package was zeno.gmccpa.
 
   It used to be android.car.usb.handler — a deliberate squat on the stock component GM points its
   config_UsbDeviceConnectionHandling_component at, on the theory that squatting the name would earn a
@@ -16,14 +22,17 @@
 
   Reverted 2026-09-08. Impersonating a platform component is a large thing to carry for a benefit
   that never materialised.
-  The ordinary attach resolver is now the only route in — UsbAttachActivity's intent-filter plus
-  res/xml/device_filter.xml — so the standard USB permission dialog appears once per device and
-  "always open" retires it. UsbBulkTransport polls hasPermission() rather than trusting the grant
-  broadcast, so the claim loop just waits for it.
+  Corrected 2026-10-08 (plan v5.9 D6): the attach ACTIVITY route (UsbAttachActivity's intent-filter
+  plus res/xml/device_filter.xml) never runs on this unit — GM routes attach to an absent fixed
+  handler — and stays only as a dormant fallback. The live route is AdapterAttachReceiver below: the
+  platform broadcasts USB_DEVICE_ATTACHED to the current user before that failed handler lookup, and
+  the persistent USB grant ("always open", granted once) lets the auto-claim claim with no dialog.
+  UsbBulkTransport polls hasPermission() rather than trusting the grant broadcast.
 
   Component android:name values stay FULLY QUALIFIED. They no longer have to be (a leading '.' would
   resolve correctly again), but they are unambiguous and it keeps the diff off every component line.
-  adb/am commands take zeno.gmccpa again — see README and docs/06.
+  (2026-09-08..10-15: adb/am commands took zeno.gmccpa. Since 2026-10-15 they take
+  android.car.usb.handler — see README and docs/06.)
 -->
 <!-- NO versionCode/versionName here, deliberately (2026-09-11). `aapt2 link` honours its
      version-code/version-name flags only when the manifest declares NEITHER, so tools/build_apk.sh
@@ -34,24 +43,19 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="zeno.gmccpa">
 
-    <!-- Network + discovery. All are normal/dangerous perms an ordinary app UID can hold;
-         none are signature/privileged. Grant the dangerous ones via `adb shell pm grant` (see README). -->
+    <!-- Network + discovery: INTERNET only (a normal permission). The receiver, the connect-out and
+         the self-hosted mDNS responder are raw sockets (ServerSocket / Socket / MulticastSocket), and
+         the advert/browse is NsdManager; none of them needs more. The netprobe-era Wi-Fi, location
+         and multicast-lock permissions and the cleartext-traffic flag were removed in v5.9 (D011):
+         nothing in the app calls WifiManager, MulticastLock, ConnectivityManager, LocationManager
+         or an HTTP stack. -->
     <uses-permission android:name="android.permission.INTERNET"/>
-    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
-    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE"/>
-    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
-    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE"/>
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
-    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
-    <!-- Android 13+; harmless no-op on the API 32 target, present so the same APK probes newer units. -->
-    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES"
-        android:usesPermissionFlags="neverForLocation"/>
     <!-- Whole-OS log capture, the opt-in second scope of the in-app logger. READ_LOGS is
          signature|privileged|development: it can NEVER be obtained by declaring it, but the
          `development` flag means adb can grant it, and a permission can only be granted if the
          package DECLARES it — hence this line. One-time bench step, survives reboots and
          `install -r`, lost only on a full uninstall:
-           adb shell pm grant zeno.gmccpa android.permission.READ_LOGS
+           adb shell pm grant android.car.usb.handler android.permission.READ_LOGS
          Without it the logger still captures this app's own process (no permission needed); with
          it, it also captures GM's CarPlay receiver, wpa_supplicant and the USB stack — the parts
          of the USB-grant and Bluetooth faults that happen before our process exists. -->
@@ -72,15 +76,22 @@
          still recovers what preceded it) — see BootReceiver's KDoc. -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
 
-    <!-- Special access; enable with `adb shell appops set <pkg> SYSTEM_ALERT_WINDOW allow`.
-         The overlay window is the in-motion display lever; the prober only *reports* its availability. -->
+    <!-- SYSTEM_ALERT_WINDOW (corrected 2026-10-08, plan v5.9 D6 R1): granted by `install -g` (its
+         protection level includes `development`); the appop stays `default`, and default + granted IS
+         effective. NEVER set the appop to ignore/deny — that overrides the grant. setting the appop to `allow` for
+         user 10 is optional and lost on uninstall (docs/06 has the command; an XML comment cannot hold it). It is what admits the
+         auto-claim's background FGS start (REASON 62) and the background launch of CarPlayActivity
+         when the phone connects with the app closed. -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
     <!-- Keeps the process alive while a CarPlay session is up so backgrounding can't let LMK kill it. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
-    <!-- Microphone uplink (Siri, phone calls). FOREGROUND_SERVICE_MICROPHONE is declared for the
-         session service; note that on Android 11+ an FGS started from the BACKGROUND captures
-         silence regardless of type, so the mic only works when the session was started from a
-         visible Activity or the USB-attached launch. -->
+    <!-- Microphone uplink (Siri, phone calls). FOREGROUND_SERVICE_MICROPHONE is an API 34 permission:
+         android-32 does not define it (javap on the SDK jar: absent), so on this unit it is INERT —
+         an unknown string the installer ignores, kept only for a future targetSdk bump (corrected
+         2026-10-08, D-DOC 3). What matters on API 32 is the service's foregroundServiceType="microphone"
+         below. Note that on Android 11+ an FGS started from the BACKGROUND gets no while-in-use mic
+         capability, so it captures silence until a VISIBLE start upgrades it — CarPlayActivity's own
+         start of the service (plan v5.9 D6: an auto-claimed session gets the mic that way; U59-23). -->
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/>
 
@@ -113,10 +124,14 @@
          owner's decision is that a second rules surface is more than the threat warrants on a head
          unit that is never the source of a phone-style migration. Not an oversight; do not add it
          without re-opening that decision. -->
+    <!-- icon: outline USB trident in the HomeScreen's own grey wireframe style. Without it the tile
+         showed the stock Android robot. It is a PLAIN vector on purpose: an <adaptive-icon> renders a
+         transparent background as a black disc (see the comment in res/drawable/ic_launcher_usb.xml).
+         No roundIcon, for the same reason. -->
     <application
         android:label="GM CCPA"
+        android:icon="@drawable/ic_launcher_usb"
         android:allowBackup="false"
-        android:usesCleartextTraffic="true"
         android:theme="@android:style/Theme.DeviceDefault">
 
         <!-- Present so the class loader resolves android.car at runtime on the head unit; the prober
@@ -126,11 +141,13 @@
         <!-- NoActionBar: the DeviceDefault action bar rendered the label in a washed-out strip across
              the top and stole vertical space the state readout needs. The screen paints its own
              background and owns the whole area. -->
-        <!-- THE USB ATTACH ENTRY. A NoDisplay trampoline: the attach resolver can fire for other
-             USB host devices, so it filters to the OCBM adapter (0x1314:0x2d00) via device_filter
-             and only then forwards into MainActivity's existing attach path; anything else finishes
-             without UI. Before 2026-09-08 this was the fixed-handler squat
-             (android.car.usb.handler.UsbHostManagementActivity) — see the manifest header. -->
+        <!-- The attach ACTIVITY route: a NoDisplay trampoline that filters to the OCBM adapter
+             (0x1314:0x2d00) via device_filter and forwards into MainActivity's attach path. DORMANT on
+             this unit (corrected 2026-10-08, plan v5.9 D6): GM routes attach to an absent fixed
+             handler, so the resolver never launches it; AdapterAttachReceiver is the live route.
+             Kept as the fallback for a unit whose resolver does run. Before 2026-09-08 this was the
+             fixed-handler squat (android.car.usb.handler.UsbHostManagementActivity); since 2026-10-15
+             that component exists again as the activity-alias right below. -->
         <activity
             android:name="zeno.gmccpa.UsbAttachActivity"
             android:exported="true"
@@ -145,6 +162,22 @@
             <meta-data android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
                 android:resource="@xml/device_filter"/>
         </activity>
+        <!-- THE FIXED-HANDLER COMPONENT (2026-10-15, with the android.car.usb.handler install package).
+             GM's config_UsbDeviceConnectionHandling_component is the literal
+             android.car.usb.handler/android.car.usb.handler.UsbHostManagementActivity. On every USB
+             host attach the framework (deviceAttachedForFixedHandler) broadcasts, grants device
+             permission to this package's uid, then starts THAT component explicitly. Same component
+             name as the pre-2026-09-08 squat class, but as an alias onto UsbAttachActivity so no class
+             leaves zeno.gmccpa. The grant itself needs only the package; the alias is what gives a
+             post-grant entry: AdapterAttachReceiver's broadcast is sent BEFORE the grant, so its
+             background pre-check can read "no permission" and SKIP_NO_GRANT, while this start comes
+             after it on the same system_server thread. It fires for EVERY USB device; the trampoline
+             ignores anything that is not 0x1314:0x2d00. No intent-filter: one plug must not resolve
+             to two activities of this app on a unit whose ordinary resolver runs. -->
+        <activity-alias
+            android:name="android.car.usb.handler.UsbHostManagementActivity"
+            android:targetActivity="zeno.gmccpa.UsbAttachActivity"
+            android:exported="true"/>
 
         <activity
             android:name="zeno.gmccpa.MainActivity"
@@ -160,10 +193,9 @@
                  to show while the vehicle is in motion. Combined with a Play-attributed install
                  (adb install -i com.android.vending) this is what lets it run moving. -->
             <meta-data android:name="distractionOptimized" android:value="true"/>
-            <!-- The USB attach trigger enters via UsbAttachActivity above, which forwards a matching
-                 ACTION_USB_DEVICE_ATTACHED intent here; MainActivity's onCreate / onNewIntent handle
-                 it unchanged. It is not declared here so one plug does not resolve to two activities
-                 in the same app. -->
+            <!-- No attach filter here: the (dormant) UsbAttachActivity forwards a matching
+                 ACTION_USB_DEVICE_ATTACHED intent; the live attach route is AdapterAttachReceiver,
+                 which claims with no UI at all (plan v5.9 D6). -->
         </activity>
         <activity
             android:name="zeno.gmccpa.av.CarPlayActivity"
@@ -180,8 +212,9 @@
 
         <!-- Foreground service that pins the process at foreground priority for the session lifetime
              (C3). API 32: no foregroundServiceType attribute is mandated. -->
-        <!-- foregroundServiceType="microphone" is required for the mic uplink.
-             FOREGROUND_SERVICE_MICROPHONE is INERT without it: from Android 11 an FGS needs the
+        <!-- foregroundServiceType="microphone" is required for the mic uplink (the
+             FOREGROUND_SERVICE_MICROPHONE permission above is API 34 and inert on this unit either
+             way): from Android 11 an FGS needs the
              microphone TYPE to capture, and without it AudioRecord.read() silently returns the
              full requested byte count filled with ZEROS the moment the Activity stops being
              visible — exactly the GM-dialog / reverse-camera / app-switch case this service
@@ -194,27 +227,50 @@
         <!-- AAOS media source registration.
              AAOS builds its source switcher by querying for services answering
              android.media.browse.MediaBrowserService. Without this the app plays audio fine but is
-             invisible to the switcher and the homescreen Media card, so selecting FM leaves no way
-             back to CarPlay except relaunching by hand. MUST be exported: the querying process is
-             Media Center / CarLauncher, not us. -->
+             invisible to the switcher, so selecting FM leaves no way back to CarPlay except
+             relaunching by hand. MUST be exported: the querying process is the media host
+             (CarMediaService / the GM media apps), not us. -->
         <service
             android:name="zeno.gmccpa.av.CarPlayMediaBrowserService"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.media.browse.MediaBrowserService" />
             </intent-filter>
-            <!-- CarLauncher opt-in. An app that is BOTH a launcher app and a MediaBrowserService is
-                 classified "non media template" by MediaSource.isMediaTemplate() unless this is
-                 present, which hides it from the homescreen Media card. -->
+            <!-- Kept, effect on gminfo37 UNKNOWN. The isMediaTemplate() / "homescreen Media card"
+                 reasoning that used to stand here is AOSP CarLauncher behaviour; this head unit's HOME
+                 is GM HomeScreen (no CarLauncher installed); a decompile of HomeScreen showed no
+                 reference to this key (one trace, 2026-10-08). A GM media picker may read it (the CT5
+                 GMCarMediaService dex carries the string), so it stays. Removing it does NOT remove
+                 the second app-grid tile; the key below does. -->
             <meta-data android:name="androidx.car.app.launchable" android:value="true" />
+            <!-- One launcher icon (owner request 2026-10-08). GM HomeScreen adds an app-grid tile for
+                 EVERY MediaBrowserService, beside the LAUNCHER activity; tapping it opened the GM media
+                 app (MEDIA_TEMPLATE), not ours. HIDDEN keeps that tile off the grid while the service
+                 stays bound and selectable as a media source, as carlink_native does. SERVICE level
+                 only: HomeScreen merges application metaData into every component, so the key at
+                 application level would also hide MainActivity. Whether GM's media picker apps read it
+                 is UNKNOWN (bench: GM Audio must still select gm_ccpa). -->
+            <meta-data android:name="com.gm.homescreen.visibility" android:value="HIDDEN" />
         </service>
 
         <!-- Declares the app to AAOS as a media app; see res/xml/automotive_app_desc.xml. -->
         <meta-data
             android:name="com.android.automotive"
             android:resource="@xml/automotive_app_desc" />
-        <!-- Capture at boot. Fully qualified like every other component here, for consistency
-             rather than necessity now that the applicationId matches the source package again. -->
+        <!-- Fully qualified like every other component here — NECESSARY again since 2026-10-15: the
+             applicationId is android.car.usb.handler, so a leading '.' would resolve against it. -->
+        <!-- plan v5.9 D6 trigger T1: the adapter attached (hot plug, box reboot) with the app closed.
+             exported=false: the sender is system_server (its uid passes any receiver check); a shell
+             or app broadcast is refused. One action, no meta-data (device filters are matched for
+             activities only); the receiver checks 0x1314:0x2d00 itself. -->
+        <receiver
+            android:name="zeno.gmccpa.AdapterAttachReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"/>
+            </intent-filter>
+        </receiver>
+        <!-- BOOT_COMPLETED: capture start, and D6 trigger T2 (the boot auto-claim). -->
         <receiver
             android:name="zeno.gmccpa.logging.BootReceiver"
             android:exported="true"

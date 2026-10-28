@@ -12,7 +12,8 @@ members = ["crates/ocbm-proto", "crates/box-common", "crates/bt-common", "ccpa/o
 # Vendored external crates (copied in 2026-07-13 to make the project self-contained): carplayd's
 # receiver_core deps (from old/ncm_carplayd) + iap2d's carplay iAP2 core. Excluded from membership so
 # `--workspace` builds them only as path DEPENDENCIES with the features the project requests
-# (carplayd uses receiver default-features=false + ["mic-uplink-eld"], so the optional eld-codec /
+# (carplayd uses receiver default-features=false + ["mic-uplink", "local-mfi"] and enables
+# `receiver/mic-uplink-eld` through its own default feature, so the optional eld-codec /
 # static libfdk-aac IS built into carplayd — needs FDK_AAC_PREFIX; a deliberate pending-decision
 # flag point, see ccpa/carplayd/Cargo.toml).
 exclude = [

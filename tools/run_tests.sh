@@ -48,6 +48,37 @@ run "aa-wireless" cargo test -p aa-wireless --quiet
 run "aa-bridge"  cargo test -p aa-bridge --quiet
 # box-common carries the shared flags/config/phone/AP-address definitions all of the above depend on.
 run "box-common" cargo test -p box-common --quiet
+
+# Shell/Rust parity for the `android_auto` opt-in lever (D1, 2026-10-19). session_supervisor.sh's
+# `aa_enabled()` and box_common::cfg::aa_requested are two copies of one rule that cannot share code;
+# both are run against crates/box-common/tests/fixtures/aa_lever_cases.txt (the Rust half is the box-common
+# test `aa_lever_matches_the_shared_shell_fixture`, above). The shell half extracts the ONE
+# `aa_enabled() {` line from the real script — not a copy — and evaluates it per case.
+aa_lever_shell_parity() {
+  _fx=crates/box-common/tests/fixtures/aa_lever_cases.txt
+  _fn=$(grep -E '^aa_enabled\(\) \{' tools/session_supervisor.sh)
+  [ -n "$_fn" ] && [ "$(printf '%s\n' "$_fn" | wc -l | tr -d ' ')" = 1 ] \
+    || { echo "expected exactly one one-line aa_enabled() in tools/session_supervisor.sh"; return 1; }
+  _tmp=$(mktemp /tmp/aa_lever.XXXXXX) || return 1
+  _rc=0; _n=0
+  while IFS= read -r _line; do
+    case "$_line" in '#'*|'') continue ;; esac
+    _want=${_line%%|*}; _doc=${_line#*|}
+    printf '%b\n' "$_doc" > "$_tmp"
+    if (WIRELESS_CFG="$_tmp"; eval "$_fn"; aa_enabled); then _got=1; else _got=0; fi
+    _n=$((_n + 1))
+    [ "$_got" = "$_want" ] || { echo "MISMATCH want=$_want got=$_got doc=$_doc"; _rc=1; }
+  done < "$_fx"
+  # No document at all is OFF (the Rust side's AaLever::NoConfig, which aa_requested() also refuses).
+  if (WIRELESS_CFG=/nonexistent/carplay_cfg.yaml; eval "$_fn"; aa_enabled); then
+    echo "MISMATCH: an absent config reads as Android Auto enabled"; _rc=1
+  fi
+  rm -f "$_tmp"
+  [ "$_n" -ge 10 ] || { echo "fixture lost its cases ($_n)"; _rc=1; }
+  echo "aa_enabled() parity: $_n fixture cases + absent file, rc=$_rc"
+  return "$_rc"
+}
+run "aa lever shell parity" aa_lever_shell_parity
 run "pairing"    cargo test --manifest-path crates/vendor/pairing/Cargo.toml --quiet
 run "rtsp"       cargo test --manifest-path crates/vendor/rtsp/Cargo.toml --quiet
 run "mfi"        cargo test --manifest-path crates/vendor/mfi/Cargo.toml --quiet

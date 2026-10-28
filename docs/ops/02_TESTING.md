@@ -12,7 +12,8 @@ Status: executed 2026-07-25. The `'cmnd'` fix held — `RX 0xAA00 -> CertSent` p
 full identification and metadata. Retained as the regression checklist for any change to the wireless
 transport. Sections describing hypotheses that the run resolved are marked below.
 
-Companion to `docs/carplay/05_METADATA_AND_CONTROLS.md`.
+Companion to `docs/carplay/05_METADATA_AND_CONTROLS.md`. Scope: written against a CPC200-CCPA box
+(`/tmp/carplayd_wl.log`, UART via `host/uart_cmd.sh`); other boxes (C2Air, Pi) have their own bring-up docs.
 
 ### The discriminator — one grep, box-side, no phone trace needed
 
@@ -251,11 +252,13 @@ active` (a rider was orphaned by a skip and correctly dropped) · `[art] OVERLON
 (duplicated artwork fragment; see docs/ops/05_AUDITS.md §4) · `[meta] seam write failed — reconnecting on next
 message` (was the sink-eviction bug, fixed 2026-07-29 — should no longer appear).
 
-> Note (2026-08-10): the `/tmp/carplay_metadata` / `CARPLAY_METADATA` levers this plan drives are
-> interim, box-side controls — per docs/carplay/04_CAPABILITIES_AND_CONFIG.md tier ownership is app-side and the levers migrate to
-> app-pushed config. Every operational instruction in this plan (the tier-confirmation log line, the
-> `echo proven` recovery, the post-reboot re-arm) remains exactly how the CURRENT build is driven;
-> follow them unchanged until the migration lands.
+> Note (corrected 2026-10-28): the app-pushed tier landed 2026-08-10 (`iap2-core/src/config.rs`,
+> `features::arm_pushed_policy`). The `/tmp/carplay_metadata` file and `CARPLAY_METADATA` /
+> `CARPLAY_METADATA_SKIP` are APP-LESS bench levers only: with an app connected the pushed tier wins and
+> editing the file does nothing (carplayd logs `pushed metadata tier ... IGNORED` on a differing push).
+> The `echo proven` / `echo extended` recovery and the post-reboot re-arm in this plan apply only to a
+> box running without the app. With the app connected, change the tier in the app (Settings > Vehicle >
+> Data feeds); on a wired session it takes effect only when `iap2d` restarts (phone unplug and replug).
 
 Informational, record but not failures: `SETUP phase2 stream type N NOT IMPLEMENTED` (write the list
 down — each is a candidate for the next stream-130-class discovery), `stale connection (gen N) closed`,
@@ -280,9 +283,12 @@ down — each is a candidate for the next stream-130-class discovery), `stale co
   session the phone's port is on the box, so pull the archive afterwards per "The trace persists"
   above and grep `accd.txt` instead), then
   `grep -E "iapreject|Identification info rejected" /tmp/rej.txt`. It names the param, the message id
-  and a reason from Apple's enum (docs/carplay/05_METADATA_AND_CONTROLS.md §6.5). Recovery is `echo proven > /tmp/carplay_metadata`.
-- **Identified but only NowPlaying/RouteGuidance** → check `/tmp/carplay_metadata` says `extended`;
-  `/tmp` is tmpfs and a reboot reverts to the baseline. Confirm the subscribe count line
+  and a reason from Apple's enum (docs/carplay/05_METADATA_AND_CONTROLS.md §6.5). Recovery is to set the tier to `proven` in the app
+  (and restart `iap2d` for the wired arm); on an app-less box, `echo proven > /tmp/carplay_metadata`.
+- **Identified but only NowPlaying/RouteGuidance** → check the tier the process pinned (the
+  `[features] metadata policy (resolved once)` line). With the app connected that is the app's pushed tier;
+  app-less, `/tmp/carplay_metadata` should say `extended` (`/tmp` is tmpfs, a reboot reverts to the
+  baseline). Confirm the subscribe count line
   `[events] iAP2-tunnel metadata: N subscribes`.
 - **Metadata but no artwork** → confirm session 2 is routed (`RX session-2 file-transfer fragment`) and
   that each transfer reaches `[art] complete id=0x… N B (expected N)`. `[art] INCOMPLETE` means
@@ -304,7 +310,9 @@ down — each is a candidate for the next stream-130-class discovery), `stale co
   Non-zero on the first = the phone asked and we handled it. Zero on the first is **not** by itself proof
   the phone stayed silent — a guard can drop the SETUP with no log at all, which is how the 2026-08-10
   outage hid. Settle it from the request itself: `touch /tmp/setup_dump` (wireless arm, `av.rs`; the wired
-  supervisor arms the same `CARPLAY_SETUP_DUMP` via `/tmp/logtransfer_test` or `/tmp/mainbuffered_test`),
+  supervisor arms the same `CARPLAY_SETUP_DUMP` via `/tmp/logtransfer_test` or `/tmp/mainbuffered_test`;
+  note those flag files' lever effects now apply ONLY when no host config is in force — with the app
+  connected carplayd logs `bench lever(s) … IGNORED`, see `docs/carplay/04_CAPABILITIES_AND_CONFIG.md`),
   reconnect, and read `/tmp/setup_req.N` — each raw SETUP request plist is written before any guard runs.
   A `type 130` entry there with no `DataStream(130)` line in the log = **the box is refusing a stream the
   phone is asking for**, a box-side bug that nothing in `/info` will explain. Nothing in `/tmp/setup_req.*`

@@ -41,6 +41,8 @@ class HevcRenderer(
 ) {
     private val log = ProbeLog.sub("hevc")
     private val running = AtomicBoolean(false)
+    /** [stop]'s reason, written before [running] goes false; read by feed's ISE catch. */
+    @Volatile private var stopWhy = ""
 
     @Volatile private var codec: MediaCodec? = null
     @Volatile private var configured = false
@@ -71,6 +73,10 @@ class HevcRenderer(
         const val CONFIGURE_RETRY_MS = 5_000L      // don't re-attempt configure per NAL (codec-pool leak)
         const val KEYFRAME_COOLDOWN_MS = 500L      // H264Renderer's REACTIVE_KEYFRAME_COOLDOWN
         const val MAX_MESSAGE = 8 * 1024 * 1024     // desync guard on the seam length prefix
+        /** The reusable message buffer's resting size (a 2400x960 HEVC AU is ~26 KB; IDR AUs ~100-200 KB). */
+        const val SCRATCH_INITIAL = 256 * 1024
+        /** A message above this re-allocates the resting size afterwards instead of pinning the big one. */
+        const val SCRATCH_SHRINK_ABOVE = 1024 * 1024
         // Match the seam's max message: a seam-legal AU in (old 2 MB, 8 MB] — most dangerously the IDR
         // itself — was silently dropped, and dropping the replacement keyframe stalls video entirely.
         const val MAX_INPUT_SIZE = MAX_MESSAGE
@@ -93,8 +99,11 @@ class HevcRenderer(
     }
 
     fun start() {
-        // A restart must not carry parameter sets or keyframe state across streams: mixing a new VPS
-        // with a stale SPS/PPS configures a codec that cannot decode what follows.
+        // One instance per session (CarPlayActivity builds a fresh HevcRenderer per Surface attach),
+        // so there is no restart path through here; the resets state the invariant — no parameter
+        // sets or keyframe state from another stream, since mixing a new VPS with a stale SPS/PPS
+        // configures a codec that cannot decode what follows — rather than relying on the field
+        // initialisers alone (corrected 2026-10-08, D-DOC 5: this used to describe a "restart").
         vps = null; sps = null; pps = null
         sawKeyframe = false; configured = false; configureFailedAt = 0L
         running.set(true)
@@ -111,6 +120,8 @@ class HevcRenderer(
      * stop was expected.
      */
     fun stop(why: String) {
+        // Before the flag: the consume thread's ISE catch reads it after seeing running == false.
+        stopWhy = why
         running.set(false)
         val dropped = ausDropped.get()
         val msg = "stopping ($why) — ${framesRendered.get()} frames, ${bytesIn.get()} bytes, $dropped AUs dropped"
@@ -145,6 +156,11 @@ class HevcRenderer(
             "the video seam connected, so parameter sets, an IRAP (ours to request every " +
             "${KEYFRAME_COOLDOWN_MS}ms) and a rendered frame should follow; measured 145ms on 2026-09-09")
         val hdr = ByteArray(4)
+        // Grow-only scratch for the message body (F-C2, 2026-10-08): one allocation per AU at 30-60
+        // AU/s was the GC churn. Every consumer below takes (buf, len) and stops at len — stale
+        // bytes past it are the previous message (NalScan). Shrunk back after an outsized message
+        // so one 8 MB artwork-sized AU does not pin 8 MB for the session.
+        var scratch = ByteArray(SCRATCH_INITIAL)
         try {
             while (running.get()) {
                 if (!readFully(ins, hdr, 4)) break
@@ -160,10 +176,11 @@ class HevcRenderer(
                 // exactly what this head unit emitted before the sample-description fix. Treating it
                 // as desync drops the connection and churns ForceKeyFrame on every reconnect.
                 if (len == 0) continue
-                val msg = ByteArray(len)
-                if (!readFully(ins, msg, len)) break
+                if (scratch.size < len) scratch = ByteArray(len)
+                if (!readFully(ins, scratch, len)) break
                 bytesIn.addAndGet((len + 4).toLong())
-                handleMessage(msg)
+                handleMessage(scratch, len)
+                if (len > SCRATCH_SHRINK_ABOVE) scratch = ByteArray(SCRATCH_INITIAL)
             }
         } finally {
             releaseCodec(if (running.get()) "video seam connection ended — rebuilt on the producer's re-dial"
@@ -195,31 +212,18 @@ class HevcRenderer(
         return true
     }
 
-    /** One message = the parameter sets, or one complete access unit. */
-    private fun handleMessage(msg: ByteArray) {
-        // Classify by scanning the NALs this message carries. Parameter-set messages carry VPS/SPS/PPS
-        // and no VCL NAL; frame messages are fed whole, exactly one queueInputBuffer per AU.
-        var sawParamSet = false
-        var sawVcl = false
-        var keyframe = false
-        var i = 0
-        while (i < msg.size - 4) {
-            val long4 = msg[i].toInt() == 0 && msg[i + 1].toInt() == 0 &&
-                        msg[i + 2].toInt() == 0 && msg[i + 3].toInt() == 1
-            val short3 = !long4 && msg[i].toInt() == 0 && msg[i + 1].toInt() == 0 && msg[i + 2].toInt() == 1
-            if (!long4 && !short3) { i++; continue }
-            val off = i + (if (long4) 4 else 3)
-            if (off >= msg.size) break
-            val type = (msg[off].toInt() shr 1) and 0x3F
-            val to = nextStart(msg, off)
-            when (type) {
-                32 -> { vps = msg.copyOfRange(i, to); sawParamSet = true; log.i("VPS (${to - i} B)") }
-                33 -> { sps = msg.copyOfRange(i, to); sawParamSet = true; log.i("SPS (${to - i} B)") }
-                34 -> { pps = msg.copyOfRange(i, to); sawParamSet = true; log.i("PPS (${to - i} B)") }
-                in 0..31 -> { sawVcl = true; if (type in 16..21) keyframe = true }   // 16..21 = IRAP
-            }
-            i = to   // nextStart already walked off..to; resuming at `off` rescanned every NAL body
-        }
+    /** One message = the parameter sets, or one complete access unit; [msg] is valid to [len] only. */
+    private fun handleMessage(msg: ByteArray, len: Int) {
+        // Classify by scanning the NALs this message carries (NalScan: pure, bounded by len — the
+        // buffer is reused). Parameter-set messages carry VPS/SPS/PPS and no VCL NAL; frame messages
+        // are fed whole, exactly one queueInputBuffer per AU.
+        val r = NalScan.scan(msg, len)
+        r.vps?.let { vps = it; log.i("VPS (${it.size} B)") }
+        r.sps?.let { sps = it; log.i("SPS (${it.size} B)") }
+        r.pps?.let { pps = it; log.i("PPS (${it.size} B)") }
+        val sawParamSet = r.sawParamSet
+        val sawVcl = r.sawVcl
+        val keyframe = r.keyframe
 
         // Reconfigure if the parameter sets CHANGED mid-session (iOS re-SETUP / resolution change):
         // feeding new-stream AUs into a codec configured for the old VPS/SPS/PPS decodes garbage
@@ -249,19 +253,7 @@ class HevcRenderer(
             log.i("keyframe — decoding starts (after $keyframeReqsSinceIrap keyframe request(s))")
             keyframeReqsSinceIrap = 0
         }
-        feed(msg)
-    }
-
-    private fun nextStart(msg: ByteArray, from: Int): Int {
-        var i = from
-        while (i < msg.size - 4) {
-            if (msg[i].toInt() == 0 && msg[i + 1].toInt() == 0) {
-                if (msg[i + 2].toInt() == 1) return i
-                if (msg[i + 2].toInt() == 0 && msg[i + 3].toInt() == 1) return i
-            }
-            i++
-        }
-        return msg.size
+        feed(msg, len)
     }
 
     private fun requestKeyframe() {
@@ -320,7 +312,7 @@ class HevcRenderer(
         }
     }
 
-    private fun feed(auBytes: ByteArray) {
+    private fun feed(auBytes: ByteArray, len: Int) {
         val c = codec ?: return
         try {
             var idx = -1
@@ -335,17 +327,27 @@ class HevcRenderer(
             val ib = c.getInputBuffer(idx)
             if (ib == null) { c.queueInputBuffer(idx, 0, 0, 0, 0); return }
             ib.clear()
-            if (ib.remaining() < auBytes.size) {
+            if (ib.remaining() < len) {
                 c.queueInputBuffer(idx, 0, 0, 0, 0)
                 ausDropped.incrementAndGet()
-                log.e("AU ${auBytes.size} B exceeds input buffer ${ib.remaining()} B — dropped, requesting keyframe")
+                log.e("AU $len B exceeds input buffer ${ib.remaining()} B — dropped, requesting keyframe")
                 requestKeyframe()
                 return
             }
-            ib.put(auBytes)
-            c.queueInputBuffer(idx, 0, auBytes.size, SystemClock.uptimeMillis() * 1000, 0)
+            ib.put(auBytes, 0, len)
+            c.queueInputBuffer(idx, 0, len, SystemClock.uptimeMillis() * 1000, 0)
             drain(c)
         } catch (e: IllegalStateException) {
+            if (!running.get()) {
+                // 2026-10-06 (E1): CarPlayActivity.detachRenderer calls stop() before
+                // surfaceDestroyed returns, and the Surface is released after that return, so an
+                // in-flight frame meets a dead consumer here. Not a codec fault, and this instance is
+                // discarded: release, no reset, no backoff. A real codec fault that coincides with a
+                // stop is downgraded too — the instance goes either way.
+                log.i("codec threw after stop ($stopWhy) — the Surface was released under an in-flight frame; expected")
+                releaseCodec("renderer stopped ($stopWhy)")
+                return
+            }
             log.e("codec in error state: ${e.message} — resetting")
             resetCodec()
         } catch (e: Exception) {
@@ -363,7 +365,7 @@ class HevcRenderer(
      * to prevent, just entered through the feed path instead of the configure path.
      */
     private fun resetCodec() {
-        releaseCodec("codec threw mid-stream — rebuilt after ${CONFIGURE_RETRY_MS}ms backoff")   // single release path; it already does stop-then-release correctly
+        releaseCodec("codec threw mid-stream — reconfigure allowed after ${CONFIGURE_RETRY_MS}ms")   // single release path; it already does stop-then-release correctly
         sawKeyframe = false
         configureFailedAt = android.os.SystemClock.elapsedRealtime()
         requestKeyframe()

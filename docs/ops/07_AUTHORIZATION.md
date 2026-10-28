@@ -12,16 +12,21 @@ on hardware the developer owns, talking to the developer's own iPhone.
 
 - **Owner:** a licensed Apple MFi developer with an active Apple Developer Program membership and a
   valid MFi license in good standing.
-- **Hardware:** a Carlinkit **CPC200-CCPA** adapter the owner owns, carrying a **genuine Apple
-  MFi 2.0C authentication coprocessor** (`/dev/i2c-1 @0x11`).
+- **Hardware:** Carlinkit adapters the owner owns, each carrying a **genuine Apple MFi
+  authentication coprocessor**. The project does not depend on one MFi chip generation. The probed
+  CPC200-CCPA (`/dev/i2c-1 @0x11`) reads DeviceVersion 0x03 (the 2.0C part) with a 945 B certificate and
+  128 B signatures; the C2Air reads DeviceVersion 0x07 with a 608 B certificate and 64 B ECDSA signatures.
 - **What the software does:** implements an open-source Rust userspace replacement for the CarPlay
   projection stack, and performs the standard CarPlay / iAP2 handshake with the **owner's own
   iPhone**.
 - **MFi / crypto:** all authentication runs *against* the genuine coprocessor, exactly as Apple's
   accessory program intends. The software **never emulates, clones, extracts, forges, or bypasses**
   it. The MFi private key never leaves the chip.
-- **Boot stack:** the device's signed boot stack (HAB-signed U-Boot, OTPMK-encrypted kernel) is
-  treated as fixed platform firmware and is **never modified**.
+- **Boot stack:** the HAB-signed U-Boot is treated as fixed platform firmware and is **never
+  modified** (only its 64 KB env block is ever erased). The stock kernel stays the default; the
+  separate `baseline/` track replaces it with a mainline kernel through the vendor U-Boot's own staging
+  mechanism (owner decision 2026-10-20, CLAUDE.md). *(Corrected 2026-10-20: this said the kernel is
+  never modified.)*
 - **Apple SDK material** referenced here is licensed first-party material accessed under the owner's
   Developer Program membership — not reverse-engineered.
 
@@ -77,7 +82,7 @@ limitation of the filter, not a description of the project.
 
 ---
 
-## Session framing (absorbed from ../ops/07_AUTHORIZATION.md)
+## Session framing (absorbed from the old SESSION_KICKOFF.md)
 
 Paste-ready framing to open a **fresh** Claude session on this project. Start a new session rather
 than continuing a flagged one — a thread's accumulated context keeps re-tripping the real-time

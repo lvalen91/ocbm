@@ -12,8 +12,12 @@ import zeno.gmccpa.logging.SessionTrace
  *
  * Bring-up order, which is load-bearing:
  *
- *   1. CT_HELLO, retransmitted until CT_HELLO_ACK arrives. Every other frame is DISCARDED while
- *      waiting — a prior session can leave kernel-buffered A/V frames queued ahead of the ACK.
+ *   1. CT_HELLO, retransmitted until CT_HELLO_ACK arrives. While waiting, CH_CTRL frames ARE
+ *      decoded by [dispatch]/handleCtrl; [hello] clears ctrlQ and ignores non-ACK entries.
+ *      CH_MFI/CH_MGMT/CH_FILE frames are QUEUED (nothing clears them at HELLO; each queue is
+ *      drained only by its own verb before a request), CH_LOG is replayed (handleLog), and only unknown/A-V channels are
+ *      logged and dropped — a prior session can leave kernel-buffered A/V frames queued ahead of
+ *      the ACK. (Corrected 2026-10-06: this said every other frame was discarded.)
  *   2. CT_SETTIME immediately. The box has no RTC battery, so its clock is bogus at every boot and
  *      CarPlay's TLS pairing needs a real one.
  *   3. CT_SUBSCRIBE with the config blob. This is the presence latch: `/tmp/host_present` goes to 1
@@ -57,6 +61,16 @@ class OcbmClient(
     /** The CT_HELLO nonce this client identifies itself with. Owned by the probe — see [newHostInstance]. */
     private val hostInstance: Int,
     private val trace: Boolean = true,
+    /**
+     * Monotonic ms for the client's own deadlines (v5.8 V7 / Q015): the HCI-attach budget armed by
+     * [subscribe] and promoted to MISSED by the heartbeat. NOT the wall clock — the bench's clock is
+     * stepped by the adb time-sync hook, and a forward step promoted a pending wait to MISSED while
+     * a backward one stretched the budget. Since fix1 every deadline in this class (HELLO retry,
+     * SETTIME ack, the re-SUBSCRIBE backoff, the transport-edge wait, the CH_MFI / CH_FILE / CH_MGMT
+     * reply budgets) runs on it too; the one wall-clock read left is the CT_SETTIME value itself.
+     * Injected so the JVM tests run with no android.os.
+     */
+    private val monoMs: () -> Long = { android.os.SystemClock.elapsedRealtime() },
 ) {
     private val reasm = Reassembler()
     private val seq = AtomicInteger(0)
@@ -68,10 +82,21 @@ class OcbmClient(
     private val fileQ = LinkedBlockingQueue<ByteArray>()
 
     @Volatile var helloAcked = false; private set
+    /**
+     * The transport is gone (read loop died): no CT_HELLO_ACK stands any more. [helloAcked] is
+     * otherwise only ever set, and OcbmProbe.hasLink() gates every self-provoked connect-out on it.
+     */
+    fun markLinkDead() { helloAcked = false }
     @Volatile var caps = 0; private set
     @Volatile var activeMode: Byte = Ocbm.MODE_PROJECTION; private set
     @Volatile var subscribed = false; private set
     @Volatile var lastSessionEvent: Byte = 0; private set
+    /**
+     * HOST_GONE nudges ignored because this client holds no subscription after its HELLO_ACK. The
+     * no-subscribe relink's liveness beats draw one every ~30 s, so only the first is logged per
+     * client and the rest are counted here ([statsLine]; review A2). Written on `ocbm-read` only.
+     */
+    @Volatile var hostGoneNudgesIgnored = 0; private set
     /** Last CT_BT_PHASE seen this session. Advisory/monotonic-ish — see [Ocbm.btpName]. */
     @Volatile var lastBtPhase: Byte = Ocbm.BTP_IDLE; private set
     /**
@@ -84,12 +109,26 @@ class OcbmClient(
      * single `ocbm-read` thread, so it is the flag for the phase being delivered.
      */
     @Volatile var lastBtPhaseReplay = false; private set
+    /**
+     * Whether the last `CT_BOX_HEALTH` carried envelope bit2 ([Ocbm.F_REPLAY]): the box's latched
+     * mirror re-sent after a (re)SUBSCRIBE, not a change. Read inline from an `onBoxHealth`
+     * handler, exactly like [lastBtPhaseReplay].
+     */
+    @Volatile var lastBoxHealthReplay = false; private set
+    /**
+     * Latch for the "box lost" edge of THIS client. CASed by SessionCore's transport-death edge
+     * (OcbmProbe.onLinkDead — since v5.6 also reached when the heartbeat declares the link dead) and
+     * by the heartbeat's fallback HOST_GONE synthesis (only when that edge cannot run), so the edge
+     * is delivered once per client whichever lands first. The box's own CH_CTRL HOST_GONE is deliberately NOT
+     * under it: that one is recoverable (heartbeat re-SUBSCRIBE), and CASing it would swallow the
+     * later, real transport-death edge of the same client. Its consumers are idempotent
+     * (SessionSummary.end, SessionSupervisor.onBoxLost). 2026-10-06.
+     */
+    val hostGoneDelivered = java.util.concurrent.atomic.AtomicBoolean(false)
     /** Last `CT_BOX_HEALTH` bitmask the box pushed. -1 until it has said anything. */
     @Volatile var lastBoxHealth: Int = -1; private set
     /** Last CT_PROJ_MODE seen this session. Advisory — see [Ocbm.pmName]. */
     @Volatile var lastProjMode: Byte = Ocbm.PM_NONE; private set
-    /** Last CT_PHONE_IDENT JSON seen this session, or "" when cleared / not yet identified. */
-    @Volatile var lastPhoneIdent: String = ""; private set
     @Volatile var framesIn = 0L; private set
     @Volatile var bytesIn = 0L; private set
 
@@ -98,7 +137,29 @@ class OcbmClient(
     /** Config blob last sent with CT_SUBSCRIBE; re-sent verbatim if the box drops us. */
     @Volatile private var configBlob: ByteArray = ByteArray(0)
 
-    private var heartbeatThread: Thread? = null
+    /**
+     * True once this client has sent a CT_SUBSCRIBE ([configBlob] is written only by [subscribe]
+     * and never cleared). `!subscribed && everSubscribed` is a link in HOST_GONE recovery, whose
+     * own re-SUBSCRIBE has a backoff that must not be defeated (2026-10-06).
+     */
+    val everSubscribed: Boolean get() = configBlob.isNotEmpty()
+
+    // Volatile: handleCtrl reads it on ocbm-read to say whether anything will re-subscribe.
+    @Volatile private var heartbeatThread: Thread? = null
+
+    /**
+     * Raised by [subscribe] BEFORE [configBlob] is set (a count, so two overlapping calls cannot lower
+     * it early), lowered right after `subscribed = true` — or when [subscribe] returns, on the
+     * failure paths (v5.6, reviews A2/B-N2; v5.6 fix B-M1).
+     * Two readers: the heartbeat's recovery branch, which must not send a second CT_SUBSCRIBE while
+     * this one is between setting the blob and setting [subscribed] (once `subscribed` is true the
+     * heartbeat takes its subscribed branch first); and [handleCtrl], which drops a box HOST_GONE that
+     * arrives meanwhile — it predates this SUBSCRIBE (typically the box's 30 s nudge answering a
+     * liveness-probe beat written just before). It is NOT held across the setTime/radio/logCtl writes
+     * after the latch: a HOST_GONE there is a real drop and must be forwarded (B-M1).
+     */
+    private val subscribesInFlight = AtomicInteger(0)
+    private val subscribeInFlight: Boolean get() = subscribesInFlight.get() > 0
 
     /** Optional observer for session events, so the UI can react to HOST_GONE / PHONE_* live. */
     var onSessionEvent: ((Byte) -> Unit)? = null
@@ -184,6 +245,8 @@ class OcbmClient(
      */
     @Volatile private var hciState = HCI_PENDING
     @Volatile private var hciDeadlineMs = 0L
+    /** Test view (v5.8 V7 fix1): the heartbeat promoted the HCI wait to MISSED on the injected clock. */
+    internal val hciMissed: Boolean get() = hciState == HCI_MISSED
 
     /**
      * Where decoded `CH_LOG` lines go. Defaults to the client's own logger; [OcbmProbe] points it at
@@ -192,6 +255,70 @@ class OcbmClient(
      */
     var boxLogger: zeno.gmccpa.ProbeLog.Logger? = null
     private val blog: zeno.gmccpa.ProbeLog.Logger get() = boxLogger ?: log
+
+    /**
+     * Backfill de-duplication. Every arm replays each source's WHOLE file from offset 0 (ocbmd
+     * main.rs `log_reset` / the offset-0 reopen; lines read in that pass carry [Ocbm.LOG_F_BACKFILL]),
+     * so a re-subscribe or a MGMT re-arm pushes the same history again: 860 of 1300 box lines in one
+     * capture were `[old]` repeats (2026-10-05). Keyed on (source, the line text) — NOT on the box
+     * stamp, because an unstamped line is stamped at the tailer's READ time and so differs on every
+     * replay (ocbmd main.rs `decode`/tailer). The ring records LIVE lines too, so the replay of a
+     * line first seen live is caught, but only BACKFILL lines are ever suppressed: a live line that
+     * repeats is evidence. One summary line per re-arm.
+     *
+     * One ring per source, bounded in BYTES — the wire UTF-8 length of each line, not `text.length`
+     * — to the same size the replay itself is bounded to, so the whole replay is covered: box.log
+     * is held to the CT_LOG_CTL cap (`log_enforce_cap`), and the five CH_LOG tail sources that
+     * tools/session_supervisor.sh `bound_logs` covers (carplayd, carplayd_wl, iap2d, aa-bridge, wl)
+     * are cut to their last 65536 B once past 262144 B, every 30 supervisor ticks — so a file can
+     * exceed 256 KiB between passes and a replay can exceed the ring. bt.log, radio_ap_dhcp.log and
+     * radio_bt_attach.log are small `>`-truncated status files bound_logs does not touch. Budget per
+     * source = max(cap, 256 KiB), taken from [logCapKb] at record time so a later re-arm with a
+     * larger cap grows the ring. Residuals: box.log is only rotated once it passes the cap AND
+     * nothing is left unstreamed, or at 4x the cap (`log_enforce_cap`), so a replay between cap and
+     * 4x cap can exceed the budget; worst-case memory is roughly sources x 256 KiB of text.
+     * A line genuinely repeated within one box log file is shown once, even on the first replay:
+     * its later copies are BACKFILL and already in the ring (counted as suppressed in the per-arm
+     * summary).
+     * Touched from the read thread ([handleLog]) and the `ops` thread ([logCtl], [stop]).
+     */
+    private class BoxLogRing {
+        private val order = ArrayDeque<String>()
+        /** Wire byte length of each entry in [order], same position. Kept rather than re-encoded:
+         *  a [Ocbm.LOG_F_TRUNCATED] or malformed line does not re-encode to its wire length. */
+        private val lens = ArrayDeque<Int>()
+        private val count = HashMap<String, Int>()
+        private var bytes = 0L
+        /** Record [line] of [len] wire bytes; true if it was already in the ring. Evicts oldest past [budget]. */
+        fun record(line: String, len: Int, budget: Long): Boolean {
+            val seen = (count[line] ?: 0) > 0
+            count[line] = (count[line] ?: 0) + 1
+            order.addLast(line)
+            lens.addLast(len)
+            bytes += len
+            while (bytes > budget && order.isNotEmpty()) {
+                val old = order.removeFirst()
+                bytes -= lens.removeFirst()
+                val n = (count[old] ?: 1) - 1
+                if (n <= 0) count.remove(old) else count[old] = n
+            }
+            return seen
+        }
+    }
+    private val logDedup = Any()
+    private val logRings = HashMap<Int, BoxLogRing>()
+    private var backfillLines = 0L
+    private var backfillSuppressed = 0L
+
+    /** The per-arm summary. Called on each re-arm and at stop; silent when the arm saw no backfill. */
+    private fun backfillSummary(why: String) {
+        val (total, dropped) = synchronized(logDedup) {
+            val r = backfillLines to backfillSuppressed
+            backfillLines = 0; backfillSuppressed = 0
+            r
+        }
+        if (total > 0) blog.i("[box] backfill: $total [old] lines this arm, $dropped suppressed as replays of lines already logged — $why")
+    }
 
     // ---- trace helpers (all no-ops when `trace` is false) ------------------------------------------
 
@@ -279,7 +406,7 @@ class OcbmClient(
                 if (pl.size >= 2) {
                     val sev = pl[1]
                     lastSessionEvent = sev
-                    log.i("<< SESSION_EVENT ${Ocbm.sevName(sev)}")
+                    log.i("<< SESSION_EVENT ${Ocbm.sevName(sev)}${if (replay) " (replay)" else ""}")
                     if (sev == Ocbm.SEV_HOST_PRESENT) {
                         met(OcbmExpect.HOST_PRESENT)
                         boardUp(OcbmBoard.LINK, linkDetail("subscribed, box confirms HOST_PRESENT"))
@@ -287,21 +414,47 @@ class OcbmClient(
                     // The box has cleared its own subscribed flag and will ignore our heartbeats
                     // until a fresh SUBSCRIBE. Re-arm or the session hangs forever.
                     if (sev == Ocbm.SEV_HOST_GONE) {
-                        subscribed = false
+                        // Read the blob BEFORE the in-flight flag: subscribe() raises the flag before
+                        // it sets the blob, so a non-empty blob read here with the flag down means
+                        // that subscribe() had already returned. `subscribed` is cleared only on the
+                        // real-drop path below — clearing it in the ignore paths could overwrite a
+                        // concurrent subscribe()'s `subscribed = true` (v5.6).
+                        val blob = configBlob
                         // Since 2026-09-05 the box also answers a heartbeat from an UNSUBSCRIBED
                         // host with HOST_GONE once every 30 s, as a "re-SUBSCRIBE now" nudge. That
                         // is not a drop, and on the deliberate no-subscribe relink path (a box that
                         // came back under a live Wi-Fi session) re-subscribing is exactly the wrong
-                        // answer — it would clear the radio inhibit and re-latch presence.
-                        if (configBlob.isEmpty()) {
-                            log.i("<< HOST_GONE nudge (we hold no subscription by choice) — ignoring")
-                        } else {
-                            // A fault, not a warning: the box's 10 s watchdog expired on us, or
-                            // ocbmd restarted underneath the session. Board.failed carries the E
-                            // line, and the entry stays FAILED in every status block until the
-                            // re-subscribe below is answered with HOST_PRESENT.
-                            boardFailed(OcbmBoard.LINK, "box reported HOST_GONE while we hold a subscription (its ${Ocbm.HEARTBEAT_GRACE_MS}ms watchdog expired, or ocbmd restarted) — re-subscribing on the next heartbeat tick")
+                        // answer — it would clear the radio inhibit and re-latch presence. Since
+                        // v5.6 that relink's heartbeat beats as a liveness probe, so this nudge is
+                        // expected every ~30 s on such a link.
+                        if (blob.isEmpty()) {
+                            // Before the ACK it is about the previous host's subscription, not this
+                            // link (2026-10-06: all four "by choice" lines on record preceded the ACK).
+                            if (!helloAcked) log.i("<< HOST_GONE before CT_HELLO_ACK — sent before this link was acknowledged, about the previous host's subscription (its teardown / the box's 10 s watchdog), not this link — ignoring")
+                            else if (hostGoneNudgesIgnored++ == 0) log.i("<< HOST_GONE — we hold no subscription (not yet subscribed on this link, or the deliberate no-subscribe relink, whose liveness beats the box nudges every 30 s) — ignoring; further ones on this link are counted, not logged (statsLine nudgesIgnored)")
+                            // Ignoring means not forwarding either: the observer chain ends in
+                            // onBoxLost ("press Start") and SessionSummary.end("host_gone"), and
+                            // three relaunches on 2026-10-06 closed a 2 s "session" that way.
+                            return
                         }
+                        if (subscribeInFlight) {
+                            // v5.6 (A2/B-N2): a beat went out just before subscribe() set the blob and
+                            // the box's nudge for it landed just after. Forwarded, it would end the
+                            // SessionSummary, report the box lost and drive a second (edgeless)
+                            // SUBSCRIBE from the heartbeat. The SUBSCRIBE in flight answers it.
+                            log.i("<< HOST_GONE while our CT_SUBSCRIBE is in flight — the box handles frames in order, so it predates that SUBSCRIBE — ignoring")
+                            return
+                        }
+                        subscribed = false
+                        // A fault, not a warning: the box's 10 s watchdog expired on us, or
+                        // ocbmd restarted underneath the session. Board.failed carries the E
+                        // line, and the entry stays FAILED in every status block until the
+                        // re-subscribe is answered with HOST_PRESENT. Whether anything re-subscribes
+                        // depends on the heartbeat (v5.6 H1-5): once it has declared the link dead
+                        // it is gone, and the relink re-claims the link instead.
+                        boardFailed(OcbmBoard.LINK, "box reported HOST_GONE while we hold a subscription (its ${Ocbm.HEARTBEAT_GRACE_MS}ms watchdog expired, or ocbmd restarted) — " +
+                            if (heartbeatThread?.isAlive == true) "re-subscribing from the heartbeat (2 s backoff, doubling)"
+                            else "no heartbeat is running on this link (it already declared the link dead, or the client is stopping) — the relink re-claims it")
                     }
                     onSessionEvent?.invoke(sev)
                 }
@@ -317,7 +470,8 @@ class OcbmClient(
             }
             Ocbm.CT_PAIRING_CODE -> {
                 val code = if (pl.size > 1) String(pl, 1, pl.size - 1, Charsets.US_ASCII).trim() else ""
-                log.i(if (code.isEmpty()) "<< PAIRING_CODE cleared" else "<< PAIRING_CODE $code  <-- match this on the iPhone")
+                val rp = if (replay) " (replay)" else ""
+                log.i(if (code.isEmpty()) "<< PAIRING_CODE cleared$rp" else "<< PAIRING_CODE $code$rp  <-- match this on the iPhone")
                 if (code.isEmpty()) boardDown(OcbmBoard.PAIRING_CODE, "cleared by box")
                 else boardUp(OcbmBoard.PAIRING_CODE, "$code — must match the iPhone's prompt")
                 onPairingCode?.invoke(code)
@@ -327,8 +481,9 @@ class OcbmClient(
                     val f = pl[1].toInt() and 0xFF
                     val prev = lastBoxHealth
                     lastBoxHealth = f
-                    log.i("<< BOX_HEALTH 0x%02x [%s]".format(f, Ocbm.bhString(f)))
-                    noteBoxHealth(prev, f)
+                    lastBoxHealthReplay = replay
+                    log.i("<< BOX_HEALTH 0x%02x [%s]%s".format(f, Ocbm.bhString(f), if (replay) " (replay)" else ""))
+                    noteBoxHealth(prev, f, replay)
                     onBoxHealth?.invoke(f)
                 }
             }
@@ -345,9 +500,11 @@ class OcbmClient(
             }
             Ocbm.CT_PHONE_IDENT -> {
                 val json = if (pl.size > 1) String(pl, 1, pl.size - 1, Charsets.UTF_8).trim() else ""
-                lastPhoneIdent = json
-                log.i(if (json.isEmpty()) "<< PHONE_IDENT cleared" else "<< PHONE_IDENT $json")
-                if (json.isEmpty()) boardDown(OcbmBoard.PHONE, "cleared by box — no phone identified")
+                log.i((if (json.isEmpty()) "<< PHONE_IDENT cleared" else "<< PHONE_IDENT ${PhoneIdent.redactName(json)}") + (if (replay) " (replay)" else ""))
+                // In this role the box only ever clears it (F-C8): CT_PHONE_IDENT is filled from the
+                // box's own SETUP, which the app — the AirPlay endpoint here — never sends it. The
+                // text says so, so a capture does not read "no phone" as a fault under live CarPlay.
+                if (json.isEmpty()) boardDown(OcbmBoard.PHONE, "not identified by the box — expected: the app is the AirPlay endpoint, the box never sees SETUP")
                 else boardUp(OcbmBoard.PHONE, phoneSummary(json))
                 onPhoneIdent?.invoke(json)
             }
@@ -355,7 +512,7 @@ class OcbmClient(
                 if (pl.size >= 2) {
                     val m = pl[1]
                     lastProjMode = m
-                    log.i("<< PROJ_MODE ${Ocbm.pmName(m)}")
+                    log.i("<< PROJ_MODE ${Ocbm.pmName(m)}${if (replay) " (replay)" else ""}")
                     boardUp(OcbmBoard.PROJ_MODE, Ocbm.pmName(m))
                     onProjMode?.invoke(m)
                 }
@@ -376,7 +533,7 @@ class OcbmClient(
      *    `0x50` with bit 0 clear is the exact signature of a missing radio HAL script or a failed
      *    `hciattach` (docs/wireless/01_BT_AND_RADIO.md), and the box's `[box:bt]` lines say which.
      */
-    private fun noteBoxHealth(prev: Int, f: Int) {
+    private fun noteBoxHealth(prev: Int, f: Int, replay: Boolean) {
         val detail = "0x%02x [%s]".format(f, Ocbm.bhString(f))
         val hci = (f and Ocbm.BH_HCI_PRESENT) != 0
         when {
@@ -384,12 +541,14 @@ class OcbmClient(
                 if (hciState != HCI_SEEN) { hciState = HCI_SEEN; hciDeadlineMs = 0L; met(OcbmExpect.HCI_PRESENT) }
                 boardUp(OcbmBoard.HEALTH, detail)
             }
-            prev >= 0 && (prev and Ocbm.BH_HCI_PRESENT) != 0 ->
-                boardFailed(OcbmBoard.HEALTH, "$detail — hci0 was present and is now GONE (controller dropped, or the radios were taken down)")
+            // A replay is the box's mirror after a (re)SUBSCRIBE, not a transition (2026-10-06): it
+            // falls through to the budget branches, and subscribe() re-arms the HCI_PRESENT expectation.
+            !replay && prev >= 0 && (prev and Ocbm.BH_HCI_PRESENT) != 0 ->
+                boardFailed(OcbmBoard.HEALTH, "$detail — hci0 was present and is now GONE (controller dropped, the radios were taken down, or the box's BT probe sample went stale >10 s)")
             hciState == HCI_MISSED ->
-                boardFailed(OcbmBoard.HEALTH, "$detail — still no hci0: the box's BT controller never attached (radio HAL / hciattach — read the [box:bt] lines)")
+                boardFailed(OcbmBoard.HEALTH, "$detail — still no hci0: the box's BT controller never attached, or its BT probe sample is stale >10 s (radio HAL / hciattach — read the [box:bt] lines)")
             else ->
-                boardUp(OcbmBoard.HEALTH, "$detail — hci0 not yet attached (BT bring-up in progress, ${((hciDeadlineMs - System.currentTimeMillis()).coerceAtLeast(0)) / 1000}s of budget left)")
+                boardUp(OcbmBoard.HEALTH, "$detail — hci0 not yet attached (BT bring-up in progress, ${((hciDeadlineMs - monoMs()).coerceAtLeast(0)) / 1000}s of budget left)")
         }
     }
 
@@ -413,14 +572,15 @@ class OcbmClient(
         val v = p.toInt() and 0xFF
         val pv = prev.toInt() and 0xFF
         if (!replay && prev != Ocbm.BTP_PAIR_REJECTED && v < pv && lastProjMode == Ocbm.PM_NONE) {
-            log.w("~~ BT phase went BACKWARDS ${Ocbm.btpName(prev)} -> $name with no projection session (PROJ_MODE NONE) — " +
+            log.w("~~ BT phase went BACKWARDS ${Ocbm.btpName(prev)} -> $name while the box reports PROJ_MODE NONE (the box's view only — says nothing about the Wi-Fi CarPlay session this app hosts) — " +
                 "the BT/iAP2 handshake reset before a session formed; if PROJ_MODE just went NONE above, this is the tail of a session that ended")
         }
     }
 
     /**
      * One Board line for the identified phone: model, OS and the BR/EDR `deviceID` that ties it to a
-     * `MGMT_INFO` bond, plus the user-given name. Hand-scanned, honouring the box's `\"` escaping,
+     * `MGMT_INFO` bond, plus the user-given name's LENGTH only (F119: the name itself is personal and
+     * the export redactor does not catch it). Hand-scanned, honouring the box's `\"` escaping,
      * because the field set is fixed (receiver `publish_phone_identity`) and the app carries no JSON
      * parser for this.
      */
@@ -443,7 +603,7 @@ class OcbmClient(
         val os = "${field("osName")} ${field("osVersion")}".trim()
         val id = field("deviceID")
         return buildString {
-            if (name.isNotEmpty()) append('"').append(name).append("\" ")
+            if (name.isNotEmpty()) append(PhoneIdent.placeholder(name)).append(' ')
             if (model.isNotEmpty()) append(model).append(' ')
             if (os.isNotEmpty()) append(os).append(' ')
             if (id.isNotEmpty()) append("deviceID=").append(id)
@@ -517,6 +677,14 @@ class OcbmClient(
             val text = String(pl, body, len, Charsets.UTF_8)
             val backfill = (flags and Ocbm.LOG_F_BACKFILL) != 0
             val truncated = (flags and Ocbm.LOG_F_TRUNCATED) != 0
+            // Replay suppression — see [BoxLogRing]. Live lines are recorded and always emitted.
+            val budget = maxOf(logCapKb.toLong() * 1024, LOG_RING_MIN_BYTES)
+            val suppress = synchronized(logDedup) {
+                val seen = logRings.getOrPut(source) { BoxLogRing() }.record(text, len, budget)
+                if (backfill) { backfillLines++; if (seen) backfillSuppressed++ }
+                backfill && seen
+            }
+            if (suppress) continue
             // Backfill is history the box already had on disk. Kept, but marked, so a stale line can
             // never be read as live evidence in a capture.
             val tag = buildString {
@@ -541,10 +709,24 @@ class OcbmClient(
      * CH_LOG" — the 2026-09-08 `MGMT_FORGET_ALL` failure, see [reArmAfterMgmt].
      */
     fun logCtl(enabled: Boolean, capKb: Int = Ocbm.LOG_CAP_DEFAULT_KB): Boolean {
+        // Close the previous arm's books before the replay this arm triggers starts a new count.
+        if (enabled) backfillSummary("re-arming CH_LOG")
         logStreamWanted = enabled
         logCapKb = capKb
         lastLogSeq = -1
         logFlowing = false
+        if (enabled) {
+            boardUp(OcbmBoard.CH_LOG, "armed cap=${capKb}KiB — no entry yet")
+            // Arming replays every source from offset 0, so a live tailer answers at once
+            // (same millisecond, device-observed 2026-09-09). Re-arming (subscribe, a MGMT
+            // wireless restart) replaces the previous expectation rather than stacking one.
+            // Armed BEFORE the write: a stale in-flight line that lands between the write and
+            // the arm took the !logFlowing edge and met nothing, and the fresh replay's first
+            // line was then a false EXPECTED-MISSING (03:56:06.629/.630 -> 03:56:16.631,
+            // 2026-10-06). Now such a line is an early MET instead.
+            expect(OcbmExpect.LOG_FIRST_LINE, BOX_REPLY_BUDGET_MS,
+                "CT_LOG_CTL on was written; the box replays each log source from offset 0 on arming, so a live tailer produces the first [box:*] entry within milliseconds")
+        }
         val pl = byteArrayOf(
             Ocbm.CT_LOG_CTL,
             if (enabled) 1 else 0,
@@ -554,20 +736,16 @@ class OcbmClient(
         val ok = send(Ocbm.CH_CTRL, pl)
         if (ok) {
             log.i(">> CT_LOG_CTL ${if (enabled) "on, cap ${capKb}KiB" else "off"}")
-            if (enabled) {
-                boardUp(OcbmBoard.CH_LOG, "armed cap=${capKb}KiB — no entry yet")
-                // Arming replays every source from offset 0, so a live tailer answers at once
-                // (same millisecond, device-observed 2026-09-09). Re-arming (subscribe, a MGMT
-                // wireless restart) replaces the previous expectation rather than stacking one.
-                expect(OcbmExpect.LOG_FIRST_LINE, BOX_REPLY_BUDGET_MS,
-                    "CT_LOG_CTL on was written; the box replays each log source from offset 0 on arming, so a live tailer produces the first [box:*] entry within milliseconds")
-            } else {
+            if (!enabled) {
                 cancelExpect(OcbmExpect.LOG_FIRST_LINE, "CH_LOG disarmed by host")
                 boardDown(OcbmBoard.CH_LOG, "disarmed by host")
             }
         } else {
             log.e(">> CT_LOG_CTL write FAILED")
-            if (enabled) boardFailed(OcbmBoard.CH_LOG, "CT_LOG_CTL write failed — box narration will NOT reach this log")
+            if (enabled) {
+                cancelExpect(OcbmExpect.LOG_FIRST_LINE, "CT_LOG_CTL write failed")
+                boardFailed(OcbmBoard.CH_LOG, "CT_LOG_CTL write failed — box narration will NOT reach this log")
+            }
         }
         return ok
     }
@@ -590,7 +768,9 @@ class OcbmClient(
 
     /**
      * Send CT_HELLO and wait for CT_HELLO_ACK, retransmitting on the reference cadence (500 ms for
-     * the first 15 s, then 2 s). Every non-ACK frame arriving meanwhile is discarded by [dispatch].
+     * the first 15 s, then 2 s). Meanwhile [dispatch] still decodes CH_CTRL (this waits only for
+     * the ACK entry in ctrlQ), queues CH_MFI/CH_MGMT/CH_FILE, replays CH_LOG and drops only
+     * unknown/A-V channels (corrected 2026-10-06; it said every non-ACK frame was discarded).
      */
     fun hello(timeoutMs: Long = 20_000): Boolean {
         ctrlQ.clear()
@@ -615,23 +795,23 @@ class OcbmClient(
         hi[4] = ((inst ushr 16) and 0xFF).toByte()
         hi[5] = ((inst ushr 24) and 0xFF).toByte()
         System.arraycopy(label, 0, hi, 6, label.size)
-        val deadline = System.currentTimeMillis() + timeoutMs
-        val fastUntil = System.currentTimeMillis() + 15_000
+        val deadline = monoMs() + timeoutMs
+        val fastUntil = monoMs() + 15_000
         var attempt = 0
         // Same budget as the loop below, so the watchdog and the loop agree to the poll granularity
         // on when "never" is. On a timeout both speak: the loop's line says how many attempts were
         // made, the EXPECTED-MISSING line puts it in the class every other missing step shares.
         expect(OcbmExpect.HELLO_ACK, timeoutMs,
             "CT_HELLO is being written on the claimed bulk OUT (retransmit every 500 ms, then 2 s) — a running ocbmd ACKs in milliseconds, so silence means no daemon, a wedged daemon, or wrong framing")
-        while (System.currentTimeMillis() < deadline) {
+        while (monoMs() < deadline) {
             attempt++
             // A single failed write must NOT abort bring-up: right after a box reboot the gadget is
             // re-enumerating and the first write(s) can fail while a retry 500 ms later succeeds.
             if (!send(Ocbm.CH_CTRL, hi)) { log.w(">> CT_HELLO write failed (attempt $attempt) — retrying") }
             else if (attempt == 1) log.i(">> CT_HELLO (v${Ocbm.VERSION})")
-            val waitMs = if (System.currentTimeMillis() < fastUntil) 500L else 2000L
-            val end = System.currentTimeMillis() + waitMs
-            while (System.currentTimeMillis() < end) {
+            val waitMs = if (monoMs() < fastUntil) 500L else 2000L
+            val end = monoMs() + waitMs
+            while (monoMs() < end) {
                 val pl = ctrlQ.poll(100, TimeUnit.MILLISECONDS) ?: continue
                 if (pl.isNotEmpty() && pl[0] == Ocbm.CT_HELLO_ACK) {
                     log.i("<< CT_HELLO_ACK v${pl[1]} caps=0x%08x [%s] mode=%s"
@@ -668,8 +848,8 @@ class OcbmClient(
         log.i(">> CT_SETTIME $secs (${java.util.Date(secs * 1000)})")
         expect(OcbmExpect.SETTIME_ACK, timeoutMs,
             "CT_SETTIME was written on the same control channel that just carried CT_HELLO_ACK — ocbmd answers it inline")
-        val deadline = System.currentTimeMillis() + timeoutMs
-        while (System.currentTimeMillis() < deadline) {
+        val deadline = monoMs() + timeoutMs
+        while (monoMs() < deadline) {
             val r = ctrlQ.poll(100, TimeUnit.MILLISECONDS) ?: continue
             if (r.isNotEmpty() && r[0] == Ocbm.CT_SETTIME && r.size >= 10) {
                 val ok = r[9] == 0.toByte()
@@ -693,27 +873,57 @@ class OcbmClient(
      */
     fun subscribe(config: ByteArray): Boolean {
         if (!running.get()) { log.w("subscribe after stop — refusing (would re-latch the box)"); return false }
+        // Raised BEFORE the blob is set; lowered once, by the body right after `subscribed = true`,
+        // or by the finally on the failure paths — see [subscribeInFlight].
+        subscribesInFlight.incrementAndGet()
+        var held = true
+        val lower = { if (held) { held = false; subscribesInFlight.decrementAndGet() } }
+        try { return subscribeInFlightBody(config, lower) } finally { lower() }
+    }
+
+    private fun subscribeInFlightBody(config: ByteArray, lowerInFlight: () -> Unit): Boolean {
         configBlob = config
         val pl = ByteArray(1 + config.size)
         pl[0] = Ocbm.CT_SUBSCRIBE
         System.arraycopy(config, 0, pl, 1, config.size)
+        // Armed BEFORE the write: the box answers synchronously and the arm won by only >=6 ms
+        // in every capture (2026-10-06), so an arm after the write could meet nothing. HCI_PRESENT
+        // stays after the write on purpose — armed early, a stale health report could meet it.
+        expect(OcbmExpect.HOST_PRESENT, BOX_REPLY_BUDGET_MS,
+            "CT_SUBSCRIBE (${config.size}B) was written — ocbmd raises /tmp/host_present and answers SEV_HOST_PRESENT synchronously (2 ms device-observed 2026-09-09)")
         if (!send(Ocbm.CH_CTRL, pl)) {
             log.e(">> CT_SUBSCRIBE write FAILED")
+            cancelExpect(OcbmExpect.HOST_PRESENT, "CT_SUBSCRIBE write failed")
             boardFailed(OcbmBoard.LINK, "CT_SUBSCRIBE write failed — the radio-wake edge was never taken")
             return false
         }
         subscribed = true
+        // Latch first, then lower (B-M1): the heartbeat now sees `subscribed`, and a HOST_GONE read
+        // from here on is taken as about this subscription — forwarded, not held behind the
+        // setTime/radio/logCtl writes below until the box's next 30 s nudge. Residual, accepted: a
+        // nudge for a beat written just before the SUBSCRIBE that ocbmd only emits after this write
+        // completed now reads as a real drop; the heartbeat's recovery re-SUBSCRIBE answers it.
+        lowerInFlight()
         log.i(">> CT_SUBSCRIBE (${config.size}B config) — this is the radio-wake edge")
-        if (config.isNotEmpty()) config.toString(Charsets.UTF_8).trim().lines().forEach { log.i("     | $it") }
+        // The passphrase is echoed by shape only. The value went to logcat in plaintext until
+        // 2026-10-06, and logcat leaves the vehicle (export_log_raw, whole-OS capture); the length
+        // is enough to spot a blank or truncated entry, which is all the echo was ever for. The SSID
+        // likewise since v5.8 V7 (Q014): a Wi-Fi identifier is not for durable output either.
+        if (config.isNotEmpty()) config.toString(Charsets.UTF_8).trim().lines().forEach {
+            log.i("     | " + when {
+                it.startsWith("wifi_pass:") -> "wifi_pass: set (${it.removePrefix("wifi_pass:").trim().length} chars)"
+                it.startsWith("wifi_ssid:") -> "wifi_ssid: set (${it.removePrefix("wifi_ssid:").trim().length} chars)"
+                else -> it
+            })
+        }
         boardUp(OcbmBoard.LINK, linkDetail("subscribed, awaiting HOST_PRESENT"))
 
-        // What the box owes us for this edge. Both are re-armed on every subscribe, including the
-        // heartbeat's recovery re-subscribe, because the box's state resets with the edge: the
-        // supervisor tears wireless down on host loss and brings it up again from here.
-        expect(OcbmExpect.HOST_PRESENT, BOX_REPLY_BUDGET_MS,
-            "CT_SUBSCRIBE (${config.size}B) was written — ocbmd raises /tmp/host_present and answers SEV_HOST_PRESENT synchronously (2 ms device-observed 2026-09-09)")
+        // What the box owes us for this edge (HOST_PRESENT is armed above, before the write).
+        // Both are re-armed on every subscribe, including the heartbeat's recovery re-subscribe,
+        // because the box's state resets with the edge: the supervisor tears wireless down on
+        // host loss and brings it up again from here.
         hciState = HCI_PENDING
-        hciDeadlineMs = System.currentTimeMillis() + BT_ATTACH_BUDGET_MS
+        hciDeadlineMs = monoMs() + BT_ATTACH_BUDGET_MS
         expect(OcbmExpect.HCI_PRESENT, BT_ATTACH_BUDGET_MS,
             "CT_SUBSCRIBE is the radio-wake edge: the box supervisor runs wireless_up and attaches the BT controller, and CT_BOX_HEALTH must then carry BH_HCI_PRESENT (8 s device-observed 2026-09-09; 0x50 with bit 0 clear = no hci0, docs/wireless/01_BT_AND_RADIO.md)")
 
@@ -760,7 +970,18 @@ class OcbmClient(
         return ok
     }
 
-    /** Start the 1 Hz beat. If we are un-subscribed, the tick re-SUBSCRIBEs instead (it also stamps liveness). */
+    /**
+     * Start the 1 Hz beat. Three modes, chosen per tick:
+     *  - subscribed: CT_HEARTBEAT, the box watchdog's input and our liveness signal;
+     *  - HOST_GONE recovery (a subscription was sent, the box dropped it): re-CT_SUBSCRIBE with
+     *    backoff instead of beating;
+     *  - never subscribed (the deliberate no-subscribe relink, v5.6 H1-3): CT_HEARTBEAT as a
+     *    liveness probe ONLY. It never SUBSCRIBEs, so it never takes a presence edge; the box
+     *    answers an unsubscribed beat with a HOST_GONE nudge at most every 30 s, which
+     *    [handleCtrl] ignores while no subscription was ever sent.
+     * In every mode, 5 consecutive failed OUT writes (beats, or re-SUBSCRIBE writes) declare the
+     * link dead — see [heartbeatDeclaresDead].
+     */
     fun startHeartbeat() {
         // isAlive, not != null: the loop nulls the field on exit (below), so a heartbeat that ended on
         // a spurious interrupt can be restarted instead of refusing forever.
@@ -773,6 +994,13 @@ class OcbmClient(
             // has held for this long — see the comment at the reset site.
             var stableTicks = 0
             val STABLE_TICKS_TO_CLEAR = 30
+            // v5.6 H1-3: whether this thread has already seen a non-empty configBlob. A heartbeat
+            // started in no-subscribe mode can see the blob appear when another thread's subscribe()
+            // (rung 1's OcbmProbe.subscribeExisting, or runAllLocked's queued-link path) sets it
+            // BEFORE its write and `subscribed` only AFTER. [subscribeInFlight] closes that window
+            // exactly; this first-sight deferral is the plan's own guard on top of it, so a first
+            // subscribe whose write failed is retried on the backoff schedule, not on the next tick.
+            var sawConfig = configBlob.isNotEmpty()
             // Set on the presumed-dead exit so `finally` does not overwrite FAILED with DOWN.
             var died = false
             try {
@@ -783,7 +1011,7 @@ class OcbmClient(
                     // to MISSED at its deadline so the Board says so even if the box never pushes
                     // another health report. Logs once per subscribe at most — see [hciState].
                     val hciDue = hciDeadlineMs
-                    if (hciDue != 0L && hciState == HCI_PENDING && System.currentTimeMillis() >= hciDue) {
+                    if (hciDue != 0L && hciState == HCI_PENDING && monoMs() >= hciDue) {
                         hciDeadlineMs = 0L
                         hciState = HCI_MISSED
                         val h = lastBoxHealth
@@ -792,6 +1020,7 @@ class OcbmClient(
                             else "0x%02x [%s] — no hci0 within ${BT_ATTACH_BUDGET_MS}ms of CT_SUBSCRIBE: the box's BT controller never attached (radio HAL / hciattach — read the [box:bt] lines)".format(h, Ocbm.bhString(h)))
                     }
                     if (subscribed) {
+                        if (configBlob.isNotEmpty()) sawConfig = true
                         // Check the write result — it is the liveness signal. On a box reboot / gadget
                         // stall every write fails; declare the link dead rather than looking healthy
                         // forever with a hung session.
@@ -810,20 +1039,8 @@ class OcbmClient(
                                 resubBackoff = 0L; nextResubAt = 0L; stableTicks = 0
                             }
                         } else if (++writeFailures >= 5) {
-                            log.e("!! heartbeat write failed ${writeFailures}x — link presumed dead")
                             died = true
-                            boardFailed(OcbmBoard.HEARTBEAT, "write failed ${writeFailures}x — link presumed dead")
-                            boardFailed(OcbmBoard.LINK, "heartbeat writes failing — box rebooted, adapter unplugged, or gadget stalled; HOST_GONE synthesised")
-                            // Clear the latch HERE. This path synthesises HOST_GONE by calling the
-                            // observer directly, which bypasses handleCtrl() — the only other place
-                            // `subscribed` is cleared. Leaving it true stranded the client in a state
-                            // where the link was dead but every readiness check said "up": the UI told
-                            // the driver to press Start, and autoStart() then short-circuited on
-                            // `subscribed == true` with "already subscribed; nothing to do". The one
-                            // action offered was the one action that could not work; only Stop-then-
-                            // Start escaped. Device-observed 2026-08-27.
-                            subscribed = false
-                            onSessionEvent?.invoke(Ocbm.SEV_HOST_GONE)
+                            heartbeatDeclaresDead(writeFailures, "heartbeat")
                             break
                         }
                     } else {
@@ -831,14 +1048,45 @@ class OcbmClient(
                         // edges that trip the box supervisor's flap detector (-> ocbmd restart -> full
                         // box reboot). Space attempts out: 2s, 4s, 8s, capped at 15s.
                         stableTicks = 0
-                        // No config means this client was brought up with subscribe=false on
-                        // purpose. Keep beating (it stamps liveness and keeps CH_MFI usable) but
-                        // never latch presence behind the caller's back.
-                        if (configBlob.isEmpty()) continue
-                        val now = System.currentTimeMillis()
+                        // Another thread's subscribe() is between setting configBlob and setting
+                        // `subscribed` (v5.6 H1-3, the double-SUBSCRIBE race): not our edge to take.
+                        if (subscribeInFlight) continue
+                        if (configBlob.isEmpty()) {
+                            // No config means this client was brought up with subscribe=false on
+                            // purpose (the no-subscribe relink under a live session). Beat anyway as a
+                            // liveness probe ONLY (v5.6 H1-3): until 2026-10-06 this branch wrote
+                            // nothing, so a second box stall after such a relink was undetectable and
+                            // a dead CH_MFI surfaced only at the next /auth-setup. A beat from an
+                            // unsubscribed host changes no box state (it stamps last_hb and earns a
+                            // HOST_GONE nudge at most every 30 s, which handleCtrl ignores here).
+                            // Never SUBSCRIBE from here: that is presence behind the caller's back.
+                            if (send(Ocbm.CH_CTRL, byteArrayOf(Ocbm.CT_HEARTBEAT))) writeFailures = 0
+                            else if (++writeFailures >= 5) {
+                                died = true
+                                heartbeatDeclaresDead(writeFailures, "liveness-probe heartbeat")
+                                break
+                            }
+                            continue
+                        }
+                        val now = monoMs()
+                        if (!sawConfig) {
+                            sawConfig = true
+                            nextResubAt = now + 2000L
+                            log.i("a subscription appeared on this link (configBlob set elsewhere) — any recovery re-CT_SUBSCRIBE waits 2 s")
+                            continue
+                        }
                         if (now >= nextResubAt) {
                             log.i(">> re-CT_SUBSCRIBE (recovering from HOST_GONE, backoff=${resubBackoff}ms)")
-                            subscribe(configBlob)
+                            // The write result counts (v5.6 H1-2): a link that dies in recovery used
+                            // to retry forever, because subscribe() returns false on a failed write
+                            // without touching any failure count.
+                            if (subscribe(configBlob)) writeFailures = 0
+                            else if (!running.get()) break
+                            else if (++writeFailures >= 5) {
+                                died = true
+                                heartbeatDeclaresDead(writeFailures, "re-CT_SUBSCRIBE")
+                                break
+                            }
                             resubBackoff = if (resubBackoff == 0L) 2000L else (resubBackoff * 2).coerceAtMost(15_000L)
                             nextResubAt = now + resubBackoff
                         }
@@ -846,10 +1094,10 @@ class OcbmClient(
                 }
             } catch (_: InterruptedException) {
                 // stop() interrupts this thread. If the interrupt lands while a recovery
-                // re-SUBSCRIBE is inside setTime()'s ctrlQ.poll(), the exception surfaces here
-                // rather than at the sleep above. Deliberate teardown, not a fault — it must not
-                // escape run(): no UncaughtExceptionHandler is installed, so Android would kill
-                // the process.
+                // re-SUBSCRIBE is inside setTime()'s ctrlQ.poll(), or while the dead-link handoff
+                // below waits for the transport edge, the exception surfaces here rather than at the
+                // sleep above. Deliberate teardown, not a fault — it must not escape run(): no
+                // UncaughtExceptionHandler is installed, so Android would kill the process.
             } finally {
                 heartbeatThread = null
                 if (!died) boardDown(OcbmBoard.HEARTBEAT, if (running.get()) "thread exited on interrupt — restartable" else "client stopped")
@@ -858,8 +1106,59 @@ class OcbmClient(
         t.isDaemon = true
         heartbeatThread = t
         t.start()
-        log.i(">> heartbeat started at ${Ocbm.HEARTBEAT_MS}ms (box watchdog is ${Ocbm.HEARTBEAT_GRACE_MS}ms)")
+        log.i(">> heartbeat started at ${Ocbm.HEARTBEAT_MS}ms (box watchdog is ${Ocbm.HEARTBEAT_GRACE_MS}ms)" +
+            if (configBlob.isEmpty()) " — liveness probe only, no CT_SUBSCRIBE on this link" else "")
         boardUp(OcbmBoard.HEARTBEAT, "${Ocbm.HEARTBEAT_MS}ms cadence, box watchdog ${Ocbm.HEARTBEAT_GRACE_MS}ms")
+    }
+
+    /**
+     * The link is presumed dead: [failures] consecutive OUT writes failed ([what] = which writes).
+     * Runs on the heartbeat thread, which exits right after. May throw InterruptedException
+     * (stop() during the handoff wait); the caller's catch treats that as teardown.
+     *
+     * v5.6 H1-2. Until 2026-10-06 this synthesised HOST_GONE and nothing else, and on a half-dead
+     * link (OUT NAKing, IN timing out normally — logcat_cp4 18:42:52-18:44:07) the read loop never
+     * ended, so the transport-death edge and the box relink never ran: the app sat in
+     * BOX_LOST_SESSION_UP / "press Start" with no heartbeat and no relink. Now it hands the link to
+     * the transport-death path ([RawBulkTransport.declareDead]), whose edge carries
+     * `transportDied = true` and arms the relink (SessionCore.onBoxTransportDead CASes
+     * [hostGoneDelivered], then arms). HOST_GONE is synthesised here only when that edge does not
+     * run: a transport with no read loop to end, or a read thread wedged inside a native transfer.
+     */
+    private fun heartbeatDeclaresDead(failures: Int, what: String) {
+        log.e("!! heartbeat write failed ${failures}x ($what writes) — link presumed dead")
+        boardFailed(OcbmBoard.HEARTBEAT, "write failed ${failures}x ($what) — link presumed dead")
+        boardFailed(OcbmBoard.LINK, "heartbeat writes failing — box stalled or rebooted, adapter unplugged, or gadget stalled; declaring the link dead")
+        // Clear the latch HERE. The edge below bypasses handleCtrl() — the only other place
+        // `subscribed` is cleared. Leaving it true stranded the client in a state where the link was
+        // dead but every readiness check said "up": the UI told the driver to press Start, and
+        // autoStart() then short-circuited on `subscribed == true` with "already subscribed; nothing
+        // to do". The one action offered was the one action that could not work; only Stop-then-
+        // Start escaped. Device-observed 2026-08-27. It also keeps stop() from sending CT_STOP into
+        // a box that is waking up.
+        subscribed = false
+        // Same reason for the HELLO latch: a dead link must not answer OcbmProbe.hasLink() with "yes".
+        helloAcked = false
+        val handed = transport.declareDead("heartbeat write failed ${failures}x ($what), read loop alive")
+        if (handed) {
+            // The read loop exits within one read timeout and its edge CASes the latch. Wait for it
+            // (bounded; stop() interrupts this) so the synthetic edge below cannot pre-empt the real
+            // one, whose `transportDied = true` is what tells the supervisor a relink is coming.
+            val until = monoMs() + 2000L
+            while (!hostGoneDelivered.get() && running.get() && monoMs() < until) Thread.sleep(50)
+        }
+        // A stopped client delivers nothing (B-N3): its owner tore it down on purpose.
+        if (!running.get()) return
+        if (hostGoneDelivered.compareAndSet(false, true)) {
+            // `handed`: the read loop was told to end and has not yet. If it does end later (the
+            // wedged transfer returns), its edge still arms the box relink and re-reports the loss
+            // as relinking (SessionCore.onBoxTransportDead, reviews A1/B-M2) — so "none yet", not "none".
+            log.w(if (handed) "transport-death edge did not arrive within 2 s (read thread wedged in a native transfer?) — HOST_GONE synthesised; no relink is armed unless the read loop ends later"
+                  else "no read loop to end on this transport — HOST_GONE synthesised; no relink is armed")
+            onSessionEvent?.invoke(Ocbm.SEV_HOST_GONE)
+        } else if (handed) {
+            log.i("link handed to the transport-death path — its edge delivered HOST_GONE and arms the relink")
+        }
     }
 
     // ---- CH_MFI relay ---------------------------------------------------------------------------
@@ -867,6 +1166,13 @@ class OcbmClient(
     companion object {
         /** Counts [newHostInstance] calls, so two probes built inside one millisecond still differ. */
         private val HOST_GENERATION = java.util.concurrent.atomic.AtomicInteger(0)
+
+        /**
+         * [BoxLogRing] byte floor per source: the 262144 B threshold at which tools/session_supervisor.sh
+         * `bound_logs` cuts its five tail sources back to 65536 B (every 30 ticks, so a file can run
+         * past it between passes). The CT_LOG_CTL cap raises it when larger — see [BoxLogRing].
+         */
+        private const val LOG_RING_MIN_BYTES = 262144L
 
         /**
          * Mint a host instance nonce. One per [zeno.gmccpa.ocbm.OcbmProbe], minted when the probe is
@@ -948,6 +1254,15 @@ class OcbmClient(
     private val fileLock = java.util.concurrent.locks.ReentrantLock(true)
 
     /**
+     * Serialises CH_MGMT, as [fileLock] does CH_FILE. Both [mgmtGetInfo] and [mgmtAction] clear the
+     * one shared [mgmtQ] before they send, and nothing in a reply names its request. Unlocked, a
+     * getInfo that started while a FORGET was waiting for its ACK cleared that ACK: the FORGET then
+     * reported failure and [reArmAfterMgmt] never ran, so CH_LOG stayed silent (audit12 F057;
+     * SessionCore's HOST_GONE end snapshot runs getInfo on a pool thread, concurrent with a forget).
+     */
+    private val mgmtLock = java.util.concurrent.locks.ReentrantLock(true)
+
+    /**
      * Per-request correlation tag. Rolls 1..255, never 0, so a zero byte from a torn frame is never
      * mistaken for a valid tag. See [Mfi.TAG_LEN] for why length correlation was not enough.
      */
@@ -962,7 +1277,7 @@ class OcbmClient(
         timeoutMs: Long,
         expectedOk: (ByteArray) -> Boolean,
     ): Mfi.Response? {
-        val deadline = System.currentTimeMillis() + timeoutMs
+        val deadline = monoMs() + timeoutMs
         // Bounded acquire out of the SAME budget. Failing fast here is correct: the caller is either
         // the tunnel (a late frame is fine, a late HTTP reply is not) or /auth-setup (which surfaces
         // the failure), and blocking past the phone's timeout helps neither.
@@ -977,7 +1292,7 @@ class OcbmClient(
             while (mfiQ.poll() != null) { /* discard */ }
             if (!send(Ocbm.CH_MFI, build(tag))) return null
             while (true) {
-                val remaining = deadline - System.currentTimeMillis()
+                val remaining = deadline - monoMs()
                 if (remaining <= 0) return null
                 val pl = mfiQ.poll(remaining, TimeUnit.MILLISECONDS) ?: return null
                 val resp = Mfi.parse(pl, pl.size) ?: continue
@@ -1012,8 +1327,22 @@ class OcbmClient(
     fun mfiCertificate(timeoutMs: Long = MFI_CERT_TIMEOUT_MS): Mfi.Response? {
         log.i(">> CH_MFI copy_certificate")
         // A certificate is ~945 B; a 128-B OK reply is the signature answer to another request.
-        return mfiRequest({ t -> Mfi.certRequest(t) }, timeoutMs) { it.size > Mfi.SIG_LEN }
+        val r = mfiRequest({ t -> Mfi.certRequest(t) }, timeoutMs) { it.size > Mfi.SIG_LEN }
+        // Remember a GOOD read of the expected length — and nothing else. A failure, a timeout or
+        // an odd-length payload must never be served back as the certificate.
+        if (r != null && r.ok && r.payload.size == Mfi.EXPECTED_CERT_LEN) certCache = r.payload
+        return r
     }
+
+    /**
+     * The certificate this link has already read, if any. Per client on purpose: a re-claim builds
+     * a new client, so a swapped adapter can never be served the old chip's certificate. Populated
+     * by every OK read of [Mfi.EXPECTED_CERT_LEN] bytes (bring-up included); consumed only by
+     * `OcbmProbe.mfiRelay`, which is why a caller that wants the CHIP's answer calls
+     * [mfiCertificate] directly. A signature can never be cached — it is over a fresh digest.
+     */
+    @Volatile private var certCache: ByteArray? = null
+    fun cachedCertificate(): ByteArray? = certCache
 
     /**
      * Sign a 20-byte SHA-1 digest. The chip sequence alone runs up to ~2.1 s, and with lock
@@ -1049,7 +1378,7 @@ class OcbmClient(
             return null
         }
         try {
-            val deadline = System.currentTimeMillis() + timeoutMs
+            val deadline = monoMs() + timeoutMs
             while (fileQ.poll() != null) { /* drop anything left by a timed-out pull */ }
             val pathBytes = path.toByteArray(Charsets.UTF_8)
             val req = ByteArray(1 + pathBytes.size)
@@ -1059,7 +1388,7 @@ class OcbmClient(
 
             val body = java.io.ByteArrayOutputStream()
             while (true) {
-                val remaining = deadline - System.currentTimeMillis()
+                val remaining = deadline - monoMs()
                 if (remaining <= 0) { log.w("!! CH_FILE pull of $path timed out"); return null }
                 val pl = fileQ.poll(remaining, TimeUnit.MILLISECONDS) ?: continue
                 if (pl.isEmpty()) continue
@@ -1102,34 +1431,51 @@ class OcbmClient(
 
     /** MGMT_GET_INFO → MGMT_INFO, whose payload is UTF-8 JSON running to the end of the frame. */
     fun mgmtGetInfo(timeoutMs: Long = 5000): String? {
-        mgmtQ.clear()
-        if (!send(Ocbm.CH_MGMT, byteArrayOf(Ocbm.MGMT_GET_INFO))) return null
-        val deadline = System.currentTimeMillis() + timeoutMs
-        while (System.currentTimeMillis() < deadline) {
-            val pl = mgmtQ.poll(200, TimeUnit.MILLISECONDS) ?: continue
-            if (pl.isNotEmpty() && pl[0] == Ocbm.MGMT_INFO) {
-                return String(pl, 1, pl.size - 1, Charsets.UTF_8)
-            }
+        if (!mgmtLock.tryLock(timeoutMs, TimeUnit.MILLISECONDS)) {
+            log.w("!! CH_MGMT busy — MGMT_GET_INFO could not start within ${timeoutMs}ms")
+            return null
         }
-        return null
+        try {
+            mgmtQ.clear()
+            if (!send(Ocbm.CH_MGMT, byteArrayOf(Ocbm.MGMT_GET_INFO))) return null
+            val deadline = monoMs() + timeoutMs
+            while (monoMs() < deadline) {
+                val pl = mgmtQ.poll(200, TimeUnit.MILLISECONDS) ?: continue
+                if (pl.isNotEmpty() && pl[0] == Ocbm.MGMT_INFO) {
+                    return String(pl, 1, pl.size - 1, Charsets.UTF_8)
+                }
+            }
+            return null
+        } finally {
+            mgmtLock.unlock()
+        }
     }
 
     /** Any of the four action verbs; returns the status byte from MGMT_ACK (0 ok, 1 error). */
     fun mgmtAction(verb: Byte, arg: ByteArray = ByteArray(0), timeoutMs: Long = 5000): Int? {
-        mgmtQ.clear()
-        val pl = ByteArray(1 + arg.size)
-        pl[0] = verb
-        System.arraycopy(arg, 0, pl, 1, arg.size)
-        if (!send(Ocbm.CH_MGMT, pl)) return null
-        val deadline = System.currentTimeMillis() + timeoutMs
-        while (System.currentTimeMillis() < deadline) {
-            val r = mgmtQ.poll(200, TimeUnit.MILLISECONDS) ?: continue
-            if (r.size >= 3 && r[0] == Ocbm.MGMT_ACK && r[1] == verb) {
-                if (r[2].toInt() == 0) reArmAfterMgmt(verb)
-                return r[2].toInt()
-            }
+        if (!mgmtLock.tryLock(timeoutMs, TimeUnit.MILLISECONDS)) {
+            log.w("!! CH_MGMT busy — verb 0x%02x could not start within ${timeoutMs}ms".format(verb.toInt() and 0xFF))
+            return null
         }
-        return null
+        val status: Int? = try {
+            mgmtQ.clear()
+            val pl = ByteArray(1 + arg.size)
+            pl[0] = verb
+            System.arraycopy(arg, 0, pl, 1, arg.size)
+            if (!send(Ocbm.CH_MGMT, pl)) return null
+            val deadline = monoMs() + timeoutMs
+            var got: Int? = null
+            while (monoMs() < deadline) {
+                val r = mgmtQ.poll(200, TimeUnit.MILLISECONDS) ?: continue
+                if (r.size >= 3 && r[0] == Ocbm.MGMT_ACK && r[1] == verb) { got = r[2].toInt(); break }
+            }
+            got
+        } finally {
+            mgmtLock.unlock()
+        }
+        // Outside the lock: the re-arm writes CH_CTRL only, and a waiting getInfo need not sit behind it.
+        if (status == 0) reArmAfterMgmt(verb)
+        return status
     }
 
     /**
@@ -1182,6 +1528,7 @@ class OcbmClient(
         // that has gone. The box would reset it on teardown anyway; sending it makes the shutdown
         // legible in the box's own log, which is the first place anyone looks after a bad session.
         if (logStreamWanted) logCtl(false)
+        backfillSummary("client stopping")
         val wasSubscribed = subscribed
         if (subscribed) {
             log.i(">> CT_STOP")
@@ -1202,84 +1549,5 @@ class OcbmClient(
 
     fun statsLine(): String =
         "frames=$framesIn bytes=$bytesIn resyncBytes=${reasm.resyncBytes} helloAck=$helloAcked " +
-            "subscribed=$subscribed caps=[${Ocbm.capsString(caps)}]"
-}
-
-/**
- * [SessionTrace.Board] entry names for the OCBM side, in one place so `OcbmProbe`,
- * `UsbBulkTransport` and this client cannot spell the same component two ways.
- */
-internal object OcbmBoard {
-    /** The claimed USB interface — written by `UsbBulkTransport.open/stop` and, for the waiting states, by `OcbmProbe.awaitClaimable`. */
-    const val USB_CLAIM = "usb-claim"
-    /** The `ocbm-read` thread. */
-    const val USB_READ = "usb-read-loop"
-    /** The OCBM link: HELLO_ACK, subscribed, HOST_PRESENT confirmed — or FAILED with why. */
-    const val LINK = "ocbm-link"
-    /** The 1 Hz heartbeat thread. */
-    const val HEARTBEAT = "ocbm-heartbeat"
-    /** The box's `CH_LOG` push stream: armed, flowing, disarmed. */
-    const val CH_LOG = "box-log-stream"
-    /** Host-side radio inhibit (`CT_RADIO`), as last commanded. */
-    const val RADIOS = "box-radios"
-    /** The box's last `CT_BOX_HEALTH`, decoded via [Ocbm.bhString]; FAILED when hci0 is missing. */
-    const val HEALTH = "box-health"
-    /** The BT/iAP2 handshake phase (`CT_BT_PHASE`). */
-    const val BT_PHASE = "bt-phase"
-    /** The identified phone (`CT_PHONE_IDENT`). */
-    const val PHONE = "phone"
-    /** The SSP numeric-comparison code on display (`CT_PAIRING_CODE`). */
-    const val PAIRING_CODE = "pairing-code"
-    /** Which projection transport owns the box (`CT_PROJ_MODE`). */
-    const val PROJ_MODE = "proj-mode"
-}
-
-/**
- * [SessionTrace] expectation names for the bring-up ladder. Each is armed exactly where the wait
- * begins and met exactly where the answer is decoded; see the class KDoc of [OcbmClient] for the
- * budget behind each.
- */
-internal object OcbmExpect {
-    /** Armed by `UsbAttachActivity` when it forwards an attach; met at the top of `OcbmProbe.runAllLocked`. */
-    const val LINK_ATTEMPT = "link-attempt-after-attach"
-    /** Armed by `OcbmProbe.awaitClaimable` when it raises the permission dialog; met when the grant appears. */
-    const val USB_PERMISSION = "usb-permission"
-    const val HELLO_ACK = "ocbm-hello-ack"
-    const val SETTIME_ACK = "ocbm-settime-ack"
-    /** Bring-up MFi steps, armed by `OcbmProbe.runAllLocked` with the client's own budgets. */
-    const val MFI_CERT = "mfi-cert"
-    const val MFI_SIGN = "mfi-sign"
-    const val MFI_SIGN_RETRY = "mfi-sign-retry"
-    const val HOST_PRESENT = "sev-host-present"
-    const val HCI_PRESENT = "box-health-hci"
-    const val LOG_FIRST_LINE = "box-log-first-entry"
-
-    /** The names [OcbmClient] arms itself, cancelled together on [OcbmClient.stop]. */
-    val CLIENT_OWNED = listOf(HELLO_ACK, SETTIME_ACK, HOST_PRESENT, HCI_PRESENT, LOG_FIRST_LINE)
-    /** The names `OcbmProbe` arms, cancelled together when it stops the link. */
-    val PROBE_OWNED = listOf(USB_PERMISSION, MFI_CERT, MFI_SIGN, MFI_SIGN_RETRY)
-}
-
-/**
- * Name a `CH_LOG` source id. Mirrors `ocbm-proto`'s `log_source_name` exactly.
- *
- * Lives here rather than in the shared `OcbmProto.kt` because that file is ccpa_custom's, consumed
- * through a symlink — this repo restates the protocol, it does not extend it. An unknown id renders
- * rather than drops: the source table grows box-side, and a host that discards lines it cannot label
- * loses exactly the evidence about the thing that is new.
- */
-internal fun logSourceName(id: Int): String = when (id) {
-    Ocbm.LOG_SRC_BOX -> "box"
-    Ocbm.LOG_SRC_AIRPLAYD -> "airplayd"
-    Ocbm.LOG_SRC_AIRPLAYD_WL -> "airplayd-wl"
-    Ocbm.LOG_SRC_IAP2D -> "iap2d"
-    Ocbm.LOG_SRC_AA_BRIDGE -> "aa-bridge"
-    Ocbm.LOG_SRC_RX_CONNECT -> "rx-connect"
-    Ocbm.LOG_SRC_BT -> "bt"
-    Ocbm.LOG_SRC_RADIO_AP_DHCP -> "radio_ap_dhcp"
-    Ocbm.LOG_SRC_RADIO_BT_ATTACH -> "radio_bt_attach"
-    Ocbm.LOG_SRC_RX_CONNECT_WL -> "rx-connect_wl"
-    Ocbm.LOG_SRC_CARPLAY_WIRELESS -> "wl"
-    Ocbm.LOG_SRC_INTERNAL -> "internal"
-    else -> "src$id"
+            "subscribed=$subscribed nudgesIgnored=$hostGoneNudgesIgnored caps=[${Ocbm.capsString(caps)}]"
 }

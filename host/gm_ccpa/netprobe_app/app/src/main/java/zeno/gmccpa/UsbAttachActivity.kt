@@ -36,11 +36,29 @@ import zeno.gmccpa.ocbm.UsbBulkTransport
  * impersonate a platform component for a benefit that never materialised.
  *
  * The app is back to `zeno.gmccpa`, so the fixed-handler path no longer resolves to us at all and
- * the ORDINARY attach resolver is the only route in: the `<intent-filter>` +
- * `res/xml/device_filter.xml` below match `0x1314:0x2d00`, the framework shows the standard USB
- * permission dialog, and "always open for this device" makes it a one-time cost per install. That
- * degrades correctly because [UsbBulkTransport] polls `hasPermission()` as the authoritative signal
- * rather than trusting the grant broadcast — the claim loop simply waits until the grant exists.
+ * the ORDINARY attach resolver was meant to be the route in: the `<intent-filter>` +
+ * `res/xml/device_filter.xml` below match `0x1314:0x2d00`.
+ *
+ * **Corrected 2026-10-06: on this unit that route never runs either.** GM routes every attach to
+ * the fixed handler and, the package being absent, stops there: logcat2 15:10:45.977
+ * `E UsbProfileGroupSettingsManager: Default USB handling package (android.car.usb.handler) not
+ * found for user UserHandle{10}` (AOSP `deviceAttachedForFixedHandler`, which then returns without
+ * resolving activities), on every attach on record, and 0 `USB ATTACH TRAMPOLINE` lines in all of
+ * logcat2. So this activity is not launched on attach, and "always open for this device" is never
+ * offered. Permission is per device instance: every replug needed the dialog plus a user tap. What
+ * actually re-claims a replugged adapter is OcbmProbe's claim loop finding it by polling, then
+ * raising the dialog — started by a launch, or since 2026-10-06 by the box relink armed on
+ * transport death (MainActivity `BoxRelink`). [UsbBulkTransport] polls `hasPermission()` as the
+ * authoritative signal, so the loop simply waits until the grant exists.
+ *
+ * **2026-10-15 (owner request): the app installs as `android.car.usb.handler` again**, and the
+ * manifest declares `android.car.usb.handler.UsbHostManagementActivity` as an `<activity-alias>` onto
+ * THIS class — so the fixed-handler path resolves to us again, grants this uid permission and then
+ * starts this trampoline for every USB attach (the class itself stays `zeno.gmccpa`). The two
+ * paragraphs above are the history of the 2026-09-08..10-15 `zeno.gmccpa` package. Whether the
+ * grant now lands on every attach is what the bench has to show (the 2026-10-07 re-analysis in
+ * `ccpa_custom/docs/host/01_ANDROID_AND_AAOS.md` predicts no grant for an attach handled before the
+ * switch to user 10); the `via=` field of the `attach ctx: pkg=` line says which route fired.
  *
  * The diagnostics below are kept as-is. They were written to explain the squat's intermittency, and
  * every one of them is equally the right evidence for a dialog that does not appear, a grant that
@@ -173,7 +191,9 @@ class UsbAttachActivity : Activity() {
         log.i("attach ctx: uid=$uid user=${uid / 100_000} pid=${Process.myPid()} process_age=${ageMs}ms")
 
         val pkg = runCatching { packageManager.getPackageInfo(packageName, 0) }.getOrNull()
-        log.i("attach ctx: pkg=$packageName v=${pkg?.versionName} src=${applicationInfo.sourceDir}")
+        // via = the component the framework started: the fixed-handler alias
+        // (android.car.usb.handler.UsbHostManagementActivity) or the ordinary resolver's UsbAttachActivity.
+        log.i("attach ctx: pkg=$packageName via=${intent?.component?.className} v=${pkg?.versionName} src=${applicationInfo.sourceDir}")
 
         if (dev == null) return SessionSummary.SerialOutcome.UNKNOWN
 

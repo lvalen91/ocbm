@@ -15,6 +15,20 @@ extraction, driver load, BT attach with convergence, the owned SoftAP, and the s
 are all landed and hardware-validated. Read §7 for what is still open; Broadcom remains untested
 and is the known-hardest case.
 
+**Scope: stock 3.14.52 units.** Everything below (the vendor `init_bluetooth_wifi.sh` dispatcher, the
+`*_ko.tar.gz` driver tarballs, `hciattach`/`bluetoothDaemon`, kernel `hci_core.c` references) describes the
+stock-kernel CCPA with its vendor rootfs, converted by `tools/ncm_base_install.sh`. In this file "the
+baseline" and "the IW416 baseline" mean that NCM base, not the `baseline/` mainline tree. The mainline
+baseline loads the radio stack as modules and names the IW416 interface `mlan0`. It does not use
+`radio_hal.sh`; it has its own `radio up|down|status`, which supports only the IW416 (`mwifiex_sdio` +
+`btnxpuart`, verified on hardware), the RTL8822CS and the RTL8822BS (`baseline/README.md` §2.5). It has no
+Broadcom, RTL8733BS or SD8987 mapping. A CCPA unit probed 2026-10-28 is an NXP IW416 (SDIO 02df:9159,
+`mwifiex_sdio` + `btnxpuart`, Bluetooth 5.4). The C2Air is a different box (Allwinner V821 rv32, AIC8800D80
+Wi-Fi/BT, Bluetooth reports AIC8820 5.4, MFi 3.x); its bring-up is in `c2air/README.md`, not here.
+The Raspberry Pi / AAOS port and a Linux workstation have reached full CarPlay A/V with a CCPA in NCM mode
+as the MFi source only (own Bluetooth and Wi-Fi radios, light testing); none of the radio HAL applies to
+them.
+
 ### 1. The problem, stated precisely
 
 CCPA ships with at least six WLAN/BT parts. Per the resources repo's
@@ -83,7 +97,7 @@ Separate the vendor's **observations** from their **choices** (CLAUDE.md doctrin
   not own.
 * **Choices — do not inherit.** Executing the dispatcher wholesale re-imports:
   - `/script/attach_bluetooth.sh &` — **fork-and-return**, which is exactly the uncoordinated
-    double-bring-up docs/wireless/01_BT_AND_RADIO.md recorded fighting itself for 7+ minutes;
+    double-bring-up recorded in "HISTORICAL — bring-up race and health check" below, which fought itself for 7+ minutes;
   - the Broadcom branch backgrounding `brcm_patchram_plus` the same way;
   - the SD8987 branch's `dmesg | grep "woal_request_fw failed" && reboot`, a reboot inside a
     radio bring-up that would bypass `session_supervisor`'s escalation ladder and its persistent
@@ -94,7 +108,7 @@ Separate the vendor's **observations** from their **choices** (CLAUDE.md doctrin
 **The AP layer is always ours — never delegate it.** On a stripped box the vendor's
 `start_bluetooth_wifi.sh` reads config through `riddleBoxCfg`, which the OCBM base removes. The
 calls are *not* `test -e`-guarded, so with it gone that script seds an **empty `wpa_passphrase`
-into `/etc/hostapd.conf`** — persistent, on flash — and falls back to `WLANIP=192.168.50.2`,
+into `/etc/hostapd.conf`** — persistent, on flash — and falls back to `WLANIP=<ADAPTER_IP>`,
 which is NCM's own address, then repoints the DHCP pool onto the management subnet. Its teardown
 `killall`s every `udhcpd`, including NCM's. That is the control channel you are standing on.
 
@@ -174,14 +188,14 @@ Three contract clauses, each bought with a real failure:
    that answers nothing.
 3. **Never reboot, never touch session daemons.** A backend that believes only a reboot can
    recover says so with an exit code and lets the layer that owns reboot policy decide. The HAL
-   never signals `carplayd`/`rx-connect`/`btd`/`ocbmd` — it cannot know whether a
-   live session is wired-owned, which is what the supervisor's conditional reap (docs/wireless/00_WIRELESS_CARPLAY.md #1.4)
+   never signals `carplayd`/`btd`/`ocbmd` — it cannot know whether a
+   live session is wired-owned, which is what the supervisor's conditional reap (`wireless_down` in `tools/session_supervisor.sh`)
    exists to decide.
 
 **Naming is load-bearing.** The supervisor's teardown runs in a detached `sh -c` whose own argv
 its own `pkill` patterns can see — a bug this project already paid for once (2026-08-01: a plain
 `pkill -f` killed the teardown subshell before it reached `wlan_off`, orphaning a still-beaconing
-AP). So the script name and every verb must avoid `carplayd`, `rx-connect`, `btd`,
+AP). So the script name and every verb must avoid `carplayd`, `btd`,
 `ocbmd`, `hostapd`. Audited clear; re-audit before renaming a verb.
 
 **The owned AP layer is invoked as `/script/radio_ap_up.sh`, never
@@ -214,7 +228,7 @@ consistent with the vendor's BT wait being on `wlan0`.
 
 1. **Presence ≠ ownership.** The first `wifi_ap_on` would have run the *vendor's*
    `start_bluetooth_wifi.sh`. Fixed by the unambiguous `radio_ap_up.sh` name. Verified after the
-   fix: `hostapd.conf` still `wpa_passphrase=12345678`, `ncm0` still `192.168.50.2`.
+   fix: `hostapd.conf` still `wpa_passphrase=<box default passphrase>`, `ncm0` still `<ADAPTER_IP>`.
 2. **`UP RUNNING` is a lie.** A wedged controller reported `UP RUNNING` while every name read
    timed out — docs/wireless/01_BT_AND_RADIO.md reproduced live. The responsiveness check is what caught it.
 3. **Reclaim the UART before re-attaching.** Attaching while the previous helper still held
@@ -250,9 +264,11 @@ real failure three phases before anything switched.
 > names `wlan_on.sh`/`bt_on.sh` (the old paths survive there only as a comment), and `--full` ships
 > the seam. The *mechanism* that made those failures silent is untouched and is still live today:
 >
-> - `tools/session_supervisor.sh:792,794` (and again at `:865,894`) call
->   `sh /script/radio_hal.sh {wifi_ap_on,bt_on} >/tmp/{wlan,bt}.log 2>&1` inside a detached `setsid`
->   wrapper. **There is no `$?` check at any of those four sites.**
+> - `tools/session_supervisor.sh` (`wireless_up` for `wifi_ap_on`/`bt_on`, `wireless_down` and its teardown
+>   branches for `wifi_ap_off`/`bt_off`) calls
+>   `sh /script/radio_hal.sh <verb> >/tmp/{wlan,bt}.log 2>&1` inside a detached `setsid`
+>   wrapper. **There is no `$?` check at any of those call sites** (the `bt_on` call pipes through `tee`,
+>   so even the pipeline's status is `tee`'s).
 > - So if `/script/radio_hal.sh` or `/script/radio_detect.sh` is simply ABSENT from the target, the
 >   shell writes `sh: /script/radio_hal.sh: not found` into `/tmp/bt.log` and the supervisor carries
 >   on exactly as if the radios had converged.
@@ -308,17 +324,21 @@ each IDR — suggests the decoder session is being rebuilt against every re-sync
 brief feedback loop. Note the *decrypt* counters are clean (`fail=0`) throughout, so this is
 strictly downstream of decryption.
 
-**Why this session worked is also why it would not have on Broadcom.** `av.rs:63,66` pin
-`WLAN_IFACE="wlan0"` and `AP_IP="192.168.43.1"`. On this Realtek unit both constants happen to
+**Why this session worked is also why it would not have on Broadcom.** `WLAN_IFACE` in `av.rs` pins
+`"wlan0"` and `AP_IP` (one constant, `box_common::net::AP_IP`, re-exported by `av.rs`) pins `"192.168.43.1"`. On this Realtek unit both constants happen to
 be correct — `wlan0` is primary and the owned AP layer serves 192.168.43.1 — so the Rust side
 never noticed it was hardcoded. On a Broadcom unit the interface is `sta0` and `wlan0` does not
 exist at all, so the identical session would fail with the radios up and perfectly healthy.
-That makes §7's Rust item load-bearing risk rather than tidiness.
+That makes §7's Rust item load-bearing risk rather than tidiness. The mainline baseline has the same
+problem on the IW416: its interface is `mlan0` (mwifiex), so `wlan0` does not exist there either
+(`baseline/README.md` §2.5).
 
 ### 6c. What the box does with app-pushed config
 
-The app pushes exactly three Wi-Fi keys — `wifi_ssid`, `wifi_pass`, `wifi_channel` — and
-`apply_host_wifi_creds()` rebuilds `/etc/hostapd.conf` from a pristine `.stock` snapshot with
+Only the gm_ccpa app pushes Wi-Fi keys, `wifi_ssid` and `wifi_pass` (`SubscribeConfig.kt`); the macOS app pushes none of them (only `wifi_ap:`). It sent a third, `wifi_channel`, until
+2026-10-07, when the owner decided the app sends no channel on purpose. The box still accepts
+`wifi_channel` from a host that sends it, and only replaces the stock `channel=` line when one is
+supplied. `apply_host_wifi_creds()` rebuilds `/etc/hostapd.conf` from a pristine `.stock` snapshot with
 them (rebuild, not sed-substitute, because an SSID or passphrase can contain regex/delimiter
 characters). What survives after that depends on the role:
 
@@ -339,6 +359,12 @@ IW416 baseline too, but it is a doctrine gap, not a design decision.
 identity currently cannot.
 
 #### One box, one name — the intent, and why it is NOT yet achieved
+
+*(Scope note, 2026-10-08: this intent is the stock box-AP role's, where the box's own SoftAP SSID and its
+Bluetooth name should match. In the `host/gm_ccpa` bridge role the AP is the vehicle's hotspot and the box
+raises none, so "one name" does not apply there; the adapter still advertises `CarLink-<suffix>` from
+`bt_name_from()`. An app-pushed `bt_name` is recorded as an upstream proposal, with its costs, in
+`host/gm_ccpa/docs/11_HARDENING_PLAN.md` — D9.)*
 
 Wi-Fi and Bluetooth must advertise the same `ccpa-<4hex>`, and deriving it per-radio does not
 achieve that. The sources disagree: on the RTL8822CS unit the Wi-Fi MAC and the BT controller
@@ -399,14 +425,16 @@ variable assignments within the unit's branch — tracked in §7, not claimed he
   run it. Moot while IW416 resolves to the `owned` backend, latent otherwise.
 * `ocbm_install.sh`: the generic manifest cross-reference assertion (§6). The specific Realtek
   failure it would have caught is now closed — `--full` ships the seam alongside the supervisor
-  (`ocbm_install.sh:158-160`) — but a future shipped script referencing a path the target lacks
+  (the `FULL` branch of `tools/ocbm_install.sh`) — but a future shipped script referencing a path the target lacks
   would still slip through.
 * A reversible radio verification gate in the baseline, run while still on NCM.
-* Rust parameterisation: `WLAN_IFACE`/`AP_IP` from the seam (`av.rs:63,66`), the identity chain
-  (`box_identity.rs`'s `hardware_id()` :15, `iap2-core/src/message.rs`'s `device_suffix()` :215 — a
+* Rust parameterisation: `WLAN_IFACE` (`av.rs`) and `AP_IP` (`box_common::net`) from the seam. **Decided:
+  the radio seam will export the wireless interface name to the Rust side; this is planned, not done.**
+  Also the identity chain (`box_identity.rs` `hardware_id()`, `iap2-core/src/message.rs` `device_suffix()`,
+  and the `/sys/class/net/wlan0/address` read in ocbmd's `bt_name_from` caller — all read `wlan0` — a
   live bug on IW416 too, since `/sys/class/net/wlan0/address` is absent whenever the driver is
-  unloaded, which under on-demand radios is most of the time), and the hardcoded Raspberry Pi BT MAC
-  at `bt_driver.rs:61`. **Added 2026-08-16:** that same chain is why §6c's "one box, one name" is
+  unloaded, which under on-demand radios is most of the time). *(The hardcoded Raspberry Pi BT MAC that
+  was listed here is fixed: `bt_driver.rs` `accessory_bt_mac()` reads sysfs, 2026-09-03.)* **Added 2026-08-16:** that same chain is why §6c's "one box, one name" is
   **not yet achieved**. `/etc/carplay_ident` is read only by `radio_hal.sh` and `radio_ap_up.sh`;
   `btd` (`main.rs` → `bt_bringup::bring_up`), `bt_on.sh` and `ocbmd`'s `bt_name_from()`
   each derive independently, and because the supervisor execs `btd` *after*
@@ -476,7 +504,7 @@ reads channel 1, and `rfcomm::connect_to` opens it.
 [bt-driver] RX 0xAA00 -> CertSent ... AuthSuccess ... RX 0xAA05 -> Authenticated
 [bt-driver] TX 0x1D01 IdentificationInformation (301 B, wireless transport)
 [bt-driver] IdentifyAccept ... RX 0x1D02 -> Identified
-[bt-driver] RX 0x5702 RequestAccessoryWiFiConfig -> replying 0x5703 (ssid="ccpa-b0df" ch=36 …)
+[bt-driver] RX 0x5702 RequestAccessoryWiFiConfig -> replying 0x5703 (ssid="<box stock SSID>" ch=36 …)
 [bt-driver] RX 0x4E0E DeviceTransportIdentifier: param0=<phone bdaddr>, param1=<phone UDID>
 [av] started /usr/sbin/carplayd (detached) → transport=wireless → CarPlay active
 ```
@@ -558,25 +586,6 @@ scaffolding from this doc for the Model-B session.
 
 ---
 
-## Remaining task list (as of 2026-08-01) — ordered
-
-Landed & hardware-validated this session: audit remediation (Phase 0/1), the ocbmd OutQueue refactor,
-the lost-command chain (C1/C4), wired↔wireless switching (item 1) + the Hot-Handover/Standard opt-in.
-
-1. **Item 3 — V1 AVCC fast path + V4 host backpressure** (host Swift; biggest host-CPU win; no BT
-   unknowns; testable on the live box).
-2. **Item 4 — structural**: delete the dormant `Protocol/` layer (extract `TouchAction`/`CommandID`/LE
-   helpers to `InputTypes.swift` first) + build the OCBM test suite (unblocked by the coordinator split)
-   + add a TSan scheme.
-3. **Deferred smaller items** (from docs/ops/05_AUDITS.md): eld-codec `AACENC_SBR_MODE=0` (ELD ASC, needs the phone);
-   `CT_INPUT_NACK` protocol addition; `connect_seam` numeric-only (E); ocbmd `opt-level=2` (measure-first).
-4. ~~**Item 2 (LAST) — accessory-initiated BT reconnect via Model B** (this doc).~~ **✅ DONE
-   2026-08-01, device-proven** — see the RESOLVED banner at the top. SDP client + RFCOMM client +
-   reconnect orchestrator landed; the phone's real iAP2-v2 UUID (`02030302-…`) on RFCOMM ch 1 was the
-   unlock.
-
----
-
 ## HCI event-mask pairing regression
 
 <!-- absorbed: ../wireless/01_BT_AND_RADIO.md -->
@@ -593,7 +602,7 @@ STATUS: FIXED in source and at HEAD, verified by review against the real kernel 
 
 ### The symptom
 
-From `SESSION_HANDOFF_2026-07-24.md`: the box becomes discoverable and stays so (`hciconfig hci0 name`
+From the 2026-07-24 session notes: the box becomes discoverable and stays so (`hciconfig hci0 name`
 reads `'CarLink-b0df'` steadily, `btd` running, SDP/SSP bring-up clean in `/tmp/wl.log`).
 The iPhone **sees** the device in Settings > Bluetooth and taps it. Every attempt reports **"Pairing
 Unsuccessful."**
@@ -860,8 +869,7 @@ This document covers the blocker. The same batch also fixed, from a 12-agent cod
 
 STATUS: SHIPPED 2026-07-24. Written 2026-07-25 — the code comments in
 `ccpa/rootfs/script/attach_bluetooth.sh` and `bt_on.sh` referenced "docs/wireless/01_BT_AND_RADIO.md" from the day they were
-written, but the document was never actually created (flagged as a loose end in
-`SESSION_HANDOFF_2026-07-24.md`). This closes that.
+written, but the document was never actually created (flagged as a loose end in a 2026-07-24 session note). This closes that.
 
 Both fixes are in the box's **shell bring-up scripts**, not in any Rust daemon. They are pre-existing
 vendor-script defects that happened to surface while chasing an unrelated problem.

@@ -15,11 +15,11 @@ media crossing the USB bulk pipe.
 > 2026-09-11 note (removed) that called the app "dormant, and behind" and pointed readers at
 > `gm_ccpa`/`host/MacHost/` instead — that was true on 2026-08-16 and is not true now. Today's
 > build gate is green
-> (`./gradlew :app:assembleDebug :app:testDebugUnitTest :app:detekt :app:ktlintCheck`,
+> (`./gradlew :app:assembleSideloadDebug :app:testSideloadDebugUnitTest :app:detekt :app:ktlintCheck`,
 > `python3 tools/proto_check.py`), and three things landed in `:app`: the 3P native shell (WP1, see
 > below, box-verified on the emulator and a live box, no phone), phone-call audio (WP2, JVM-tested only
 > — no phone call yet), and a resolution/orientation-agnostic UI redesign (device-measured on two AVDs
-> and a live box, including two real iPhone CarPlay sessions). Nothing is committed yet.
+> and a live box, including two real iPhone CarPlay sessions). (Written before commit; the work has since been committed.)
 > **2026-09-25:** that dashboard UI was replaced by a port of the `carlink_native` screens — see
 > "UI — carlink_native screens on the OCBM stack" below.
 > `crates/ocbm-proto` remains canonical; `OcbmProto.kt` remains an app-owned fork of it since
@@ -28,8 +28,13 @@ media crossing the USB bulk pipe.
 > other, `F_BOTH` not being in `ocbm-proto`, is unrelated and still open). Do not re-share this file
 > into `gm_ccpa`.
 
-**The adapter is currently in `ncm_only` mode.** `/script/ncm_only` exists, so `start_main_service.sh`
-skips `ocbm_boot.sh` and the box comes up as a USB-NCM network device instead of the OCBM accessory.
+**NCM mode (state recorded 2026-09-18; implemented on modified stock firmware).** On 2026-09-18 the bench
+adapter was in `ncm_only` mode: `/script/ncm_only` exists, `start_main_service.sh` skips `ocbm_boot.sh`, and the
+box comes up as a USB-NCM network device instead of the OCBM accessory. The flag is a sticky file, written by
+`ocbmd` on `MGMT_ENTER_NCM` (`ocbm-host ncm`) and removed over the NCM shell. Planned replacement: a runtime
+switch to NCM that a reboot reverts, plus a trigger file for sticky mode, per the c2air research repo
+`docs/userspace-spec.md` D9/D14. The NCM USB identity is also planned to become its own PID, 1314:2d10; the
+host device tables do not list it yet. Until then 1314:1520/1521 are the stock Carlinkit firmware ids only.
 
 - Shell: `python3 tools/boxsh.py run '<cmd>'` (telnet to 192.168.50.2; the Mac gets a DHCP lease on
   192.168.50.x). Verified working.
@@ -312,7 +317,11 @@ emulator. The sealing helpers re-derive nonce and AAD from the wire spec rather 
 - **Lifecycle**: `setDeadHandler` on the transport (dispatched off the read thread, so teardown cannot
   join itself), a one-shot `onLinkDead` distinct from the recoverable `SEV_HOST_GONE`, `clearHalt` via
   `controlTransfer` before declaring a stalled endpoint dead, and an explicit single-use contract.
-- **`VehicleConfigYaml`** renders the pushed document, pinned byte-for-byte by a golden test.
+- **`VehicleConfigYaml`** renders the pushed document, pinned byte-for-byte by a golden test. Its
+  header states this host's intent explicitly (2026-10-19): `android_auto: false` (`:app` has no Android
+  Auto engine, and the box now treats an absent key as OFF — `docs/androidauto/02_ARBITRATION.md` §1)
+  and `wifi_ap: true` (this host uses the box's own radios). `VehicleConfigYamlTest` asserts both keys
+  are always present.
 
 ### One design finding worth carrying
 
@@ -727,7 +736,7 @@ kotlin/com/carlink/projection/CarProjectionBridge.kt`) and does not use `car-sys
 `:projection`). Record this so `ProjectionStatus`/`CarProjectionManager` for `:app` is not
 re-proposed; the SDK evidence above is why, not a preference.
 
-**Module split.** `:app` (applicationId `zeno.carlink.ocbm`, `app/build.gradle.kts:21`) owns the
+**Module split.** `:app` (applicationId `zeno.carlink.ocbm`, `defaultConfig` in `app/build.gradle.kts`) owns the
 USB/OCBM transport to the adapter directly (`ocbm/UsbBulkTransport.kt`) and is the product this
 document describes: adapter-bridged CarPlay running as an ordinary 3P app on AAOS. `:projection` is
 a different arrangement — it consumes a loopback TCP seam (`projection/src/main/kotlin/com/carlink/

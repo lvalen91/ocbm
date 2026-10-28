@@ -11,7 +11,7 @@
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -27,6 +27,28 @@ static EVENT: Mutex<Option<EventSender>> = Mutex::new(None);
 /// quiet is EXPECTED) from a transport stall (link actually broke) — the two look identical from
 /// frame-flow alone. Default true (we own the screen post-RECORD until told otherwise).
 static SCREEN_FOCUSED: AtomicBool = AtomicBool::new(true);
+
+/// Plan v5.9 MED M5 / OD-9C (owner: stock-style): has THIS accessory taken MainAudio away from the
+/// phone because the head unit's media focus was lost for good, and not yet given it back?
+/// One of [`MAIN_AUDIO_NONE`] / [`MAIN_AUDIO_SENT`] / [`MAIN_AUDIO_HELD`]; transitions are
+/// [`main_audio_next`]. Process-wide, like [`SCREEN_FOCUSED`], because the take outlives the screen
+/// that sent it (a CarPlay screen can be destroyed while the session stays up) — reset per session.
+static MAIN_AUDIO_TAKE: AtomicU8 = AtomicU8::new(MAIN_AUDIO_NONE);
+/// No take of ours is outstanding.
+pub const MAIN_AUDIO_NONE: u8 = 0;
+/// A Take was written; the phone has not yet reported the accessory as MainAudio's permanent owner.
+pub const MAIN_AUDIO_SENT: u8 = 1;
+/// A `modesChanged` confirmed the accessory as MainAudio's permanent owner after our Take.
+pub const MAIN_AUDIO_HELD: u8 = 2;
+
+/// What moved the MainAudio take state (see [`main_audio_next`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MainAudioEvent {
+    /// A `modesChanged` named this permanent MainAudio owner (1 = controller, 2 = accessory).
+    PermanentOwner(i64),
+    /// The event channel came up or went down: a new session owes nothing to the old one's take.
+    SessionReset,
+}
 
 /// Whether the receiver currently holds MainScreen focus per the last `modesChanged` (#47).
 pub fn screen_focused() -> bool {
@@ -257,6 +279,11 @@ pub(crate) fn modes_changed(d: &Dictionary) {
     if owned != prev {
         eprintln!("[events] modesChanged: MainScreen focus {}", if owned { "REGAINED" } else { "LOST" });
     }
+    // OD-9C: confirm our MainAudio take, or notice the phone took MainAudio back (a CarPlay-side play
+    // is user-initiated, which the take's UserInitiated constraint allows) so no stale Untake follows.
+    if let Some(owner) = modes_main_audio_permanent_owner(d) {
+        main_audio_apply(MainAudioEvent::PermanentOwner(owner));
+    }
     // docs/wireless/00_WIRELESS_CARPLAY.md #2.8: one-shot wireless-metadata re-subscribe, piggybacking on this already-parsed
     // inbound event as a cheap "something changed, retry" signal (see METADATA_RESUBSCRIBED's doc).
     modes_changed_tunnel_nudge();
@@ -297,6 +324,150 @@ fn modes_screen_owned(d: &Dictionary) -> bool {
     true
 }
 
+/// The PERMANENT MainAudio owner (resourceID 2) a `modesChanged` reports: `permanentEntity`, or
+/// `entity` when a frame omits it. `None` when the frame names no MainAudio. Permanent, not current:
+/// a Siri/call BORROW moves `entity` while the take (a permanent transfer) is unaffected.
+fn modes_main_audio_permanent_owner(d: &Dictionary) -> Option<i64> {
+    for key in ["resources", "modes"] {
+        let Some(arr) = d.get(key).and_then(|v| v.as_array()) else { continue };
+        for e in arr {
+            let Some(ed) = e.as_dictionary() else { continue };
+            if ed.get("resourceID").and_then(|v| v.as_signed_integer()) != Some(2) {
+                continue;
+            }
+            return ed
+                .get("permanentEntity")
+                .or_else(|| ed.get("entity"))
+                .and_then(|v| v.as_signed_integer());
+        }
+    }
+    None
+}
+
+/// Pure transition of the OD-9C MainAudio take state. Only a CONFIRMED take (HELD) is cleared by the
+/// phone reporting itself the permanent owner again: a `modesChanged` already in flight when the Take
+/// was written still says "controller" and must not cancel it.
+pub fn main_audio_next(state: u8, ev: MainAudioEvent) -> u8 {
+    match (state, ev) {
+        (_, MainAudioEvent::SessionReset) => MAIN_AUDIO_NONE,
+        (MAIN_AUDIO_SENT, MainAudioEvent::PermanentOwner(2)) => MAIN_AUDIO_HELD,
+        (MAIN_AUDIO_HELD, MainAudioEvent::PermanentOwner(1)) => MAIN_AUDIO_NONE,
+        (s, _) => s,
+    }
+}
+
+fn main_audio_apply(ev: MainAudioEvent) {
+    let mut cur = MAIN_AUDIO_TAKE.load(Ordering::Acquire);
+    loop {
+        let next = main_audio_next(cur, ev);
+        if next == cur {
+            return;
+        }
+        match MAIN_AUDIO_TAKE.compare_exchange(cur, next, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => {
+                if let MainAudioEvent::PermanentOwner(o) = ev {
+                    eprintln!(
+                        "[events] modesChanged: MainAudio permanent owner {} — OD-9C take {}",
+                        if o == 2 { "ACCESSORY" } else { "CONTROLLER" },
+                        if next == MAIN_AUDIO_HELD { "confirmed" } else { "ended by the phone (no Untake owed)" }
+                    );
+                }
+                return;
+            }
+            Err(actual) => cur = actual,
+        }
+    }
+}
+
+/// The `changeModes` body for a MainAudio Take or Untake, byte-for-byte what Apple's
+/// `AirPlayCreateModesDictionary` (`AirPlayUtils.c:206`) emits for `AirPlayReceiverSessionTakeMainAudio`
+/// / `UntakeMainAudio` (`AirPlayReceiverSession.h:559-566`):
+/// - Take: `{resourceID:2, transferType:1 (Take), transferPriority:500 (UserInitiated),
+///   takeConstraint:500 (UserInitiated), borrowConstraint:100 (Anytime)}`;
+/// - Untake: `{resourceID:2, transferType:2 (Untake)}` — the macro passes NotApplicable for the
+///   priority and both constraints, which the C omits.
+///
+/// The Take values are stock's: GM's `AudioStateMachine.prepareModeForAccessory(5)` (media) sets
+/// owner ACCESSORY, TAKE, USER_INITIATED priority, USER take constraint, ANYTIME borrow constraint
+/// (SD:resmanagement/AudioStateMachine.java:81-100, :572-577, :102-112), which `ResourceMode.
+/// prepareModeChanges` hands to Cinemo as main_audio {type 1, priority 2, take 2, borrow 1}
+/// (ResourceMode.java:279-316). The Cinemo-enum -> wire-value step happens in Cinemo's native
+/// library and is NOT read; the wire values here are Apple's constants for the same names
+/// (`AirPlayCommon.h:1296-1299`, `kAirPlayTransferPriority_UserInitiated` = 500).
+pub fn main_audio_mode_body(take: bool, reason: &str) -> Option<Vec<u8>> {
+    let mut r = Dictionary::new();
+    r.insert("resourceID".into(), Value::Integer(2.into())); // MainAudio
+    if take {
+        r.insert("transferType".into(), Value::Integer(1.into())); // Take
+        r.insert("transferPriority".into(), Value::Integer(500.into())); // UserInitiated
+        r.insert("takeConstraint".into(), Value::Integer(500.into())); // UserInitiated
+        r.insert("borrowConstraint".into(), Value::Integer(100.into())); // Anytime
+    } else {
+        r.insert("transferType".into(), Value::Integer(2.into())); // Untake
+    }
+    let mut params = Dictionary::new();
+    params.insert("resources".into(), Value::Array(vec![Value::Dictionary(r)]));
+    params.insert("reasonStr".into(), Value::String(reason.into()));
+    let mut d = Dictionary::new();
+    d.insert("type".into(), Value::String("changeModes".into()));
+    d.insert("params".into(), Value::Dictionary(params));
+    let mut body = Vec::new();
+    Value::Dictionary(d).to_writer_binary(&mut body).ok()?;
+    Some(body)
+}
+
+/// Plan v5.9 MED M5 / OD-9C: the head unit's media focus was lost for good (the driver picked another
+/// source), so take MainAudio from the phone the way stock does — GM's AudioStateMachine answers a
+/// media `AUDIOFOCUS_LOSS` (-1) in the CONTROLLER state, with no CarPlay focus held, with this take
+/// (SD:resmanagement/AudioStateMachine.java:826-833; ResourceManager.java:1289-1301 sends it as a
+/// mode change). A take of MainAudio is what makes the phone stop playing into a car that is no
+/// longer listening.
+///
+/// Returns false, sending nothing, when a take of ours is already outstanding (stock's ACCESSORY
+/// state ignores a second loss the same way) or when the write fails / no event channel exists — the
+/// state is then back to NONE, so a later release owes nothing. (Stock's ACCESSORY state re-takes on
+/// a media loss only while the system is muted, AudioStateMachine.java:708-711.) BLOCKING on the
+/// event mutex.
+pub fn send_take_main_audio() -> bool {
+    take_main_audio_with(&MAIN_AUDIO_TAKE, send_command)
+}
+
+/// [`send_take_main_audio`] over an explicit state cell and sender (unit-testable).
+fn take_main_audio_with(state: &AtomicU8, send: impl FnOnce(&[u8]) -> bool) -> bool {
+    if state
+        .compare_exchange(MAIN_AUDIO_NONE, MAIN_AUDIO_SENT, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        eprintln!("[events] changeModes: MainAudio take already outstanding — not re-sent");
+        return false;
+    }
+    // Marked SENT before the write, so a `modesChanged` confirming it can never arrive "too early".
+    let ok = main_audio_mode_body(true, "media focus lost").is_some_and(|b| send(&b));
+    if !ok {
+        let _ = state.compare_exchange(MAIN_AUDIO_SENT, MAIN_AUDIO_NONE, Ordering::AcqRel, Ordering::Acquire);
+    }
+    eprintln!("[events] changeModes: MainAudio TAKE (OD-9C, media focus lost) sent={ok}");
+    ok
+}
+
+/// Give MainAudio back after an OD-9C take: stock answers a media focus GAIN in its ACCESSORY state
+/// with a controller mode (SD:resmanagement/AudioStateMachine.java:704-707). `None` = no take of ours
+/// is outstanding (nothing sent — the normal case, and the case where the phone already took it back
+/// itself); `Some(sent)` otherwise. BLOCKING on the event mutex.
+pub fn release_main_audio() -> Option<bool> {
+    release_main_audio_with(&MAIN_AUDIO_TAKE, send_command)
+}
+
+/// [`release_main_audio`] over an explicit state cell and sender (unit-testable).
+fn release_main_audio_with(state: &AtomicU8, send: impl FnOnce(&[u8]) -> bool) -> Option<bool> {
+    if state.swap(MAIN_AUDIO_NONE, Ordering::AcqRel) == MAIN_AUDIO_NONE {
+        return None;
+    }
+    let ok = main_audio_mode_body(false, "media focus regained").is_some_and(|b| send(&b));
+    eprintln!("[events] changeModes: MainAudio UNTAKE (OD-9C, give it back) sent={ok}");
+    Some(ok)
+}
+
 struct EventSender {
     stream: TcpStream,
     chan: ControlChannel,
@@ -335,6 +506,7 @@ pub fn setup(stream: TcpStream, shared: [u8; 32], alive: Arc<AtomicBool>) {
     // ordering hygiene rather than an observed loss.
     let reader = stream.try_clone().ok();
     SCREEN_FOCUSED.store(true, Ordering::Release); // we take the screen at RECORD; reset per session
+    main_audio_apply(MainAudioEvent::SessionReset); // OD-9C: no take carries into a new session
     METADATA_RESUBSCRIBED.store(false, Ordering::Release); // fresh one-shot retry budget per session (#2.8)
     // docs/carplay/02_SESSION_LIFECYCLE.md: not started until `record()` says so. Cleared HERE as well as in `clear()` so a session
     // that reconnects without a clean teardown can't inherit the previous session's started state.
@@ -428,10 +600,12 @@ pub fn setup(stream: TcpStream, shared: [u8; 32], alive: Arc<AtomicBool>) {
 pub fn clear() {
     *crate::plock(&EVENT) = None;
     SESSION_STARTED.store(false, Ordering::Release); // docs/carplay/02_SESSION_LIFECYCLE.md: no sends valid again until the next RECORD
+    main_audio_apply(MainAudioEvent::SessionReset); // OD-9C: the take dies with the session
     // Reset the cluster-forward gate so a `CMD_NAV_START` that wasn't followed by a `CMD_NAV_STOP`
     // can't leak into the next session and forward the cluster from the start (audit LOW). Default off.
     set_nav_forward(false);
     crate::iap_tunnel::reset(); // docs/wireless/00_WIRELESS_CARPLAY.md: a future reconnect must start its OWN fresh iAP2 handshake
+    reset_route_guidance_log(); // F159 logging only: next session logs its first route state afresh
     crate::datastream::clear(); // docs/carplay/05_METADATA_AND_CONTROLS.md: the RCS socket dies with the session; don't write to a stale fd
 }
 
@@ -677,12 +851,180 @@ pub(crate) fn dispatch_iap_tunnel_message(data: &[u8]) {
     let msg_id = u16::from_be_bytes([payload[4], payload[5]]);
     let body = &payload[6..];
     eprintln!("[events] iAP tunnel msg 0x{msg_id:04x} ({} B body)", body.len());
+    // Bench lever (off by default): raw hex of 0x5201/0x5202/0x5204 bodies when
+    // `/tmp/carplay_rg_hex` exists or `CARPLAY_RG_HEX` is set (`iap2_core::metadata::RG_HEX_FILE`).
+    metadata::log_route_guidance_hex("events", msg_id, body);
+    log_route_guidance(msg_id, body);
     // One dispatcher, shared with the wired driver (`iap2_core::metadata::dispatch`). These two
     // paths diverged once — 0x4171 ListUpdate was handled wired and silently dropped here — and the
     // shared function exists so they cannot again.
     if !metadata::dispatch(msg_id, body) {
         eprintln!("[events] iAP tunnel msg 0x{msg_id:04x} not yet handled");
     }
+}
+
+/// F159 (LOGGING ONLY — no behaviour reads this): the bench needs the iPhone's exact
+/// `RouteGuidanceState` values, which the per-message line above does not show. Decoded with the
+/// shared typed decoder (`carplay_metadata::tlv`), one line per CHANGE, never per message (0x5201
+/// arrives ~1 Hz during a route). Privacy: destination text is never logged — only its byte length.
+///
+/// Sticky merge: iOS sends both full updates (~154-178 B during a route) and small partial ones
+/// (11/31/41 B at route start/end), so a param absent from one message means "unchanged", not
+/// "gone". Values are therefore the last ones SEEN, kept per `RouteGuidanceDisplayComponentID`
+/// (param 0) so two components interleaving at 1 Hz can't make the line flap.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+struct RgSnap {
+    /// Raw `RouteGuidanceState` (param 1) byte.
+    state: Option<u8>,
+    /// `RouteGuidanceManeuverTotalCount` (param 14).
+    maneuvers: Option<u16>,
+    /// First element of `RouteGuidanceManeuverCurrentList` (param 13) = the current maneuver index.
+    current: Option<u16>,
+    /// `DestinationName` (param 4) raw value length in bytes — the text itself is never kept.
+    dest_len: Option<usize>,
+}
+
+#[derive(Default)]
+struct RgLog {
+    /// `(display component id, last snapshot logged)`; `None` id = message carried no param 0.
+    comps: Vec<(Option<u16>, RgSnap)>,
+    /// Param-id list of the last decode failure logged (each distinct shape is logged once).
+    bad_pids: Option<Vec<u16>>,
+    /// Current 0x5202 run: `(count, (min, max) of the indexes seen)`.
+    burst: Option<(u32, Option<(u16, u16)>)>,
+}
+
+/// Most display components tracked per session (real iPhones use one or two).
+const RG_MAX_COMPS: usize = 8;
+/// Most param ids printed on a decode-failure line; the rest are counted as "+N more".
+const RG_MAX_PIDS_SHOWN: usize = 32;
+
+static RG_LOG: Mutex<RgLog> = Mutex::new(RgLog {
+    comps: Vec::new(),
+    bad_pids: None,
+    burst: None,
+});
+
+fn log_route_guidance(msg_id: u16, body: &[u8]) {
+    let mut log = crate::plock(&RG_LOG);
+    // Printed under the lock so concurrent dispatchers can't reorder state-change lines.
+    for line in route_guidance_lines(&mut log, msg_id, body) {
+        eprintln!("{line}");
+    }
+}
+
+/// Session teardown: forget the last-logged values so the next session's first state is logged.
+fn reset_route_guidance_log() {
+    *crate::plock(&RG_LOG) = RgLog::default();
+}
+
+/// Pure core of [`log_route_guidance`] (unit-testable): returns the lines to print, if any.
+fn route_guidance_lines(log: &mut RgLog, msg_id: u16, body: &[u8]) -> Vec<String> {
+    use carplay_metadata::tlv;
+    const RG_UPDATE: u16 = 0x5201;
+    const RG_MANEUVER: u16 = 0x5202;
+    let mut out = Vec::new();
+
+    if msg_id == RG_MANEUVER {
+        let idx = tlv::parse_route_guidance_maneuver(body).index;
+        let (n, range) = log.burst.unwrap_or((0, None));
+        let range = match (range, idx) {
+            (Some((lo, hi)), Some(i)) => Some((lo.min(i), hi.max(i))),
+            (None, Some(i)) => Some((i, i)),
+            (r, None) => r,
+        };
+        log.burst = Some((n.saturating_add(1), range));
+        return out;
+    }
+    // Any other message ends a 0x5202 run: one summary line per burst (indexes only, no text).
+    if let Some((n, range)) = log.burst.take() {
+        let range = range.map_or_else(|| "none".to_string(), |(lo, hi)| format!("{lo}..{hi}"));
+        out.push(format!("[events] route_guidance: maneuver burst count={n} idx={range}"));
+    }
+    if msg_id != RG_UPDATE {
+        return out;
+    }
+
+    let groups = tlv::parse_groups(body);
+    let rg = tlv::parse_route_guidance(body);
+    let pids: Vec<u16> = groups.iter().map(|(p, _)| *p).collect();
+    let consumed: usize = groups.iter().map(|(_, v)| v.len() + 4).sum();
+    let first = |pid: u16| groups.iter().find(|(p, _)| *p == pid).map(|(_, v)| *v);
+    let be16 = |v: &[u8]| (v.len() >= 2).then(|| u16::from_be_bytes([v[0], v[1]]));
+
+    let raw_state = first(1).and_then(|v| v.first().copied());
+    let failure = if groups.is_empty() || consumed != body.len() {
+        Some(format!("framing stopped at {consumed}/{} B", body.len()))
+    } else if raw_state.is_some() && rg.route_state.is_none() {
+        Some(format!("unknown RouteGuidanceState raw={}", raw_state.unwrap_or_default()))
+    } else {
+        None
+    };
+    if let Some(why) = failure {
+        if log.bad_pids.as_ref() != Some(&pids) {
+            // Bounded line: a hostile/garbled body can carry thousands of groups.
+            let shown = &pids[..pids.len().min(RG_MAX_PIDS_SHOWN)];
+            let more = match pids.len() - shown.len() {
+                0 => String::new(),
+                n => format!(" +{n} more"),
+            };
+            out.push(format!(
+                "[events] route_guidance: decode incomplete ({why}); param ids={shown:?}{more}"
+            ));
+            log.bad_pids = Some(pids.clone());
+        }
+    }
+
+    let comp = first(0).and_then(be16);
+    let slot = match log.comps.iter().position(|(c, _)| *c == comp) {
+        Some(i) => i,
+        // Bounded state: components beyond the first RG_MAX_COMPS are not tracked (or logged).
+        None if log.comps.len() >= RG_MAX_COMPS => return out,
+        None => {
+            log.comps.push((comp, RgSnap::default()));
+            log.comps.len() - 1
+        }
+    };
+    let prev = log.comps[slot].1;
+    let mut next = prev;
+    if raw_state.is_some() {
+        next.state = raw_state;
+    }
+    if let Some(n) = first(14).and_then(be16) {
+        next.maneuvers = Some(n);
+    }
+    if let Some(i) = first(13).and_then(be16) {
+        next.current = Some(i);
+    }
+    if let Some(v) = first(4) {
+        next.dest_len = Some(v.len());
+    }
+    if next != prev {
+        log.comps[slot].1 = next;
+        // Name from the decoder's own enum; raw byte always shown (Unknown = outside Apple's 0..=6).
+        let state = match next.state {
+            Some(raw) => format!(
+                "{}({raw})",
+                carplay_metadata::types::RouteGuidanceState::from_u8(raw)
+                    .map(|s| format!("{s:?}"))
+                    .unwrap_or_else(|| "Unknown".into())
+            ),
+            None => "unseen".into(),
+        };
+        let opt = |v: Option<u16>| v.map_or_else(|| "unseen".to_string(), |n| n.to_string());
+        let dest = match next.dest_len {
+            Some(n) => format!("present({n}B)"),
+            None => "absent".into(),
+        };
+        let comp_s = comp.map_or_else(|| "-".to_string(), |c| c.to_string());
+        out.push(format!(
+            "[events] route_guidance: comp={comp_s} state={state} maneuvers={} current={} dest={dest} (params={})",
+            opt(next.maneuvers),
+            opt(next.current),
+            pids.len()
+        ));
+    }
+    out
 }
 
 /// Request a fresh IDR keyframe from the iPhone — the C's ForceKeyFrame (`Session.c:4916`:
@@ -1215,10 +1557,209 @@ mod tests {
         assert!(!modes_screen_owned(&modes(vec![resource(2, 2), resource(1, 1)])));
     }
 
+    fn mode_resources(body: &[u8]) -> (Dictionary, Dictionary) {
+        let v: Value = plist::from_bytes(body).expect("binary plist");
+        let d = v.into_dictionary().expect("dict");
+        assert_eq!(d.get("type").and_then(|v| v.as_string()), Some("changeModes"));
+        let p = d.get("params").and_then(|v| v.as_dictionary()).expect("params").clone();
+        let arr = p.get("resources").and_then(|v| v.as_array()).expect("resources");
+        assert_eq!(arr.len(), 1, "exactly one resource");
+        (p.clone(), arr[0].as_dictionary().expect("resource dict").clone())
+    }
+
+    fn int(d: &Dictionary, k: &str) -> Option<i64> {
+        d.get(k).and_then(|v| v.as_signed_integer())
+    }
+
+    /// OD-9C: the Take is stock's media-loss mode (owner ACCESSORY, TAKE, UserInitiated priority, USER
+    /// take constraint, ANYTIME borrow constraint) in Apple's wire values, on MainAudio (2).
+    #[test]
+    fn main_audio_take_body_is_stocks_media_loss_take() {
+        let (p, r) = mode_resources(&main_audio_mode_body(true, "media focus lost").unwrap());
+        assert_eq!(int(&r, "resourceID"), Some(2));
+        assert_eq!(int(&r, "transferType"), Some(1));
+        assert_eq!(int(&r, "transferPriority"), Some(500));
+        assert_eq!(int(&r, "takeConstraint"), Some(500));
+        assert_eq!(int(&r, "borrowConstraint"), Some(100));
+        assert_eq!(r.len(), 5, "no other keys: {r:?}");
+        assert_eq!(p.get("reasonStr").and_then(|v| v.as_string()), Some("media focus lost"));
+    }
+
+    /// The Untake carries only resourceID + transferType (Apple's macro passes NotApplicable for the
+    /// rest, and AirPlayCreateModesDictionary omits NotApplicable).
+    #[test]
+    fn main_audio_untake_body_is_bare() {
+        let (_, r) = mode_resources(&main_audio_mode_body(false, "media focus regained").unwrap());
+        assert_eq!(int(&r, "resourceID"), Some(2));
+        assert_eq!(int(&r, "transferType"), Some(2));
+        assert_eq!(r.len(), 2, "{r:?}");
+    }
+
+    #[test]
+    fn main_audio_take_state_transitions() {
+        use MainAudioEvent::*;
+        // A frame in flight before the Take still says "controller": it must not cancel the take.
+        assert_eq!(main_audio_next(MAIN_AUDIO_SENT, PermanentOwner(1)), MAIN_AUDIO_SENT);
+        // The phone confirms the accessory as permanent owner.
+        assert_eq!(main_audio_next(MAIN_AUDIO_SENT, PermanentOwner(2)), MAIN_AUDIO_HELD);
+        assert_eq!(main_audio_next(MAIN_AUDIO_HELD, PermanentOwner(2)), MAIN_AUDIO_HELD);
+        // The phone took it back (a CarPlay-side play): nothing owed any more.
+        assert_eq!(main_audio_next(MAIN_AUDIO_HELD, PermanentOwner(1)), MAIN_AUDIO_NONE);
+        // Without a take of ours, the phone's reports change nothing (MainAudio is accessory-owned at
+        // session start: docs/ops/captures/2026-07-24_carplay_cmd_capture.bin frames 0-6).
+        assert_eq!(main_audio_next(MAIN_AUDIO_NONE, PermanentOwner(2)), MAIN_AUDIO_NONE);
+        assert_eq!(main_audio_next(MAIN_AUDIO_NONE, PermanentOwner(1)), MAIN_AUDIO_NONE);
+        for s in [MAIN_AUDIO_NONE, MAIN_AUDIO_SENT, MAIN_AUDIO_HELD] {
+            assert_eq!(main_audio_next(s, SessionReset), MAIN_AUDIO_NONE);
+        }
+    }
+
+    #[test]
+    fn main_audio_owner_reads_permanent_entity_first() {
+        let mut e = Dictionary::new();
+        e.insert("resourceID".into(), Value::Integer(2.into()));
+        e.insert("entity".into(), Value::Integer(1.into())); // borrowed for Siri right now
+        e.insert("permanentEntity".into(), Value::Integer(2.into())); // still ours for good
+        assert_eq!(modes_main_audio_permanent_owner(&modes(vec![resource(1, 1), Value::Dictionary(e)])), Some(2));
+        // `entity` is the fallback when a frame omits permanentEntity.
+        let mut f = Dictionary::new();
+        f.insert("resourceID".into(), Value::Integer(2.into()));
+        f.insert("entity".into(), Value::Integer(1.into()));
+        assert_eq!(modes_main_audio_permanent_owner(&modes(vec![Value::Dictionary(f)])), Some(1));
+        assert_eq!(modes_main_audio_permanent_owner(&modes(vec![resource(1, 2)])), None);
+        assert_eq!(modes_main_audio_permanent_owner(&Dictionary::new()), None);
+    }
+
+    /// Take once, never twice; release only what was taken, exactly once. A local cell + recording
+    /// sender, so the process-wide state (reset by any session teardown) is not shared with other tests.
+    #[test]
+    fn main_audio_take_then_release_sends_each_once() {
+        let st = AtomicU8::new(MAIN_AUDIO_NONE);
+        let sent = std::cell::RefCell::new(Vec::<i64>::new());
+        let rec = |b: &[u8]| {
+            sent.borrow_mut().push(int(&mode_resources(b).1, "transferType").unwrap());
+            true
+        };
+        assert_eq!(release_main_audio_with(&st, rec), None, "nothing taken, nothing sent");
+        assert!(take_main_audio_with(&st, rec));
+        assert_eq!(st.load(Ordering::Acquire), MAIN_AUDIO_SENT);
+        assert!(!take_main_audio_with(&st, rec), "a second loss does not re-take");
+        assert_eq!(release_main_audio_with(&st, rec), Some(true));
+        assert_eq!(release_main_audio_with(&st, rec), None, "released once");
+        assert_eq!(*sent.borrow(), vec![1, 2], "one Take then one Untake");
+    }
+
+    /// A refused write (no event channel) rolls the take back, so a later release owes nothing.
+    #[test]
+    fn main_audio_take_refused_rolls_back() {
+        let st = AtomicU8::new(MAIN_AUDIO_NONE);
+        assert!(!take_main_audio_with(&st, |_| false));
+        assert_eq!(st.load(Ordering::Acquire), MAIN_AUDIO_NONE);
+        assert_eq!(release_main_audio_with(&st, |_| panic!("must not send")), None);
+        // An owed release whose write fails still clears the state (the channel is gone anyway).
+        st.store(MAIN_AUDIO_HELD, Ordering::Release);
+        assert_eq!(release_main_audio_with(&st, |_| false), Some(false));
+        assert_eq!(st.load(Ordering::Acquire), MAIN_AUDIO_NONE);
+    }
+
     #[test]
     fn modes_screen_owned_defaults_to_focused_on_an_unknown_shape() {
         assert!(modes_screen_owned(&modes(vec![])));
         assert!(modes_screen_owned(&modes(vec![resource(2, 1)]))); // MainAudio only, no MainScreen
         assert!(modes_screen_owned(&Dictionary::new()));
+    }
+
+    /// One iAP2 TLV group `[len BE16 incl. header][pid BE16][value]`.
+    fn rg_group(pid: u16, value: &[u8]) -> Vec<u8> {
+        let mut g = ((4 + value.len()) as u16).to_be_bytes().to_vec();
+        g.extend_from_slice(&pid.to_be_bytes());
+        g.extend_from_slice(value);
+        g
+    }
+
+    #[test]
+    fn route_guidance_log_is_change_only_sticky_and_private() {
+        let mut log = RgLog::default();
+        let full: Vec<u8> = [
+            rg_group(0, &0u16.to_be_bytes()),
+            rg_group(1, &[1]),
+            rg_group(4, b"Home St\0"),
+            rg_group(13, &[0, 2, 0, 3]),
+            rg_group(14, &5u16.to_be_bytes()),
+        ]
+        .concat();
+        let l = route_guidance_lines(&mut log, 0x5201, &full);
+        assert_eq!(l.len(), 1, "{l:?}");
+        assert!(
+            l[0].contains("comp=0 state=RouteSet(1) maneuvers=5 current=2 dest=present(8B)"),
+            "{l:?}"
+        );
+        assert!(!l[0].contains("Home"), "destination text must never be logged");
+        // Identical update (the ~1 Hz stream): silent.
+        assert!(route_guidance_lines(&mut log, 0x5201, &full).is_empty());
+        // The observed 11 B route-end body: component id + state only. Others stay sticky.
+        let end = [rg_group(0, &0u16.to_be_bytes()), rg_group(1, &[0])].concat();
+        assert_eq!(end.len(), 11);
+        let l = route_guidance_lines(&mut log, 0x5201, &end);
+        assert_eq!(l.len(), 1);
+        assert!(l[0].contains("state=NoRouteSet(0) maneuvers=5 current=2"), "{l:?}");
+        assert!(route_guidance_lines(&mut log, 0x5201, &end).is_empty());
+        // Another message id with no burst pending: nothing.
+        assert!(route_guidance_lines(&mut log, 0x5001, &end).is_empty());
+    }
+
+    #[test]
+    fn route_guidance_log_decode_failures_log_param_ids_once() {
+        let mut log = RgLog::default();
+        let unknown = [rg_group(0, &1u16.to_be_bytes()), rg_group(1, &[9])].concat();
+        let l = route_guidance_lines(&mut log, 0x5201, &unknown);
+        assert_eq!(l.len(), 2, "{l:?}");
+        assert!(l[0].contains("unknown RouteGuidanceState raw=9") && l[0].contains("param ids=[0, 1]"));
+        assert!(l[1].contains("comp=1 state=Unknown(9)"));
+        assert!(route_guidance_lines(&mut log, 0x5201, &unknown).is_empty());
+        // Truncated framing: ids that parsed are listed, no payload bytes.
+        let mut cut = rg_group(1, &[1]);
+        cut.extend_from_slice(&[0x00, 0x20, 0x00, 0x04, 0xAA]);
+        let l = route_guidance_lines(&mut log, 0x5201, &cut);
+        assert!(l[0].contains("framing stopped at 5/10 B") && l[0].contains("param ids=[1]"), "{l:?}");
+        assert!(!l.iter().any(|x| x.contains("aa") || x.contains("170")));
+    }
+
+    #[test]
+    fn route_guidance_log_summarises_maneuver_bursts() {
+        let mut log = RgLog::default();
+        for i in [3u16, 1, 2] {
+            let m = [rg_group(1, &i.to_be_bytes()), rg_group(2, b"Turn left\0")].concat();
+            assert!(route_guidance_lines(&mut log, 0x5202, &m).is_empty());
+        }
+        let l = route_guidance_lines(&mut log, 0x5201, &rg_group(1, &[1]));
+        assert_eq!(l[0], "[events] route_guidance: maneuver burst count=3 idx=1..3");
+        assert!(l[1].contains("comp=- state=RouteSet(1)"), "{l:?}");
+        assert!(!l.iter().any(|x| x.contains("Turn")));
+    }
+
+    #[test]
+    fn route_guidance_log_state_and_lines_are_bounded() {
+        let mut log = RgLog::default();
+        // Components: the first RG_MAX_COMPS are tracked; a 9th is ignored; existing ones update.
+        let upd = |c: u16, s: u8| [rg_group(0, &c.to_be_bytes()), rg_group(1, &[s])].concat();
+        for c in 0..RG_MAX_COMPS as u16 {
+            assert_eq!(route_guidance_lines(&mut log, 0x5201, &upd(c, 1)).len(), 1);
+        }
+        assert!(route_guidance_lines(&mut log, 0x5201, &upd(99, 1)).is_empty());
+        assert_eq!(log.comps.len(), RG_MAX_COMPS);
+        let l = route_guidance_lines(&mut log, 0x5201, &upd(3, 0));
+        assert!(l.len() == 1 && l[0].contains("comp=3 state=NoRouteSet(0)"), "{l:?}");
+        // Decode-failure line: first 32 ids then "+N more".
+        let mut log = RgLog::default();
+        let mut many: Vec<u8> = (100..140u16).flat_map(|p| rg_group(p, &[])).collect();
+        many.push(0xFF); // trailing byte => framing failure
+        let l = route_guidance_lines(&mut log, 0x5201, &many);
+        assert!(l[0].contains("param ids=[100, ") && l[0].contains(", 131] +8 more"), "{l:?}");
+        assert!(!l[0].contains("132"));
+        // Burst counter saturates instead of overflowing.
+        log.burst = Some((u32::MAX, None));
+        assert!(route_guidance_lines(&mut log, 0x5202, &[]).is_empty());
+        assert_eq!(log.burst, Some((u32::MAX, None)));
     }
 }

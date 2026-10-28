@@ -14,8 +14,8 @@ rejection, wireless video framing) that were fully resolved and are kept here as
 
 Target: `gm/full_gminfo37_gb/gminfo37:12/W231E-Y181.3.2-SIHM22B-499.3/231:user/release-keys`,
 Android 12 / API 32, SELinux Enforcing, verified-boot green, `ro.debuggable=0`, GAS build (Play Store +
-GMS present). Installs as package `zeno.gmccpa`; source classes remain `zeno.gmccpa.*`
-(`netprobe_app/app/build.gradle:16,20`).
+GMS present at the factory; since 2026-10-15 the debloat script uninstalls both per-user, see §8). Installs as package `android.car.usb.handler` (since 2026-10-15, owner request; `zeno.gmccpa` 2026-09-08..10-15); source classes remain `zeno.gmccpa.*`
+(`netprobe_app/app/build.gradle:19,25`, `tools/build_apk.sh` `INSTALL_PKG`).
 
 ---
 
@@ -25,7 +25,7 @@ GMS present). Installs as package `zeno.gmccpa`; source classes remain `zeno.gmc
 |---|---|---|
 | Install as ordinary app, Play-attributed | ✅ | uid 1010124, `installerPackageName=com.android.vending` |
 | In-motion display eligible | ✅ | `distractionOptimized=true` + `canDrawOverlays=true`; CarUxRestrictions readable |
-| Hotspot band | ✅ 5 GHz | `SoftAp mBand:2` (BAND_5GHZ), SSID `myChevrolet 32D4`, br0 |
+| Hotspot band | ✅ 5 GHz | `SoftAp mBand:2` (BAND_5GHZ), SSID `<vehicle SSID>`, br0 |
 | AP client isolation | ✅ none | app completed TCP to the iPhone; app also runs *on* the AP host |
 | Multicast / mDNS both ways | ✅ | iPhone `Owner-iPhone` discovered on br0; app's own `_airplay._tcp` REGISTERED |
 | Unicast reach to iPhone | ✅ | TCP 62078 + 49152 OPEN, ICMP true — both runs |
@@ -51,14 +51,16 @@ confirmed live (`12_OBSERVED_FLOW.md` Phase 4–6).
 is `CarPlayRx.kt`, which defaults to port **7011**, not 7010 (the `port` constructor default of `class CarPlayRx`, `CarPlayRx.kt`), and — unlike the probe
 above — does implement pairing. **Scoped precisely 2026-09-10; this sentence used to claim
 `CarPlayRx.kt` implements "SRP-6a `pair-setup`/`pair-verify`", which overstates the Kotlin side.**
-What `CarPlayRx` itself implements is SRP-6a **`pair-setup` M1–M4 only** (`CarPlayRx.handlePairSetup`,
-dispatched from the `/pair-setup` arm of `CarPlayRx.respond`); `handlePairSetup`'s own KDoc records
-that M5/M6, the Ed25519 LTPK exchange, are not implemented there, and `respond` routes only
-`/pair-setup` and `/info` — everything else, **`/pair-verify` included**, falls to its deliberate 501
-arm. Pair-verify on the shipping path is done by the JNI'd Rust core via `CarPlayRx.handleNative`,
-which is the whole reason the core exists (API 32 exposes no X25519/Ed25519). The Kotlin stub is a
-fallback that cannot complete a session. "No pairing implemented" describes the 2026-07-31 probe
-only, not the current receiver.
+**Corrected 2026-10-08 (plan v5.9 D016): the Kotlin pairing fallback is gone.** `CarPlayRx` itself
+implements no pairing. All of it — pair-setup, pair-verify, `/auth-setup` — is done by the JNI'd Rust
+core via `CarPlayRx.handleNative`, which is the whole reason the core exists (API 32 exposes no
+X25519/Ed25519). When the native core is unavailable, the connection is closed with a
+`native core unavailable — closing; there is no fallback` error line (`CarPlayRx.handle`). Until
+v5.9 that case fell to a Kotlin stub (`handleStub` / `respond` / `handlePairSetup`, plus
+`pair/SrpServer.kt` and `pair/Tlv8.kt`) that answered SRP-6a `pair-setup` M1–M4 and `/info` and
+501'd everything else, **`/pair-verify` included** — it could never complete a session, and it was
+removed with its two files. "No pairing implemented" describes the 2026-07-31 probe only, not the
+current receiver.
 
 What this probe did **not** establish, since it matters for read order: `pair-setup` and `pair-verify`
 are chipless SRP-6a / Curve25519 — the MFi coprocessor is not touched until `auth-setup`, two steps
@@ -74,9 +76,9 @@ The head unit **hosts** the hotspot; it is not a Wi-Fi station. That fact explai
 readings and shapes the whole design.
 
 ```
-              iPhone  ── Wi-Fi 5GHz ──►  br0 (SoftAP "myChevrolet 32D4", 192.168.5.1/24, HEAD UNIT)
-        192.168.5.206                     │  the receiver APP runs HERE, on the AP host
-   fe80::c5f:9f98:aee2:3a4f%br0           │  → host↔client, so ap_isolate never applies
+              iPhone  ── Wi-Fi 5GHz ──►  br0 (SoftAP "<vehicle SSID>", 192.168.5.1/24, HEAD UNIT)
+        <IPHONE_IP>                     │  the receiver APP runs HERE, on the AP host
+   <IPHONE_LL6>%br0           │  → host↔client, so ap_isolate never applies
                                           │
    default route = CELLULAR (net 100/101, iface vlan5, validated=false)  ← OnStar/telematics
    internal VLANs: vlan5/eth0 192.168.1.0/24 (radio) · vlan4 172.16.4.0/24 (EOCM/telematics)
@@ -161,6 +163,9 @@ readings and shapes the whole design.
   `user` build (`SecurityException: requires non-user build`), so this is the only path. Both
   preconditions are confirmed; the in-motion behaviour itself (as opposed to eligibility) has not been
   re-tested since — every capture to date was taken parked (`requiresDistractionOptimization=false`).
+  **2026-10-15:** at owner request the debloat script now `pm uninstall --user`s `com.android.vending`
+  (and GMS/GSF) on users 0 and 10 (§8). With no vending installer on-device, whether this attribution
+  precondition still holds is UNTESTED.
 
 ---
 
@@ -249,14 +254,15 @@ satisfied.
 (the `std::env::set_var("CARPLAY_SESSION_MGMT", "1")` call in `JNI_OnLoad`, `native/carplay-jni/src/lib.rs`), with `/info` regenerated under that same env — a static asset
 built under a different env than the running server is exactly the hazard this bug was.
 
-**Structural gaps still open on the Kotlin/Android path** (not blocking): `arm_keepalive` TCP 3/3/3
-dead-link detect (Java sockets can't express it; `android.system.Os.setsockoptInt` can),
+**Structural gaps on the Kotlin/Android path** (not blocking). **Corrected 2026-10-06:** the
+`arm_keepalive` TCP 3/3/3 dead-link detect, listed here as open, is implemented (v5.5,
+`CarPlayRx.armKeepalive`: 3/3/3 via `android.system.Os.setsockoptInt` plus `TCP_USER_TIMEOUT` 12 s),
+and so is the `av_idle_ms` JNI export (`nativeAvIdleMs`, row N17) — both pending on-device acceptance;
+the `NOT YET IMPLEMENTED` block in `CarPlayRx.kt` that tracked them is removed. Still open:
 `start_input_listener()` HID on `127.0.0.1:9110` (not started — the app advertises `hidDevices` but does
 not implement it), and per-connection `build_info(&load_device_config())` (this project ships a static
 `/info` asset instead). Live code sites: the doc comment above `Java_zeno_gmccpa_pair_NativeCore_nativeTouch`
-and the `build_info` comment block in `JNI_OnLoad` (both `native/carplay-jni/src/lib.rs`), and the
-`NOT YET IMPLEMENTED` block in `netprobe_app/app/src/main/java/zeno/gmccpa/CarPlayRx.kt` (search
-`arm_keepalive`).
+and the `build_info` comment block in `JNI_OnLoad` (both `native/carplay-jni/src/lib.rs`).
 
 **Scope corrected 2026-09-09.** These are gaps in THIS app only, not in the reference. The native
 `carplayd` daemon implements all three: `fn arm_keepalive` (`ccpa/carplayd/src/main.rs`, called per
@@ -264,14 +270,16 @@ control connection in `run_pairing_server`), `fn start_input_listener` (same fil
 started from `main()` before the accept loop), and `pub fn build_info` (`crates/vendor/receiver/src/info.rs`)
 with `fn load_device_config` (`ccpa/carplayd/src/main.rs`) called per control connection in
 `run_pairing_server`. An earlier pass on 2026-09-09 entered these as flatly "not implemented", which
-was wrong about the reference; the rows now read correctly. They are tracked as OPEN rows N13-N15 in
-`11_HARDENING_PLAN.md` (the `CarPlayRx.kt` comment's stale pointer to §8 of this doc is tracked as N16).
+was wrong about the reference; the rows now read correctly. They are tracked as rows N13-N15 in
+`11_HARDENING_PLAN.md` — N13 IMPLEMENTED 2026-10-06 (pending on-device acceptance), N14-N15 OPEN (the
+`CarPlayRx.kt` comment's stale pointer to §8 of this doc is tracked as N16).
 
 **RESOLVED 2026-09-10 — this paragraph was stale.** It used to say the `NOT YET IMPLEMENTED` wording
 in the `CarPlayRx.handleNative` comment block (`CarPlayRx.kt`, search `arm_keepalive`) carried the same
 error and needed a source fix. It was fixed in `8cadba4`: the block now says "both are real gaps"
 scoped to the Kotlin path, and cites rows N13–N16 of `11_HARDENING_PLAN.md` plus `fn arm_keepalive`
-(`ccpa/carplayd/src/main.rs`) by symbol. Row N16 records it LANDED. The former text follows for
+(`ccpa/carplayd/src/main.rs`) by symbol. Row N16 records it LANDED. (2026-10-06: the block itself is
+now removed — both gaps it named were implemented in v5.5.) The former text follows for
 history only —
 still needs a source fix.
 
@@ -314,9 +322,9 @@ access point and carries no media; the iPhone is never wired to it.
  iPhone ──BT──► CCPA (own BT, NOT vehicle BT) ──USB/OCBM──► head-unit APP
    │            └ MFi coprocessor (cert + signature, relayed over OCBM every session)
    │
-   └─ told to join "myChevrolet" via 0x5703 handoff (app-supplied SSID+pass) ─┐
+   └─ told to join "<vehicle SSID>" via 0x5703 handoff (app-supplied SSID+pass) ─┐
                                                                               ▼
- iPhone (192.168.5.206) ──── 5GHz Wi-Fi, br0 ────► APP is the AirPlay endpoint (192.168.5.1)
+ iPhone (<IPHONE_IP>) ──── 5GHz Wi-Fi, br0 ────► APP is the AirPlay endpoint (192.168.5.1)
         advertises _airplay._tcp ◄─ iPhone connects in ─► RTSP + pair-verify + H.264/HEVC stream
 ```
 
@@ -331,7 +339,9 @@ write cap). See `12_OBSERVED_FLOW.md` for the current phase-by-phase mechanics a
 
 ## 8. What to protect from the debloat (`reference/debloat/gm_debloat_full.sh`)
 
-`reference/kept_packages.txt` is the authoritative keep list (thirteen entries). Five of them collided
+`reference/kept_packages.txt` is the authoritative keep list (ten entries since 2026-10-15; thirteen
+before `com.android.vending`, `com.google.android.gms` and `com.google.android.gsf` were deleted from it —
+see the 2026-10-15 note at the end of this section). Five of the original thirteen collided
 with the script as it stood on 2026-07-01 (byte-exact at
 `git show b049810:host/gm_ccpa/reference/debloat/gm_debloat_full.sh`) — four package actions plus the
 settings block that goes with three of them:
@@ -341,14 +351,14 @@ settings block that goes with three of them:
   `fid_hotspot_disable_status 1`, `share_hotspot_data_status 0`, `soft_ap_timeout_enabled 1`,
   `tethering_allow 0` (all `settings put global`, persistent across reboots), tried to kill `hostapd`
   (`cmd wifi stop-softap`, then an airplane-mode toggle), and the status report FAILED the run if
-  `hostapd` was up — the very `myChevrolet` hotspot the plan needs.
+  `hostapd` was up — the very `<vehicle SSID>` hotspot the plan needs.
 - **`com.android.networkstack.tethering.inprocess`, `….tethering.inprocess.csm`, `….tethering.csm`**
   (former `TETHER_PACKAGES` array, `pm disable-user` + `am force-stop` from Section 5) — three keep-list
   entries; disabling them is what stopped `hostapd` respawning at boot.
 - **`com.android.vending`** (`DISABLE_PACKAGES`, plus a per-boot `am force-stop` in former Section 7) — the
   in-motion display path checks `installerPackageName=com.android.vending`; whether a user-disabled
   installer still satisfies that check is untested on this build, so it stays enabled. Re-test in-motion
-  after any debloat.
+  after any debloat. *(Superseded 2026-10-15: no longer kept — now uninstalled, see below.)*
 - **`com.gm.hmi.connection`** (`BLOAT_PACKAGES` — the *uninstall* list, `pm uninstall --user`, not the
   disable list; recoverable with `pm install-existing --user <u> com.gm.hmi.connection`) — hosts
   `WifiHotspotActivity`, the only GUI that can read the hotspot passphrase, which the app cannot read
@@ -357,7 +367,8 @@ settings block that goes with three of them:
 
 The other eight keep-list entries (`com.google.android.gms`, `com.google.android.gsf`, `com.gm.vmsplugin`,
 `com.gm.updater`, `com.gm.hmi.hvac`, `brand.chevrolet.app.hvac`, `com.google.android.embedded.projection`,
-`com.gm.domain.server.delayed`) were already commented out of, or never in, the script.
+`com.gm.domain.server.delayed`) were already commented out of, or never in, the script. (2026-10-15:
+GMS and GSF have since left the keep list and are now uninstalled — see the note below.)
 
 **Reconciled 2026-09-10.** Section 5 (hotspot) and Section 7 (Play Store force-stop) are deleted outright,
 not flag-gated — the script is meant to re-run every boot, the settings persist, and one accidental run
@@ -368,6 +379,16 @@ exit 1 if any keep-list package appears in `BLOAT_PACKAGES` or `DISABLE_PACKAGES
 `remove_package`/`disable_package` refuse kept packages a second time. To disable one deliberately,
 delete its line from `kept_packages.txt` first. Note the copy under `old/gm_ccpa` is a *different*
 2026-09-08 variant ("hotspot kept enabled; Play Store/Services/Maps removed"), not this file's ancestor.
+
+**Changed 2026-10-15 (owner request).** `com.android.vending`, `com.google.android.gms` and
+`com.google.android.gsf` were deleted from `kept_packages.txt` and appended to `BLOAT_PACKAGES`
+(last, Play Store → GSF → GMS), so the script now `pm uninstall --user`s them on users 0 and 10 like the
+other bloat entries (disable-user fallback if the uninstall does not stick), and `--status` counts them in
+the removed-check. The in-motion installer-attribution dependency (`installerPackageName=com.android.vending`,
+§4) and the Automotive Template Host dependency (`com.google.android.embedded.projection`, not present on
+this unit, still on the keep list) are UNTESTED after removal; apps installed with the installer flag will
+no longer have a vending installer on-device. The hotspot/tethering and `com.gm.hmi.connection` keeps
+are unchanged. Reverse per package: `pm install-existing --user <0|10> <package>`.
 
 **Revert recipe for a unit that already had Section 5 applied** — the exact inverse of the four settings
 it wrote that gate the hotspot, then re-enable the three tethering packages for both users:
@@ -414,6 +435,6 @@ afterwards: the tethering packages are what start `hostapd` at boot.
 | `05_codecs.txt` | Video/audio codec inventory + Intel HW limits |
 | `session_2026-08-12-standby/` | Current regression oracle — full A/V, event-driven standby, RECORD→first-frame 0.82 s |
 
-Hardware IDs seen (2026-07-31 capture): iPhone `Owner-iPhone` = `192.168.5.206` /
-`fe80::c5f:9f98:aee2:3a4f%br0` / BT-ish MAC `4a:b1:2c:f2:7c:39`. Head unit br0 = `192.168.5.1` /
-`fe80::f86d:ccff:fe1c:32d4%br0`. SoftAP `myChevrolet 32D4`, 5 GHz, US, max 8 clients.
+Hardware IDs seen (2026-07-31 capture): iPhone `Owner-iPhone` = `<IPHONE_IP>` /
+`<IPHONE_LL6>%br0` / BT-ish MAC `<MAC-1>`. Head unit br0 = `192.168.5.1` /
+`fe80::<vehicle-derived>%br0`. SoftAP `<vehicle SSID>`, 5 GHz, US, max 8 clients.

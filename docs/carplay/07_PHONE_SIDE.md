@@ -26,9 +26,9 @@ mode (`05ac:12a8`), `iap2d` is not running, until a **host app** acts. The host 
 
 - Host app **SUBSCRIBEs** over the CH_CTRL session-control channel → ocbmd sets `/tmp/host_present=1`.
 - On the 0→1 edge the supervisor runs **`projection_up.sh`** — the IDLE→projection bring-up (the cold
-  start below, idempotent: it no-ops if already Identified) — **then** ARMs carplayd + rx-connect, so
-  the iPhone opens its session.
-- Host STOP / crash → ocbmd sets `/tmp/host_present=0` → supervisor tears down carplayd + rx-connect;
+  start below, idempotent: it no-ops if already Identified) — **then** ARMs carplayd, so
+  the iPhone opens its session. *(corrected 2026-10-19: this said "carplayd + rx-connect"; the separate `rx-connect` binary was merged into carplayd 2026-09-08, mDNS discovery now runs in-process — `tools/session_supervisor.sh` header comment.)*
+- Host STOP / crash → ocbmd sets `/tmp/host_present=0` → supervisor tears down carplayd (rx-connect no longer exists as a separate process, `tools/session_supervisor.sh` header comment);
   **iap2d / the iAP2 link stay up** (holding pattern), so the next SUBSCRIBE re-arms instantly.
 
 ocbmd tracks presence and mirrors it to `/tmp/host_present`; `projection_up.sh` and
@@ -53,9 +53,9 @@ that tree is archived at `~/Documents/carlink/old/ncm_carplayd`, docs/carplay/00
    which is **`ncm0`** on an OCBM box (CORRECTED 2026-08-16: this step said `ncm1`. The name is
    enumeration-order dependent, not a constant: `ncm1` is what the phone-facing link is called when a
    HOST-facing NCM gadget already owns `ncm0` — the `ncm_only`/`ncm_wifi` bring-up mode of
-   `custom_init.sh` (host-facing `ncm` at 192.168.50.2; `start_main_service.sh` even speaks of
+   `custom_init.sh` (host-facing `ncm` at <ADAPTER_IP>; `start_main_service.sh` even speaks of
    "release phone-side ncm0 owner"), and the old `ncm_carplayd` Pi topology this sequence came from,
-   whose ACTIVITY_LOG and `tools/cold_start2.sh:62` both say `ncm1`. On the OCBM path the host-facing
+   whose ACTIVITY_LOG and `tools/cold_start2.sh` both say `ncm1`. On the OCBM path the host-facing
    gadget presents `accessory` only, so the phone-facing link is `ncm0` — `tools/cold_start_airplay.sh`,
    `docs/ops/captures/2026-07-09_airplayd_pairverify.log`, and §"Where CarPlay A/V goes" below.)
 6. Run **`iap2d /dev/android_iap2`** — the iAP2 accessory L3 daemon.
@@ -67,9 +67,8 @@ once Identified, `projection_up.sh` is idempotent and re-SUBSCRIBEs re-arm witho
 Reuses carplayd's transport-agnostic `carplay-iap2-core` (link framing + auth/identify state machine
 + TLV builders + spec, all from Apple's CarPlaySimulator.devicekitplugin). Only the transport differs
 from carplayd: a single `/dev/android_iap2` fd instead of FunctionFS ep1/ep2, and `host_configured()`
-reads `android_usb` state. **MFi auth is done on the LOCAL i2c chip** (`/dev/i2c-1 @0x11`) — carplayd's
-`mfi.rs` (a remote NCM-based MFi bridge at 192.168.50.2:5290) is deliberately NOT used by `iap2d`, which
-drives the chip directly (`ccpa/iap2d/src/main.rs`, the `G_I2C`/`i2c_rd` path).
+reads `android_usb` state. **MFi auth is done on the LOCAL i2c chip** (`/dev/i2c-1 @0x11`) — `iap2d` drives the chip directly (`ccpa/iap2d/src/main.rs`: `G_I2C`, `i2c_rd`, `mfi_cert`, `mfi_sign`).
+*(corrected 2026-10-19: this sentence cited a carplayd `mfi.rs` NCM bridge at <ADAPTER_IP>:5290 as "deliberately not used". No `mfi.rs` exists in the tree — the dead TCP client to the stock `ncm_carplayd` auth service was removed as audit Fix #19 (CLAUDE.md, "Authorization & scope"); carplayd now signs through `LocalMfiSigner` in `ccpa/carplayd/src/main.rs` — on the CCPA that is the local chip; only when `CARPLAY_MFI_ADDR` is set (Raspberry Pi / AAOS port, `mfi_wire::client::addr` in `crates/mfi-wire/src/lib.rs`, dispatch in `LocalMfiSigner`) does it go to the opt-in `ccpa/mfid` TCP oracle, which is not the removed `mfi.rs` client. The stale `mfi.rs` mention also survives in a code comment in the `ccpa/iap2d/src/main.rs` module doc, not edited here.)*
 
 > **⚠️ UPDATED 2026-08-16 — "this setup has no NCM" no longer holds repo-wide.** It still holds for
 > THIS wired CCPA path: `iap2d` drives the local chip and speaks no NCM. But the repo now also carries
@@ -79,9 +78,9 @@ drives the chip directly (`ccpa/iap2d/src/main.rs`, the `G_I2C`/`i2c_rd` path).
 
 Handshake flow (iAP2, all message ids from spec.rs):
 1. **L2 link:** TX detect prelude + SYN → RX SYN-ACK → TX ACK. (Established with the real iPhone.)
-2. **Auth (0xAA0x):** RX `0xAA00 RequestAuthenticationCertificate` → local `mfi_cert()` (reg 0x30/0x31)
+2. **Auth (0xAA0x):** RX `0xAA00 RequestAuthenticationCertificate` → local `mfi_cert()` (2.0C registers 0x30/0x31)
    → TX `0xAA01`. RX `0xAA02 RequestAuthenticationChallengeResponse` → local `mfi_sign(challenge)`
-   (0x20/0x21 write, 0x10 go, 0x11/0x12 read) → TX `0xAA03`. RX `0xAA05 AuthenticationSucceeded`.
+   (2.0C registers: 0x20/0x21 write, 0x10 go, 0x11/0x12 read) → TX `0xAA03`. RX `0xAA05 AuthenticationSucceeded`.
 3. **Identify (0x1D0x):** RX `0x1D00 StartIdentification` → TX `0x1D01 IdentificationInformation`
    (`declare_wired=false`; declares the USBHostTransportComponent with `cp_iface=1` = the NCM data
    interface that carries CarPlay A/V) → RX `0x1D02 IdentificationAccepted`. Done.
@@ -112,7 +111,7 @@ dropped — no OS interface, and the box terminates the transport on its own `nc
 ### Status
 **DONE (2026-07-10): the whole phone-side path validated on hardware, end-to-end.** iAP2 handshake to
 Identified (SYN-ACK → 0xAA00/cert(945B)/0xAA01 → 0xAA02/sign(128B)/0xAA03 → 0xAA05 AuthSuccess →
-0x1D01(275B) → 0x1D02 IdentifyAccept → Identified, holds the link), MFi auth on the local i2c chip.
+0x1D01(275B) → 0x1D02 IdentifyAccept → Identified, holds the link), MFi auth on the local i2c chip. Sizes are for the CCPA's MFi 2.0C chip (128-byte RSA signature); a 3.x chip (C2Air) returns a 64-byte ECDSA signature.
 Two fixes got here: (1) local-i2c MFi (not the NCM bridge), and (2) `carplay-iap2-core`
 `link.rs::parse()` tolerates coalesced reads (the iPhone piggybacks 0xAA05 with the next 0x1D00 frame).
 Beyond Identify, pair-setup/verify on `ncm0` derives the ChaCha20 session key, and the box **forwards

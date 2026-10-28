@@ -62,8 +62,9 @@ pub struct DeviceConfig {
     /// YAML `mainVideoStream.viewAreas[1].viewArea` (+ our `initial` extension key). MAIN stream
     /// only — `view_areas` gates the second-area block on the type-110 display and Apple's
     /// `_AirPlayScreenDictSetViewAreas` gates the per-area flags on `type == 110`, so the alt/cluster
-    /// stream never carries one. `None` = the shipped single-area declaration (or the app-less
-    /// `CARPLAY_VIEWAREA2` bench lever, which [`view_area_2`] consults only when this is `None`).
+    /// stream never carries one. `None` = the shipped single-area declaration (or, with NO host
+    /// config in force — [`Self::host_configured`] false — the `CARPLAY_VIEWAREA2` bench lever,
+    /// which [`view_area_2`] consults only then).
     /// Carried here POSITIVE-ONLY (`ViewArea2::is_positive`); containment against the panel is
     /// checked — and refused loudly — in [`view_area_2`], the same gate the lever goes through.
     pub main_view_area_2: Option<ViewArea2>,
@@ -110,6 +111,16 @@ pub struct DeviceConfig {
     /// `OSInfo`. Default `false` (left-hand drive), and emitted UNCONDITIONALLY like Apple's own
     /// stack — it is a plain boolean, so there is no absent-means-default subtlety to preserve.
     pub right_hand_drive: bool,
+    /// A host-pushed `VehicleConfig` is IN FORCE for this connection — set by
+    /// [`crate::vehicle_config::VehicleConfig::apply`], which runs only on carplayd's parse-SUCCESS
+    /// path. `false` on every no-config / rejected-config path (carplayd's `base_device_config`).
+    ///
+    /// Read by the second-view-area resolution ([`view_area_2`]): the `CARPLAY_VIEWAREA2` /
+    /// `/tmp/carplay_viewarea2` bench lever is consulted ONLY when this is `false`, i.e. when there
+    /// is genuinely no app-pushed config to be subordinate to (docs/carplay/04_CAPABILITIES_AND_CONFIG.md
+    /// §2, D3 2026-10-19). Before that a pushed config that declared ONE area still picked the
+    /// lever's rect up off the box.
+    pub host_configured: bool,
 }
 
 impl Default for DeviceConfig {
@@ -153,6 +164,7 @@ impl Default for DeviceConfig {
             oem_icon_label: String::new(),
             oem_icon_visible: false,
             right_hand_drive: false,
+            host_configured: false,
         }
     }
 }
@@ -375,12 +387,17 @@ fn hid_device(uid: u32, name: &str, product_id: i64, descriptor: Vec<u8>) -> Val
 /// APP-DRIVEN SINCE 2026-09-05 (docs/carplay/04_CAPABILITIES_AND_CONFIG.md doctrine): the pushed
 /// YAML's `videoStreamsConfig.mainVideoStream.viewAreas[1].viewArea` is the SOURCE
 /// ([`DeviceConfig::main_view_area_2`], filled by `vehicle_config::VehicleConfig::apply`). The bench
-/// lever below is the APP-LESS fallback and is consulted only when the config carries no second
-/// area — a config-sourced area gets the SAME containment check ([`view_area_2`]), and a REFUSED
-/// config area declares one area rather than falling through to stale on-box lever state.
+/// lever below is the APP-LESS fallback and is consulted only when NO host config is in force
+/// ([`DeviceConfig::host_configured`] false) — a pushed config that declares one area declares one
+/// area, whatever is on the box (corrected 2026-10-19, D3: until then the lever was read whenever
+/// the config merely carried no second area, i.e. with the app connected). A config-sourced area
+/// gets the SAME containment check ([`view_area_2`]), and a REFUSED config area declares one area
+/// rather than falling through to stale on-box lever state.
 ///
 /// BENCH LEVER (2026-09-05): a SECOND main view area, so the CarPlay Dock's resize button can be
-/// exercised on real hardware on an app-less box.
+/// exercised on real hardware on an app-less box. With the app connected use its door instead
+/// (`viewarea arm <WxH@X,Y>` + `save` on the macOS ControlServer); the one thing only the lever can
+/// express is `:initial`, which is therefore app-less-only.
 ///
 /// `CARPLAY_VIEWAREA2=WxH@X,Y` (env, or the on-box file `/tmp/carplay_viewarea2`) declares a second
 /// area at that rect and sets `viewAreaTransitionControl: true` on BOTH areas, which is what makes
@@ -505,8 +522,10 @@ impl ViewArea2 {
 
 /// The raw lever spec, if armed: env first, then the on-box file. The file form is what makes this
 /// testable without redeploying session_supervisor.sh: write it, reconnect the phone, and carplayd
-/// picks it up on its next control connection. `/tmp` is tmpfs, so a box reboot reverts to the
-/// shipped single-area behaviour on its own — a bench lever that cannot be left on by accident.
+/// picks it up on its next control connection — on an APP-LESS box only (no host config in force;
+/// see [`resolve_view_area_2`]). `/tmp` is tmpfs, so a box reboot reverts to the shipped
+/// single-area behaviour on its own. A file left behind while an app runs is now inert rather than
+/// silently mixed into the app's declaration.
 fn view_area_2_spec() -> Option<String> {
     std::env::var("CARPLAY_VIEWAREA2")
         .ok()
@@ -514,7 +533,8 @@ fn view_area_2_spec() -> Option<String> {
 }
 
 /// Resolve the second MAIN view area against the MAIN panel: the pushed config's
-/// [`DeviceConfig::main_view_area_2`] first, else the bench lever. `None` = neither source set,
+/// [`DeviceConfig::main_view_area_2`] first, else — only with no host config in force — the bench
+/// lever. `None` = neither source set, a host config in force that declares one area,
 /// lever malformed, or refused (does not fit the panel) — every one of those emits the
 /// byte-identical single-area default. Resolved ONCE per `/info` build (`build_info`) and threaded
 /// through, so the refusal is logged once and every consumer (`viewAreas`, `initialViewArea`,
@@ -531,7 +551,12 @@ fn view_area_2(cfg: &DeviceConfig) -> Option<ViewArea2> {
 /// 1. A config-sourced area WINS, and a refused one declares ONE area — it does NOT fall through to
 ///    the lever. App intent must never mix with stale on-box state (the same rule the metadata
 ///    `skip` list follows): with an app connected, what the app pushed is what the phone sees.
-/// 2. The lever is consulted only when the config carries no second area (app-less box).
+/// 2. A host config in force ([`DeviceConfig::host_configured`]) that carries no second area
+///    declares ONE area. The lever is IGNORED (and that is logged) — the same subordinate rule as
+///    `levers::SubordinateLevers`. Corrected 2026-10-19: this step used to read the lever, which
+///    the old comment called "app-less" although it ran with the app connected.
+/// 3. Only with NO host config in force (absent / rejected — the genuinely app-less box) is the
+///    lever consulted.
 fn resolve_view_area_2(cfg: &DeviceConfig, lever: Option<String>) -> Option<ViewArea2> {
     let (panel_w, panel_h) = (cfg.display_width, cfg.display_height);
     if let Some(a) = cfg.main_view_area_2 {
@@ -557,6 +582,17 @@ fn resolve_view_area_2(cfg: &DeviceConfig, lever: Option<String>) -> Option<View
             if lever.is_some() { "ignored" } else { "unset" }
         );
         return Some(a);
+    }
+    if cfg.host_configured {
+        if let Some(spec) = lever {
+            eprintln!(
+                "[carplayd] CARPLAY_VIEWAREA2 bench lever {:?} IGNORED — a pushed config is in \
+                 force and declares no second area (bench levers are no-config-only); declaring ONE \
+                 view area. Arm it through the app (`viewarea arm`)",
+                spec.trim()
+            );
+        }
+        return None;
     }
     let spec = lever?;
     let Some(a) = parse_view_area_2(&spec) else {
@@ -795,8 +831,8 @@ fn add_appearance_keys(d: &mut Dictionary) {
 
 /// Build the `/info` binary plist bytes from `cfg`.
 ///
-/// Resolves the second main view area (pushed config first, then the `CARPLAY_VIEWAREA2` bench
-/// lever) against the MAIN panel exactly once here and publishes how many main view areas the
+/// Resolves the second main view area (pushed config first, then — with no host config in force
+/// only — the `CARPLAY_VIEWAREA2` bench lever) against the MAIN panel exactly once here and publishes how many main view areas the
 /// result declares (see [`declared_view_area_count`]).
 pub fn build_info(cfg: &DeviceConfig) -> Vec<u8> {
     let second = view_area_2(cfg);
@@ -1735,7 +1771,8 @@ mod tests {
         );
     }
 
-    // ---- pushed config vs bench lever precedence (app-driven since 2026-09-05) ----------------
+    // ---- pushed config vs bench lever precedence (app-driven since 2026-09-05; the lever is
+    // ---- no-config-only since 2026-10-19) -----------------------------------------------------
     // Driven through `resolve_view_area_2` with the lever spec passed in, so no test here touches
     // the process environment or `/tmp` — the other tests in this module call `build_info`, which
     // reads both, and a `set_var` from a parallel test thread would race them.
@@ -1762,10 +1799,33 @@ mod tests {
     }
 
     #[test]
-    fn bench_lever_is_the_fallback_only_when_the_config_carries_no_area() {
+    fn bench_lever_is_the_fallback_only_when_no_host_config_is_in_force() {
+        // `cfg_with` builds `host_configured: false` — the no-config / rejected-config box.
         let got = resolve_view_area_2(&cfg_with(None), Some(GOOD.into()));
         assert_eq!(got, parse_view_area_2(GOOD));
         assert_eq!(resolve_view_area_2(&cfg_with(None), None), None);
+    }
+
+    /// D3 (2026-10-19): a pushed config that declares ONE area declares one area. A stale
+    /// `/tmp/carplay_viewarea2` used to be picked up here with the app connected, so an app that
+    /// had switched the second area OFF still got one.
+    #[test]
+    fn host_config_in_force_ignores_the_bench_lever() {
+        let configured = DeviceConfig { host_configured: true, ..cfg_with(None) };
+        assert_eq!(resolve_view_area_2(&configured, Some(GOOD.into())), None);
+        assert_eq!(resolve_view_area_2(&configured, None), None);
+        // ...and a configured area still wins exactly as before.
+        let both = DeviceConfig { host_configured: true, ..cfg_with(Some(CONFIG_AREA)) };
+        assert_eq!(resolve_view_area_2(&both, Some(GOOD.into())), Some(CONFIG_AREA));
+    }
+
+    /// `apply()` is the only place `host_configured` is set, and it runs only on carplayd's
+    /// parse-success path — so the flag tracks "a host config is in force" exactly.
+    #[test]
+    fn apply_marks_the_config_host_configured() {
+        assert!(!DeviceConfig::default().host_configured, "the compiled base is not host config");
+        let vc = crate::vehicle_config::VehicleConfig::from_yaml(b"name: X\n").unwrap();
+        assert!(vc.apply(DeviceConfig::default()).host_configured);
     }
 
     #[test]

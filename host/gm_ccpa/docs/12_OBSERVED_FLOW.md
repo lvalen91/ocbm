@@ -20,7 +20,9 @@ does, in order, with the log lines you should expect to see.
 > 1. box binaries packed with **UPX 3.96**, not 5.x (5.x's stub segfaults on this 3.14 kernel);
 > 2. `libcarplayjni.so` linked with the **NDK cross-compiler** (`CC_x86_64_linux_android`) so the
 >    ELD shim is x86-64 ELF, not host arm64 Mach-O — otherwise `eld_enc_*` stays undefined, `dlopen`
->    fails, and the app silently serves pair-verify as 501 from a Kotlin stub;
+>    fails, and the app cannot pair: the native core is unavailable and the connection is closed
+>    (`native core unavailable — closing`; until v5.9 D016, 2026-10-08, a Kotlin stub silently
+>    answered pair-verify with 501 instead);
 > 3. a **self-hosted mDNS advert** on a hostname we own (Failure Point 3);
 > 4. exactly **one** OCBM bring-up per process (Failure Point 4).
 
@@ -40,6 +42,10 @@ Measured, from the control connection landing:
 | `RECORD done` | 1.723 s |
 | **`FIRST FRAME RENDERED`** | **2.598 s** |
 
+> Bench 2026-10-08, build `230eaa7` (first session right after an `install -r`, ONE sample): pair-verify M1+M3
+> in 28 ms from accept, first frame decoded ≈3.1 s after accept. Not read as a regression against the 2.598 s
+> above (a single post-reinstall sample, different content) and not as a pass — re-sample on a warm start.
+
 `RECORD done` → first frame is **875 ms**. First audio is *not* a latency figure here: iOS did not
 SETUP the type-102 stream until 8.5 s after RECORD, which is the phone's choice, not ours.
 Session totals: **1358 frames rendered, 0 AUs dropped**, 843 media audio frames, 361 mic chunks.
@@ -49,6 +55,24 @@ Session totals: **1358 frames rendered, 0 AUs dropped**, 843 media audio frames,
 > longer the newest end-to-end proof, and several rows below that said "not yet exercised" now are.
 > `05_SESSION_FLOW.md` §9's "session-start → first-video-frame is not measured anywhere in the
 > corpus — don't quote a number for it" is **retired**: it is 2.598 s from inbound, measured here.
+
+> ### What changed since that capture (2026-10-08; v5.8 + v5.9 working tree, bench = the cp12 capture, rc1 then rc2)
+> The 2026-09-09 reference session ran build `7c92000`. The behaviours below are NEW code that session never
+> exercised; the canonical description is `04_SYSTEM_MODEL.md` §4e. What cp12 (rc1 from `MARK RC1 install`, rc2
+> from `MARK RC2 install`) has actually shown:
+> - **Claim with the app closed (rc2, 04:43:27):** `auto-claim (media-browser bind): CLAIM — claiming the
+>   adapter`, then `ui: CLAIMING ADAPTER`, then the rediscover loop woken on `CT_HELLO_ACK`. No dialog, no UI.
+> - **Nav prompt (rc2, 04:48:16):** `duckAudio` arrives (`volume=-13.98dB durationMs=500`), the nav sink is built
+>   `AAC-ELD 48000Hz 2ch … buffer 48ms` and plays live with `no focus request (stock: OD-8C)`, the device starts
+>   66 ms after `play()`, the software duck lifts 313 ms after `duckAudio`, and the GM platform logs
+>   `updateMutexSink … ducking -18.70dB`. END line of that stream: `played 415 … excess 11 … excess loud 0, silent
+>   catch-up 9, target 80ms W 200ms`.
+> - Not yet bench-observed: Stop-per-boot, the B-V1-W overlap matrix, OD-7F refusals, the pairing-key migration
+>   (B-V5-1), and UI layout/keyboard. The box has been disconnected since (owner), so they wait for its return.
+> - The radio cold-restarted once during rc2 testing (04:48:50, per the session handoff in `plan_v5.md`); the
+>   cause is UNKNOWN (reason code 51, the same as every earlier power cycle; no crash or shutdown lines were found).
+>   2026-10-08 (evening, `6c95684`): an adb transport dropout of ≈13 min with the radio NOT rebooting (uptime
+>   continuous, same app pid) was observed — the earlier "restart" may have been the same thing, unconfirmed.
 
 Earlier captures remain the archive (`evidence/` lives in the standalone checkout at
 `~/Documents/carlink/old/gm_ccpa/evidence/`, not under this tree):
@@ -81,6 +105,10 @@ directly to the app.
 
 - Endpoints are **discovered by walking the interface**, not hardcoded. The hardware-verified pair is
   **IN `0x81` / OUT `0x01`**.
+- **Who calls the claim (2026-10-08):** the driver's Start, a launcher open, or — with the app closed and the
+  persistent USB grant in place — `AutoClaim.trigger` from the attach receiver, BOOT_COMPLETED or the
+  media-browser bind (`auto-claim (<origin>): <DECISION> — <why>`). A claim by a bare shell `am start` is the
+  same code path.
 - `CAP_MFI` in the ACK gates everything downstream.
 - `CT_SETTIME` matters because the box has no RTC battery.
 
@@ -102,20 +130,26 @@ explicitly (the `if (!r.helloOk)` gate after `ocbm().runAll()` in `MainActivity.
 
 ## Phase 2 — `CT_SUBSCRIBE`: the radio-wake edge — **credentials MUST be present**
 
+> Historical capture: the `wifi_channel` key below is no longer sent. Since 2026-10-07 the app sends
+> no channel on purpose (owner decision), and the box keeps its stock hostapd channel
+> (`tools/session_supervisor.sh` strips `channel=` only when a channel is supplied).
+
 ```
 [ocbm ] >> CT_SUBSCRIBE (153B config)
          | wireless: true | wifi_ap: false | pairing: just_works
-         | wifi_ssid: myChevrolet 32D4 | wifi_pass: … | wifi_channel: 36
+         | wifi_ssid: <vehicle SSID> | wifi_pass: … | wifi_channel: 36
 ```
 
 > ### ⚠ FAILURE POINT 1 — the most order-sensitive step in the whole flow
 > `host_present` 0→1 is what makes the box run `wireless_up()` → `apply_host_wifi_creds()`, which
 > rewrites `/etc/hostapd.conf`. **Credentials arriving in a later SUBSCRIBE are ignored** — `wireless_up`
-> has already run. Subscribe once without them and `0x5703` is pinned to the box's stock `ccpa-b0df`
+> has already run. Subscribe once without them and `0x5703` is pinned to the box's stock `<box stock SSID>`
 > for the entire session; the phone is told to join an AP that is never raised (`wifi_ap:false`), and
 > per `06` §5.4 that dead network then poisons the next attempt until it is forgotten on the phone.
 > **Recovery is a full `host_present` cycle** (app stop/start, minding the ~20 s flap detector).
-> `OcbmProbe` now refuses to subscribe with no SSID rather than entering that state.
+> `OcbmProbe` now refuses to subscribe with no SSID rather than entering that state. Since OD-7A (2026-10-07)
+> that is also the first-run state: there are no compiled-in credentials, so with none saved Start opens the
+> hotspot dialog (`SessionCore.kt:765`) instead of reaching this step.
 > Verify with: `grep -aE '^ssid=' /etc/hostapd.conf` on the box — expect the vehicle SSID.
 
 ## Phase 3 — Box side: Bluetooth, iAP2, and the handoff
@@ -166,12 +200,12 @@ retries `0x5702`, so the handler must be idempotent.
 ## Phase 4 — App becomes the accessory on Wi-Fi
 
 ```
-[cprx ] CarPlay RX up on :7011 deviceid=B2:D6:2A:9F:C9:30 features=0x44440B80,0x61
+[cprx ] CarPlay RX up on :7011 deviceid=<MAC-1> features=0x44440B80,0x61
 [cprx ] advertise _airplay._tcp:7011 REGISTERED as 'gm-ccpa'
 [cprx ] advert not yet REGISTERED — holding the connect-out until it is   (only if it lags)
-[mdns ] live lookup: Owner iPhone._carplay-ctrl._tcp.local -> target=Owner-iPhone.local port=57347
-                     addrs=fe80::c0b:7143:d356:a90, 192.168.5.57
-[cprx ] connect-out accepted on attempt 1 via fe80::c0b:7143:d356:a90%br0:57347
+[mdns ] live lookup: <phone name>._carplay-ctrl._tcp.local -> target=Owner-iPhone.local port=57347
+                     addrs=<IPHONE_LL6>, <IPHONE_IP>
+[cprx ] connect-out accepted on attempt 1 via <IPHONE_LL6>%br0:57347
 ```
 
 Three things are load-bearing:
@@ -238,8 +272,8 @@ Three things are load-bearing:
 ## Phase 5 — The phone dials back
 
 ```
-HandleControlServerEvent command 'connect' received for deviceID: B2:D6:2A:9F:C9:30
-Setting pending autoconnect deviceID: B2:D6:2A:9F:C9:30
+HandleControlServerEvent command 'connect' received for deviceID: <MAC-1>
+Setting pending autoconnect deviceID: <MAC-1>
 >>> INBOUND CONTROL CONNECTION on :7011
 ```
 
@@ -254,16 +288,16 @@ Setting pending autoconnect deviceID: B2:D6:2A:9F:C9:30
 > ```
 > 21:38:04.548641  Bonjour TXT Add CarPlay._airplay._tcp.local.       <- GM's
 > 21:38:04.548668  Bonjour TXT Add gm-ccpa._airplay._tcp.local.       <- ours, 27 MICROSECONDS later
-> 21:38:04.549866  Created APEndpointCarPlay [0xE051] with name 'CarPlay' and id 'F8:6D:CC:DC:32:D6'
+> 21:38:04.549866  Created APEndpointCarPlay [0xE051] with name 'CarPlay' and id '<MAC-2>'
 > 21:38:04.549876  Added new WiFi endpoint 0xE051 (CarPlayControlSupported: Y)
 > ```
 > Both records arrive; iOS creates **one** endpoint and stamps it with GM's identity. Ours is
 > discarded — not rejected, just folded in. Every later autoconnect then fails looking for an ID that
 > was never indexed:
 > ```
-> carManager_handlePendingAutoconnect: index = WiFi, for deviceID: F8:6D:CC:DC:32:D6,
->                                      pendingAutoconnectID: B2:D6:2A:9F:C9:30
-> carManager_handlePendingAutoconnect: No matching endpoint found for deviceID B2:D6:2A:9F:C9:30
+> carManager_handlePendingAutoconnect: index = WiFi, for deviceID: <MAC-2>,
+>                                      pendingAutoconnectID: <MAC-1>
+> carManager_handlePendingAutoconnect: No matching endpoint found for deviceID <MAC-1>
 > HTTP connection closing: -6753/0xFFFFE59F kConnectionErr
 > ```
 > The cause is that **both SRV records targeted the same host, `Android.local`** — the platform
@@ -273,8 +307,9 @@ Setting pending autoconnect deviceID: B2:D6:2A:9F:C9:30
 >
 > **The fix, implemented and confirmed on hardware.** Publish a **second advert on a hostname we own**.
 > `NsdManager` cannot do this — AOSP drops `NsdServiceInfo.setHost()` on registration — so
-> `MdnsResponder.kt` answers mDNS itself: instance `gmccpa-rx`, SRV target `gmccpa-rx.local`, and a
-> single A record pointing at the `br0` bridge (`192.168.5.1`). It runs **alongside** the NsdManager
+> `MdnsResponder.kt` answers mDNS itself: instance `gmccpa-rx`, SRV target `gmccpa-rx.local`, an A
+> record for the `br0` bridge (`192.168.5.1`) and — since 2026-10-06 — an AAAA record for br0's IPv6
+> link-local (an AAAA query is answered with A + NSEC when there is none). It runs **alongside** the NsdManager
 > advert, wired in `CarPlayRx.advertise()`. Result, same rig, GM running untouched:
 > ```
 > [cprx ] self-hosted advert up: gmccpa-rx.local -> br0:7011
@@ -288,7 +323,7 @@ Setting pending autoconnect deviceID: B2:D6:2A:9F:C9:30
 > phone's subnet, so resolution was a coin flip across an 8-interface head unit.
 >
 > **Acceptance test** — on the phone, look for a second `Created APEndpointCarPlay ... id
-> 'B2:D6:2A:9F:C9:30'`. Absence of errors proves nothing; that line is the proof.
+> '<MAC-1>'`. Absence of errors proves nothing; that line is the proof.
 >
 > ### ⛔ NEVER force-stop or disable GM's CarPlay service
 > Not as a workaround, not as a diagnostic, not "just once to check". Owner-instructed, 2026-08-12:
@@ -304,7 +339,7 @@ Setting pending autoconnect deviceID: B2:D6:2A:9F:C9:30
 
 > A *similar-looking* but different failure is the stale iOS endpoint cache, whose fix is forgetting the
 > vehicle on the iPhone and re-pairing. Distinguish them: cache staleness shows an index entry for **our**
-> deviceID that has expired; coexistence shows an index entry for **`F8:6D:CC:DC:32:D6`**.
+> deviceID that has expired; coexistence shows an index entry for **`<MAC-2>`**.
 
 ## Phase 6 — Apple protocols, app-side
 
@@ -352,7 +387,7 @@ POST /feedback every 2 s
 > then `read: rapid -1 x50 — device gone`, and a `consecutive=` counter that only ever climbs (it resets
 > to 0 on any successful write, so a monotonic climb means *nothing* has been written since).
 >
-> Fix: one bring-up per process. `adb shell am force-stop zeno.gmccpa` before `am start` if
+> Fix: one bring-up per process. `adb shell am force-stop android.car.usb.handler` before `am start` if
 > you are re-launching by hand — starting the activity while an instance is already live is enough to
 > cause it. Verify with `grep -c "claimed interface 0"` — it must be exactly **1**.
 - **Streams are not batched.** `audio(102)` arrived ~4 minutes after `screen(110)` in the reference run.
@@ -362,6 +397,22 @@ POST /feedback every 2 s
   exists, but nothing consumes it yet — `[meta] seam 127.0.0.1:9004 unavailable` is expected today.
 
 ## Phase 7 — Localhost seam → MediaCodec
+
+> **Bench observation, 2026-10-08 (build `230eaa7`, ≈3 min into a session).** 6000 → 6900 frames in 27.3 s =
+> 33 fps decode; SurfaceFlinger present avg 34.9 ms (28.6 fps), 1/2/3/4+-vsync = 53/13/55/5 — the same bimodal
+> cadence as rc2 below (F-C4 unchanged; render pacing 6.3 not adopted). Audio: `1 AUs not queued, 3 underruns`
+> in the first 500 frames (stream-start transient; the new C-F7 counter made the drop visible). Process: PSS
+> 42.7 MB, RSS 174 MB, 72 threads, 26.6 % of a core, 10 logged ART GCs in ≈3.5 min — indicative only vs rc2.
+>
+> **Bench observation, 2026-10-08 (rc2, live owner session, read-only).** Decode rate 30.4-34.2 fps from the
+> 300-frame counters (~26 KB per AU) against a panel that is a single 2400x960 mode at 60.001434 Hz (VSYNC
+> 16,666,268 ns); the served `/info` advertises `maxFPS 60`, so ~30 is the iPhone's adaptive encode target
+> for largely static content (Apple Maps), not an app setting (Phase 9 of the plan, closed by the owner).
+> Presentation is unpaced (`releaseOutputBuffer(idx, true)`), so the SurfaceFlinger latency shows a bimodal
+> 1-vsync / 3-vsync cadence (F-C4; render pacing recorded, not adopted). A/V was clean: 0 E lines, 0 audio
+> underruns, 0 AU drops in the 300 s window, ~32 % of one core, PSS 39 MB. 32-37 % of the app's log lines in
+> that window were the box's `wireless` daemon's 1 Hz `EADDRINUSE` retry (F-C1, upstream), relayed over
+> `CH_LOG`.
 
 Rust `session.rs` (`spawn_screen`/`spawn_audio`) dials **outbound** to `127.0.0.1:9001` and `:9002`, so
 the consumer must be listening **before** stream SETUP or every access unit is dropped (`connect carlink
@@ -373,7 +424,9 @@ outbound dial to `forward.rs`.)
 
 > ### The consumers stand by; they are not started on demand
 > `CarPlayRx` fires `onSessionUp` the moment the phone opens the control connection — before
-> pair-verify, ~3 s before any stream SETUP — and `MainActivity` brings the CarPlay screen up from it.
+> pair-verify, ~3 s before any stream SETUP — and `SessionCore.showCarPlayScreen` brings the CarPlay
+> screen (and with it the A/V consumers) up from it. Only the supervisor's `SESSION_UP` and
+> `SessionCore.sessionUp` wait for pair-verify (A-F1, 2026-10-08, `04` §4b).
 > The seams, threads and Surface therefore exist before the phone asks, and `AacPlayer.prime()` has
 > already built a playing `AudioTrack` (safe: stereo AAC-LC 48 kHz is a wire-format ceiling, and a
 > format mismatch discards the primed track rather than imposing the wrong rate).
@@ -397,7 +450,7 @@ outbound dial to `forward.rs`.)
 |---|---|
 | `:9001` video | `[u32 BE len][Annex-B payload]`, one message per screen message |
 | `:9002` audio | **no** prefix — raw ADTS |
-| `:9003` voice | consumed by `VoiceRouter` → Siri→`Voice`, call→`Phone`/`Call`, nav→`Navigation`, each owner-confirmed audible on the truck 2026-09-04. (The `:9003 (voice, drained)` lines in the 2026-08-12 captures predate `VoiceRouter` and are stale.) |
+| `:9003` voice | consumed by `VoiceRouter` (reader) and the per-purpose engines in `av/VoiceStreams.kt` → Siri→`Voice`, call→`Phone`/`Call`, nav→`Navigation` (no focus), alert→`CALL_RING`, each owner-confirmed audible on the truck 2026-09-04 (alert still unexercised). Since v5.8 the seam carries voice-tag v2: BEGIN/END control frames and a per-AU receive stamp + RTP timestamp, which feed a per-stream jitter buffer (`docs/carplay/06_AV_PIPELINE.md` §10; `04_SYSTEM_MODEL.md` §4e). (The `:9003 (voice, drained)` lines in the 2026-08-12 captures predate `VoiceRouter` and are stale.) |
 | `:9004` metadata | **LIVE since 2026-09-09** — `[cpui] meta seam connected` / `[rust] [meta] connected to ocbmd metadata seam 127.0.0.1:9004`. Carries now-playing deltas (543 `0x5001` frames in one session) and album art (a 76,869 B JPEG reassembled over the iAP2 session-2 file transfer). The old "unavailable — deferred by decision" row, and the `[meta] seam 127.0.0.1:9004 unavailable` line said to be "expected today", are both retired |
 
 ```
@@ -417,6 +470,20 @@ outbound dial to `forward.rs`.)
 ---
 
 ## Phase 8 — Session end and recovery (device-reported 2026-08-28, fixed)
+
+> **Bench observation, 2026-10-08 (evening), build `6c95684`.** Adapter unplugged under a live session: "box
+> gone, session live", CarPlay kept running without the adapter. When the phone's own Wi-Fi/BT then went down
+> (19:52:33, control silent 6 s → `LINK_LOST`) media focus and the voice router stopped cleanly, the grace window
+> held 10 s, rung 0 re-announced, rungs 1-2 skipped with `adapter: ABSENT`, and the phase went STALLED with the
+> accurate no-adapter text. While the phone stayed away the app dialled its CACHED endpoint (10 attempts, "no
+> usable response") and NsdManager resolves failed `code=3` every ≈12 s until the operator Stop — the first fresh
+> resolve came only after the phone rejoined (`11` row BP-1). Recovery bring-ups: after Stop/Start the box
+> paged the bonded phone on its own (RFCOMM, MFi, Identify, 0x5703), connect-out accepted on attempt 1,
+> pair-verify OK, CarPlay live at 19:57:29; after an `am force-stop` the system relaunched the app via the
+> media-browser bind within ≈1 s and CarPlay was live again ≈4 s later; after `carplay_stop` + `ocbm_stop` the
+> process idled untouched for a minute and a launcher reopen reached CarPlay live in ≈4.9 s (pair-verify 41 ms).
+> Reading the iPhone log: `Bluetooth power state: ffffffff` is the normal reply, not "off" (the toggle shows as
+> `0` / `cafebabe`); the "Failed to parse accessory cert chain" lines belong to an audio accessory, not the box.
 
 Two teardown gaps were found on the same device session and both are now fixed:
 
@@ -443,6 +510,11 @@ Two teardown gaps were found on the same device session and both are now fixed:
   (device-measured 12.0 s). The assistant edge and the focus edge ran on different clocks;
   `ASSISTANT.idleMs` is now `ASSISTANT_HOLD_MS + 1` sweep period, closing the gap to ~1 s.
   `reclaimFocus()` covers the permanent hang, which is a separate fault. See `13_AUDIO_ROUTING.md` §3a.
+  **Corrected 2026-10-08:** the permanent-loss retry-while-media-flows described above is replaced. After a
+  permanent loss focus returns only on a resume intent (including the CarPlay screen returning to the front,
+  `CarPlayActivity.onResume` -> `AacPlayer.onScreenReturned`) or a phone-side resume (a phone already paused at
+  the loss counts), and the loss also sends the phone a MainAudio Take as stock does (OD-9C). Bench-pending:
+  whether iOS pauses on it (plan B-MED-9).
 
 ---
 
@@ -521,13 +593,18 @@ box paging the phone and the phone showing an unknown-accessory prompt (observed
 | Store | Cleared by |
 |---|---|
 | iPhone's CarPlay/BT record | forget the vehicle on the iPhone — **but take the box's Bluetooth down first**, or it re-pairs and re-creates the record before the forget settles (observed 2026-08-27) |
-| **Box's BT link key** | the **Forget Pairing** button, or `--es run ocbm_forget` |
-| App's AirPlay LTPK (`carplay_peers.bin`) | the **Forget Pairing** button, or `adb uninstall` |
+| **Box's BT link key** | **Adapter & logs ▸ Forget pairing**, or `--es run ocbm_forget` |
+| App's AirPlay LTPK (`carplay_peers.bin`) | **Adapter & logs ▸ Forget pairing**, `--es run ocbm_forget` (since 2026-10-08), or `adb uninstall` |
 
 **Updated 2026-08-27:** the last two rows used to be independent, and the button that cleared the box's
 bond left the app's peer store untouched. That split brain presents as `pair-verify` failing — which
 reads as broken crypto and sends you debugging code that is fine. Forget Pairing now clears both
 together; the iPhone's record remains yours to clear by hand.
+**Updated 2026-10-08 (plan v5.9 D020):** the `ocbm_forget` verb still cleared only the box's bond (the
+same split brain, from the shell); it now runs the button's path and clears both. With `--es mac` the box
+clears that one bond plus all of its AirPlay peers and the app clears its whole peer store (the store has
+no per-device mapping), so every other iPhone bonded to the adapter must be forgotten and re-paired too.
+With no adapter link it answers "No adapter connected — press Start first" and leaves the state word.
 
 A genuinely fresh pairing shows the full `pair-setup` M1/M3/M5 in the log. If it fast-paths straight
 to `pair-verify`, a peer store survived and the test was not clean.
@@ -571,7 +648,7 @@ After a genuine two-sided clear the box logs `LOAD_LINK_KEYS(count=0)` and the n
 
 Health check (derive the uid — it changes on every reinstall):
 ```bash
-APPID=$(adb shell dumpsys package zeno.gmccpa | sed -n 's/.*userId=\([0-9]*\).*/\1/p' | head -1)
+APPID=$(adb shell dumpsys package android.car.usb.handler | sed -n 's/.*userId=\([0-9]*\).*/\1/p' | head -1)
 adb shell "cat /proc/net/tcp6" | awk -v u="$((1000000 + APPID))" '$8==u && $4=="01"'
 ```
 4–6 established sockets plus `POST /feedback` every 2 s is a healthy session.

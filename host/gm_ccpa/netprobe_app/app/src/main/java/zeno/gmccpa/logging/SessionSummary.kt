@@ -1,6 +1,7 @@
 package zeno.gmccpa.logging
 
 import zeno.gmccpa.ocbm.Ocbm
+import zeno.gmccpa.ocbm.PhoneIdent
 import android.hardware.usb.UsbDevice
 import android.os.SystemClock
 import org.json.JSONArray
@@ -56,14 +57,20 @@ import java.util.concurrent.atomic.AtomicLong
  *    may now read `none` (a launch-origin session had no trampoline to sample). No key moved or
  *    changed meaning: a `v=1` reader that ignores unknown trailing keys still parses a `v=2` line, and
  *    `perm_trampoline=none` is the same absent-token rule every other field already follows.
+ *  - `v=3` (2026-10-08, plan v5.9 D6): `origin=` gains `auto_attach` | `auto_boot` | `auto_bind` — a
+ *    session begun at a link attempt the AUTO-CLAIM started (adapter attach broadcast, BOOT_COMPLETED,
+ *    media-browser bind) with no app UI. Same absent-token rules as `launch`. No key added or moved.
  *
  * A lower-frequency `SESSION_DETAIL id=<id> ...` block (session-end only, one key per line) carries the
- * fields too long or too structured for one line: the raw phone-identity JSON and the two `MGMT_INFO`
- * bonded-device snapshots, verbatim and as parsed lists.
+ * fields too long or too structured for one line: the phone-identity JSON (its `"name"` value replaced
+ * by `<name N chars>`, see below) and the two `MGMT_INFO` bonded-device snapshots, verbatim and as
+ * parsed lists.
  *
- * `phone_device_id=` is the iPhone's BR/EDR MAC lifted from `CT_PHONE_IDENT`; it and the raw
- * `SESSION_DETAIL` JSON blocks are deliberately NOT redacted here — the export-time redactor
- * (`LogExport.kt`) is expected to find them by these key names.
+ * `phone_device_id=` is the iPhone's BR/EDR MAC lifted from `CT_PHONE_IDENT`; it and the
+ * `SESSION_DETAIL` JSON blocks are deliberately NOT MAC-redacted here — the export-time redactor
+ * (`LogExport.kt`) is expected to find them by these key names. The phone's user-given NAME is the
+ * exception: the export redactor has no pattern for free text, so it is replaced at emit time by
+ * [zeno.gmccpa.ocbm.PhoneIdent.redactName] (audit12 F119).
  *
  * ## Thread safety / cost
  * Scalar facts are `@Volatile`; the two small, rare collections (session-event history, at most a few
@@ -74,7 +81,7 @@ import java.util.concurrent.atomic.AtomicLong
 object SessionSummary {
 
     /** Bump on any field-set/order change; never reinterpret an existing key. History in the class KDoc. */
-    const val SCHEMA_VERSION = 2
+    const val SCHEMA_VERSION = 3
 
     /**
      * How long a permission-dialog observation with NO open session waits for a session to claim it.
@@ -165,7 +172,7 @@ object SessionSummary {
      */
     fun beginLaunch(dev: UsbDevice): Session = begin(
         AttachInfo(
-            origin = Origin.LAUNCH,
+            origin = launchOrigin ?: Origin.LAUNCH,
             hasPermissionAtTrampoline = null,
             uid = android.os.Process.myUid(),
             userId = android.os.Process.myUid() / 100_000,
@@ -286,7 +293,8 @@ object SessionSummary {
 
         // Detail block: session-end only, one key per line, for the fields too long/structured for the
         // one-liner above. Same "none" discipline — a missing snapshot is explicit, not a blank line.
-        log.i("SESSION_DETAIL id=${s.id} phone_ident_json=${orNone(s.phoneIdentJson)}")
+        // F119: the phone's user-given name is replaced by its length; the export redactor misses it.
+        log.i("SESSION_DETAIL id=${s.id} phone_ident_json=${orNone(s.phoneIdentJson.let { if (it.isEmpty()) it else PhoneIdent.redactName(it) })}")
         log.i("SESSION_DETAIL id=${s.id} bond_start_json=${orNone(s.mgmtInfoStartJson)}")
         log.i("SESSION_DETAIL id=${s.id} bond_end_json=${orNone(s.mgmtInfoEndJson)}")
         log.i("SESSION_DETAIL id=${s.id} bond_start_list=${bondStart?.toString() ?: "none"}")
@@ -321,6 +329,19 @@ object SessionSummary {
 
     // ------------------------------------------------------------------------------------------------
 
+    /**
+     * v=3 (plan v5.9 D6): the origin [beginLaunch] records while an auto-claim's bring-up runs, null
+     * otherwise. Set by [withLaunchOrigin] on netprobe-cmd around the blocking runAll; read on the
+     * probe's ops thread, which runs that runAll while netprobe-cmd waits on it.
+     */
+    @Volatile private var launchOrigin: Origin? = null
+
+    /** Run [block] (a blocking runAll) with [origin] as the origin of a session it begins. */
+    fun <T> withLaunchOrigin(origin: Origin, block: () -> T): T {
+        launchOrigin = origin
+        try { return block() } finally { launchOrigin = null }
+    }
+
     /** How the session came to exist. Rendered as the `origin=` token; see [AttachInfo.origin]. */
     enum class Origin(val tag: String) {
         /** The framework launched `UsbAttachActivity` for the adapter; every [AttachInfo] field is real. */
@@ -328,6 +349,12 @@ object SessionSummary {
         /** Launcher / `am start` / task switch with the adapter already present; no trampoline ran for
          *  this session, so the attach-only fields carry the absent token. Built by [beginLaunch]. */
         LAUNCH("launch"),
+        /** v=3: the auto-claim (D6) after the adapter-attach broadcast; no trampoline, no UI. */
+        AUTO_ATTACH("auto_attach"),
+        /** v=3: the auto-claim after BOOT_COMPLETED. */
+        AUTO_BOOT("auto_boot"),
+        /** v=3: the auto-claim when the media host bound CarPlayMediaBrowserService. */
+        AUTO_BIND("auto_bind"),
     }
 
     /**
@@ -418,9 +445,11 @@ object SessionSummary {
         internal fun sevHistoryNames(): List<String> =
             synchronized(sevHistory) { sevHistory.map { Ocbm.sevName(it) } }
 
-        /** Raw `CT_PHONE_IDENT` JSON, or "" if never identified this session. */
+        /** Raw `CT_PHONE_IDENT` JSON, or "" if never identified this session. A clear ("") from the
+         *  box does not erase an identity already recorded (F-C8, 2026-10-08): the box replays an
+         *  empty ident on every subscribe in this role, and the summary wants what WAS known. */
         @Volatile var phoneIdentJson: String = ""; private set
-        fun onPhoneIdent(json: String) { phoneIdentJson = json }
+        fun onPhoneIdent(json: String) { if (json.isNotEmpty()) phoneIdentJson = json }
 
         /** `MGMT_INFO` JSON snapshots at session start and end. Capture BOTH ends deliberately — a diff
          *  between them is the bond-asymmetry signature behind fault 2 (iOS shows "known", box's own

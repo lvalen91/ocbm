@@ -486,6 +486,9 @@ fn process(
     let body: &[u8] = rx.payload.get(6..).unwrap_or(&[]);
     // One dispatcher, shared with the wireless RCS tunnel (`receiver::events`). These two paths
     // diverged once — 0x4171 ListUpdate was handled here and silently dropped there.
+    // Bench lever (off by default): raw hex of 0x5201/0x5202/0x5204 bodies when
+    // `/tmp/carplay_rg_hex` exists or `CARPLAY_RG_HEX` is set (`metadata::RG_HEX_FILE`).
+    metadata::log_route_guidance_hex("iap2", msg_id, body);
     metadata::dispatch(msg_id, body);
     // opt #5: NowPlaying (0x5001) / RouteGuidance (0x5201) / Maneuver (0x5202) are display-only —
     // metadata::dispatch above already parsed the TLV and forwarded it to the :9004 seam (the app shows

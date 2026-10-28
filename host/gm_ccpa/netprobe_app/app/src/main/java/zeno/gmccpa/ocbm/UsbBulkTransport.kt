@@ -59,8 +59,17 @@ class UsbBulkTransport(
     @Volatile private var epOut: UsbEndpoint? = null
     @Volatile private var readThread: Thread? = null
     private val running = AtomicBoolean(false)
+    /**
+     * Set by [declareDead]: the read loop exits at its next pass while [running] stays true, so the
+     * transport-death callback still fires. A new transport is built for every claim
+     * (OcbmProbe.runAllLocked), so this never carries over to the next link.
+     */
+    @Volatile private var deadRequested = false
+    /** Why the read loop was asked to end ([declareDead]); null when it ended on its own (ENODEV, read errors). */
+    @Volatile var deadReason: String? = null
+        private set
     @Volatile private var handler: ((ByteArray, Int) -> Unit)? = null
-    private val writeLock = Object()
+    private val writeLock = Any()
 
     @Volatile
     var lastError: String? = null
@@ -171,7 +180,7 @@ class UsbBulkTransport(
 
     private fun readLoop() {
         val buf = ByteArray(READ_BUF)
-        while (running.get()) {
+        while (running.get() && !deadRequested) {
             // Any throw here would otherwise propagate out of the thread and Android's default
             // handler would kill the PROCESS — one malformed frame taking down the instrument
             // mid-session and leaving the box subscribed until its watchdog fires.
@@ -213,8 +222,30 @@ class UsbBulkTransport(
                 }
             }
         }
+        val why = deadReason
+        if (why != null && deadRequested) {
+            log.e("read: ending the read loop on request — $why")
+            SessionTrace.Board.failed(OcbmBoard.USB_READ, "ended on request — $why")
+        }
         log.i("read loop ended")
         onTransportDead?.let { if (running.get()) it() }
+    }
+
+    /**
+     * v5.6 H1-1: end the read loop WITHOUT [stop], so [onTransportDead] fires (it is gated on
+     * [running], which stop() clears first). For the half-dead link: bulk OUT NAKs every write
+     * while bulk IN keeps timing out at [READ_TIMEOUT_MS], so the loop above never exits on its own.
+     * False when there is nothing to end — not running, or the read thread already exited (its
+     * own exit has delivered, or is delivering, the edge). [writeBulk] is unchanged.
+     */
+    override fun declareDead(why: String): Boolean {
+        val rt = readThread
+        if (!running.get() || rt == null || !rt.isAlive) return false
+        // Reason before flag: the read thread reads the flag, then the reason.
+        deadReason = why
+        deadRequested = true
+        log.w("declareDead: $why — the read loop ends within ${READ_TIMEOUT_MS} ms and the transport-death edge follows")
+        return true
     }
 
     private var readFailures = 0

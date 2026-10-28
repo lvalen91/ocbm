@@ -7,6 +7,14 @@ Board-specific material for the **C2Air**, a second adapter unrelated to the CPC
 > [!IMPORTANT]
 > Nothing here is cross-flashable with the CCPA. Different SoC, different instruction set.
 
+> [!NOTE]
+> Historical. This document describes the stock-firmware-based C2Air unit as of 2026-08 (kernel
+> 5.4.220, ADB over functionfs, OCBM run on 2026-08-17). The current C2Air baseline (clean LIVI-derived
+> Linux 7.2.x image, NCM control channel, FEL recovery) lives in the research repo
+> (`/Volumes/stuff/misc/research/carlinkit_adapters/c2air/`, `README.md` and `docs/hardware.md`). OCBM has
+> not been run on that new baseline. The C2Air MFi chip is 3.x (device version 0x07, 64-byte ECDSA
+> signature), not the CCPA's 2.0C (128-byte RSA); the bus and address (`/dev/i2c-1 @0x11`) match.
+
 ## The headline: OCBM needs almost no C2Air-specific Rust
 
 This was the open question, and it was answered by building and running it rather than by estimating.
@@ -35,7 +43,7 @@ board facts that normally break a port are **identical on both boards**:
 
 | Fact | CCPA | C2Air |
 |---|---|---|
-| MFi coprocessor | `/dev/i2c-1 @0x11` | `/dev/i2c-1` (`LY_MFI_I2C_BUS=1`) — same |
+| MFi coprocessor | `/dev/i2c-1 @0x11` (2.0C, 128-byte RSA) | `/dev/i2c-1` (`LY_MFI_I2C_BUS=1`), same bus and address, but MFi 3.x (64-byte ECDSA) |
 | USB gadget state | `/sys/class/android_usb/android0/state` | present, same path, reports `CONFIGURED` |
 | WLAN interface | `wlan0` | `wlan0` (AIC8800, driver in-kernel) |
 

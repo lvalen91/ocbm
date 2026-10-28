@@ -152,7 +152,7 @@ build_accessory_wifi_configuration_information(&AccessoryWiFiConfig { ssid, pass
 
 **Change:** replace the `read_hostapd_ap_config()` call in the `0x5702` arm of `fn process_one` (`crates/vendor/wireless/src/bt_driver.rs`)
 with a source fn that
-builds `AccessoryWiFiConfig` from app-supplied vehicle creds handed up over OCBM (`myChevrolet 32D4` +
+builds `AccessoryWiFiConfig` from app-supplied vehicle creds handed up over OCBM (`<vehicle SSID>` +
 user passphrase + WPA2 + 5 GHz channel), reusing the same `has_wpa && !pass.is_empty() →
 Wpa2OrWpa3Personal` mapping. The builder, TLV layout, enums, and session-1 dispatch are untouched. Needs
 one new OCBM control message carrying `{ssid, passphrase, channel}` + a holder the `0x5702` handler
@@ -367,7 +367,7 @@ wireless launch wrapper so the box raises no AP; swap the `read_hostapd_ap_confi
 spawned.
 
 **B4. BT bring-up + handoff, driven from the app.** **Device-proven** — the iPhone pairs, completes iAP2
-identify, sends `0x5702`, receives the truck's credentials, and joins `myChevrolet 32D4`. iOS retries
+identify, sends `0x5702`, receives the truck's credentials, and joins `<vehicle SSID>`. iOS retries
 `0x5702` (observed twice per session); the handler is idempotent.
 
 ### Converged

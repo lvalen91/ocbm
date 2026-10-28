@@ -11,8 +11,8 @@ authoritative on session sequencing) → [`01_FINDINGS.md`](01_FINDINGS.md) (pro
 
 A **wireless-only** CarPlay receiver running as an **unprivileged Android app** on a 2024 Silverado
 head unit (GM Info 3.7 / `gminfo37`, Android 12 / API 32, x86_64). The iPhone streams CarPlay to the
-app **over the vehicle's own 5 GHz hotspot** (`myChevrolet 32D4`, bridge `br0`, head unit at
-`192.168.5.1`). No cable ever connects the iPhone to anything in this design.
+app **over the vehicle's own 5 GHz hotspot** (its SSID is deliberately not recorded in these docs; bridge `br0`,
+head unit at `192.168.5.1`). No cable ever connects the iPhone to anything in this design.
 
 A Carlinkit **CPC200-CCPA** adapter, on USB and speaking a custom protocol (**OCBM**), does exactly two
 jobs: it is the phone's **Bluetooth radio**, and it is the **MFi coprocessor**. It is not the AirPlay
@@ -24,14 +24,25 @@ RTL8822CS. The firmware's `radio_caps` layer (`RADIO_CHIP`, `RADIO_BT_ATTACH`, `
 `RADIO_BT_AFTER_WLAN`) abstracts that difference, so nothing in this app is chipset-aware and neither
 box is "the test box". Two places where the variant is nonetheless observable, both recorded where
 they matter: the Realtek part must load its WLAN driver before Bluetooth will attach, which makes
-`wlan0` exist (§2 below), and the two boxes derive different identities (`CarLink-626a` vs
-`CarLink-f867`), so a phone bonded to one holds no record for the other.
+`wlan0` exist (§2 below), and the two boxes derive different identities (each box's Bluetooth name
+is derived from its own identity), so a phone bonded to one holds no record for the other.
 
-The app installs under its own package name, `zeno.gmccpa` — the GM USB fixed-handler squat
-(`android.car.usb.handler`) was reverted (2026-09-08) — TRUCK-VERIFIED. The app goes through the
-platform's normal USB-attach permission flow, one-time dialog included — and **that was true under
-the squat as well**: corrected 2026-09-10, the squat did NOT deliver the silent per-UID grant it was
-adopted for, so the revert cost nothing (the header comment of `netprobe_app/app/src/main/AndroidManifest.xml` plus the `USB_DEVICE_ATTACHED` intent-filter on `UsbAttachActivity`; stale line cite, re-anchored 2026-09-10 — the old line was the `package=` attribute).
+**Changed 2026-10-15 (owner request):** the app installs as `android.car.usb.handler` again (classes stay
+`zeno.gmccpa.*`; `tools/build_apk.sh` `INSTALL_PKG`), and the manifest declares the fixed-handler component
+`android.car.usb.handler.UsbHostManagementActivity` as an alias onto `UsbAttachActivity`, so GM's fixed-handler
+path grants this uid and starts the trampoline on each attach. The rest of this paragraph is the
+2026-09-08..10-15 state: the app installed as `zeno.gmccpa` — the GM USB fixed-handler squat
+(`android.car.usb.handler`) was reverted (2026-09-08) and never delivered the silent grant it was adopted
+for (owner, 2026-09-10). **Corrected 2026-10-08:** the USB permission prompt is now removed by a
+*persistent* grant written once over adb by an `app_process` helper running as the shell uid (bench-verified
+2026-10-07; see `docs/host/01_ANDROID_AND_AAOS.md`, "Bench verification of the persistent USB grant").
+It is keyed to the app's uid, so it must be re-run after any uninstall + reinstall and after a box swap; a
+plain `install -r` keeps it. With it in place the live attach route is `AdapterAttachReceiver` (a manifest
+receiver for `USB_DEVICE_ATTACHED`, `AndroidManifest.xml:234-240`), not the `UsbAttachActivity` trampoline,
+which stays declared but dormant because GM's fixed-handler dead end means the resolver never launches it
+(manifest comment, `AndroidManifest.xml:130-135`) — not dormant since 2026-10-15: the fixed handler now
+starts it through the alias, after the grant, alongside the receiver. Without the grant the auto-claim never prompts: it
+logs `SKIP_NO_GRANT` and the driver's Start asks as before (`AutoClaimPolicy.kt`).
 
 ---
 
@@ -68,7 +79,7 @@ which no shell script or immediately-exiting binary satisfies.
 >
 > Observed consequence in the same session: `rx-connect` came up on it and advertised a **second**
 > `CarPlay._airplay._tcp` on `:5000` at `192.168.43.1`, under a different identity (`device id
-> A6:2E:60:15:A8:43`, `pi 1544acf6-…`) from the one the app advertises and the one the box presented
+> <MAC-1>`, `pi 1544acf6-…`) from the one the app advertises and the one the box presented
 > over Bluetooth. It did no harm — `192.168.43.1` is the box's own unbridged interface and the phone
 > is on `br0` — but "nothing can reach it" is now an accident of routing rather than an absence of
 > the interface, and it is a competing AirPlay endpoint with a mismatched deviceID, which is exactly
@@ -99,8 +110,10 @@ it is a raw byte pipe. Then `CT_HELLO` → `CT_HELLO_ACK`, `CT_SETTIME` (the box
 there, reading `wifi_ap:false` out of that same config to suppress its own SoftAP
 (the `BOX_WIFI_AP` test inside `wireless_up()` in `session_supervisor.sh`: `BOX_WIFI_AP=0` → `"box SoftAP SUPPRESSED"`; stale line cite, re-anchored 2026-09-10 — the old lines are now `pairing_interactive()`'s header comment) while still bringing
 up Bluetooth (`radio_hal.sh bt_on`, unconditional). If the app is not running and subscribed, no session
-can start. (Practical consequence: give the app a `device_filter.xml` +
-`ACTION_USB_DEVICE_ATTACHED` filter on `0x1314:0x2d00`, so plugging in the adapter *is* the trigger.)
+can start. (Practical consequence: the app is told about the adapter without being open — corrected
+2026-10-08: the live trigger is the manifest `AdapterAttachReceiver` plus two more, see §4e. The
+`device_filter.xml` + `ACTION_USB_DEVICE_ATTACHED` filter on `0x1314:0x2d00` is still declared on the
+dormant `UsbAttachActivity`.)
 
 The box's `CT_BOX_HEALTH` (`0x1A`) report carries per-subsystem readiness bits, including
 `BH_HCI_PRESENT` (bit 0), which the box sets from `HCIGETDEVINFO` on a raw HCI socket — the same ioctl
@@ -132,9 +145,12 @@ in this loop; it observes progress through `CT_SESSION_EVENT`.
 ### Phase 3 — handoff to the *vehicle's* hotspot
 
 The iPhone sends iAP2 `0x5702` *RequestAccessoryWiFiConfigurationInformation*. The box answers `0x5703`
-with the **vehicle's** hotspot credentials — SSID, passphrase, security type, channel — supplied by the
-app over OCBM, not read from the box's own `hostapd.conf`. The box's AP never comes up. The iPhone
-leaves Bluetooth-only and joins `myChevrolet 32D4` on `br0`. There is no join confirmation over iAP2 — a
+with the **vehicle's** hotspot credentials — SSID, passphrase, security type — supplied by the
+app over OCBM, not read from the box's own `hostapd.conf`. (Corrected 2026-10-08: no channel is sent. The
+subscribe config carries `wifi_ssid`/`wifi_pass` only, `SubscribeConfig.kt:24-25`, so the box keeps its
+stock hostapd channel line — owner, 2026-10-07. There are no compiled-in credentials either, OD-7A: with
+none saved, a start opens the hotspot dialog instead of subscribing.) The box's AP never comes up. The iPhone
+leaves Bluetooth-only and joins the vehicle hotspot on `br0`. There is no join confirmation over iAP2 — a
 successful `0x5703` write is the only signal, and iOS retries `0x5702` two or three times as a matter of
 course, so the handler must be idempotent.
 
@@ -253,6 +269,16 @@ Every state has an exit. Discovery is suspended in exactly `SESSION_UP`, `BOX_LO
 `GRACE`, and running everywhere else including `STALLED` — the phone may return unprompted at any
 moment.
 
+**`SESSION_UP` is entered at pair-verify, not at accept (A-F1, 2026-10-08).** The accept of a control
+connection on `:7011` still stands the consumers and the CarPlay screen up at once (`CarPlayRx.onSessionUp`
+→ `SessionCore.showCarPlayScreen`; streams are SETUP within ~300 ms of RECORD), but `SessionCore.sessionUp`
+and `supervisor.onSessionUp` now move in the pair-verified callback (`SessionCore.onPairVerified`, before the
+rekey early return). Until then any hotspot client that opened the port paused discovery and cancelled every
+recovery clock. A connection still plaintext 10 s after accept is closed by the pump as `EndReason.UNVERIFIED`
+(`UnverifiedConnRule`, `CarPlayRx.handleNative`), sending or silent; SessionCore takes the screen down but
+does NOT hand that end to the supervisor — no GRACE, no ladder reset, the phase stands. A real phone that
+closes early on its own still arrives as `CLOSED` and keeps the grace window (case 2 above).
+
 ### Rules that are not obvious
 
 - **`BTP_WIFI_HANDOFF` is the only trustworthy "a CarPlay connect is coming" signal.** The phone
@@ -266,6 +292,15 @@ moment.
   session. `onBtPhase` therefore returns early in `SESSION_UP` / `BOX_LOST_SESSION_UP`, as
   `onBoxHealth` and `onDialAccepted` already did. Device-observed 2026-09-08 (`CarPlay live -> pairing`
   at 900 rendered frames); fixed the same day.
+- **No new control connection displaces a live encrypted session (OD-7F, owner 2026-10-07; landed in the
+  v5.8 working tree).** The accept loop asks `Admission.decide` (`CarPlayRxSlots.kt:124-166`) first: a LOCAL
+  newcomer (`Admission.isLocal`: loopback, the socket's own address, or an address the head unit owns, or
+  an unnameable peer) is always refused; with no incumbent, a
+  closed incumbent, or an incumbent whose control channel is not yet ENCRYPTED (pair-verify not done), the
+  newcomer is admitted; against an ENCRYPTED incumbent every newcomer is refused. There is no quiet-time or
+  third-try escape. Host-JUnit only (`AdmissionPolicyTest`): the cp12 bench capture (rc1/rc2) contains no refusal line, so
+  the refusal path has not been exercised on the unit. The pre-v5.8 behaviour was
+  "newest connection wins", which is what the sentence above about the rediscover loop describes.
 - **Losing the box mid-session must not end the session.** The A/V path is Wi-Fi and does not depend on
   Bluetooth or on the box once streaming. On the box's return the app re-establishes the link *without*
   `CT_SUBSCRIBE` (`OcbmProbe.runAll(subscribe = false)`) and asserts `CT_RADIO` off, so the MFi relay
@@ -291,11 +326,16 @@ moment.
 | 2 | `MGMT_RESTART_WIRELESS` | 180 s | no |
 | 3 | terminal: tell the driver to reconnect Bluetooth from the iPhone | — | — |
 
-(`SessionSupervisor.kt`.) The ladder re-enters itself on a timer; only a real session resets it — but
-since 2026-09-08 it stands that timer DOWN while a handshake is in flight (see the refinement below).
-Cooldowns are correctness, not politeness — see §4c. The "Recover" button runs the same ladder from
-rung 0 ignoring cooldowns, because those exist to stop the machine hammering the box unattended and a
-human request is not that.
+(`SessionSupervisor.kt`.) The ladder re-enters itself on a timer. Its POSITION resets to rung 0 on a real
+session (`onSessionUp`, which also cancels the retry), on a session ending (`onSessionDown`) and — since
+2026-10-08, B-F1 — on the box link going away outside GRACE (`onBoxLost`: a retry armed before the
+transport died used to fire into the relink and exhaust the ladder, or fire rung 2 into a freshly relinked
+box); the per-rung cooldown stamps survive all three. Since 2026-09-08 it also stands that timer DOWN while
+a handshake is in flight (see the refinement below).
+Cooldowns are correctness, not politeness — see §4c. The ladder runs on its own; Restart Session
+clears its cooldowns, because those exist to stop the machine hammering the box unattended and a
+human request is not that. (Corrected 2026-10-08, plan v5.9 UI-1: the "Recover" button that ran the
+ladder from rung 0 was merged into Restart Session — `SessionSupervisor.onOperatorRestart`.)
 
 **Rung 3 is not an action, and that is deliberate.** A full manual reset — box power-cycled, app
 relaunched, receiver re-bound, Bluetooth re-paired, Wi-Fi re-joined through the proper CarPlay prompt —
@@ -446,6 +486,107 @@ strongest lever carrying no flap exposure at all.
    `MGMT_FORGET_ALL` on the box (`--es run ocbm_forget`) and Forget This Device on the iPhone — and
    re-pair. Clearing only one leaves the same half-bond in the other direction. See the three
    independent pairing stores in `evidence/session_2026-08-12-freshpair/README.md`.
+
+---
+
+## 4e. The app surface, as built (2026-10-08, v5.8 + v5.9 working tree)
+
+*One place for what the Kotlin shell does around the protocol. Everything here is in the uncommitted v5.8/v5.9
+working tree; file:line cites are to `netprobe_app/app/src/main/java/zeno/gmccpa/`. Bench status is stated per
+item. The source fix round of 2026-10-08 is finished, so nothing here is marked pending.*
+
+**Launcher (`Ui.kt`, `LauncherModel.kt`).** Two panes: status on the left (state word, driver line, pairing code,
+the adapter's Bluetooth name, the V5 rekey hint, and the always-visible hotspot chip "Hotspot: <ssid> · Edit" or
+"Hotspot not set · Set"), actions on the right chosen by state (`actionsFor`, `LauncherModel.kt:140-154`). The
+verbs are **Set hotspot** (while credentials are missing), **Start**, **Restart session**, **Stop** and
+**Adapter & logs**. There is no Recover, Box Info, Log Scope or Log Status button any more (UI-1/UI-2, D001/D003):
+Recover was merged into Restart session (`Ui.kt:62-72`; `SessionSupervisor.onOperatorRestart`, `:835`, clears
+the recovery ladder's cooldowns), and the **Adapter & logs** sheet (`LauncherModel.kt:85-96`) holds Restart adapter
+Bluetooth, Reboot adapter, Forget pairing (each confirmed, `confirmBodyFor`), Export logs, and the full "Last
+message". Saving changed hotspot details while the box is subscribed offers **Apply now (restarts the session)** /
+Later (OD-9A, `Ui.kt:551-556`, `MainActivity.kt:86-87`). Driver wording is the OD-9B table, `driverLine`
+(`LauncherModel.kt:180-200`). Bench: the layout and keyboard handling are still on the pending list. 2026-10-08
+(F-C3): the launcher's metrics are now applied from a `ViewTreeObserver.OnPreDrawListener` (`Ui.kt`, replacing
+the layout-change listener that rebuilt the buttons and called `requestLayout()` inside the layout pass);
+needs the launcher shown on the bench to measure (gfxinfo janky %, "requestLayout() improperly called" count).
+
+**Hotspot credentials (OD-7A).** No compiled-in SSID or passphrase: `LauncherUi` starts blank and loads only what
+`HotspotPrefs` saved (`Ui.kt:86-100`); the dialog's Save is the only writer. With none saved, Start or an attach
+opens the dialog instead of subscribing (`SessionCore.kt:765`). `--es ssid/--es pass` apply to that run only and
+are not persisted (`HotspotPrefs.kt` KDoc). The app sends no channel (`SubscribeConfig.kt:24-25`). A `chan` an
+older build saved is purged by the next Save (D015).
+
+**Claiming the adapter with the app closed (D6, OD-9D, OD-9E).** Three triggers call `AutoClaim.trigger`
+(`AutoClaim.kt:33`): `usb-attach` (`AdapterAttachReceiver`), `boot` (`logging/BootReceiver.kt`, BOOT_COMPLETED,
+about 48 s after the media-browser bind has usually claimed already, so it is mostly a NOOP) and `media-browser
+bind` (`CarPlayMediaBrowserService.onCreate`, about +7 s at boot when this app is the media source). The decision
+table is `AutoClaimPolicy.decide` (`AutoClaimPolicy.kt:45-57`); every trigger logs `auto-claim (<origin>):
+<DECISION> — <why>`. No dialog is ever raised from the background. An on-screen **Stop** suppresses every trigger
+until the next head-unit boot — a Stop does NOT survive a reboot (OD-9D): the boot identity is
+`Settings.Global.BOOT_COUNT`, else `/proc/sys/kernel/random/boot_id`, else not suppressed
+(`AutoClaim.kt:99-153`, `AutoClaimPolicy.sameBoot`, `:82`); Start and Restart session clear it. While the adapter is
+linked or a session runs, ONE ongoing notification (channel `gmccpa_status`, "GM CCPA status"; the old
+`carplay_session` channel is deleted at start) shows the state and carries no names or addresses (OD-9E,
+`av/StatusNotice.kt`, `av/CarPlaySessionService.kt`). It replaces the old static "CarPlay active" notification,
+which existed only while a session ran. Bench: headless auto-claim through the media-browser bind, and the status
+notification, were observed on rc2 (plan_v5 handoff block); the other triggers, Stop-per-boot and the notification
+text are still bench-pending. Fix round finished 2026-10-08: "adapter reconnecting" with no adapter is by design, not a leak — a detach arms
+a relink bounded at 10 minutes (`OcbmProbe.kt:494`, deadline `:591`). When that relink ends without a link —
+expired, capped or failed, adapter still enumerated or not — the hold is released by the same rule every other
+trigger end uses (`AutoClaimPolicy.shouldRelease`: no link and no relink owning the claim; `SessionCore.onRelinkDone`
+→ `releaseLinkIfUnlinked`, B-F3 2026-10-08; before that an enumerated-but-ungranted adapter kept the hold and
+its "Adapter connected" notification up indefinitely).
+
+**Pairing key (V5, Q001).** The accessory's Ed25519 seed is 32 `SecureRandom` bytes generated once per install in
+`noBackupFilesDir` (`AccessoryKey.kt`); `CarPlayRx` has no default seed. An install that finds an existing peer
+store but no seed (an upgrade), or a corrupt/legacy-pattern seed file, persists a rekey flag; `RekeyFlow` then
+runs Forget Pairing automatically once on the next OCBM link (OD-8B) and the launcher shows "Accessory key
+changed — press … then forget this car on the iPhone, then pair again" until a pair-verify succeeds under the new
+key. Every existing iPhone pairing must be redone once (owner, 2026-10-07). Host-JVM tested; the on-unit run
+(B-V5-1) is pending. There is no Kotlin pairing fallback: when the native core is unavailable the connection is
+closed with `native core unavailable — closing; there is no fallback` (`CarPlayRx.kt:1359`; D016).
+
+**Voice (calls, Siri, nav, alerts).** `:9003` carries voice-tag v2 (BEGIN/END, receive stamp, RTP timestamp). Each
+voice stream gets a jitter buffer keyed on the RTP timestamp (`av/VoiceJitterBuffer.kt`): target = the SETUP's
+`audioLatencyMs` (absent -> 80 ms, floor 32 ms), watermark W = max(target + 20, 200) ms, trimmed DOWN TO W
+continuously ("real time, never a growing buffer", owner 2026-10-07), the node pool as in stock
+(`av/VoiceLatency.kt:13-46`). The AudioTrack is sized to stock's per-usage device buffer (call 32, Siri 128, alert
+48, nav 48 ms) and primed with silence. **Start-transient exemption (fix2):** the HAL bus takes about 140-400 ms
+to wake after `play()`; the buffer is not trimmed during that stall, what built up is carried as an allowance and
+paid back by dropping only silent AUs (`VoiceJitterBuffer.kt:220-262`, `VoiceLatency.START_STALL_CAP_MS` 500). On
+the rc2 nav stream logged at 04:48:20 that cost "excess 11 … excess loud 0, silent catch-up 9". The voice workers
+and the `:9003` reader run at `THREAD_PRIORITY_URGENT_AUDIO` (`VoiceLatency.VOICE_THREADS_URGENT_AUDIO`,
+`VoiceRouter.kt:421-428`). **NAV takes no audio focus** and plays live from its BEGIN to its END (OD-8C/8D,
+stock-aligned); CALL, ASSISTANT and ALERT still request focus. Media ducking follows the iPhone's `duckAudio` /
+`unduckAudio` (volume, duration) through one shaper; an unduck ramps back to 1.0 at once and the GM platform duck
+carries the tail (`NAV_UNDUCK_HOLD` = false, the non-default software hold). **Stock-style duck lift:** once the
+nav track's head first advances (bus1 active) our own software duck lifts in 100 ms so media sits at the platform
+duck alone instead of stacking (`VoiceStreams.kt:957-967`, `VoiceLatency.NAV_DUCK_LIFT_ON_BUS`, owner
+2026-10-08). Rc2 capture: lifts logged 286 ms and 313 ms after `duckAudio`, with the platform duck at -18.70 dB
+(cp12, 04:48:16 and 04:48:46). Design and the older sections: `13_AUDIO_ROUTING.md`. **After a permanent media-focus
+loss** (the driver picks FM) focus is re-requested only on a resume intent — a MediaSession play, a new screen, the
+surviving screen returning to the front (`CarPlayActivity.onResume` -> `AacPlayer.onScreenReturned`,
+`CarPlayActivity.kt:1110`) — or when the phone itself resumes (`av/FocusReclaimRule.kt`; a phone already paused at
+the loss counts). The loss also takes MainAudio from the phone as stock does (OD-9C, `av/MainAudioHandover.kt`).
+**A focus request REFUSED at start** (AOSP rejects MUSIC while a CALL holds focus) holds media silent until a
+later request is granted, as stock does (GM Cinemo configures its media streams only after a granted request):
+the refusal sets the same `pausedForFocus` hold and `feed`'s gate re-requests once per 3 s while media flows,
+the first refusal an E, repeats at I (C-F1 variant B, owner-approved 2026-10-08; until then the refusal was logged
+once and media played unfocused over the call for the rest of the session). Bench-pending.
+Voice dead code (D010/D019) was removed. Bench-pending: whether iOS pauses on the take and whether a HID PLAY
+alone resumes it (plan B-MED-9).
+
+**Media card and launcher tile (v5.9 MED).** `NowPlayingMerge` treats now-playing as a delta stream: a title change
+no longer blanks artist/album/art (`av/NowPlayingMerge.kt:1-30`). `CarPlayMediaBrowserService` is selectable while
+idle (STATE_STOPPED, actions 0, placeholder card; `av/CarPlayMediaBrowserService.kt:316-322,374-386`) and carries
+`com.gm.homescreen.visibility = HIDDEN` so the grid shows one launcher icon, not two (`AndroidManifest.xml:221`).
+Bench (rc1, plan_v5 handoff block): one icon, source and metadata kept across same-artist skips — not re-verified
+by this documentation pass. Whether GM's own media picker honours HIDDEN is recorded as unknown in the manifest
+comment.
+
+**Bench-only hooks.** `mic_inject` and `finish_launcher` exist only when `GMCCPA_BENCH=1` selects `src/bench`; a
+release build compiles the `src/nobench` stub that only logs "not in this build (release)". `mic_inject` is
+additionally gated by `debug.gmccpa.mic_inject` (`bench/BenchHooks.kt`). Runbook: `06_BRINGUP_RUNBOOK.md` §4.
 
 ---
 

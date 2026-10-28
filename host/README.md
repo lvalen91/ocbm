@@ -5,9 +5,9 @@ Android/AAOS.
 
 | Path | What it is |
 |---|---|
-| `accbench.c` | libusb throughput **benchmark** for the `/dev/usb_accessory` pipe — prints the device's USB descriptors and measures IN/OUT throughput. Proven the transport: VID 0x1314, IF0 class 0xFF, EP IN 0x83 / OUT 0x02, 512 MPS; **339 Mbps read / 90 Mbps write**. |
+| `accbench.c` | libusb throughput **benchmark** for the `/dev/usb_accessory` pipe — prints the device's USB descriptors and measures IN/OUT throughput. Proven the transport: VID 0x1314, IF0 class 0xFF, bulk pair enumerated, 512 MPS — **0x81 IN / 0x01 OUT** as observed on the shipped gadget (the `(ifnum, ep_in, ep_out)` defaults in `ocbm-host/src/main.rs` set them and walks the interface's endpoints; `docs/carplay/00_ARCHITECTURE.md` endpoint-address correction, 2026-08-17); the original benchmark run recorded 0x83 / 0x02 on a unit not identified, so never hard-code either; **339 Mbps read / 90 Mbps write**. |
 | `uart_cmd.sh` | drive the box's serial root console from the host (single-fd, 115200) — send a command, capture output. Works when NCM is down / during partial boots. |
-| `ocbm-host/` | the host end of the OCBM multiplexer (Rust) — claims the accessory interface, demuxes channels (IP tunnel, MFi bridge, A/V, control). Subcommands: `settime`, `echo`, `rtt`, `mfi`, `console`, `ip`, `srcbench`, `sinkbench`, `bridge`, `av`, **`avdec`**, `session`, `setup-relay`, `push`, `pull`. (`hello` is the DEFAULT mode string rather than a dispatch arm: every invocation sends HELLO and pushes the box clock before the `match`, and "hello" falls through it — so `ocbm-host hello`, like a bare `ocbm-host`, is a HELLO-plus-clock-push run and nothing more.) |
+| `ocbm-host/` | the host end of the OCBM multiplexer (Rust) — claims the accessory interface, demuxes channels (IP tunnel, MFi bridge, A/V, control). Subcommands: `settime`, `echo`, `rtt`, `mfi`, `console`, `ncm` (CH_MGMT ENTER_NCM: reboots the box into USB-NCM maintenance), `ip`, `srcbench`, `sinkbench`, `bridge`, `av`, **`avdec`**, `session`, `setup-relay`, `push`, `pull`. (`hello` is the DEFAULT mode string rather than a dispatch arm: every invocation sends HELLO and pushes the box clock before the `match`, and "hello" falls through it — so `ocbm-host hello`, like a bare `ocbm-host`, is a HELLO-plus-clock-push run and nothing more.) |
 | `aa-headunit/` | Minimal **Android Auto head-unit client** for bench-testing the AA projection protocol against a phone's own developer head-unit server — no Carlinkit box in the loop. See [`aa-headunit/README.md`](aa-headunit/README.md). |
 | `CallSim/` | **Fake phone calls** for Android Auto telephony testing — a self-managed Telecom `ConnectionService` whose calls Telecom, the dialer and gearhead treat as real. See [`CallSim/README.md`](CallSim/README.md). |
 | `mfi-probe/` | Host-side exerciser for `mfid`: points at the box over USB-NCM and confirms the coprocessor answers with a real certificate and signature. The direct analogue of `CH_MFI`, minus OCBM. |
@@ -21,7 +21,7 @@ Android/AAOS.
 # accbench (macOS/Linux, needs libusb):
 clang accbench.c -o accbench -I/opt/homebrew/include -L/opt/homebrew/lib -lusb-1.0
 DYLD_LIBRARY_PATH=/opt/homebrew/lib ./accbench info 1314        # dump descriptors
-./accbench read 1314 1520 6 262144                              # bulk-IN throughput
+./accbench read 1314 2d00 6 262144                              # bulk-IN throughput (2d00 = OCBM accessory; 1520/1521 are the stock Carlinkit firmware ids, not the OCBM accessory)
 ```
 
 ## Implemented

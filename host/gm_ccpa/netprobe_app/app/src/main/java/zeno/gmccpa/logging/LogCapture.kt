@@ -53,11 +53,18 @@ import kotlin.concurrent.withLock
  *   2. READ_LOGS is mapped to the supplementary gid `log`, and supplementary gids are assigned at
  *      **fork time**. After a grant, the already-running process still lacks the gid:
  *      `checkSelfPermission` says GRANTED while logd still filters output to our own uid. So the
- *      permission check alone is not proof, and [Session.verifyScope] additionally checks whether
- *      any captured line carries a pid other than ours. When it does not, that is an ERROR (since
- *      2026-09-10; it was a WARN): the whole-OS half of the capture — GM's CarPlay service,
- *      `wpa_supplicant`, the USB stack, the permission dialog — is silently absent for the rest of
- *      the process's life, which is precisely the evidence that scope exists to collect.
+ *      permission check alone is not proof, and [Session.probeForeignUid] additionally asks logd,
+ *      once, before the first capture child, for a line of ANOTHER uid. When it sees none, that is
+ *      an ERROR (since 2026-09-10; it was a WARN): the whole-OS half of the capture — GM's CarPlay
+ *      service, `wpa_supplicant`, the USB stack, the permission dialog — is silently absent for the
+ *      rest of the process's life, which is precisely the evidence that scope exists to collect.
+ *      (2026-10-06: the check was "a captured line with a pid other than ours". That was wrong
+ *      twice: the pid parser read the `+0000` UTC token of the year/UTC format and only ever matched
+ *      '\r'-split box-log fragments, and logd filters an unprivileged reader by UID, so lines from
+ *      DEAD pids of our own uid stay visible — "a pid ≠ ours" false-verifies the exact
+ *      same-process-after-grant case this trap is about. The probe reads `-v uid`, splits on '\n'
+ *      only, and degrades only on positive evidence: a probe that cannot run is INCONCLUSIVE, a W
+ *      line and a Board entry, never a degrade.)
  *
  * ## Self-healing the degraded state (2026-09-10)
  *
@@ -68,9 +75,9 @@ import kotlin.concurrent.withLock
  * the same check — so the next start ([Session.resolveScope]) can:
  *
  *  - in a FRESH process with the grant still held and WHOLE_OS requested: say that it is re-verifying
- *    whole-OS because the previous process was stale, and clear the marker the moment a foreign
- *    pid is seen (the heal);
- *  - in the SAME process (a capture restart from the UI): skip the 15 s pretence and go straight
+ *    whole-OS because the previous process was stale, and clear the marker the moment the probe
+ *    sees a foreign uid (the heal);
+ *  - in the SAME process (a capture restart from the UI): skip the probe and go straight
  *    to own-process, saying that only a re-fork can fix it;
  *  - with the grant held but OWN_PROCESS chosen by the operator: say that whole-OS is available.
  *    The operator's choice is respected — [CapturePrefs] is theirs — this is a hint, not an override;
@@ -92,9 +99,14 @@ import kotlin.concurrent.withLock
  * over a 39-minute leg — ~227 MB/h unfiltered, of which 88 % is V/D and 60 % is two Codec2 tags. A
  * multi-day unattended capture at that rate is not storable, so [DEFAULT_SYSTEM_FILTER] keeps V for
  * the tags that matter to the two faults being chased (USB attach permission prompt, iPhone BT
- * auto-reconnect) plus `NETPROBE`, and puts a `*:I` floor under everything else. That is ~27 MB/h,
- * which the 768 MB ceiling turns into roughly a day of rolling history. Pass `filterSpec =
- * listOf("*:V")` to capture everything and accept a ~3 h window instead.
+ * auto-reconnect) plus `NETPROBE`, and puts a `*:I` floor under everything else. On that 2026-08-18
+ * drive capture that came to ~27 MB/h, which the 768 MB ceiling turns into roughly a day of rolling
+ * history. Pass `filterSpec = listOf("*:V")` to capture everything and accept a ~3 h window instead.
+ *
+ * Re-measured 2026-10-06 on gminfo37, idle, no phone: ~61 MB/h admitted, 76-77 % of bytes from two
+ * gmloggerd E tags (gmlogger housekeeping, nothing USB/BT). At that rate 768 MB is ~12.5 h. Both
+ * tags are now suppressed (filterspec for `GMLoggerService|Archiver`, [Config.pumpDrop] for
+ * `GMLoggerService::Util`). The GMLogger rate varied within one boot.
  *
  * ## Threading model
  * Four threads touch a running session; each owns a distinct stage of a one-way pipeline and no
@@ -155,12 +167,16 @@ object LogCapture {
      *   adb shell user), and it is voluminous when it is readable. The buffer is probed and its
      *   readability recorded in every file header either way.
      * @param appVersion recorded in the header; keep in sync with `AndroidManifest.xml` versionName.
+     * @param pumpDrop substrings whose lines the pump discards before the queue, [Scope.WHOLE_OS]
+     *   only, counted in [Status.linesSuppressed] (never a DROPPED marker — that one means
+     *   backpressure). For tags logcat's filterspec cannot name; see [DEFAULT_PUMP_DROP].
      */
     data class Config(
         val scope: Scope = Scope.WHOLE_OS,
         val filterSpec: List<String> = DEFAULT_SYSTEM_FILTER,
         val includeKernel: Boolean = false,
         val appVersion: String = "4.0",
+        val pumpDrop: List<String> = DEFAULT_PUMP_DROP,
     )
 
     /** A snapshot; every field is read from a volatile or an atomic, so it is never torn but may be stale. */
@@ -184,6 +200,8 @@ object LogCapture {
         val linesWritten: Long,
         val linesDropped: Long,
         val restarts: Int,
+        /** Lines discarded by [Config.pumpDrop] (whole-OS only); not a loss, a filter. */
+        val linesSuppressed: Long = 0L,
     )
 
     const val LOGS_DIR = "logs"
@@ -197,7 +215,8 @@ object LogCapture {
      * which silently went stale when the fixed-handler package squat was reverted to `zeno.gmccpa`
      * on 2026-09-08: the app kept printing a grant recipe for a package that no longer exists on
      * the device, and `pm grant` fails with nothing but "Unknown package". Derived, it cannot drift
-     * across the next rename (fixed 2026-09-09). BuildConfig is deliberately NOT used — the
+     * across the next rename (fixed 2026-09-09) — and it did not when the install package went back
+     * to android.car.usb.handler on 2026-10-15. BuildConfig is deliberately NOT used — the
      * canonical build (`tools/build_apk.sh`) is a raw kotlinc compile that generates no
      * BuildConfig class, and this module does not enable `buildFeatures { buildConfig true }`.
      */
@@ -209,8 +228,9 @@ object LogCapture {
     /**
      * The same grant, pinned to the Android user this process runs as. `pm grant` without `--user`
      * targets user 0, and on this head unit the app runs as user 10 (`u10a…` in `Start proc`), where
-     * runtime/development permission state is per-user. Printed only on the refuted-fork path in
-     * [Session.verifyScope], where "did the grant land for the right user" is the next question.
+     * runtime/development permission state is per-user. This is the form every printed recipe uses
+     * since 2026-10-08 (the degraded-scope WARN in [Session.start], the capture file header, and the
+     * refuted-fork path in [Session.verifyWholeOs]); [grantCmd] remains for the user-less form.
      * The user id is `uid / 100000`, the same arithmetic the framework uses; nothing is hard-coded.
      */
     fun grantCmdForUser(ctx: Context): String =
@@ -246,8 +266,18 @@ object LogCapture {
         "HeadsetService:V", "HeadsetClientService:V", "BluetoothPan:V",
         // enough system context to place the above in a lifecycle
         "ActivityManager:V", "ActivityTaskManager:V",
+        // 2026-10-06: this tag and GMLoggerService::Util (DEFAULT_PUMP_DROP) were 76-77 % of captured
+        // bytes, all gmlogger housekeeping E. argv via ProcessBuilder, no shell: `|` is literal (rc=0 on the radio).
+        "GMLoggerService|Archiver:S",
         "*:I",
     )
+
+    /**
+     * logcat's filterspec splits at the FIRST ':' and rejects this tag
+     * (`Invalid filter expression 'GMLoggerService::Util:S'`, rc=1, device-checked 2026-10-06), so
+     * the pump drops it instead. Matched as a substring of the threadtime line.
+     */
+    val DEFAULT_PUMP_DROP: List<String> = listOf(" E GMLoggerService::Util: ")
 
     private val stateLock = ReentrantLock()
 
@@ -307,14 +337,17 @@ object LogCapture {
         effectiveScope = Scope.OWN_PROCESS,
         readLogsGranted = false, buffers = emptyList(), sessionId = "-", currentFile = null,
         fileCount = 0, bytesOnDisk = 0L, linesWritten = 0L, linesDropped = 0L, restarts = 0,
+        linesSuppressed = 0L,
     )
 
     /** Where the files are, whether or not a session is running. */
     fun logsDir(context: Context): File = File(context.applicationContext.filesDir, LOGS_DIR)
 
     /**
-     * Every capture file on disk, oldest first, across sessions and scopes. Names sort
-     * chronologically. For the later SAF/USB export task — `run-as` is blocked on this head unit
+     * Every capture file on disk, sorted by name, across sessions and scopes: the scope prefix sorts
+     * first, so every `netprobe-os-*` file (oldest first) precedes every `netprobe-own-*` file
+     * (oldest first) — chronological WITHIN a scope, not across them (corrected 2026-10-08). For the
+     * later SAF/USB export task — `run-as` is blocked on this head unit
      * and the app's files are not reachable by adb (see the `MainActivity` class KDoc), so this list
      * is the only handle an exporter gets.
      */
@@ -420,6 +453,7 @@ private class Session(private val ctx: Context, private val cfg: LogCapture.Conf
     private val droppedLines = AtomicLong(0)
     private val droppedChars = AtomicLong(0)
     private val linesWritten = AtomicLong(0)
+    private val suppressedLines = AtomicLong(0)
     private val restarts = AtomicInteger(0)
 
     /** "the pump should keep reading" — cleared by [stop] and by the pump's own abort paths. */
@@ -451,8 +485,6 @@ private class Session(private val ctx: Context, private val cfg: LogCapture.Conf
     )
 
     private val seam = SeamFilter({ hasYear }) { note -> enqueue(marker(note), critical = true) }
-    @Volatile private var verified = false
-    private var verifyDeadlineMs = 0L
     @Volatile private var diskStopped = false
 
     /**
@@ -530,6 +562,7 @@ private class Session(private val ctx: Context, private val cfg: LogCapture.Conf
         linesWritten = linesWritten.get(),
         linesDropped = droppedLines.get(),
         restarts = restarts.get(),
+        linesSuppressed = suppressedLines.get(),
     )
 
     // --- pump thread -----------------------------------------------------------------------------
@@ -539,23 +572,30 @@ private class Session(private val ctx: Context, private val cfg: LogCapture.Conf
         resolveFormat()
         resolveBuffers()
         if (buffersOk.isEmpty()) {
+            scopeResolved = true
             log.e("no readable logcat buffer — capture aborted")
             SessionTrace.Board.failed(LogCapture.BOARD_NAME, "no readable logcat buffer — nothing is being captured to disk")
             running.set(false)
             return
         }
+        // Decided BEFORE the first file and the first capture child exist (2026-10-06), so a degrade
+        // re-resolves the buffers and the header and the first child already show the real scope.
+        val verdict = if (effectiveScope == LogCapture.Scope.WHOLE_OS) verifyWholeOs() else null
+        scopeResolved = true
+        if (!running.get()) return
         if (!files.open()) {
             SessionTrace.Board.failed(LogCapture.BOARD_NAME, "could not open a capture file — nothing is being captured to disk")
             running.set(false)
             return
         }
+        verdict?.degradedWhy?.let { enqueue(marker("SCOPE DEGRADED — $it"), critical = true) }
         exec.scheduleWithFixedDelay(::drainQuietly, FLUSH_MS, FLUSH_MS, TimeUnit.MILLISECONDS)
         exec.scheduleWithFixedDelay(::sweepQuietly, SWEEP_MS, SWEEP_MS, TimeUnit.MILLISECONDS)
         log.i("capturing requested=${cfg.scope} effective=$effectiveScope read_logs=$readLogsGranted buffers=${buffersOk.joinToString(",")} -> ${files.currentFileName()}")
-        SessionTrace.Board.up(LogCapture.BOARD_NAME,
-            "effective=$effectiveScope (requested ${cfg.scope}, READ_LOGS=$readLogsGranted) buffers=${buffersOk.joinToString(",")}" +
-                (if (effectiveScope == LogCapture.Scope.WHOLE_OS) " — verifying foreign pids" else ""))
-        verifyDeadlineMs = SystemClock.elapsedRealtime() + VERIFY_MS
+        // The probe's own Board entry wins over the generic one: posted after it, so a degrade's
+        // FAILED or an UNVERIFIED is never overwritten by a plain UP.
+        if (verdict != null) verdict.board() else SessionTrace.Board.up(LogCapture.BOARD_NAME,
+            "effective=$effectiveScope (requested ${cfg.scope}, READ_LOGS=$readLogsGranted) buffers=${buffersOk.joinToString(",")}")
 
         var backoffMs = BACKOFF_MIN_MS
         var phase = Phase.BACKLOG
@@ -675,76 +715,185 @@ private class Session(private val ctx: Context, private val cfg: LogCapture.Conf
 
     private fun consume(line: String) {
         if (!seam.accept(line)) return
-        if (!verified) verifyScope(line)
+        if (wholeOs && cfg.pumpDrop.any { line.contains(it) }) { suppressedLines.incrementAndGet(); return }
         enqueue(line, critical = false)
+    }
+
+    /** What [verifyWholeOs] decided; [board] is posted after the `capturing` line (see [pumpLoop]). */
+    private class Verdict(val degradedWhy: String?, val board: () -> Unit)
+
+    /** One logd probe's result. Pump thread only. */
+    private sealed class UidProbe {
+        class Verified(val uid: String, val n: Int) : UidProbe()
+        class Degraded(val n: Int) : UidProbe()
+        /** [retry]: worth another probe (spawn failure, or no header-shaped line yet). */
+        class Inconclusive(val reason: String, val retry: Boolean) : UidProbe()
     }
 
     /**
      * READ_LOGS can be granted-but-ineffective (the `log` gid is only acquired at fork), and the
-     * failure is invisible: logcat runs, produces output, and every line is ours. Detect it by the
-     * only observable that distinguishes the two states — a line from a foreign pid — and say
-     * exactly what to do about it. Costs one tokenisation per line for at most VERIFY_MS.
+     * failure is invisible: logcat runs, produces output, and every line is ours. Decide it before
+     * any capture file or child exists, from the only observable that distinguishes the two states.
      *
-     * This is driven by captured lines, so it needs traffic to fire. It always has some: the
-     * engine's own `ProbeLog.sub("logcap")` status line is written at the top of [pumpLoop] and is
-     * itself captured, so even a completely idle unit delivers a line inside the window.
+     * 2026-10-06: that observable is a line of a foreign UID, asked of logd once by
+     * [probeForeignUid] — not a pid ≠ ours in the captured stream. logd filters an unprivileged
+     * reader by uid, so lines from DEAD pids of our own uid are visible and "a pid ≠ ours" is no
+     * proof (it false-verified the same-process restart after a grant); and the old pid parser read
+     * the `+0000` token of `-v year -v UTC`, so it only ever "saw" '\r'-split fragments of the box
+     * log replay. The probe's output is split on '\n' only for the same reason.
+     *
+     * Retries every 1 s for [VERIFY_MS] while the probe could not run or saw no header-shaped line
+     * (our own I line below guarantees one in `main` once logd has it). VERIFIED and DEGRADED are
+     * final — a retry cannot change this process's gids — and so are rc ≠ 0 and a timeout, which
+     * end as INCONCLUSIVE: capture continues as requested, with a W line and a Board entry. It
+     * degrades only on positive evidence.
      */
-    private fun verifyScope(line: String) {
-        if (effectiveScope != LogCapture.Scope.WHOLE_OS) { verified = true; return }
-        val pid = pidOf(line)
+    private fun verifyWholeOs(): Verdict {
         val myPid = android.os.Process.myPid()
-        if (pid != -1 && pid != myPid) {
-            verified = true
-            // The heal: a fresh process with the grant sees other pids. Forget the degradation so
-            // the next start does not keep announcing a fault that is over.
-            prior?.let { p ->
-                log.i("whole-OS capture verified in pid $myPid (foreign pid $pid seen) — the degradation recorded for pid ${p.pid} at ${isoLocal(p.atMs)} is cleared: that process was forked before the grant took effect")
-                ScopeMarker.clear(ctx)
-                prior = null
+        val myUid = android.os.Process.myUid()
+        log.i("verifying whole-OS: asking logd for a foreign uid (pid $myPid, uid $myUid)")
+        val t0 = SystemClock.elapsedRealtime()
+        var r: UidProbe
+        while (true) {
+            r = probeForeignUid()
+            if (!running.get()) return Verdict(null) {}
+            if (r !is UidProbe.Inconclusive || !r.retry || SystemClock.elapsedRealtime() - t0 >= VERIFY_MS) break
+            if (!sleepInterruptibly(PROBE_RETRY_MS)) return Verdict(null) {}
+        }
+        val buffers = buffersOk.joinToString(",")
+        return when (val res = r) {
+            is UidProbe.Verified -> {
+                // The heal: a fresh process with the grant sees other uids. Forget the degradation
+                // so the next start does not keep announcing a fault that is over.
+                val p = prior
+                log.i("whole-OS capture verified in pid $myPid (foreign uid ${res.uid} seen, ${res.n} lines probed)" +
+                    (if (p != null) " — the degradation recorded for pid ${p.pid} at ${isoLocal(p.atMs)} is cleared: that process was forked before the grant took effect" else ""))
+                if (p != null) { ScopeMarker.clear(ctx); prior = null }
+                Verdict(null) { SessionTrace.Board.up(LogCapture.BOARD_NAME, "WHOLE_OS verified — foreign uid ${res.uid} seen, buffers=$buffers") }
             }
-            SessionTrace.Board.up(LogCapture.BOARD_NAME, "WHOLE_OS verified — foreign pids visible, buffers=${buffersOk.joinToString(",")}")
-            return
+            is UidProbe.Inconclusive -> {
+                log.w("whole-OS capture UNVERIFIED — ${res.reason}; capture continues as requested")
+                Verdict(null) { SessionTrace.Board.up(LogCapture.BOARD_NAME, "WHOLE_OS UNVERIFIED — ${res.reason}") }
+            }
+            is UidProbe.Degraded -> {
+                val p = prior
+                val freshFork = p != null && !priorSameProcess
+                val freshFails = (p?.freshForkFailures ?: 0) + (if (freshFork) 1 else 0)
+                val why = if (freshFork) {
+                    // The fork-time explanation predicts that a re-forked process passes. It did not.
+                    "READ_LOGS reports granted, this process (pid $myPid, forked at boot+${android.os.Process.getStartElapsedRealtime() / 1000}s) is NOT the one that degraded before (pid ${p.pid} at ${isoLocal(p.atMs)}), and logd STILL shows only our own uid (${res.n} lines probed) — " +
+                        "the fork-time explanation is refuted on this unit ($freshFails fresh process(es) in a row). The grant is not reaching logd: check it was made for THIS user (${LogCapture.grantCmdForUser(ctx)}) " +
+                        "and that the platform maps READ_LOGS to gid log; another force-stop will not change this"
+                } else {
+                    "READ_LOGS reports granted but only our own uid is visible (${res.n} lines probed). Usual cause: the `log` gid is assigned at fork and this process predates the grant. " +
+                        "Restart the app (${LogCapture.forceStopCmd(ctx)}); the next start re-verifies whole-OS by itself and will say if a fresh process fails too"
+                }
+                log.e(why)
+                ScopeMarker.save(ctx, ScopeMarker.Degraded(
+                    pid = myPid,
+                    procStart = android.os.Process.getStartElapsedRealtime(),
+                    atMs = System.currentTimeMillis(),
+                    freshForkFailures = freshFails,
+                ))
+                // Same buffers as the priorSameProcess path (main,system,crash), so the header and
+                // the first child carry the real scope.
+                effectiveScope = LogCapture.Scope.OWN_PROCESS
+                resolveBuffers()
+                Verdict(why) {
+                    SessionTrace.Board.failed(LogCapture.BOARD_NAME, "degraded to OWN_PROCESS — the system half of the capture is MISSING for the life of pid $myPid")
+                }
+            }
         }
-        if (SystemClock.elapsedRealtime() < verifyDeadlineMs) return
-        verified = true
-        effectiveScope = LogCapture.Scope.OWN_PROCESS
-        val p = prior
-        val freshFork = p != null && !priorSameProcess
-        val freshFails = (p?.freshForkFailures ?: 0) + (if (freshFork) 1 else 0)
-        val why = if (freshFork) {
-            // The fork-time explanation predicts that a re-forked process passes. It did not.
-            "READ_LOGS reports granted, this process (pid $myPid, forked at boot+${android.os.Process.getStartElapsedRealtime() / 1000}s) is NOT the one that degraded before (pid ${p!!.pid} at ${isoLocal(p.atMs)}), and logd STILL shows only our own pid — " +
-                "the fork-time explanation is refuted on this unit ($freshFails fresh process(es) in a row). The grant is not reaching logd: check it was made for THIS user (${LogCapture.grantCmdForUser(ctx)}) " +
-                "and that the platform maps READ_LOGS to gid log; another force-stop will not change this"
-        } else {
-            "READ_LOGS reports granted but only our own pid is visible. Usual cause: the `log` gid is assigned at fork and this process predates the grant. " +
-                "Restart the app (${LogCapture.forceStopCmd(ctx)}); the next start re-verifies whole-OS by itself and will say if a fresh process fails too"
-        }
-        log.e(why)
-        ScopeMarker.save(ctx, ScopeMarker.Degraded(
-            pid = myPid,
-            procStart = android.os.Process.getStartElapsedRealtime(),
-            atMs = System.currentTimeMillis(),
-            freshForkFailures = freshFails,
-        ))
-        SessionTrace.Board.failed(LogCapture.BOARD_NAME, "degraded to OWN_PROCESS — the system half of the capture is MISSING for the life of pid $myPid")
-        enqueue(marker("SCOPE DEGRADED — $why"), critical = true)
     }
 
-    /** pid is token 2 in `-v threadtime` with or without the year modifier; -1 when unparseable. */
-    private fun pidOf(line: String): Int {
-        var i = 0
-        var field = 0
-        val n = line.length
-        while (i < n && field < 2) {
-            while (i < n && line[i] != ' ') i++
-            while (i < n && line[i] == ' ') i++
-            field++
+    /**
+     * One `logcat -d -t 2000 -v threadtime -v uid` over the readable buffers with the capture's own
+     * filterspec (so a bad spec shows here as rc ≠ 0, before the capture starts). Keeps no lines:
+     * only the set of uid tokens, the uid tokens seen on lines of our own pid, a count of
+     * header-shaped lines and the first line that is neither header-shaped nor a
+     * `--------- beginning of` banner (for the diagnostic). Published in [child] exactly as
+     * [runChild] does, so [stop] destroys it; a one-shot timer on [exec] bounds it.
+     */
+    private fun probeForeignUid(): UidProbe {
+        val args = buildList {
+            add(logcatBin())
+            addAll(PROBE_FORMAT)
+            buffersOk.forEach { add("-b"); add(it) }
+            add("-d"); add("-t"); add(PROBE_LINES.toString())
+            addAll(cfg.filterSpec)
         }
-        var v = 0
-        var any = false
-        while (i < n && line[i] in '0'..'9') { v = v * 10 + (line[i] - '0'); i++; any = true }
-        return if (any) v else -1
+        val proc = try {
+            ProcessBuilder(args).redirectErrorStream(true).start()
+        } catch (e: IOException) {
+            return UidProbe.Inconclusive("probe spawn failed: ${e.message}", retry = true)
+        }
+        val accepted = procLock.withLock {
+            if (!running.get()) false else { child = proc; true }
+        }
+        if (!accepted) { proc.destroy(); return UidProbe.Inconclusive("capture stopped", retry = false) }
+        try { proc.outputStream.close() } catch (e: IOException) { /* nothing writes to it anyway */ }
+        val timedOut = AtomicBoolean(false)
+        val timer = try {
+            exec.schedule({ timedOut.set(true); proc.destroy() }, PROBE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        } catch (e: java.util.concurrent.RejectedExecutionException) {
+            null // stop() has shut the executor down; running is already false
+        }
+
+        val myPid = android.os.Process.myPid().toString()
+        val own = HashSet<String>().apply { add(android.os.Process.myUid().toString()) }
+        val seen = HashSet<String>()
+        var n = 0
+        var firstOther: String? = null
+        val sb = StringBuilder(256)
+        fun line() {
+            val l = sb.toString()
+            sb.setLength(0)
+            val m = PROBE_HEADER.matcher(l)
+            if (m.lookingAt()) {
+                n++
+                val uid = m.group(1)!!
+                seen += uid
+                if (m.group(2) == myPid) own += uid
+            } else if (firstOther == null && l.isNotBlank() && !l.startsWith("--------- beginning of")) {
+                firstOther = l.take(200)
+            }
+        }
+        try {
+            InputStreamReader(proc.inputStream, Charsets.UTF_8).use { rd ->
+                val buf = CharArray(8 * 1024)
+                while (running.get()) {
+                    val k = rd.read(buf)
+                    if (k < 0) break
+                    for (i in 0 until k) {
+                        val c = buf[i]
+                        // '\n' only: a '\r' inside a message is message text, not a line end (RD).
+                        if (c == '\n') line() else if (sb.length < PROBE_LINE_KEEP) sb.append(c)
+                    }
+                }
+                if (sb.isNotEmpty()) line()
+            }
+        } catch (e: IOException) {
+            // destroy() (stop or the timer) tears the pipe out from under the read.
+        }
+        var rc = -1
+        try {
+            if (!proc.waitFor(CHILD_REAP_MS, TimeUnit.MILLISECONDS)) proc.destroy()
+            if (proc.waitFor(CHILD_REAP_MS, TimeUnit.MILLISECONDS)) rc = proc.exitValue()
+        } catch (e: InterruptedException) {
+            proc.destroy()
+            Thread.currentThread().interrupt()
+        }
+        timer?.cancel(false)
+        procLock.withLock { if (child === proc) child = null }
+
+        val diag = firstOther?.let { " (first other output: $it)" } ?: ""
+        return when {
+            !running.get() -> UidProbe.Inconclusive("capture stopped", retry = false)
+            timedOut.get() -> UidProbe.Inconclusive("probe timed out after ${PROBE_TIMEOUT_MS}ms$diag", retry = false)
+            rc != 0 -> UidProbe.Inconclusive("probe exited rc=$rc$diag", retry = false)
+            n == 0 -> UidProbe.Inconclusive("probe saw no uid-format line$diag", retry = true)
+            else -> (seen - own).firstOrNull()?.let { UidProbe.Verified(it, n) } ?: UidProbe.Degraded(n)
+        }
     }
 
     private fun sleepInterruptibly(ms: Long): Boolean = try {
@@ -774,13 +923,13 @@ private class Session(private val ctx: Context, private val cfg: LogCapture.Conf
                 cfg.scope != LogCapture.Scope.WHOLE_OS ->
                     log.i("READ_LOGS is granted (known since $since) but the requested scope is OWN_PROCESS — whole-OS capture is available: capture_whole_os")
                 priorSameProcess -> {
-                    // No 15 s pretence: this pid already proved it cannot see other pids, and a
+                    // No probe: this pid already proved it cannot see other uids' lines, and a
                     // restart of the capture cannot change its gids. Go straight to own-process.
                     effectiveScope = LogCapture.Scope.OWN_PROCESS
-                    log.e("READ_LOGS: still pid $myPid, the process that could not see other pids at $since — restarting capture cannot recover the `log` gid; capturing own process only until the process is re-forked: ${LogCapture.forceStopCmd(ctx)}")
+                    log.e("READ_LOGS: still pid $myPid, the process that could not see other uids' lines at $since — restarting capture cannot recover the `log` gid; capturing own process only until the process is re-forked: ${LogCapture.forceStopCmd(ctx)}")
                 }
                 else ->
-                    log.i("READ_LOGS: pid ${p.pid} (degraded $since) could not see other pids; this process (pid $myPid) is a fresh fork, so whole-OS is requested again and re-verified" +
+                    log.i("READ_LOGS: pid ${p.pid} (degraded $since) could not see other uids' lines; this process (pid $myPid) is a fresh fork, so whole-OS is requested again and re-verified" +
                         (if (p.freshForkFailures > 0) " — ${p.freshForkFailures} fresh process(es) have already failed that check on this unit" else ""))
             }
         }
@@ -788,10 +937,11 @@ private class Session(private val ctx: Context, private val cfg: LogCapture.Conf
             effectiveScope = LogCapture.Scope.OWN_PROCESS
             log.w("READ_LOGS not held — capturing own process only. To capture the whole OS:")
             log.w("  1. AndroidManifest.xml must declare <uses-permission android:name=\"android.permission.READ_LOGS\"/> (pm grant rejects an undeclared permission)")
-            log.w("  2. ${LogCapture.grantCmd(ctx)}")
+            log.w("  2. ${LogCapture.grantCmdForUser(ctx)}")
             log.w("  3. ${LogCapture.forceStopCmd(ctx)}   (the `log` gid is only picked up by a fresh process)")
         }
-        scopeResolved = true
+        // scopeResolved is set by pumpLoop after the whole-OS probe, so Status.resolved keeps meaning
+        // "the effective scope is final" (2026-10-06).
     }
 
     /**
@@ -974,12 +1124,13 @@ private class Session(private val ctx: Context, private val cfg: LogCapture.Conf
         appendLine("  device       : ${Build.MANUFACTURER} ${Build.MODEL} / ${Build.DEVICE} / ${Build.FINGERPRINT}")
         appendLine("  android      : ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
         appendLine("  scope        : $effectiveScope (requested ${cfg.scope}, READ_LOGS granted=$readLogsGranted)")
-        if (effectiveScope != cfg.scope) appendLine("  degraded     : ${LogCapture.grantCmd(ctx)} then ${LogCapture.forceStopCmd(ctx)}")
+        if (effectiveScope != cfg.scope) appendLine("  degraded     : ${LogCapture.grantCmdForUser(ctx)} then ${LogCapture.forceStopCmd(ctx)}")
         appendLine("  pid          : ${android.os.Process.myPid()}")
         appendLine("  buffers ok   : ${buffersOk.joinToString(",").ifEmpty { "(none)" }}")
         appendLine("  buffers fail : ${buffersFailed.joinToString(" ").ifEmpty { "(none)" }}")
         appendLine("  format       : ${formatArgs.joinToString(" ")}")
         appendLine("  filter       : ${if (effectiveScope == LogCapture.Scope.WHOLE_OS) cfg.filterSpec.joinToString(" ") else "--pid=${android.os.Process.myPid()} (*:V)"}")
+        if (wholeOs) appendLine("  pump drop    : ${cfg.pumpDrop.joinToString(" | ") { "'$it'" }.ifEmpty { "(none)" }}")
         appendLine("  budget       : file<=${budget.maxFileBytes / (1024 * 1024)}MB total<=${budget.totalCeilingBytes / (1024 * 1024)}MB " +
             "retention=${budget.retentionMs / 86_400_000L}d free-floor=${budget.freeFloorBytes / (1024 * 1024)}MB")
         appendLine("  '#####' lines are inserted by the capture engine, not by logcat.")
@@ -1000,9 +1151,13 @@ private class Session(private val ctx: Context, private val cfg: LogCapture.Conf
         )
 
         /**
-         * Whole-OS: ~27 MB/h with [LogCapture.DEFAULT_SYSTEM_FILTER] (~227 MB/h if the filter is
-         * widened to `*:V`). 768 MB is therefore about a day of rolling history filtered, ~3 h
-         * unfiltered — and it is a ROLLING window: the ceiling, not the retention, is what binds,
+         * Whole-OS: ~27 MB/h with [LogCapture.DEFAULT_SYSTEM_FILTER] on the 2026-08-18 drive capture
+         * (~227 MB/h if the filter is widened to `*:V`). 768 MB was therefore about a day of rolling
+         * history filtered, ~3 h unfiltered. Re-measured 2026-10-06 on gminfo37, idle, no phone:
+         * ~61 MB/h admitted, 76-77 % of bytes from two gmloggerd E tags (gmlogger housekeeping,
+         * nothing USB/BT) — ~12.5 h at that rate; both tags are now suppressed (filterspec for
+         * `|Archiver`, [LogCapture.Config.pumpDrop] for `::Util`), and the GMLogger rate varied
+         * within one boot. Either way it is a ROLLING window: the ceiling, not the retention, is what binds,
          * and the oldest files go first. Retention is set to 3 days only so a long-idle unit does
          * not keep a stale session forever.
          */
@@ -1020,11 +1175,24 @@ private class Session(private val ctx: Context, private val cfg: LogCapture.Conf
 
         private val FORMAT_YEAR_UTC = listOf("-v", "threadtime", "-v", "year", "-v", "UTC")
         private val FORMAT_PLAIN = listOf("-v", "threadtime")
+        /** [Session.probeForeignUid] only; the capture format is unchanged. Plain + uid is accepted on the radio (rc=0, 2026-10-06). */
+        private val PROBE_FORMAT = listOf("-v", "threadtime", "-v", "uid")
+        /**
+         * `MM-DD HH:MM:SS.mmm uid pid tid L ` — group 1 = uid (numeric for apps, a name for short
+         * system uids: `root`, `radio`), group 2 = pid. A line without a uid column cannot match:
+         * the level letter would land on a `\d+` slot.
+         */
+        private val PROBE_HEADER: java.util.regex.Pattern =
+            java.util.regex.Pattern.compile("\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}\\.\\d{3} +(\\S+) +(\\d+) +\\d+ [VDIWEFS] ")
+        private const val PROBE_LINES = 2000
+        private const val PROBE_LINE_KEEP = 256
+        private const val PROBE_RETRY_MS = 1_000L
 
         private const val FLUSH_MS = 1_000L
         private const val SWEEP_MS = 60_000L
         private const val EXEC_SHUTDOWN_MS = 2_000L
         private const val PROBE_TIMEOUT_MS = 3_000L
+        /** Retry budget of the whole-OS uid probe (was: the window for seeing a line of another pid). */
         private const val VERIFY_MS = 15_000L
         private const val BACKOFF_MIN_MS = 1_000L
         private const val BACKOFF_MAX_MS = 60_000L

@@ -97,7 +97,7 @@ impl MfiLock {
             return Err(MfiError::LockUnavailable);
         }
         // BOUNDED acquire (LOCK_NB + deadline), matching `ccpa/carplayd/src/main.rs`'s own `MfiLock`
-        // and `iap2d`'s. This was the only one of the four chip users still taking an UNBOUNDED
+        // and `iap2d`'s. This was the only one of the chip users (five code paths; four at the time) still taking an UNBOUNDED
         // `LOCK_EX`, and it is called from `iap_tunnel::execute` with the global SESSION guard held —
         // so a wedged holder stalled the DataStream reader, and with it every inbound iAP2 frame, plus
         // teardown (which also takes SESSION). The legitimate worst case is the sign path's ~2.1 s poll

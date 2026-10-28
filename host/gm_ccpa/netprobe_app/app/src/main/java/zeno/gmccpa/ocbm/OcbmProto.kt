@@ -42,7 +42,7 @@ object Ocbm {
     const val CH_MGMT: Int = 0x0040
 
     /** App-driven SETUP relay. Inert with `appDrivenSetup: false` — the box only relays when asked. */
-    const val CH_RTSP: Int = 0x0041 // lib.rs:65
+    const val CH_RTSP: Int = 0x0041 // lib.rs:75
     /** Box→host universal-log stream (`/tmp/box.log` + per-daemon logs); armed by CT_LOG_CTL. */
     const val CH_LOG: Int = 0x0042
     const val CH_ECHO: Int = 0x00FF
@@ -93,23 +93,23 @@ object Ocbm {
      */
     const val CT_PAIR_CONFIRM: Byte = 0x1C
 
-    /** host->box `[CT_RADIO][0 = radios off now | 1 = radios on if the pushed cfg allows]`. lib.rs:117 */
+    /** host->box `[CT_RADIO][0 = radios off now | 1 = radios on if the pushed cfg allows]`. lib.rs:182 */
     const val CT_RADIO: Byte = 0x16
 
     /**
-     * box->host `[CT_BT_PHASE][BTP_*]` — Bluetooth/iAP2 handshake progress. lib.rs:102
+     * box->host `[CT_BT_PHASE][BTP_*]` — Bluetooth/iAP2 handshake progress. lib.rs:164
      *
      * The host is not in the BT loop (the box owns the radio) and `SEV_PHONE_*` refers to the box's own
      * USB bus, so without this there is NO signal for the entire Bluetooth phase — the UI can only say
      * "waiting" from subscribe until video appears.
      *
      * Advisory and only roughly monotonic: treat an unknown value as progress and never gate on
-     * ordering (lib.rs:107-109).
+     * ordering (lib.rs:164-171, the CT_BT_PHASE comment).
      */
     const val CT_BT_PHASE: Byte = 0x17
 
     /**
-     * box->host `[CT_PHONE_IDENT][utf8 JSON]` — who the connected phone IS. lib.rs:113
+     * box->host `[CT_PHONE_IDENT][utf8 JSON]` — who the connected phone IS. lib.rs:157
      *
      * `{"name","deviceID","model","osName","osVersion"}`, lifted verbatim from the phone's own
      * AirPlay phase-1 SETUP plist. `name` is what the user typed in Settings > General > About >
@@ -118,7 +118,7 @@ object Ocbm {
      */
     const val CT_PHONE_IDENT: Byte = 0x18
 
-    // BT phase values — lib.rs:110-116.
+    // BT phase values — lib.rs:172-179.
     const val BTP_IDLE: Byte = 0x00
     const val BTP_LINK_UP: Byte = 0x01
     const val BTP_AUTHENTICATING: Byte = 0x02
@@ -308,10 +308,10 @@ object Ocbm {
     const val MGMT_ACK: Byte = 0x82.toByte()
 
     // ---- CH_INPUT sub-frames (host->box) -------------------------------------------------------
-    // Payload is [type u8][...]. lib.rs:183-206.
+    // Payload is [type u8][...]. lib.rs:395-411.
 
     /**
-     * `[INPUT_TOUCH][phase u8][nx u16 LE][ny u16 LE][finger u8]`. lib.rs:183
+     * `[INPUT_TOUCH][phase u8][nx u16 LE][ny u16 LE][finger u8]`. lib.rs:395
      *
      * Coordinates are NORMALIZED 0..=65535 across the display. carplayd scales them to absolute HID
      * coordinates using the SAME resolution it advertised in `/info`, so the box stays the single
@@ -319,16 +319,16 @@ object Ocbm {
      */
     const val INPUT_TOUCH: Byte = 0x01
 
-    /** Ask the box to request an iOS keyframe (video-loss recovery, NOT user input). lib.rs:184 */
+    /** Ask the box to request an iOS keyframe (video-loss recovery, NOT user input). lib.rs:396 */
     const val INPUT_KEYFRAME: Byte = 0x02
 
-    /** `[INPUT_MEDIA_BTN][index u8]` -> box taps the uid-2 media HID (press+release). lib.rs:197 */
+    /** `[INPUT_MEDIA_BTN][index u8]` -> box taps the uid-2 media HID (press+release). lib.rs:409 */
     const val INPUT_MEDIA_BTN: Byte = 0x03
 
-    /** `[INPUT_COMMAND][cmd u8][...]` -> box dispatches the mapped `/command`. lib.rs:198 */
+    /** `[INPUT_COMMAND][cmd u8][...]` -> box dispatches the mapped `/command`. lib.rs:410 */
     const val INPUT_COMMAND: Byte = 0x04
 
-    /** `[INPUT_NAV][nav u8]` -> box taps the uid-3 D-Pad. lib.rs:199 */
+    /** `[INPUT_NAV][nav u8]` -> box taps the uid-3 D-Pad. lib.rs:411 */
     const val INPUT_NAV: Byte = 0x05
 
     /** Force a keyframe on the ALT/cluster stream specifically; a bare INPUT_KEYFRAME only re-IDRs
@@ -547,7 +547,9 @@ object Mfi {
         fun statusName(): String =
             when (status) {
                 STATUS_OK -> "OK"
-                STATUS_FAILED -> "FAILED (no chip / i2c / lock timeout)"
+                // The box collapses every failure into one status byte; which of "no chip handle",
+                // "lock-file open failed" or "bad length after a good read" it was is not on the wire.
+                STATUS_FAILED -> "FAILED (box returned FAILED — reason not on the wire)"
                 STATUS_UNSUPPORTED -> "UNSUPPORTED (bad opcode or malformed request)"
                 else -> "0x%02x".format(status)
             }

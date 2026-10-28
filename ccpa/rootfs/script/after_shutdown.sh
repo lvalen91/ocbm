@@ -9,25 +9,10 @@
 # date    27Feb20
 ########################
 
-saveLastLog() {
-	lastLogPath=$1
-	echo "[after_shutdown] saving last log to $lastLogPath"
-	#if [ -e $lastLogPath ]; then
-	#	return
-	#fi
-	echo "Save last log when reboot" > "$lastLogPath"
-	df -h >> "$lastLogPath"
-	cat /proc/meminfo >> "$lastLogPath"
-	ps -l >> "$lastLogPath"
-	echo y > /sys/module/printk/parameters/time
-	dmesg | tail -n 1000 >> "$lastLogPath"
-	tail -n 1000 /tmp/userspace.log >> "$lastLogPath"
-	sync
-}
-
-#change USB to device mode
-
-test -e /tmp/update_status && saveLastLog /var/log/box_last_reboot.log
+# 2026-10-19: dropped the stock saveLastLog() and its only caller, `test -e /tmp/update_status &&
+# saveLastLog /var/log/box_last_reboot.log` (a reboot-time log dump to flash during an OTA). Its
+# writers (update_box.sh and the stock update scripts) are removed by ncm_base_install.sh strip,
+# so the test could never be true.
 
 sync
 echo "[after_shutdown] unmounting filesystems"

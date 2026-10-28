@@ -51,20 +51,21 @@ struct USBDeviceID: Sendable {
 
 let kSupportedDevices: [USBDeviceID] = [
     USBDeviceID(vendorID: 0x1314, productID: 0x2d00), // OCBM accessory ("Auto Box") — the committed model
-    USBDeviceID(vendorID: 0x1314, productID: 0x1520), // original CCPA (riddlebox) — legacy
+    USBDeviceID(vendorID: 0x1314, productID: 0x1520), // stock Carlinkit firmware (riddlebox) only — legacy. NCM is planned to use its own PID 1314:2d10 (decided; not in this table yet)
     USBDeviceID(vendorID: 0x1314, productID: 0x1521),
     USBDeviceID(vendorID: 0x08E4, productID: 0x01C0),
     // C2Air (Allwinner V821, riscv32) running OCBM. It keeps the ids its own rc.preboot assigns
     // rather than borrowing the CCPA's 1314:2d00 — nothing in OCBM requires a particular VID/PID
     // (ocbm-host takes them as arguments), and reusing the CCPA's would make the two boxes
-    // indistinguishable to this table. Device-verified 2026-08-17: HELLO_ACK caps=0x3f, MFi cert +
-    // signature, and a root console, all over this id pair. See c2air/README.md.
+    // indistinguishable to this table. Verified 2026-08-17 on the stock-firmware-based image (HELLO_ACK
+    // caps=0x3f, MFi cert + signature, and a root console, all over this id pair); not yet on the new
+    // baseline. See c2air/README.md.
     USBDeviceID(vendorID: 0x1f3a, productID: 0xace2), // C2Air V821 — OCBM accessory
 ]
 
 // 07-M2: legacy riddlebox PIDs only — resetDevicesOnLaunch's USBDeviceReEnumerate is the stock
 // firmware's "return to phase 0" kick. On an OCBM box a host-initiated re-enumerate is a bus-level
-// disconnect/reconnect from the gadget's perspective, and ocbmd's own source (main.rs:3065-3069)
+// disconnect/reconnect from the gadget's perspective, and ocbmd's own source (ccpa/ocbmd, accessory-fd teardown handling; the old main.rs:3065-3069 cite had drifted)
 // says only a real cable/gadget teardown HUPs its accessory fd — so this forces an ocbmd
 // exit-and-respawn plus this function's 3s sleep on every launch and every transport-lost recovery,
 // for no benefit (the OCBM box needs no watchdog kick). The OCBM PIDs rely on the existing

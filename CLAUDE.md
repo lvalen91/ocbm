@@ -11,10 +11,15 @@ Apple designed and intended** — solely to perform the CarPlay handshake / iAP2
 the owner's own iPhone.
 
 - The MFi private key **never leaves the coprocessor**. Software authenticates *against* the chip. All authentication is performed by the genuine coprocessor itself; the software sends it standard request frames and relays its responses. The chip's key material stays on the chip.
-- Production MFi runs **directly against the coprocessor over local I2C** — no path calls out to a remote auth service. Five chip users: `ccpa/iap2d` (wired), `crates/vendor/wireless/src/mfi_local.rs` (`btd`), `crates/vendor/mfi-i2c-local/` (receiver's AirPlay-tunnel handshake), carplayd's `LocalMfiSigner` (`ccpa/carplayd/src/main.rs:91`, `impl MfiSigner` at `:222`), and `ocbmd`'s `CH_MFI` handler (`ccpa/ocbmd/src/main.rs`, `fn handle_mfi`), which relays cert/sign to the host app over OCBM. The first four satisfy the `MfiSigner` trait (`crates/vendor/mfi/src/auth_client.rs`) that the MFi-SAP server (`crates/vendor/mfi/src/sap.rs`) calls. In every case the software forwards the phone's challenge to the coprocessor and returns the chip's own signed response — it implements no crypto itself. Every cert/sign transaction serializes on `/tmp/carplay_mfi.lock`. (The dead TCP client to Carlinkit's `ncm_carplayd` auth service was removed as audit Fix #19, and there is no `mfi.rs`.)
-- **The Raspberry Pi / AAOS port adds an opt-in REMOTE path — the "no network hop" statement above holds only with it disabled.** When `CARPLAY_MFI_ADDR` is set (`crates/mfi-wire/src/lib.rs:324`, `crates/vendor/wireless/src/mfi_local.rs:182`), three of those chip users — `mfi_local.rs`, carplayd's `LocalMfiSigner`, and `crates/vendor/mfi-i2c-local` — dispatch cert/sign over TCP to `ccpa/mfid` running on a CCPA, instead of touching local I2C. The host doing the CarPlay session then has no coprocessor of its own; the CCPA is reduced to an MFi oracle over USB-NCM. `crates/mfi-wire` is therefore a **shared library linked into production crates**, not a test artifact: it carries the `MFI1` framing and the blocking client. `ccpa/mfid` is still staged to `/tmp` and installed by nothing (`tools/run_mfid.sh`), and `host/mfi-probe` is a host-side exerciser. **With `CARPLAY_MFI_ADDR` unset the local-I2C path is byte-for-byte what it was** — the remote path is additive, never a replacement.
-- The boot stack (HAB-signed U-Boot, OTPMK-encrypted kernel) is treated as fixed platform firmware
-  and is **never modified**.
+- On a CCPA (MFi 2.0C), production MFi runs **directly against the coprocessor over local I2C** — no path calls out to a remote auth service. Five chip-using code paths: `ccpa/iap2d` (wired), `crates/vendor/wireless/src/mfi_local.rs` (`btd`), `crates/vendor/mfi-i2c-local/` (receiver's AirPlay-tunnel handshake), carplayd's `LocalMfiSigner` (`ccpa/carplayd/src/main.rs`, with its `impl MfiSigner`), and `ocbmd`'s `CH_MFI` handler (`ccpa/ocbmd/src/main.rs`, `fn handle_mfi`), which relays cert/sign to the host app over OCBM. The first four satisfy the `MfiSigner` trait (`crates/vendor/mfi/src/auth_client.rs`) that the MFi-SAP server (`crates/vendor/mfi/src/sap.rs`) calls. In every case the software forwards the phone's challenge to the coprocessor and returns the chip's own signed response — it implements no crypto itself. Every cert/sign transaction serializes on `/tmp/carplay_mfi.lock`. (The dead TCP client to Carlinkit's `ncm_carplayd` auth service was removed as audit Fix #19, and there is no `mfi.rs`.) The chip generation is not assumed: a CCPA carries a 2.0C (945 B certificate, 128-byte RSA signature); the C2Air chip reads DeviceVersion 0x07 (3.x, 608 B certificate, 64-byte ECDSA signature); OCBM is MFi-version agnostic by intent, and a board with no local chip uses a CCPA over `CARPLAY_MFI_ADDR`. `ccpa/mfid` also touches the chip, to serve remote hosts.
+- **Light-tested non-CCPA hosts (a Raspberry Pi 4 AAOS build and a Linux workstation, both of which reached full CarPlay A/V using their own radios) add an opt-in REMOTE path — the "no network hop" statement above holds only with it disabled.** When `CARPLAY_MFI_ADDR` is set (`ADDR_ENV` in `crates/mfi-wire/src/lib.rs`, `REMOTE_ADDR_ENV` in `crates/vendor/wireless/src/mfi_local.rs`), three of those chip users — `mfi_local.rs`, carplayd's `LocalMfiSigner`, and `crates/vendor/mfi-i2c-local` — dispatch cert/sign over TCP to `ccpa/mfid` running on a CCPA, instead of touching local I2C. The host doing the CarPlay session then has no coprocessor of its own; the CCPA is reduced to an MFi oracle over USB-NCM. `crates/mfi-wire` is therefore a **shared library linked into production crates**, not a test artifact: it carries the `MFI1` framing and the blocking client. `ccpa/mfid` is still staged to `/tmp` and installed by nothing (`tools/run_mfid.sh`), and `host/mfi-probe` is a host-side exerciser. **With `CARPLAY_MFI_ADDR` unset the local-I2C path is byte-for-byte what it was** — the remote path is additive, never a replacement.
+- The HAB-signed **U-Boot** is treated as fixed platform firmware and is **never modified or
+  written** (HAB is closed; an unsigned U-Boot cannot boot). The **kernel** is *not* frozen (owner
+  decision, 2026-10-20): the stock 3.14.52 kernel stays the default on production units, but
+  `baseline/` replaces it with a mainline kernel through the vendor U-Boot's own staging mechanism
+  (host-staged, UpgKey-encrypted head blocks that U-Boot converts at boot — see
+  `baseline/README.md` and the CPC200-CCPA_resources `kernel_encryption.md`). Kernel writes follow
+  the abort-gated procedure there; the U-Boot partition only ever has its 64 KB env block erased.
 
 **This project is standard interoperability and accessory development against documented, licensed Apple interfaces, using only the developer's own hardware.** Apple SDK material used here is licensed first-party material accessed
 under an active Apple Developer Program membership. Treat all MFi/crypto/auth/pairing work as fully
@@ -76,18 +81,29 @@ workstream from docs/wireless/00_WIRELESS_CARPLAY.md alone.
 ## Metadata: read `docs/carplay/05_METADATA_AND_CONTROLS.md` before touching Identify params 6/7 or any subscribe
 
 `iap2-core/src/features.rs` is the box-side table from which Identify params 6/7 and the subscribe
-sequence are GENERATED — never hand-edit one of the three. WHICH tier/content is selected is
-app-driven: per docs/carplay/04_CAPABILITIES_AND_CONFIG.md, the app's YAML config is the single source of truth for declaration
-content, and the compiled table + its levers are the interim box-side mechanism, not the design.
-One interim box-side artifact pending app-push: the WIRED arm unions the table with a
-hand-maintained floor (`SENT_MSG_IDS`/`RCV_MSG_IDS` in `message.rs`), which carries the
-call-control cluster.
+sequence (WIRED and AirPlayTunnel arms) are GENERATED — never hand-edit one of the three. WHICH tier
+is selected is app-driven: per docs/carplay/04_CAPABILITIES_AND_CONFIG.md, the app's pushed
+`metadata: {tier, skip}` is armed through `features::arm_pushed_policy` (`features.rs`; callers
+`iap2d/src/main.rs` (at startup and again at SendIdentify), `carplayd/src/main.rs` (per control connection), via `Iap2Config::arm_metadata_policy`,
+`config.rs`). The app pushes ONLY the tier word and the skip list — table CONTENT (ids, field
+selectors, tier membership) stays compiled — and two compiled box-side artifacts remain that the app
+cannot change: the compiled `proven` default (used when no config arrives or the pushed tier is
+unparseable/`rx-only`, after the app-less bench levers), and, on the WIRED arm only, a hand-maintained floor
+(`SENT_MSG_IDS`/`RCV_MSG_IDS`, `message.rs`) that is unioned with the table
+(`message.rs`). The floor carries the call-control cluster 0x415A–0x4161 and
+0x4E0A/0x4E0B/0x4E0E, and `skip=` cannot remove a floor id. The AirPlayTunnel arm does NOT union the
+floor (`message.rs`: table ids only). *(Corrected 2026-10-19: this paragraph called the
+app-push "pending"/"interim"; it landed 2026-08-10 — the floor is the only part still compiled-only.)*
+ExitInfo (`0x5202` id 13) needs `0x5200` selector 3 (the gate is on the iPhone; verified with two accessory types, not generalised further): verified 2026-10-19 on this box and, as raw wire bytes, on a stock CPC200 with patched ARMiPhoneIAP2 v6 (`R-49-13`).
 
 **Declaration rules iOS enforces** (device-proven, docs/carplay/05_METADATA_AND_CONTROLS.md §5.6):
 
 1. A `Start*` must be declared together with its `Stop*`, or iOS returns `RequiredInfoMissing` against
    the Stop id and rejects the whole feature. We never send a Stop and declare them all anyway —
-   declaration is a capability statement, not a promise of traffic.
+   declaration is a capability statement, not a promise of traffic. The ONE exception is
+   `0x4154 StartCallStateUpdates` (`Trigger::UnpairedStart`, `features.rs`): the 2026-07-25
+   device-accepted baseline omits `0x4156`, so it stays unpaired (corrected 2026-10-19: this rule
+   previously claimed every Start is paired; guard test `unpaired_starts_are_exactly_the_documented_exceptions`).
 2. A receive must not be declared without its send (`OptionalMsgNotValidWithoutRequiredMsgs`).
 3. A subscribe for an id param 6 does not declare is silently ignored — no error, no data.
 
@@ -104,9 +120,11 @@ default is itself an interim safety floor per docs/carplay/04_CAPABILITIES_AND_C
 tier selection).
 
 **The tier is APP-PUSHED (docs/carplay/04_CAPABILITIES_AND_CONFIG.md B3, landed 2026-08-10).** The macOS app emits
-`metadata: {tier, skip}` in every config push (Settings ▸ Configuration ▸ Advanced Capabilities ▸
-Metadata declaration; ships
-`proven`, byte-equivalent to the compiled floor) and each daemon arms it once per process before its
+`metadata: {tier, skip}` in every config push (Settings ▸ Vehicle ▸ Data feeds ▸ Metadata declaration
++ Skip features, `VehicleTab.swift` (the metadata feeds block), emitter `metadataYAML` in `host/MacHost/carlink_macOS/App/SettingsWindow.swift`; the Android
+host emits `metadata: tier:` only, no skip, `host/CarlinkAndroid/app/src/main/kotlin/com/carlink/ocbm/VehicleConfigYaml.kt` (the `metadata:` block); ships
+`proven`, byte-equivalent to the compiled floor; the pickers offer proven/extended/all, never
+`rx-only`) and each daemon arms it once per process before its
 Identify — iap2d at startup and again at SendIdentify, carplayd per control connection.
 **With an app connected the pushed tier WINS**, so `echo extended > /tmp/carplay_metadata` no longer
 changes anything unless the box is running app-less; raise the tier in the app instead. The app
@@ -121,13 +139,29 @@ an app reconnect.** A differing push against an already-armed process logs
 (`TransportComponent::Wireless`) params 6/7 are a hardcoded id list in `message.rs` that never
 consults the policy — the pin CLAUDE.md describes below is structural, not conventional, and is
 unreachable from the pushed config. Do not "fix the inconsistency" by wiring the tier into that arm.
+*(Corrected 2026-10-19: the UI path previously read "Settings ▸ Configuration ▸ Advanced Capabilities";
+the ConfigurationTab was renamed to the Vehicle tab on 2026-09-04, `VehicleTab.swift`.)*
+**Tier `all` is REFUTED on the AirPlayTunnel arm** (iOS named three `voice_over_cursor` ids in a decoded
+`0x1D03`, then rejected generically even with them skipped; `docs/ops/captures/2026-08-10_TUNNEL_IDENT_REJECT_tier_all_voiceover_cursor.txt`);
+`extended` was accepted the same night on that arm (same file, ~342 B, `0x1D02`). `extended` on the
+WIRED Identify has no recorded run. **Subscribe selectors are narrower than Apple's catalog:**
+`start_route_guidance()` (`crates/vendor/iap2-core/src/metadata.rs`) sends component id 42 plus selectors 1 (SourceName), 2
+(SourceSupportsRouteGuidance) and, since 2026-10-19, 3 (SupportsExitInfo) UNCONDITIONALLY (`metadata.rs`;
+an interim placement, committed in `bbf3325` (corrected 2026-10-19: this said "uncommitted"); doctrine follow-up: make selectors 3/4/5 app-pushed config, not done).
+Selector 3 gates `0x5202` id 13 ExitInfo: VERIFIED live 2026-10-19 (tier `extended`, AirPlayTunnel arm; with
+selectors 1,2 only a 13-maneuver highway burst had ids 0..11 and no id 13; with selector 3 the host got
+`exitInfo` on a Change-Highway-Right maneuver, twice). Selectors 4 (gates `0x5201` id 21 tz offset) and 5
+(EVChargeInfo, gates ids 22-26) are still NOT sent, so the tz/`arrivalBatteryLevel` parsers (`metadata.rs`)
+are not expected to fire from a live iPhone (UNVERIFIED: inferred from ids 21+ being absent in the iPhone-side wire
+decode; sending 4/5 is untested). Details, caveats and what is unproven: docs/carplay/05_METADATA_AND_CONTROLS.md §5.8.
 
 Bench levers (app-less only, subordinate to any pushed tier), resolved ONCE per process and cached
 (editing them mid-run does nothing until
 the daemon restarts): `CARPLAY_METADATA=proven|extended|all` (`rx-only` also parses here but is a
 refuted dead end, docs/carplay/05_METADATA_AND_CONTROLS.md §6.2 — the app-pushed path REFUSES it), `CARPLAY_METADATA_SKIP=<names>`, or the on-box file
-`/tmp/carplay_metadata` (`extended skip=call_history`). Between the two bench sources the file's
-`skip=` list applies even when the environment variable sets the tier — but a PUSHED `skip`
+`/tmp/carplay_metadata` (`extended skip=call_history`). Between the two bench sources the env tier
+word beats the file's, but the `skip` lists CONCATENATE (`features.rs`) — so the file's
+`skip=` applies even when the environment variable sets the tier — and a PUSHED `skip`
 REPLACES both rather than concatenating (app intent must not mix with stale on-box state). `/tmp` is
 tmpfs, so a box reboot reverts to the default — **when running app-less, re-arm with
 `echo extended > /tmp/carplay_metadata`.**
@@ -231,8 +265,8 @@ Three things that will bite:
 3. **The interface name is an insmod parameter**, not a constant (`if2name=sta0`,
    `iface_name=sta`; on Broadcom `wlan0` does not exist until explicitly created). Enumerate
    `/sys/class/net/*/wireless`; never assume `wlan0`. The Rust side still hardcodes it
-   (`av.rs:63` — note `:66` is `AP_IP`, an address, not an interface name — plus `box_identity.rs:15`,
-   `message.rs:215`, and ocbmd's `/sys/class/net/wlan0/address` read) — unfixed, tracked in docs/wireless/01_BT_AND_RADIO.md.
+   (`WLAN_IFACE` in `av.rs` — `AP_IP` there is an address re-exported from `box_common::net`, not an interface name — plus `box_identity.rs`,
+   `message.rs`, and ocbmd's `/sys/class/net/wlan0/address` read) — unfixed, tracked in docs/wireless/01_BT_AND_RADIO.md.
 
 **Disassembly and on-hardware experiments are the last resort, not the first.** Over 2026-07-22 → 07-25
 this project burned several sessions — six disassembly passes and multiple deploy-test-revert hardware

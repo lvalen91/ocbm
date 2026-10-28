@@ -211,7 +211,7 @@ pub const CT_BOX_HEALTH: u8 = 0x1A; // box->host [CT_BOX_HEALTH][flags u8] -> th
                                     //
                                     // Advisory, like its siblings: an unknown bit means "something the host
                                     // does not model", never a reason to refuse a session.
-pub const BH_HCI_PRESENT: u8 = 0x01; // hci0 exists AND is UP (HCI_UP in /sys/class/bluetooth/hci0/flags).
+pub const BH_HCI_PRESENT: u8 = 0x01; // hci0 exists AND is UP (HCIGETDEVINFO on a raw HCI socket reports HCI_UP; hci0/flags does not exist on the stock 3.14 kernel).
                                      // CORRECTED 2026-08-29: this used to test only that the sysfs node
                                      // EXISTED, which survives `hciconfig hci0 down` (wireless_down leaves
                                      // the module attached on purpose), so a mid-session hci-down could not
@@ -318,7 +318,7 @@ pub const PM_NONE: u8 = 0x00; // idle — no projection session; either phone ki
 pub const PM_WIRED_CP: u8 = 0x01; // wired CarPlay (projection_up -> iap2d + carplayd)
 pub const PM_WIRELESS_CP: u8 = 0x02; // wireless CarPlay (btd: BT + WiFi AP)
 pub const PM_WIRED_AA: u8 = 0x03; // wired Android Auto (aa-bridge AOAP pump; app drives AA over CH_IP)
-pub const PM_WIRELESS_AA: u8 = 0x04; // reserved — wireless Android Auto (docs/androidauto/03_WIRELESS.md, Phase 3, unbuilt)
+pub const PM_WIRELESS_AA: u8 = 0x04; // wireless Android Auto (btd claims `wireless-aa`; sent by ocbmd's proj_mode_tick since 2026-09-04; docs/androidauto/03_WIRELESS.md)
 
 pub const SEV_HOST_PRESENT: u8 = 0x01; // subscribed + heartbeat-alive
 pub const SEV_HOST_GONE: u8 = 0x02; // STOP, or heartbeat watchdog expired

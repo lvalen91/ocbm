@@ -34,7 +34,7 @@ Rules that keep it that way:
 | [00_ARCHITECTURE.md](androidauto/00_ARCHITECTURE.md) | scope, why AA differs from CarPlay, the stock stack, the GAL credential, the box/host split, video geometry |
 | [01_SESSION_AND_AV.md](androidauto/01_SESSION_AND_AV.md) | what works today, resolved defects and their causes, open items |
 | [02_ARBITRATION.md](androidauto/02_ARBITRATION.md) | CarPlay vs Android Auto — phone-type detection, the single owner flag, closed failure modes |
-| [03_WIRELESS.md](androidauto/03_WIRELESS.md) | wireless Android Auto — unbuilt; the transport it needs and what is reusable |
+| [03_WIRELESS.md](androidauto/03_WIRELESS.md) | wireless Android Auto — BT bootstrap, headset gate, TCP pump; device-run end to end 2026-09-04 |
 
 ## wireless/ — the wireless transport
 

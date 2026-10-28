@@ -8,7 +8,9 @@
 #   ocbm-host setup-relay 1314 2d00 0 tools/setup_relay_cfg.yaml
 #
 # Env knobs on the BOX side (spawn-scoped / process-cached — restart carplayd to change):
-#   CARPLAY_APP_SETUP=1|0        beats the YAML in both directions (harness override)
+#   CARPLAY_APP_SETUP=1          NO-CONFIG-ONLY since 2026-10-19 (levers::SubordinateLevers): it arms the
+#                                relay only when no pushed config is in force, so with THIS file pushed
+#                                it does nothing. To force the box-driven path, push appDrivenSetup: false.
 #   CARPLAY_RELAY_TIMEOUT_MS     rpc answer deadline (default 3000)
 #   CARPLAY_RELAY_STRICT=1       host-vs-local SETUP divergence → local fallback instead of warn
 name: SetupRelayStage0

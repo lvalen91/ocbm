@@ -9,6 +9,9 @@
 //!   ocbm-host ncm     [vid pid]                  CH_MGMT ENTER_NCM -> box reboots into USB-NCM maintenance
 //!                                                (ssh/scp at the NCM address). Return it with
 //!                                                `rm /script/ncm_only; reboot` over ssh.
+//!                                                (The sticky /script/ncm_only flag is implemented on modified stock
+//!                                                firmware; the c2air research repo docs/userspace-spec.md D9/D14
+//!                                                replaces it with a runtime switch that a reboot reverts.)
 //!   ocbm-host push  [vid pid] <local> <remote> [mode-octal]   verified file deploy (default mode 755)
 //!   ocbm-host pull  [vid pid] <remote> <local> [mode-octal]   verified file retrieval (box -> host)
 //!   ocbm-host bridge [vid pid] [iface]         bridge the box netdev (default ncm0) over CH_ETH; decode frames
@@ -22,6 +25,7 @@
 //!                                               local response, and send the host-authored bytes.
 //!                                               --mute-once: drop the FIRST RS_REQ (author/send nothing) to
 //!                                               exercise the box's timeout → sticky-local fallback.
+//!   Also dispatched (see the match in main; arguments vary): ip, srcbench, sinkbench, av, avdec, session.
 //! Every connection also auto-pushes the host clock right after HELLO.
 
 mod setup_driver;

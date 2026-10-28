@@ -1,8 +1,69 @@
 # Third-party material and reference points
 
-The code in this repository is original work. Nothing here is copied from another
-project. Several external sources were used as *reference* — to learn a wire format, a
-constant, or a behaviour — and are recorded here so the distinction is on the record.
+The code in this repository is original work with one exception: `baseline/`, which contains
+files taken from LIVI (https://github.com/f-io/LIVI, GPL-3.0-or-later): four verbatim kernel
+patches and several modified or ported files, listed below. Other external sources were used as
+*reference* only — to learn a wire format, a constant, or a behaviour — and are recorded here so
+the distinction is on the record.
+
+## Licence scope
+
+The repository is released under the Unlicense (`LICENSE`), except `baseline/`, which is
+GPL-3.0-or-later as a whole (`baseline/LICENSE`). Within it, `baseline/arm-imx6ul/dts/*` keep
+GPL-2.0 as Linux kernel derivatives (SPDX tags kept). The four files in
+`baseline/arm-imx6ul/patches/*` carry a GPL-3.0-or-later SPDX header (the added header above the
+diff); their diff bodies are GPL-2.0 kernel derivatives. The GPL-2.0 text is
+`baseline/COPYING-GPL-2.0`.
+
+The programs `baseline/build.sh` fetches (Linux, musl, BusyBox, dropbear, the OpenSSH
+sftp-server, mtd-utils, exfatprogs, libnl, iw, wpa_supplicant, BlueZ, ncurses, readline,
+wireless-regdb) keep their own licences and are not stored in this repository; the pinned
+tarballs are listed in `baseline/common/versions.env`. Radio firmware the build or a unit uses
+(linux-firmware blobs, AIC8800 and other vendor firmware) is not covered by this notice; its
+redistribution terms are its own and have not been assessed here.
+
+The rest of the repository does not link against `baseline/` and is distributed alongside it as
+an aggregate. A built image (kernel, initramfs, rootfs) is GPL-covered: whoever distributes one
+must provide the corresponding source (this tree at the build commit, the pinned tarballs in
+`baseline/common/versions.env`, and the licence texts) or a written offer for it valid for three
+years (GPL-3.0 section 6, GPL-2.0 section 3).
+
+## Based on LIVI
+
+Based on LIVI by Lasse Heitgres (https://github.com/f-io/LIVI)
+
+LIVI is Copyright (C) 2025-2026 Lasse Heitgres, GPL-3.0-or-later; its kernel patches and DTS are
+Linux derivatives under GPL-2.0. It was read at version 9.5.0; later upstream versions exist. The
+files below were taken into `baseline/` and modified on 2026-10-19 and 2026-10-20. Each carries a
+header with the attribution line, its LIVI source path, its modification date and what changed
+(except `etc/passwd` and `etc/group`, which have no comment syntax).
+
+Verbatim:
+- `baseline/arm-imx6ul/patches/0001` to `0004` (an added header above the diff; the diff bodies
+  are LIVI's, byte for byte)
+- `baseline/common/rootfs/etc/passwd`, `baseline/common/rootfs/etc/group`
+
+Modified:
+- `baseline/arm-imx6ul/initramfs/init`, `flash-kernel`, `flash-rootfs`, `flash-lib.sh`
+- `baseline/common/rootfs/init`, `etc/inittab`, `etc/profile`, `etc/init.d/rcS`
+- `baseline/common/shared/net-up`, `net-down`, `mtd.sh`
+- `baseline/arm-imx6ul/dts/imx6ull-ccpa-baseline.dts`, `radio-iw416.dtsi`, `radio-rtl8822bs.dtsi`,
+  `radio-rtl8822cs.dtsi` (GPL-2.0 kept)
+- `baseline/build.sh`
+- `baseline/arm-imx6ul/kernel/base.fragment`
+- `baseline/common/busybox/recovery.applets`, `full.fragment`
+- `baseline/arm-imx6ul/rootfs/usr/sbin/radio` (derived from LIVI's `livi-radio`)
+
+Ported (Rust to Python):
+- `baseline/arm-imx6ul/tools/stage_kernel.py`
+
+Following LIVI's structure or values only (no LIVI text taken; these carry no attribution line):
+- `baseline/common/recipes/userspace.sh` (musl and BusyBox-rescue structure)
+- `baseline/arm-imx6ul/rootfs/etc/baseline/board-rcS.sh` (LED pins and polarity from LIVI's DTS)
+- `baseline/arm-imx6ul/kernel/radio-modules.fragment` (config symbols from LIVI's `build.sh`)
+- `baseline/common/versions.env` (some version pins are LIVI's)
+
+The rest of `baseline/` is original work, licensed with the directory under GPL-3.0-or-later.
 
 ## Referenced, not incorporated
 
@@ -41,13 +102,15 @@ redistributed here: the reference tree is outside this repository and excluded f
 
 ## Included third-party files
 
-**Gradle wrapper** (`host/CarlinkAndroid/gradlew`, `gradle-wrapper.properties`) — Apache-2.0,
-unmodified, retaining its own license header.
+**Gradle wrapper** (`host/CarlinkAndroid/gradlew`, `gradle-wrapper.properties`,
+`gradle-wrapper.jar`, and `host/CallSim/gradlew`) — Apache-2.0, unmodified, retaining its own
+license header.
 
 ## Linked at build time, not vendored
 
 **libfdk-aac** (Fraunhofer FDK AAC Codec Library) — the AAC-ELD encoder for the CarPlay mic
-uplink links against it (`crates/vendor/eld-codec`, behind the `mic-uplink-eld` feature). Its
+uplink links against it (`crates/vendor/eld-codec`, behind `receiver`'s `mic-uplink-eld` feature,
+which `ccpa/carplayd` enables by default). Its
 source is not included here and is built separately. Binaries you distribute that link it
 carry Fraunhofer's own license and notice requirements, which this dedication does not and
 cannot waive.

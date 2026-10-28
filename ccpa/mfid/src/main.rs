@@ -2,7 +2,7 @@
 //!
 //! # Why this exists
 //!
-//! `docs/ops/01_RECOVERY.md` (gm_ccpa) puts four MFi chip operations per session on OCBM's `CH_MFI`. The Pi port
+//! OCBM's `CH_MFI` (`docs/carplay/01_OCBM_PROTOCOL.md`) carries every MFi chip operation of a session. The Pi port
 //! keeps the chip on the CCPA but reaches it over the USB-NCM link instead, and `CH_MFI` is not
 //! available there: `/script/ncm_only` (or `ncm_wifi`) selects an NCM boot that does not launch
 //! `ocbmd`, and `crates/vendor/mfi/src/auth_client.rs` records that the older TCP client to

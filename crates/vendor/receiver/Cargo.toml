@@ -17,7 +17,7 @@ mfi = { path = "../mfi" }
 # (different process, potentially overlapping now that BT stays up until disableBluetooth) with
 # btd's own chip access, so it shares the same /tmp/carplay_mfi.lock discipline via this
 # crate. CORRECTED 2026-07-25: this used to say LocalMfiSigner "is unlocked" — that was true and was
-# the bug. It now takes the same lock (bounded 10s rather than blocking); all four chip users agree on
+# the bug. It now takes the same lock (bounded 10s rather than blocking); all five chip code paths agree on
 # the path. See its own doc comment.
 # OPTIONAL as of 2026-08-27. Direct /dev/i2c-1 chip access is correct on the BOX and impossible in
 # the Android head-unit app, which has neither `/tmp` for the lock nor system-app rights to the head
@@ -29,6 +29,9 @@ mfi-i2c-local = { path = "../mfi-i2c-local", optional = true }
 # physical iAP2 link, since the wire-level message catalog is transport-agnostic (only the framing
 # around it differs — see events.rs).
 iap2-core = { package = "carplay-iap2-core", path = "../iap2-core" }
+# Typed RouteGuidanceUpdate decoder (tlv::parse_route_guidance) for the change-only route-state log
+# line in events.rs (F159). Already in the graph via iap2-core; no new external crates.
+carplay-metadata = { path = "../metadata" }
 # eld-codec (libfdk-aac) is only the mic-uplink AAC-ELD encoder — gated so the control/pairing plane
 # can cross-compile to the box (armv7-musl, no fdk-aac). Default-on keeps the host receiver unchanged.
 eld-codec = { path = "../eld-codec", optional = true }
@@ -61,6 +64,11 @@ mic-uplink = []
 # set `default-features = false` must opt back in explicitly — `ccpa/carplayd` does.
 local-mfi = ["dep:mfi-i2c-local"]
 mic-uplink-eld = ["mic-uplink", "dep:eld-codec"]
+# voice-tag-v2 (plan v5.8 V1a): the :9003 voice seam's v2 framing — per-AU scid/rx time/RTP seq+ts,
+# plus BEGIN/END control frames per voice stream, a 50 ms voice read timeout with a per-packet flag
+# check, and the session-side END cause. ONLY carplay-jni enables it, and carplay-jni is excluded
+# from the root workspace, so it can never unify into a box build: ocbmd/carplayd keep tag v1.
+voice-tag-v2 = []
 
 [dev-dependencies]
 # the test controller drives the X25519/Ed25519 sides of pair-verify

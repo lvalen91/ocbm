@@ -8,7 +8,8 @@ import java.util.concurrent.atomic.AtomicLong
 /**
  * The `:9004` metadata seam framer.
  *
- * Wire format, from the producer (`ccpa_custom/crates/vendor/iap2-core/src/metadata.rs:41-43,63-69`):
+ * Wire format, from the producer (`ccpa_custom/crates/vendor/iap2-core/src/metadata.rs`, `SEAM_MAGIC`
+ * and `frame()`):
  *
  *     [u32 BE 0x4D455441 "META"][u32 BE len][marker u8][payload]     len = 1 + payload.size
  *
@@ -24,10 +25,11 @@ import java.util.concurrent.atomic.AtomicLong
  * tells the two apart.
  *
  * ## Why the consumer must never block
- * The producer writes under its `SINK` mutex with a 2 s timeout (`metadata.rs:115-127`), and that mutex
- * is shared with the iAP2 reader. Because the core is in-process here, that reader is OUR thread too —
- * so a slow consumer on this seam does not merely delay a metadata card, it stalls iAP2 ingest for the
- * whole session. Parse inline (cheap), hand off anything expensive (JPEG decode, MediaSession writes).
+ * The producer writes under its `SINK` mutex with a 2 s timeout (`metadata.rs`, the `emit_command_plist`
+ * KDoc), and that mutex is shared with the iAP2 reader. Because the core is in-process here, that reader is
+ * OUR thread too — so a slow consumer on this seam does not merely delay a metadata card, it stalls iAP2
+ * ingest for the whole session. Parse inline (cheap), hand off anything expensive (JPEG decode, MediaSession
+ * writes).
  * The same reasoning is why the listener must always accept AND drain: an accepted-but-unread socket
  * costs the producer its full 2 s per record.
  */
@@ -49,8 +51,9 @@ class MetadataSeam(
 
         /**
          * Artwork is the large case — the producer caps a single transfer at 8 MiB
-         * (`metadata.rs:127`). 16 MiB is far above any real JPEG or plist and is deliberately NOT the
-         * video lane's 8 MiB bound: the two lanes carry different things and size independently.
+         * (`metadata.rs`, the `emit_command_plist` KDoc). 16 MiB is far above any real JPEG or plist
+         * and is deliberately NOT the video lane's 8 MiB bound: the two lanes carry different things
+         * and size independently.
          */
         const val MAX_MESSAGE = 16 * 1024 * 1024
         private const val COMPACT_THRESHOLD = 1 shl 16
@@ -81,9 +84,14 @@ class MetadataSeam(
         } catch (t: Throwable) {
             if (gen.get()) log.e("consume: ${t.javaClass.simpleName}: ${t.message}")
         } finally {
-            // The producer re-dials per whole message (`metadata.rs:44-46`), so any partial tail held
-            // across a disconnect belongs to a message that will be re-sent in full. Scanning it would
-            // only manufacture a false resync.
+            // A partial tail held across a disconnect is DROPPED, never resumed: the next connection
+            // starts on a frame boundary, and scanning a dead connection's tail would only manufacture
+            // a false resync. That tail's message is NOT re-sent in full. The producer
+            // (`metadata.rs` `emit_locked`, plan v5.9 MED M3) peeks for EOF before every write and
+            // re-dials at once, and on a non-control emitter retries ONE whole write after a
+            // reset-type error. It keeps no cache and replays nothing on a new connection, so a
+            // message cut by a connection that dies between that peek and its write is lost, and
+            // its fields stay missing until iOS next changes them (U59-15).
             start = 0; end = 0
         }
     }

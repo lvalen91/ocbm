@@ -22,7 +22,6 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use box_common::cfg;
 use box_common::flags::{self, ProjectionOwner};
 
 use crate::appport::{self, AppPort, Arm};
@@ -113,8 +112,10 @@ fn serve_one(app: &Arc<AppPort>, phone: TcpStream) {
     // session is already identified by its timestamps.
     eprintln!("[{TAG}] phone connected from <redacted>");
 
-    if !cfg::aa_enabled() {
-        eprintln!("[{TAG} {}] android_auto:false in the pushed config — refusing this phone", ts());
+    // LAUNCH gate: explicit opt-in only (D1). An absent config here means no host has asked for
+    // Android Auto, so a phone dialling the SoftAP is refused rather than served.
+    if !crate::gates::aa_allows(crate::gates::WIRELESS_ADMIT) {
+        eprintln!("[{TAG} {}] android_auto not requested by the pushed config — refusing this phone", ts());
         appport::close(phone);
         return;
     }
@@ -198,7 +199,9 @@ fn wait_for_app(app: &Arc<AppPort>) -> Option<TcpStream> {
         }
         // The mid-session toggle is watched separately (see `serve_session`); this covers the user
         // turning Android Auto off in the window between the phone arriving and the app answering.
-        if !cfg::aa_enabled() {
+        // `aa_withdrawn`: the phone was already admitted by the requested-gate in `serve_one`; only
+        // an explicit stop ends it here (an absent file is a transient ocbmd restart).
+        if !crate::gates::aa_allows(crate::gates::WIRELESS_HOST_WAIT) {
             eprintln!("[{TAG} {}] android_auto turned off while waiting for the host — standing down", ts());
             return None;
         }
@@ -269,7 +272,8 @@ fn serve_session(phone: TcpStream, client: TcpStream) -> (u64, u64, String, u64)
             if !wd_alive.load(Ordering::Relaxed) {
                 return;
             }
-            if !cfg::aa_enabled() {
+            // Explicit stop only — see `cfg::aa_withdrawn` for why a deleted config is not one.
+            if !crate::gates::aa_allows(crate::gates::WIRELESS_MID_SESSION) {
                 eprintln!("[{TAG} {}] android_auto turned off mid-session — ending session", ts());
                 wd_disabled.store(true, Ordering::Relaxed);
                 wd_alive.store(false, Ordering::Relaxed);

@@ -16,8 +16,6 @@ import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
 import java.io.OutputStream
-import java.security.MessageDigest
-import java.security.SecureRandom
 import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
@@ -42,12 +40,10 @@ import java.util.concurrent.Executors
  *    app; the caller's `onActivityResult` must forward into [onActivityResult].
  *
  *    **Manifest dependency this file does NOT own**: `targetSdk 32` means package-visibility
- *    filtering applies to `resolveActivity` too. Without a `<queries>` block for
- *    `ACTION_CREATE_DOCUMENT` in `AndroidManifest.xml`, the probe can report "not available" even
- *    when DocumentsUI is present, which just means this rung is skipped one step earlier than it
- *    has to be — never a crash. Add if rung 1 should be preferred over rung 2 on units that do ship
- *    the picker:
- *    `<queries><intent><action android:name="android.intent.action.CREATE_DOCUMENT"/><data android:mimeType="text/plain"/></intent></queries>`
+ *    filtering applies to `resolveActivity` too, so `AndroidManifest.xml` carries a `<queries>`
+ *    block for `ACTION_CREATE_DOCUMENT` (mimeType `*&#47;*`). Without it the probe would report
+ *    "not available" even with DocumentsUI present and this rung would be skipped one step early —
+ *    never a crash. (Corrected 2026-10-08, E-DOC 9: this used to say the block was still to be added.)
  *
  * 2. [Rung.USB_VOLUME] — `Context.getExternalFilesDirs(null)`. The workhorse: no picker, no runtime
  *    permission, and the multi-element form's entries past index 0 are OEM-mounted removable
@@ -60,10 +56,9 @@ import java.util.concurrent.Executors
  *    computer the stick is later read on, where it is an ordinary folder on an ordinary FAT/exFAT
  *    filesystem.
  *
- * 3. [Rung.MEDIA_STORE] — `MediaStore.Downloads`, requires API 29+ (this ladder runs on API 32
- *    head units per the manifest, but `minSdk 26` means a bench build could hit this method on an
- *    older device; the rung reports itself unavailable there rather than crashing on a collection
- *    that does not exist).
+ * 3. [Rung.MEDIA_STORE] — `MediaStore.Downloads`, requires API 29+. Since minSdk 32 (OD-4,
+ *    2026-10-06; it was 26) every install has it; the SDK_INT check below is kept as a harmless
+ *    guard, and the rung would report itself unavailable rather than crash on a missing collection.
  *
  * 4. [Rung.FILES_DIR] — a no-op. Reports [LogCapture.logsDir] as the destination and the sum of the
  *    existing file sizes as `bytesWritten`, but **copies nothing and redacts nothing** — the files
@@ -72,8 +67,10 @@ import java.util.concurrent.Executors
  *    [Rung.FILES_DIR] result for an exported artifact; it is a shrug with a path attached.
  *
  * ## One artifact, not a picker-per-file
- * Rungs 1-3 concatenate every file from [LogCapture.logFiles] (oldest first, matching capture
- * order) into a single stream, each source file's start marked with a plain-text separator line so
+ * Rungs 1-3 concatenate every file from [LogCapture.logFiles] (sorted by name: every `netprobe-os-*`
+ * file, oldest first, then every `netprobe-own-*` file, oldest first — the scope prefix sorts before
+ * the timestamp, so the two scopes are NOT interleaved chronologically; corrected 2026-10-08,
+ * E-DOC 8) into a single stream, each source file's start marked with a plain-text separator line so
  * provenance survives concatenation. Plain text rather than a zip: these files are read by grepping
  * them in a parking lot with whatever is at hand, and log text does not compress enough over
  * already-line-oriented content to be worth losing that.
@@ -98,8 +95,8 @@ object LogExport {
     /** Which rung of the ladder actually produced (or, for [FILES_DIR], pointed at) the artifact. */
     enum class Rung { SAF, USB_VOLUME, MEDIA_STORE, FILES_DIR }
 
-    /** One entry per redaction category actually wired into [Redactor]. */
-    enum class RedactionCategory { WPA_PSK, MAC_ADDRESS, IPV4, VIN, LONG_DIGITS, LAT_LONG }
+    // The redaction categories ([RedactionCategory]) and the rules ([Redactor]) live in Redactor.kt
+    // since plan v5.8 V7: no android.* there, so the rules run under the tier-0 JVM tests.
 
     /**
      * @param redact on by default; `false` is the operator's explicit opt-out for a raw export.
@@ -125,7 +122,8 @@ object LogExport {
      *   sum of the existing (untouched) file sizes, not bytes newly written — see the class KDoc.
      * @param filesIncluded how many rotated [LogCapture] files were concatenated (or, for
      *   [Rung.FILES_DIR], are present).
-     * @param redactionCounts per-category substitution counts so the operator can sanity-check
+     * @param redactionCounts per-category counts of DISTINCT values redacted (a value seen twice is
+     *   one placeholder and one count — `Redactor.placeholderFor`), so the operator can sanity-check
      *   redaction actually fired; empty when [Options.redact] is false or the rung is [FILES_DIR].
      */
     data class ExportResult(
@@ -219,8 +217,16 @@ object LogExport {
         }
         val launch = Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
             .setType("text/plain").putExtra(Intent.EXTRA_TITLE, artifactName(options))
+        // One picker per request code (E-F6). A second export while the first picker is still up
+        // used to overwrite the pending entry: the first caller never heard back, and the picker's
+        // result was then written with the SECOND call's options (a raw/redacted mix-up). Refuse the
+        // newcomer instead; `true` because the request was consumed here, not handed to the ladder.
+        if (pending.putIfAbsent(requestCode, Pending(context, options, callback)) != null) {
+            log.w("export refused: a SAF export is already pending for requestCode=$requestCode")
+            deliver(callback, Result.failure(IOException("export already pending (requestCode=$requestCode)")))
+            return true
+        }
         return try {
-            pending[requestCode] = Pending(context, options, callback)
             activity.startActivityForResult(launch, requestCode)
             log.i("SAF picker launched (requestCode=$requestCode)")
             true
@@ -371,166 +377,3 @@ object LogExport {
         "netprobe-export-${SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(java.util.Date())}"
 }
 
-// =================================================================================================
-
-/**
- * Line-at-a-time redaction. One instance per export, so its per-category value->placeholder maps
- * (and therefore stable correlation across a whole session's worth of files) live exactly as long
- * as the export does and never leak into a later export's salt.
- *
- * **What this catches**, in application order (order matters where character classes could
- * overlap; a placeholder already substituted never re-matches a later rule — see the length/shape
- * guards on each regex):
- * 1. **WPA_PSK** — `psk=`, `passphrase=`, `wpa[-_]psk=`, `pre-shared-key=` (case-insensitive),
- *    quoted or bare, key-value form as `wpa_supplicant.conf` and this app's own hotspot dialog
- *    (`Ui.kt:363`) write it. Only the value is replaced; the key stays so the line is still legible
- *    as "a passphrase was here."
- * 2. **MAC_ADDRESS** — six colon- or dash-separated hex octet pairs. Deliberately not
- *    BT-MAC-specific: `CT_PHONE_IDENT.deviceID` (`ocbm/OcbmProto.kt:84`) is syntactically identical
- *    to a Wi-Fi BSSID or any other MAC-shaped string, and there is no way to tell them apart from
- *    text alone — so this rule catches both on purpose. Over-redacting a non-BT MAC is the safe
- *    direction.
- * 3. **LAT_LONG** — `lat[itude]=`/`lon[gitude]=` key-value decimal forms, and a bare
- *    `-?DD.DDDD, -?DDD.DDDD` comma-separated pair (a common raw GPS log shape). Redacts the numeric
- *    value(s) only.
- * 4. **IPV4** — every dotted-quad with valid octets, EXCEPT the four ranges below, which are
- *    fixed/well-known rather than vehicle-identifying and are left readable because a redacted
- *    `127.0.0.1` helps nobody debugging this project's own seams:
- *    - `127.0.0.0/8` — loopback; the receiver's A/V seams (:9001-9004) live here.
- *    - `169.254.0.0/16` — IPv4 link-local (RFC 3927), identical on every device.
- *    - `192.168.43.0/24` — Android's own tethering default AP subnet (`MdnsInspect.kt:15`).
- *    - `192.168.5.0/24` — this project's fixed CarPlay/AirPlay accessory subnet
- *      (`CarPlayRx.kt:138`, `:457`), not the vehicle's actual telematics or hotspot LAN.
- *    Every other IPv4 — including a `192.168.50.x`/`192.168.49.x`-style vehicle hotspot LAN or any
- *    public address — is redacted, because those DO identify this specific unit's network.
- * 5. **VIN** — 17-char alnum runs excluding `I`, `O`, `Q` (the ISO 3779 exclusion set), so a
- *    plausible-looking non-VIN string of the same shape is also caught; that is accepted
- *    over-redaction, not a bug.
- * 6. **LONG_DIGITS** — bare runs of 13+ digits: IMEI (15), MEID, ICCID, and similar identifiers.
- *    Deliberately wide; it will also catch large non-identifying counters or timestamps expressed
- *    as a single long integer. Over-redaction, accepted for the same reason as VIN.
- *
- * **What this does NOT catch — state these plainly, a false sense of safety is worse than a known
- * gap:**
- * - **NMEA GPS sentences** (`$GPGGA,...`, `$GPRMC,...`) encode lat/long in `DDMM.MMMM,N/S` form,
- *   which [RE_LATLON_PAIR]/[RE_LATLON_KV] do not parse. A raw NMEA dump is NOT redacted by this
- *   class.
- * - **Bluetooth device names** and Wi-Fi SSIDs are free text and not pattern-matched at all; a
- *   phone named "John Smith's iPhone" passes through untouched.
- * - **VIN embedded inside a longer alnum token** (no word boundary on one side, e.g. concatenated
- *   with a prefix/suffix) is missed — the regex requires a clean 17-char boundary.
- * - **Non-US phone numbers, email addresses, precise street addresses** in free-text log lines —
- *   none of these are pattern-matched.
- * - **IPv6** addresses are not matched at all.
- * - A passphrase or key logged in a format other than `key=value` / `key: value` (e.g. split across
- *   two lines, or embedded in a JSON blob with unusual spacing this regex does not anticipate) may
- *   be missed. [RE_WPA] is deliberately permissive about the value's character class to catch the
- *   common cases, not exhaustive about the syntax. Two residual gaps in it: a value containing a
- *   space is redacted only up to that space, and `password=` is not in its key set (only the
- *   `psk`/`passphrase`/`wpa_psk`/`pre-shared-key`/`wifi_pass`/`pass` spellings are).
- * - This operates on captured *text* lines only. A binary-encoded OCBM frame dump (if one is ever
- *   logged as raw bytes rather than the JSON `CT_PHONE_IDENT` form) is not scanned for embedded
- *   MACs/identifiers at the byte level.
- *
- * Redaction is one-way by construction: the placeholder is `<REDACTED:CATEGORY:xxxx>` where `xxxx`
- * is 4 hex chars of `SHA-256(salt || category || rawValue)`, and the map from placeholder back to
- * `rawValue` is never built — only value-to-placeholder, and only for this instance's lifetime. The
- * salt is generated per export via [SecureRandom] and is not persisted or included in the output,
- * so placeholders are useless for correlation *across* two different exports, on purpose.
- */
-private class Redactor {
-
-    private val salt = ByteArray(16).also { SecureRandom().nextBytes(it) }
-    private val digest = MessageDigest.getInstance("SHA-256")
-    private val cache = HashMap<String, String>() // "CATEGORY\u0000rawValue" -> placeholder
-    private val counts = LinkedHashMap<LogExport.RedactionCategory, Long>()
-
-    fun redactLine(line: String): String {
-        var s = line
-        s = sub(s, RE_WPA, 2, LogExport.RedactionCategory.WPA_PSK)
-        s = subWhole(s, RE_MAC, LogExport.RedactionCategory.MAC_ADDRESS)
-        s = sub(s, RE_LATLON_KV, 2, LogExport.RedactionCategory.LAT_LONG)
-        s = subPair(s, RE_LATLON_PAIR, LogExport.RedactionCategory.LAT_LONG)
-        s = subIpv4(s)
-        s = subWhole(s, RE_VIN, LogExport.RedactionCategory.VIN)
-        s = subWhole(s, RE_LONG_DIGITS, LogExport.RedactionCategory.LONG_DIGITS)
-        return s
-    }
-
-    fun counts(): Map<LogExport.RedactionCategory, Long> = counts.toMap()
-
-    fun summaryLine(): String {
-        val body = LogExport.RedactionCategory.values().joinToString(" ") { "${it.name}=${counts[it] ?: 0}" }
-        return "##### EXPORT REDACTION COUNTS: $body #####\n"
-    }
-
-    private fun placeholderFor(category: LogExport.RedactionCategory, raw: String): String {
-        val key = category.name + "\u0000" + raw
-        return cache.getOrPut(key) {
-            counts[category] = (counts[category] ?: 0L) + 1L
-            digest.reset()
-            digest.update(salt)
-            digest.update(key.toByteArray(Charsets.UTF_8))
-            val hex = digest.digest().joinToString("") { "%02x".format(it) }.take(4)
-            "<REDACTED:${category.name}:$hex>"
-        }
-    }
-
-    /** Replaces the whole match. */
-    private fun subWhole(s: String, re: Regex, cat: LogExport.RedactionCategory): String =
-        re.replace(s) { m -> placeholderFor(cat, m.value) }
-
-    /** Replaces only capture group [group], keeping the rest of the match (e.g. the `key=`) intact. */
-    private fun sub(s: String, re: Regex, group: Int, cat: LogExport.RedactionCategory): String =
-        re.replace(s) { m ->
-            val g = m.groups[group]
-            if (g == null || g.value.isEmpty()) {
-                m.value
-            } else {
-                // Splice by the group's own range, never by searching for its text: a value that is a
-                // substring of the key (`passphrase=phrase`, `psk="k"`) would otherwise hit the key
-                // first and leave the secret in the output.
-                val off = m.range.first
-                m.value.replaceRange(g.range.first - off, g.range.last + 1 - off, placeholderFor(cat, g.value))
-            }
-        }
-
-    /** Like [sub] but for a two-value match (a lat,long pair) — both numbers get their own placeholder. */
-    private fun subPair(s: String, re: Regex, cat: LogExport.RedactionCategory): String =
-        re.replace(s) { m ->
-            val a = placeholderFor(cat, m.groupValues[1])
-            val b = placeholderFor(cat, m.groupValues[2])
-            "$a,$b"
-        }
-
-    /** IPv4 needs octet-range validation and a whitelist check the generic helpers above don't do. */
-    private fun subIpv4(s: String): String =
-        RE_IPV4.replace(s) { m ->
-            val octets = m.groupValues.drop(1).map { it.toInt() }
-            if (octets.any { it > 255 } || isWhitelistedIpv4(octets)) m.value
-            else placeholderFor(LogExport.RedactionCategory.IPV4, m.value)
-        }
-
-    private fun isWhitelistedIpv4(o: List<Int>): Boolean {
-        val (a, b) = o[0] to o[1]
-        return a == 127 || // 127.0.0.0/8 loopback
-            (a == 169 && b == 254) || // 169.254.0.0/16 link-local
-            (a == 192 && b == 168 && (o[2] == 43 || o[2] == 5)) // Android tether default / this project's CarPlay AP subnet
-    }
-
-    companion object {
-        // `wifi[-_]?pass` covers the OCBM config block's own `wifi_pass: ` key
-        // (`OcbmProbe.btOnlyConfig`), which the psk/passphrase spellings alone let through verbatim.
-        // Deliberately NOT a bare `pass`: that over-redacts ~49 unrelated `pass:`/`pass=` lines of
-        // third-party logcat, and these exports are the primary debugging artifact for this unit.
-        private val RE_WPA = Regex(
-            "(?i)\\b(passphrase|wpa[-_]?psk|psk|pre-?shared-?key|wifi[-_]?pass)\\s*[:=]\\s*\"?([^\",\\s}]+)\"?"
-        )
-        private val RE_MAC = Regex("\\b([0-9A-Fa-f]{2})([:-])([0-9A-Fa-f]{2})(\\2[0-9A-Fa-f]{2}){4}\\b")
-        private val RE_LATLON_KV = Regex("(?i)\\b(lat(?:itude)?|lon(?:g|gitude)?)\\s*[:=]\\s*(-?\\d{1,3}\\.\\d{3,})")
-        private val RE_LATLON_PAIR = Regex("(-?\\d{1,3}\\.\\d{4,6})\\s*,\\s*(-?\\d{1,3}\\.\\d{4,6})")
-        private val RE_IPV4 = Regex("\\b(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\b")
-        private val RE_VIN = Regex("\\b[A-HJ-NPR-Z0-9]{17}\\b")
-        private val RE_LONG_DIGITS = Regex("\\b\\d{13,}\\b")
-    }
-}

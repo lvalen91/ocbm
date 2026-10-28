@@ -817,7 +817,12 @@ impl VehicleConfig {
     /// Only the main display panel's pixel dimensions are applied, and ONLY when both are positive —
     /// a partial/garbled config must never zero the resolution out from under a working session; it
     /// falls through to `base` (the caller's interim default) instead.
+    ///
+    /// Also marks the result [`DeviceConfig::host_configured`]: a document that parsed is a host
+    /// config IN FORCE, so the no-config-only bench levers read from the result (today the
+    /// `CARPLAY_VIEWAREA2` second-area lever) must stand down.
     pub fn apply(&self, mut base: DeviceConfig) -> DeviceConfig {
+        base.host_configured = true;
         let d = &self
             .display_panels_config
             .main_display_panel
@@ -1134,6 +1139,56 @@ impl VehicleConfig {
                 let d = &s.pixel_dimensions;
                 (d.width > 0 && d.height > 0).then_some((d.width, d.height))
             })
+    }
+}
+
+/// carplayd's per-connection read of the host-pushed config file, CLASSIFIED — the branch structure
+/// of its `load_device_config`, lifted here so the lever decision that hangs off it
+/// ([`crate::levers::SubordinateLevers::to_arm`]) is unit-testable on the host (carplayd itself does
+/// not compile on macOS). Exactly ONE variant means "a host config is in force": [`Self::Parsed`].
+#[derive(Debug)]
+pub enum PushedCfgRead {
+    /// Read, within the size cap, and parsed. `bytes` are the exact bytes `vc` came from (carplayd
+    /// CRCs them and hands them to the iAP2-side metadata reader).
+    Parsed { vc: VehicleConfig, bytes: Vec<u8> },
+    /// Read, within the cap, but serde_yaml refused it — the WHOLE document is discarded.
+    Rejected(serde_yaml::Error),
+    /// A zero-byte file (a push produced nothing).
+    Empty,
+    /// Larger than [`Self::MAX_BYTES`]; refused before parsing. Carries the length.
+    Oversized(usize),
+    /// A read error other than not-found (permissions, I/O, a truncated tmpfs).
+    Unreadable(std::io::Error),
+    /// No such file — the normal idle state.
+    Absent,
+}
+
+impl PushedCfgRead {
+    /// Size cap applied BEFORE parsing (audit R6): serde_yaml is recursive-descent, so a
+    /// pathologically large / deeply nested document could drive it into a stack-overflow abort. A
+    /// real VehicleConfig is a few KB.
+    pub const MAX_BYTES: usize = 256 * 1024;
+
+    /// Classify the result of `std::fs::read(<config path>)`.
+    pub fn classify(read: std::io::Result<Vec<u8>>) -> Self {
+        match read {
+            Ok(bytes) if bytes.is_empty() => Self::Empty,
+            Ok(bytes) if bytes.len() > Self::MAX_BYTES => Self::Oversized(bytes.len()),
+            Ok(bytes) => match VehicleConfig::from_yaml(&bytes) {
+                Ok(vc) => Self::Parsed { vc, bytes },
+                Err(e) => Self::Rejected(e),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::Absent,
+            Err(e) => Self::Unreadable(e),
+        }
+    }
+
+    /// The host config in force, if any (`Some` only for [`Self::Parsed`]).
+    pub fn config(&self) -> Option<&VehicleConfig> {
+        match self {
+            Self::Parsed { vc, .. } => Some(vc),
+            _ => None,
+        }
     }
 }
 
@@ -1657,6 +1712,7 @@ oemIconConfig:
       imageBase64: "iVBORw0KGgp="
   label: "Owner's \"Roadster\" \\ EV"
   visible: true
+wifi_ap: true
 audio:
   formats:
   - {type: 102, audioType: media, out: aac_lc_48k_stereo}
@@ -2029,9 +2085,14 @@ metadata:
 
         /// Emitted for a consumer OUTSIDE this crate. Not a gap.
         const READ_ELSEWHERE: &[&str] = &[
-            "android_auto", // tools/session_supervisor.sh — aa_enabled(): gates arming the AA bridge
+            // tools/session_supervisor.sh aa_enabled() + box_common::cfg (aa-bridge, btd): Android
+            // Auto is explicit opt-in on the box since 2026-10-19 (absent = OFF).
+            "android_auto",
             "hot_handover", // tools/session_supervisor.sh — gates the wired/wireless preempt
             "pairing",      // tools/session_supervisor.sh — SSP association model
+            // tools/session_supervisor.sh wifi_ap_enabled() (exported to btd as BOX_WIFI_AP).
+            // Emitted unconditionally by the macOS app since 2026-10-19.
+            "wifi_ap",
         ];
 
         /// The COMPLETE inventory of keys the app emits. Asserting the exact set (not a
@@ -2124,12 +2185,13 @@ metadata:
             "viewAreas",
             "visible",
             "width",
+            // Unconditional since 2026-10-19 (was emitted only when false).
+            "wifi_ap",
             "wireless",
-            // NOT listed, on purpose — CONDITIONALLY emitted keys that the app's DEFAULT document
-            // (which this fixture is) never carries, so listing them would trip the "vanished"
-            // assertion: `wifi_ap` (emitted only when false; read by tools/session_supervisor.sh
-            // `wifi_ap_enabled`) and `view_area_anim_ms` (emitted only when != 3000; parsed here as
-            // `VehicleConfig::view_area_anim_ms`, covered by its own literal test). If either ever
+            // NOT listed, on purpose — a CONDITIONALLY emitted key that the app's DEFAULT document
+            // (which this fixture is) never carries, so listing it would trip the "vanished"
+            // assertion: `view_area_anim_ms` (emitted only when != 3000; parsed here as
+            // `VehicleConfig::view_area_anim_ms`, covered by its own literal test). If it ever
             // shows up in the regenerated fixture, the emitter's default moved — do not just add it.
         ];
 

@@ -287,6 +287,9 @@ final class MetadataStore: ObservableObject {
     private var jsonCount = 0
     /// Kinds already logged, so each is reported once regardless of where it falls in the sampler.
     private var seenKinds = Set<String>()
+    /// 0x5202 id 13 ExitInfo seen this session (logged once). ExitInfo only arrives because the box
+    /// now sends 0x5200 selector 3 SupportsExitInfo (2026-10-19 test, docs/carplay/05_METADATA_AND_CONTROLS.md).
+    private var exitInfoSeen = false
 
     /// Seam reassembly runs off the OCBM read queue; only complete messages hop to the main actor.
     nonisolated private let seamLock = NSLock()
@@ -478,7 +481,7 @@ final class MetadataStore: ObservableObject {
         media = MediaSnapshot(); nav = NavSnapshot(); activeCall = nil
         telephony.removeAll(); events.removeAll(); artworkCache.removeAll()
         power.removeAll(); device.removeAll(); apps.removeAll(); favorites.removeAll()
-        callLists.removeAll(); seenKinds.removeAll()
+        callLists.removeAll(); seenKinds.removeAll(); exitInfoSeen = false
         jsonCount = 0 // per-session numbering, so `#N` and the `<= 3` branch mean what they say
         seamLock.lock(); seam.removeAll(); seamLock.unlock()
         CarPlayCornerMask.clearSessionCorner() // next session starts from the bundled fallback until its mask arrives
@@ -631,6 +634,15 @@ final class MetadataStore: ObservableObject {
                 distanceText: str("distanceText"),
                 distanceUnits: int("distanceUnits"),
                 exitInfo: str("exitInfo"))
+            if let exit = str("exitInfo"), !exit.isEmpty {
+                // Kept raw too (shown in the Navigation pane's "Exit Info (raw)" card) — whether iOS
+                // sends ExitInfo at all is the open question, so the record itself is the evidence.
+                append(.navigation, MetaEvent(date: Date(), title: "maneuver #\(idx) exitInfo", body: pretty(obj)))
+                if !exitInfoSeen {
+                    exitInfoSeen = true
+                    log.info("iAP2 metadata: exitInfo seen on maneuver idx \(idx, privacy: .public)")
+                }
+            }
             // Bound the list (a long route streams many maneuvers).
             if nav.maneuvers.count > 64, let oldest = nav.maneuvers.keys.min() {
                 nav.maneuvers.removeValue(forKey: oldest)
@@ -994,6 +1006,8 @@ private struct MediaPane: View {
 
 private struct NavPane: View {
     let n: NavSnapshot
+    /// The `.navigation` raw records; only the `maneuver #N exitInfo` ones are shown here.
+    var raw: [MetaEvent] = []
 
     /// Deliberately status-only glyphs. `laneAngle` would let us draw the actual arrow direction,
     /// but its units are unverified, so a rotated arrow would be a guess presented as a fact.
@@ -1085,6 +1099,22 @@ private struct NavPane: View {
                         }
                         if let i = n.currentManeuverIndex {
                             Row(label: "Maneuver", value: "#\(i) of \(n.maneuvers.count) received")
+                        }
+                    }
+                }
+                // 0x5202 id 13 ExitInfo, raw, for every maneuver that carried one (not just the
+                // current one the card above shows). Absent until iOS honours SupportsExitInfo.
+                let exits = raw.filter { $0.title.hasPrefix("maneuver #") }.suffix(5)
+                if !exits.isEmpty {
+                    Card(title: "Exit Info (raw)") {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(exits.reversed()) { ev in
+                                Text("\(ev.date.formatted(date: .omitted, time: .standard))  ·  \(ev.title)")
+                                    .font(.caption).foregroundStyle(.secondary)
+                                Text(ev.body)
+                                    .font(.system(.caption, design: .monospaced))
+                                    .textSelection(.enabled)
+                            }
                         }
                     }
                 }
@@ -1183,7 +1213,7 @@ struct MetadataRootView: View {
                 case .media:
                     store.media.isEmpty ? AnyView(EmptyPane(category: .media)) : AnyView(MediaPane(m: store.media))
                 case .navigation:
-                    store.nav.isEmpty ? AnyView(EmptyPane(category: .navigation)) : AnyView(NavPane(n: store.nav))
+                    store.nav.isEmpty ? AnyView(EmptyPane(category: .navigation)) : AnyView(NavPane(n: store.nav, raw: store.events[.navigation] ?? []))
                 case .phone:
                     store.activeCall.map { AnyView(CallPane(c: $0)) } ?? AnyView(EmptyPane(category: .phone))
                 case .callHistory:

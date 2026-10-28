@@ -4,7 +4,6 @@ import android.content.Context
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import java.io.BufferedInputStream
-import java.io.OutputStream
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
@@ -12,11 +11,23 @@ import java.net.Socket
 import java.util.concurrent.Executors
 import zeno.gmccpa.pair.MfiRelay
 import zeno.gmccpa.pair.NativeCore
-import zeno.gmccpa.pair.SrpServer
-import zeno.gmccpa.pair.Tlv8
 import zeno.gmccpa.logging.SessionTrace
-import java.security.SecureRandom
 import java.util.concurrent.atomic.AtomicBoolean
+
+/**
+ * Why a control connection ended, as far as this side can tell (2026-10-06). Decided by the native
+ * pump from existing state and never by parsing a message: LINK_LOST is the 30 s idle backstop, or a
+ * read exception we did not cause with a dead-link errno in its cause chain or after >= 10 s of
+ * silence. CLOSED is everything else — EOF, a feed close, the hijack, stop(), BUSY, no native core,
+ * a dispatch failure. The supervisor enters recovery faster after LINK_LOST.
+ */
+/**
+ * Why a control connection ended. [LINK_LOST] = dead-link evidence (the grace ladder's fast entry);
+ * [UNVERIFIED] = the pump's own unverified-connection deadline closed a generation that never
+ * completed pair-verify ([UnverifiedConnRule]; SessionCore does not hand it to the supervisor);
+ * [CLOSED] = everything else, including the peer closing early on its own.
+ */
+enum class EndReason { CLOSED, LINK_LOST, UNVERIFIED }
 
 /**
  * A **CarPlay-identity** AirPlay receiver — the successor to the feasibility-era `AirPlayRx` probe
@@ -48,7 +59,7 @@ class CarPlayRx(
     /** Must ultimately equal the identity the CCPA presents over Bluetooth (the box_identity problem). */
     private val deviceId: String = BOX_DEVICE_ID,
     private val pi: String = BOX_PI,
-    /** Bridge to the device-proven OCBM CH_MFI relay; null falls back to the Kotlin stub path. */
+    /** Bridge to the device-proven OCBM CH_MFI relay; null means the native core cannot start and every control connection is closed. */
     private val mfiRelay: MfiRelay? = null,
     /**
      * Fired the instant the phone opens the control connection — BEFORE pair-verify, and long
@@ -58,9 +69,10 @@ class CarPlayRx(
      * until an operator ran `carplay_ui`, so from RECORD onward the phone streamed into a closed
      * port and `forward.rs` dropped every access unit until something answered — measured as
      * multiple seconds of black screen on a session that was otherwise healthy (2026-08-12).
-     * Runs on the accept thread: hand off, do not block.
+     * Runs on the accept thread: hand off, do not block. The argument is the native generation that
+     * came up (2026-10-06), so the link-interrupted overlay can drop a stale generation's state.
      */
-    var onSessionUp: (() -> Unit)? = null,
+    var onSessionUp: ((Long) -> Unit)? = null,
     /**
      * Fired when the last live control connection goes away — clean TEARDOWN and abrupt link loss
      * alike, because the two are indistinguishable here (the phone simply stops reading).
@@ -69,9 +81,11 @@ class CarPlayRx(
      * `MainActivity.sessionUp` were all stood up on [onSessionUp] and never torn back down, so after
      * the phone left, the CarPlay screen stayed foreground over a dead session, swallowing touches
      * (`touch move … sent=false`) and re-launching itself from `onResume`. Device-observed 2026-08-27.
-     * Runs on the dying pump thread: hand off, do not block.
+     * Runs on the dying pump thread: hand off, do not block. The argument is why the connection
+     * whose end brought the count to zero ended ([EndReason], 2026-10-06): the recovery ladder enters
+     * faster after a dead link than after a phone that hung up.
      */
-    var onSessionDown: (() -> Unit)? = null,
+    var onSessionDown: ((EndReason) -> Unit)? = null,
     /**
      * Fired once when [STALL_DIALS] consecutive connect-outs are accepted by the phone without it
      * ever dialling back. Argument is the dial count. See [noteDialAccepted] for what this means.
@@ -82,18 +96,48 @@ class CarPlayRx(
      * the accept thread has retired and closed the ServerSocket, so :7011 now refuses instead of
      * filling the kernel backlog. Argument is the reason. This is the ONLY way the supervisor learns
      * about it: [selfTest] does read false afterwards, but nothing polls it — reportReceiverHealth
-     * runs once after start() and again only when the driver presses Recover — so without this edge
+     * runs once after start(), and again on every Restart Session (a new receiver) — so without this edge
      * the receiver would sit in RX_READY with a closed listener until someone happened to look.
      * Runs on the accept thread: hand off, do not block.
      */
     var onListenerLost: ((String) -> Unit)? = null,
     /** Fired on every connect-out the phone accepts, so the supervisor can start its dial-back clock. */
     var onDialAccepted: (() -> Unit)? = null,
+    /**
+     * The live control channel has carried nothing for [QUIET_MS] while A/V is not fresh either: the
+     * link is probably interrupted (the overlay's cue). Argument = the generation. Fired at most once
+     * per silent episode, on the pump thread; hand off, do not block. 2026-10-06.
+     */
+    var onLinkQuiet: ((Long) -> Unit)? = null,
+    /** Bytes arrived again after [onLinkQuiet], or that pump ended (clear-on-exit). Argument = the generation. */
+    var onLinkResumed: ((Long) -> Unit)? = null,
+    /**
+     * May the self-provoked connect-out go out right now? Evaluated at every dispatch, never
+     * captured: the answer is "is there an OCBM link whose CH_MFI relay can answer /auth-setup",
+     * and that link is rebuilt on every re-claim. A nudge sent before CT_HELLO_ACK made the phone
+     * dial back into a receiver whose relay had no client — `relay sign requested with no OCBM
+     * link`, first auth failed, device-observed 2026-10-05. A refused dispatch burns no cooldown;
+     * [wakeDiscovery] (called on link-up) re-resolves so the held nudge goes out promptly. Only
+     * the outbound nudge is gated — an unsolicited inbound control connection is never refused here.
+     */
+    private val nudgeAllowed: () -> Boolean = { true },
     /** Where controller-id -> Ed25519 LTPK pairings persist across runs. */
     private val peerFile: String? = null,
-    /** Stable 32-byte Ed25519 accessory seed. Changing it invalidates every existing pairing. */
-    private val edSeed: ByteArray = ByteArray(32) { (it * 31 + 7).toByte() }
+    /**
+     * Stable 32-byte Ed25519 accessory seed. Changing it invalidates every existing pairing.
+     * REQUIRED, no default (plan v5.8 V5 / Q001): the only source is [AccessoryKey.loadOrCreate],
+     * per install, so no code path can fall back to a compiled-in constant.
+     */
+    private val edSeed: ByteArray,
+    /**
+     * Pair-verify completed on a control connection (the ENCRYPTED milestone): the phone holds a
+     * pairing that is valid under THIS install's accessory key. Argument = the generation. Fired on
+     * the pump thread, once per connection; hand off, do not block. V5 uses it to end the rekey
+     * migration ([AccessoryKey.clearRekey]).
+     */
+    var onPairVerified: ((Long) -> Unit)? = null
 ) {
+    init { require(edSeed.size == 32) { "edSeed must be 32 bytes" } }
     /**
      * The SAME device id, decimal. This asymmetry is deliberate and is the thing that was broken:
      * TXT `deviceid` and /info `deviceID` carry the colon MAC, but the
@@ -143,12 +187,19 @@ class CarPlayRx(
     private var regListener: NsdManager.RegistrationListener? = null
     /** Our own mDNS responder, publishing a hostname NsdManager will not let us set. See [advertise]. */
     private var selfMdns: MdnsResponder? = null
-    private var discListener: NsdManager.DiscoveryListener? = null
+    /** The browse listener. Started and stopped only under the slot's lock, gated on [running] (F039). */
+    private val browse = BrowseSlot<NsdManager.DiscoveryListener> { running.get() }
     private val pool = Executors.newCachedThreadPool()
     private val lastDial = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
-    /** The incumbent control connection, for hijack: a new inbound supersedes and closes it. */
-    @Volatile private var currentSocket: Socket? = null
+    /** The incumbent control connection. A new inbound supersedes and closes it only while it is not
+     *  yet ENCRYPTED; once it is, every newcomer is refused ([Admission], OD-7F).
+     *  Installed by acceptLoop, cleared by compareAndSet on each connection's own exit (F040). */
+    private val incumbent = IncumbentSlot()
+    /** OD-7F admission, judged on the accept thread against [incumbent] (CarPlayRxSlots.kt). */
+    private val acceptGate = AcceptGate(incumbent, onRefused = { line -> log.w(line) }, isLocal = { c ->
+        Admission.isLocal(c.inetAddress, c.localAddress) { a -> java.net.NetworkInterface.getByInetAddress(a) != null }
+    })
     /** Number of live control connections. Drives rediscovery: >0 = a session is up, pause the churn;
      *  0 = the phone left, resume forcing fresh resolves so the NEXT session can start. */
     private val liveConnections = java.util.concurrent.atomic.AtomicInteger(0)
@@ -175,6 +226,34 @@ class CarPlayRx(
      */
     private val discoveryPaused = AtomicBoolean(false)
 
+    /**
+     * Wakes [rediscoverLoop] out of its sleep so it restarts discovery NOW rather than at the next
+     * tick. A semaphore, not `Thread.interrupt`: every sleep site in the loop returns on
+     * InterruptedException because that is how `stop()`'s `shutdownNow()` ends it, so an interrupt
+     * would kill the loop instead of hurrying it. The loop thread stays the only owner of
+     * [browse]'s listener (stop() aside); a waker never touches NsdManager itself. See [wakeDiscovery].
+     */
+    private val rediscoverWake = java.util.concurrent.Semaphore(0)
+
+    /**
+     * Rediscover backoff — the supervisor's lever, not the receiver's own idea.
+     *
+     * `backoffEligible` is set by the supervisor for exactly the phases where the 12 s churn has
+     * nothing left to find (STALLED, BOX_UNHEALTHY) and cleared on every other phase. While it is
+     * set, [REDISCOVER_EMPTY_CYCLES] consecutive EMPTY cycles — a restart that produced no
+     * `onServiceResolved` before the next tick — lengthen the interval towards
+     * [REDISCOVER_MAX_MS]. Any resolve, any resume, any BT progress the supervisor relays, and the
+     * link-up wake all reset it to [REDISCOVER_MS]. The interval is read once per sleep, so a reset
+     * takes effect on the next tick at the latest; the wake makes it immediate.
+     */
+    private val backoffEligible = AtomicBoolean(false)
+    /** Guards the two below: the loop's read-modify-write races the resets from other threads otherwise. */
+    private val backoffLock = Any()
+    private var emptyCycles = 0                       // under backoffLock
+    private var rediscoverIntervalMs = REDISCOVER_MS  // under backoffLock
+    /** Set by [resolve] on every resolved record; the loop reads-and-clears it per cycle. */
+    private val resolvedThisCycle = AtomicBoolean(false)
+
     /** Is a control connection up right now? The box/attach paths need this to avoid disturbing a
      *  live session; nothing outside could see it before. */
     val sessionLive: Boolean get() = liveConnections.get() > 0
@@ -188,7 +267,11 @@ class CarPlayRx(
      */
     fun liveConnectionCount(): Int = liveConnections.get()
 
-    /** When the advert went live. The connect-out must not run until iOS has had time to index it. */
+    /**
+     * When the advert went live (elapsedRealtime ms at onServiceRegistered; 0 = not yet). The
+     * connect-out must not run until iOS has had time to index it. Monotonic since v5.8 V7 (Q015):
+     * the bench clock is stepped by the adb time-sync hook.
+     */
     @Volatile private var advertisedAt = 0L
 
     /** `onRegistrationFailed` fired — [advertisedAt] will never be stamped, so stop waiting on it. */
@@ -197,8 +280,22 @@ class CarPlayRx(
     /** One connect-out at a time. See the guard in [connectOutWithRetry]. */
     private val dialInFlight = AtomicBoolean(false)
 
-    /** One SRP-6a exchange per control connection. */
-    private var srp: SrpServer? = null
+    /** One resolved phone endpoint to nudge. [key] is the `addr:port` the cooldown map uses. */
+    private class Target(val serviceName: String, val host: InetAddress, val port: Int) {
+        val key: String get() = "${host.hostAddress}:$port"
+    }
+
+    /**
+     * The NEWEST endpoint a resolve wants nudged, handed to the in-flight connect-out instead of
+     * being dropped (2026-10-06, P1 R3: a fresh resolve to the phone's NEW port was dropped as "a
+     * connect-out is already in flight" while the worker spent 11.6 s on the stale cached port). Set
+     * by the resolver BEFORE it tries [dialInFlight]; consumed by the worker loop and at the top of
+     * each attempt in [dialOut].
+     */
+    private val pendingTarget = java.util.concurrent.atomic.AtomicReference<Target?>(null)
+
+    /** The endpoint a dispatch chain just had accepted, and when. Owned by that chain only. */
+    private class Accepted(val key: String, val at: Long)
 
     /**
      * The newest native generation started, so a superseded pump's `finally` does not mark the
@@ -236,7 +333,7 @@ class CarPlayRx(
         //
         // box_identity::derive() prefers wlan0's MAC, then the SoC serial, then /proc/cpuinfo Serial.
         // In this bridge role the first two are absent and the third reads "0000000000000000", so the
-        // stock derivation collapses to ONE identity shared by every adapter (DA:BF:58:F4:7F:18) —
+        // stock derivation collapses to ONE identity shared by every adapter (<DEGENERATE_DEVICE_ID>) —
         // exactly the fleet-collapse box_identity.rs was written to prevent, and exactly the observed
         // behaviour where an iPhone registers several Carlinkit adapters as a single vehicle no matter
         // what their Bluetooth or Wi-Fi names are. Same SHA-256 derivation, real hardware id.
@@ -265,7 +362,6 @@ class CarPlayRx(
         /** Instance name for the self-hosted advert. MUST differ from [ACCESSORY_NAME] so the two
          *  adverts do not collide, and it becomes our SRV target `<name>.local` — the whole point. */
         const val SELF_HOSTED_NAME = "gmccpa-rx"
-        const val BPLIST = "application/x-apple-binary-plist"
         /**
          * The proven CarPlay source version. 980.71.1 is an AirPlay-2 / Apple-TV-era string and can
          * steer iOS down a different negotiation path on a service claiming the Car bit; every
@@ -274,6 +370,29 @@ class CarPlayRx(
         const val SRCVERS = "320.17"
         /** Car(32) | CarPlayControl(37) | HKPairing(38) — the production CCPA value. */
         const val FEATURES = "0x44440B80,0x61"
+        /** TXT `model`; must equal `/info` `model` (InfoTxtEqualityTest). */
+        const val MODEL = "CarLink-mac-1.0"
+        /** TXT `flags`; `/info` `statusFlags` is the same value as an integer. */
+        const val FLAGS = "0x4"
+
+        /**
+         * The TXT record both adverts publish (NsdManager's `setAttribute` loop and the self-hosted
+         * responder). Pure and companion-level so `InfoTxtEqualityTest` can hold it against
+         * `assets/info.bplist` on the host: `deviceid`/`features`/`pi` (and model/srcvers/flags)
+         * must equal what `/info` returns, or pair-verify fails with `-16720` on the unit (docs/11
+         * item 5.12).
+         */
+        internal fun txtRecordFor(deviceId: String, pi: String): Map<String, String> = linkedMapOf(
+            "deviceid" to deviceId,
+            // The Car bit (high word bit 32) is what makes iOS open RTSP back to the advertised port.
+            "features" to FEATURES,
+            "flags" to FLAGS,
+            "model" to MODEL,
+            "protovers" to "1.0",
+            "pi" to pi,
+            "srcvers" to SRCVERS
+            // No `pk`: the Ed25519 long-term public key is exchanged inside pairing, not advertised.
+        )
         /**
          * Re-nudge cooldown. Was 20 s, when a wasted dial was expensive because the only address we
          * had came from NsdManager's cache and a miss cost the whole window. Dials are now aimed by
@@ -281,6 +400,12 @@ class CarPlayRx(
          * added latency on the critical path (measured: 48.5 s advert -> connect-out, 2026-08-12).
          */
         private const val REDIAL_COOLDOWN_MS = 5_000L
+        /** The rediscover cadence while anything is still expected to happen. See [rediscoverLoop]. */
+        private const val REDISCOVER_MS = 12_000L
+        /** Ceiling the backed-off cadence may reach. Short enough that a phone returning on its own is still found within one tick. */
+        private const val REDISCOVER_MAX_MS = 30_000L
+        /** Consecutive empty cycles (no resolve) before the cadence starts to lengthen — only while the supervisor says it may. */
+        private const val REDISCOVER_EMPTY_CYCLES = 5
         /**
          * Accepted-but-unanswered dials before we call it stalled. Six is ~75 s at the rediscover
          * cadence — long enough that a phone merely being slow is not misreported, short enough that
@@ -311,6 +436,8 @@ class CarPlayRx(
          * 10 s is >100x the observed verify-only path and comfortably above any pair-setup, and it is
          * a third of the pump's 30 s `soTimeout`: a connection that is still open but unencrypted
          * after 10 s is a phone that is talking and not pairing, which is the fault worth a line.
+         * Since 2026-10-08 (A-F1) it is also the DEADLINE: [handleNative] closes a still-plaintext
+         * connection at this age, sending or silent, as [EndReason.UNVERIFIED] ([UnverifiedConnRule]).
          */
         private const val PAIR_VERIFY_MS = 10_000L
         /**
@@ -342,6 +469,55 @@ class CarPlayRx(
         private const val ACCEPT_RETRY_MS = 250L
         private const val ACCEPT_FAILURES_FATAL = 40
 
+        /** [dialOut]: at most this many in-flight retargets (each resets the attempt budget) per run. */
+        private const val MAX_RETARGETS = 3
+
+        // ---- control-channel liveness (52A, 2026-10-06) -------------------------------------------
+        /**
+         * The pump's read timeout. Was 30 s; now a 1 s poll, so the silence clocks below are checked
+         * every second and `running` is observed within 1 s. A SocketTimeoutException leaves the
+         * socket valid (java.net.Socket contract), and partial ciphertext is already buffered by
+         * NativeCore.feed.
+         */
+        private const val POLL_MS = 1_000
+        /**
+         * Stage 1: the link-interrupted overlay. The live channel carries `POST /feedback` every
+         * 2.0 s; the largest healthy gap measured is 2.178 s (logcat2, 2821 intervals, locked phone
+         * and a 46 s call included), so 5 s is 2.3x that.
+         */
+        private const val QUIET_MS = 5_000L
+        /**
+         * Stage 1 arms at the first byte received this long after ENCRYPTED. Setup has legitimate
+         * gaps (ENCRYPTED -> first /feedback 4.0-8.5 s, longest pre-feedback gap 6.2 s), so a silent
+         * setup stays unarmed and never shows the overlay; the backstop still applies.
+         */
+        private const val ARM_AFTER_MS = 15_000L
+        /**
+         * The idle backstop (replaces the unconditional 30 s read-timeout break): after 30 s of
+         * control silence, continue only while the receiver core reports A/V or keepAlive beacons
+         * fresher than 30 s — the reference `serve_connection` rule (receiver net.rs, AV_IDLE_TEARDOWN_MS).
+         */
+        private const val IDLE_BACKSTOP_MS = 30_000L
+        /**
+         * A read exception after this much silence is LINK_LOST, whatever the exception says. Both
+         * kernel kills (keepalive: idle 3 s + 3 x 3 s probes; USER_TIMEOUT: 12 s of unacked data, and
+         * the reply follows the last receive) fire >= 12 s after the last received byte, and a live
+         * channel is never quiet past 2.2 s — so a peer RST mid-exchange stays CLOSED.
+         */
+        private const val LOST_MIN_SILENCE_MS = 10_000L
+        /**
+         * TCP_KEEPIDLE / TCP_KEEPINTVL / TCP_KEEPCNT. android.system.OsConstants has none of the
+         * three at compileSdk 32 (only SO_KEEPALIVE, IPPROTO_TCP, TCP_NODELAY, TCP_USER_TIMEOUT), so
+         * these are the Linux values: NDK 30 sysroot linux/tcp.h:36-38.
+         */
+        private const val TCP_KEEPIDLE_LINUX = 4
+        private const val TCP_KEEPINTVL_LINUX = 5
+        private const val TCP_KEEPCNT_LINUX = 6
+        /** Apple's receiver values (carplayd `arm_keepalive`): 3 s idle, 3 s interval, 3 probes. */
+        private const val KEEPALIVE_S = 3
+        /** Abort once sent data has been unacked this long; with keepalive on it also bounds the probes. */
+        private const val USER_TIMEOUT_MS = 12_000
+
         // ---- SessionTrace.Board entry names, so a capture is greppable per component ---------------
         private const val B_LISTENER = "rx-listener"
         private const val B_ADVERT_NSD = "advert-nsd"
@@ -351,10 +527,6 @@ class CarPlayRx(
         private const val B_CORE = "native-core"
         private const val B_CTRL = "ctrl-conn"
         private const val X_ADVERT = "advert-registered"
-        private val INTERESTING = setOf(
-            "content-type", "content-length", "user-agent", "cseq", "x-apple-device-id",
-            "active-remote", "dacp-id", "airplay-receiver-device-id", "connection"
-        )
     }
 
     fun start() {
@@ -427,14 +599,14 @@ class CarPlayRx(
         // Close the live control socket so its pump thread unblocks, breaks, and destroys its own
         // native generation in the finally. Without this, stop() left the native core running and the
         // pump blocked in read() for up to 30 s — a zombie session that collides with the next instance.
-        try { currentSocket?.close() } catch (_: Throwable) {}
-        currentSocket = null
+        incumbent.clear()?.let { try { it.sock.close() } catch (_: Throwable) {} }
         regListener?.let { try { nsd?.unregisterService(it) } catch (_: Throwable) {} }
         regListener = null
         selfMdns?.let { runCatching { it.stop() }.onFailure { t -> log.w("self-mdns stop: ${t.message}") } }
         selfMdns = null
-        discListener?.let { try { nsd?.stopServiceDiscovery(it) } catch (_: Throwable) {} }
-        discListener = null
+        // Under the browse lock, after running=false above: a rediscover restart that is mid-flight
+        // either finished first (stopped here) or now sees !running and starts nothing (F039).
+        browse.stop { try { nsd?.stopServiceDiscovery(it) } catch (_: Throwable) {} }
         SessionTrace.Board.down(B_ADVERT_NSD, "receiver stopped")
         SessionTrace.Board.down(B_ADVERT_SELF, "receiver stopped")
         SessionTrace.Board.down(B_BROWSE, "receiver stopped")
@@ -470,8 +642,8 @@ class CarPlayRx(
      * into iOS's Wi-Fi endpoint index is the whole game — the pending autoconnect is resolved against
      * it — so we use the thing that demonstrably achieves it.
      *
-     * The custom responder is kept (it verifies byte-clean) for the case where we need to pin the
-     * advertised address, but it is not the default until it is shown to produce an endpoint.
+     * The custom responder now runs ALONGSIDE this, not instead of it: 2026-10-06 the phone was shown
+     * activating its `gmccpa-rx` endpoint for every session that formed — see the second-advert block below.
      */
     private fun advertise() {
         val listenPort = port
@@ -484,7 +656,7 @@ class CarPlayRx(
         val l = object : NsdManager.RegistrationListener {
             override fun onServiceRegistered(s: NsdServiceInfo) {
                 log.i("advertise _airplay._tcp:$listenPort REGISTERED as '${s.serviceName}'")
-                advertisedAt = System.currentTimeMillis()
+                advertisedAt = android.os.SystemClock.elapsedRealtime()
                 SessionTrace.met(X_ADVERT)
                 SessionTrace.Board.up(B_ADVERT_NSD, "'${s.serviceName}' _airplay._tcp:$listenPort")
             }
@@ -505,16 +677,19 @@ class CarPlayRx(
             }
         }
         regListener = l
-        nsd?.registerService(info, NsdManager.PROTOCOL_DNS_SD, l)
         // Requested is not registered. The record is live only on onServiceRegistered (55 ms after
         // the request on 2026-09-09); ADVERT_WAIT_MS is already the app's own definition of "too
         // long" — a connect-out abandons itself after that — so a registration that has not arrived
         // by then is missing by the receiver's own rules, whether or not a dial happened to be waiting.
+        // Both are set BEFORE the request: a fast onServiceRegistered used to land between the
+        // request and the arm, so its met() found nothing and its Board `up` was overwritten by the
+        // `down` below (false EXPECTED-MISSING advert-registered at 03:58:25, 2026-10-06).
         SessionTrace.Board.down(B_ADVERT_NSD, "registerService requested — awaiting onServiceRegistered")
         SessionTrace.expect(X_ADVERT, ADVERT_WAIT_MS,
             "registerService('$ACCESSORY_NAME' _airplay._tcp:$listenPort) was requested and no " +
             "onServiceRegistered/onRegistrationFailed callback has arrived — iOS cannot index an " +
             "advert that is not live, so no connect-out can succeed")
+        nsd?.registerService(info, NsdManager.PROTOCOL_DNS_SD, l)
 
         // ---- second advert, on a hostname WE own -------------------------------------------------
         // iOS keys its Wi-Fi CarPlay endpoint index by HOST, one endpoint per host, and whichever
@@ -522,26 +697,42 @@ class CarPlayRx(
         //
         //   Bonjour TXT Add CarPlay._airplay._tcp.local.        <- GM's
         //   Bonjour TXT Add gm-ccpa._airplay._tcp.local.        <- ours, 27 MICROSECONDS later
-        //   Created APEndpointCarPlay [0xE051] ... id 'F8:6D:CC:DC:32:D6'
+        //   Created APEndpointCarPlay [0xE051] ... id '<GM_RECEIVER_ID>'
         //
         // One endpoint, stamped with GM's identity; ours was discarded. Every later autoconnect then
-        // failed with "No matching endpoint found for deviceID B2:D6:2A:9F:C9:30" — iOS was looking
+        // failed with "No matching endpoint found for deviceID <ACCESSORY_DEVICE_ID>" — iOS was looking
         // for us and we were not in the index. Both SRV records target the platform's `Android.local`,
         // so we lose that race whenever GM registers first (it starts at boot, we start ~51 s later).
         //
         // NsdManager cannot set the SRV target — AOSP drops setHost() on registration — so the only
         // way to stop sharing GM's host is to answer mDNS ourselves. MdnsResponder owns
-        // `$instance.local` and publishes exactly ONE address, the br0 bridge the phone is on, which
-        // also sidesteps `Android.local` resolving to three addresses of which two are unroutable
-        // from the phone's subnet.
+        // `$instance.local` and publishes only br0 addresses — its IPv6 link-local (AAAA) and IPv4
+        // (A) — which also sidesteps `Android.local` resolving to three addresses of which two are
+        // unroutable from the phone's subnet.
         //
-        // Run it ALONGSIDE NsdManager rather than instead of it: the NsdManager advert is the one iOS
-        // has demonstrably indexed in the past, so keep it as the fallback and let this one add a
-        // SECOND, separately-keyed endpoint carrying our deviceID. A distinct instance name keeps the
-        // two from colliding.
+        // Run it ALONGSIDE NsdManager rather than instead of it. The two do different jobs: this one
+        // is what makes iOS create the SECOND, separately-keyed endpoint carrying our deviceID, and
+        // the NsdManager advert is the proven dial path (SRV `gm-ccpa` -> `Android.local` -> br0
+        // IPv6) that every formed session actually connected through. A distinct instance name keeps
+        // the two from colliding.
         //
         // ACCEPTANCE TEST, on the phone: a second `Created APEndpointCarPlay ... id
-        // 'B2:D6:2A:9F:C9:30'`. That, not the absence of errors, is what proves this worked.
+        // '<ACCESSORY_DEVICE_ID>'`. That, not the absence of errors, is what proves this worked.
+        //
+        // Always on (v5.9 D018 removed its on/off switch, a constant that was always `true`):
+        // the phone needs it. 2026-10-06: with it off, every nudge ended in airplayd's
+        // `handlePendingAutoconnect ... No matching endpoint found for deviceID <ACCESSORY_DEVICE_ID>`
+        // and no dial. Every session that formed went `index = WiFi, for deviceID: <ACCESSORY_DEVICE_ID>`
+        // -> `Activating endpoint 'gmccpa-rx'` -> SRV `gm-ccpa` -> `Android.local:7011` over br0's IPv6
+        // link-local, within ~15 s of "self-hosted advert up".
+        //
+        // It was switched off earlier that day on the wrong diagnosis. After an in-process restart
+        // the phone resolved `gmccpa-rx.local` itself, and MdnsResponder then published only br0's
+        // IPv4 (A, with an NSEC denying AAAA): 9/9 `Connecting to 192.168.5.1:7011` ended in
+        // kTimeoutErr because the radio drops IPv4 :7011. The defect was that IPv4-only record set,
+        // not the advert; the responder now publishes AAAA (br0 link-local) + A. That is a fix in
+        // code only — acceptance is pending on-device: the phone must resolve `gmccpa-rx.local` to
+        // `fe80::…%en0` and connect `[fe80::…]:7011`, and never dial `192.168.5.1`.
         // Stop any previous responder before replacing it. Overwriting the field leaks the old one,
         // which keeps its 5353 socket and answers every query a second time — visible in logcat as
         // paired "query -> answering" lines from two threads.
@@ -551,13 +742,17 @@ class CarPlayRx(
             val r = MdnsResponder(SELF_HOSTED_NAME, "_airplay._tcp", listenPort, txtRecord(), log)
             if (r.start()) {
                 selfMdns = r
-                log.i("self-hosted advert up: $SELF_HOSTED_NAME.local -> br0:$listenPort")
-                SessionTrace.Board.up(B_ADVERT_SELF, "$SELF_HOSTED_NAME.local -> br0:$listenPort")
+                // A-only is the record set the phone could not dial (see the rationale above); the
+                // Board line says which one is up so that state is visible without logcat.
+                val fam = if (r.hasAaaa) "AAAA+A" else "A only — no IPv6 link-local on br0"
+                log.i("self-hosted advert up: $SELF_HOSTED_NAME.local -> br0:$listenPort ($fam)")
+                SessionTrace.Board.up(B_ADVERT_SELF, "$SELF_HOSTED_NAME.local -> br0:$listenPort ($fam)")
             } else {
-                // Degraded, not failed: the NsdManager advert has demonstrably produced an iOS
-                // endpoint on its own before, so this is W and a DOWN with the reason, not an E.
-                log.w("self-hosted advert did not start — NsdManager advert stands alone")
-                SessionTrace.Board.down(B_ADVERT_SELF, "did not start — NsdManager advert stands alone")
+                // Failed, not degraded: 2026-10-06 iPhone logs show no <ACCESSORY_DEVICE_ID>
+                // endpoint without gmccpa-rx — the NsdManager advert alone gets "No matching
+                // endpoint found".
+                log.e("self-hosted advert did not start — no '$SELF_HOSTED_NAME' endpoint expected; autoconnect will find no match")
+                SessionTrace.Board.down(B_ADVERT_SELF, "did not start — no '$SELF_HOSTED_NAME' endpoint for iOS")
             }
         }.onFailure {
             log.w("self-hosted advert threw: ${it.javaClass.simpleName}: ${it.message}")
@@ -566,17 +761,7 @@ class CarPlayRx(
     }
 
     /** The TXT set, byte-identical to carplayd's (`fn run` in `ccpa/carplayd/src/discovery.rs`, the `("deviceid", …)…("srcvers", …)` tuple list). */
-    private fun txtRecord(): Map<String, String> = linkedMapOf(
-        "deviceid" to deviceId,
-        // The Car bit (high word bit 32) is what makes iOS open RTSP back to the advertised port.
-        "features" to FEATURES,
-        "flags" to "0x4",
-        "model" to "CarLink-mac-1.0",
-        "protovers" to "1.0",
-        "pi" to pi,
-        "srcvers" to SRCVERS
-        // No `pk`: the Ed25519 long-term public key is exchanged inside pairing, not advertised.
-    )
+    private fun txtRecord(): Map<String, String> = txtRecordFor(deviceId, pi)
 
     // ---- the outbound nudge -----------------------------------------------------------------------
 
@@ -594,17 +779,44 @@ class CarPlayRx(
         // every session, so when it leaves (liveConnections -> 0) we must resume forcing fresh
         // resolves or the NEXT session never starts. Pause the churn while a session is up.
         while (running.get()) {
-            try { Thread.sleep(12_000) } catch (_: InterruptedException) { return }
+            // The sleep is a timed wait on the wake semaphore, so [wakeDiscovery] can end it early.
+            // InterruptedException is still the stop path (shutdownNow). Permits are drained after
+            // a wake so a burst of link-up calls collapses into one restart.
+            val waitMs = synchronized(backoffLock) { rediscoverIntervalMs }
+            val woken = try { rediscoverWake.tryAcquire(waitMs, java.util.concurrent.TimeUnit.MILLISECONDS) }
+                        catch (_: InterruptedException) { return }
+            if (woken) rediscoverWake.drainPermits()
             if (!running.get()) return
             if (liveConnections.get() > 0) continue
             if (discoveryPaused.get()) continue   // a deliberate wait is in progress; do not preempt it
-            log.i("no live control connection — restarting discovery to force a FRESH resolve")
+            // Backoff bookkeeping, only on the cadence — a wake is progress by definition and has
+            // already reset it. An empty cycle is one whose restart produced no resolve at all.
+            if (!woken) {
+                val empty = !resolvedThisCycle.getAndSet(false)
+                var backedOffTo = 0L
+                synchronized(backoffLock) {
+                    if (!empty) {
+                        emptyCycles = 0
+                        rediscoverIntervalMs = REDISCOVER_MS
+                    } else if (backoffEligible.get()) {
+                        emptyCycles++
+                        if (emptyCycles >= REDISCOVER_EMPTY_CYCLES) {
+                            val next = minOf(rediscoverIntervalMs * 2, REDISCOVER_MAX_MS)
+                            if (next != rediscoverIntervalMs) { rediscoverIntervalMs = next; backedOffTo = next }
+                        }
+                    }
+                }
+                if (backedOffTo != 0L) log.i("rediscover: $REDISCOVER_EMPTY_CYCLES+ empty cycles with nothing left to find — backing the cadence off to ${backedOffTo / 1000}s")
+            } else {
+                resolvedThisCycle.set(false)
+            }
+            log.i(if (woken) "woken — restarting discovery now so a held nudge can go out"
+                  else "no live control connection — restarting discovery to force a FRESH resolve")
             // Do NOT clear lastDial here. Doing so cancelled the cooldown entirely, so every 12s
             // restart spawned another retry loop on top of the ones still running — up to a dozen
             // concurrent dialers hammering one phone port. carplayd's discovery loop dedups (the
             // `dialed` set in `ccpa/carplayd/src/discovery.rs`) and only clears on ServiceRemoved.
-            discListener?.let { try { nsd?.stopServiceDiscovery(it) } catch (_: Throwable) {} }
-            discListener = null
+            browse.stop { try { nsd?.stopServiceDiscovery(it) } catch (_: Throwable) {} }
             try { Thread.sleep(600) } catch (_: InterruptedException) { return }
             browseForPhone()
         }
@@ -633,10 +845,17 @@ class CarPlayRx(
                 log.e("browse FAILED code=$c")
                 SessionTrace.Board.failed(B_BROWSE, "onStartDiscoveryFailed code=$c — the phone cannot be found, so it will never be nudged")
             }
-            override fun onStopDiscoveryFailed(t: String, c: Int) {}
+            // W, not silent: a failed stop is the one line that would show a browse outliving its
+            // receiver (F052, the evidence line for F039).
+            override fun onStopDiscoveryFailed(t: String, c: Int) {
+                log.w("stop browse FAILED code=$c — this _carplay-ctrl listener may still be browsing")
+            }
         }
-        discListener = l
-        nsd?.discoverServices("_carplay-ctrl._tcp", NsdManager.PROTOCOL_DNS_SD, l)
+        // Gated on running under the lock stop() takes for its read-stop-null, so a browse can never
+        // start on a receiver that stop() has already passed (F039). Hence no re-check after the
+        // rediscover loop's sleep.
+        if (!browse.start(l) { nsd?.discoverServices("_carplay-ctrl._tcp", NsdManager.PROTOCOL_DNS_SD, it) })
+            log.i("receiver stopped — not starting a browse")
     }
 
     private fun resolve(s: NsdServiceInfo) {
@@ -644,7 +863,11 @@ class CarPlayRx(
         nsd?.resolveService(s, object : NsdManager.ResolveListener {
             override fun onResolveFailed(si: NsdServiceInfo, code: Int) = log.w("resolve FAILED '${si.serviceName}' code=$code")
             override fun onServiceResolved(si: NsdServiceInfo) {
-                val raw = si.host ?: return
+                // Every exit from here is logged. A resolve that produces no dial used to leave no
+                // line at all (22:22:08 on 2026-10-05: a resolve, then silence, cause unknown), so
+                // each return now says which guard took it.
+                resolvedThisCycle.set(true)
+                val raw = si.host ?: run { log.w("resolved '${si.serviceName}' with NO host address — nothing to dial"); return }
                 // NsdManager hands back a link-local IPv6 with NO scope id, and connecting to one
                 // without a scope fails EINVAL — there is no way for the stack to know which
                 // interface to use. Re-bind it to the interface the hotspot bridge lives on.
@@ -674,21 +897,22 @@ class CarPlayRx(
                     log.i("   (control connection already live — not nudging)")
                     return
                 }
-                val now = System.currentTimeMillis()
+                val now = android.os.SystemClock.elapsedRealtime()   // Q015: a stepped wall clock must not stretch or void the cooldown
                 val last = lastDial[key] ?: 0L
                 if (now - last < REDIAL_COOLDOWN_MS) {
                     log.i("   (dialed ${(now - last) / 1000}s ago — within the ${REDIAL_COOLDOWN_MS / 1000}s cooldown, skipping)")
                     return
                 }
-                lastDial[key] = now
-                if (!running.get()) return   // stop() has run; the pool is shut down
-                try {
-                    pool.execute { connectOutWithRetry(si.serviceName, host, si.port) }
-                } catch (t: java.util.concurrent.RejectedExecutionException) {
-                    // stop() raced this resolve. Same guard acceptLoop and reannounce() carry: this
-                    // callback runs on NsdManager's own HandlerThread, where an uncaught throw is fatal.
-                    log.i("   (receiver stopped — not dispatching the connect-out)")
+                // The OCBM-link gate, BEFORE the cooldown key is burned: a refused dispatch must
+                // leave the key clean so the re-resolve the link-up wake triggers can dial at once.
+                // Evaluated now, not at construction — the link is rebuilt on every re-claim.
+                if (!nudgeAllowed()) {
+                    log.i("   (no OCBM link yet — holding the connect-out until CT_HELLO_ACK; the link-up wake re-resolves)")
+                    return
                 }
+                lastDial[key] = now
+                if (!running.get()) { log.i("   (receiver stopped — not dispatching the connect-out)"); return }   // stop() has run; the pool is shut down
+                connectOutWithRetry(Target(si.serviceName, host, si.port))
             }
         })
     }
@@ -723,19 +947,75 @@ class CarPlayRx(
      * `HandleControlServerEvent command 'connect'`. We never dial the phone for the control channel
      * itself; the phone opens that inbound afterwards.
      */
-    private fun connectOutWithRetry(serviceName: String, host: InetAddress, peerPort: Int) {
+    private fun connectOutWithRetry(t: Target) {
         // SINGLE-FLIGHT. rediscoverLoop restarts discovery every 12 s and each restart re-resolves
         // under a fresh addr:port key, so every cycle used to dispatch its own dialer on top of the
         // ones still running — four concurrent `live lookup` threads were observed in one process,
-        // all racing the same phone. One dial at a time; a stacked cycle is dropped, not queued.
+        // all racing the same phone. One dial at a time — but a stacked cycle is now HANDED to the
+        // worker in flight (2026-10-06), not dropped: the target FIRST, then the CAS, so the worker
+        // either sees it or has not yet cleared the flag and the post-finally check re-dispatches.
+        pendingTarget.set(t)
         if (!dialInFlight.compareAndSet(false, true)) {
-            log.i("   (a connect-out is already in flight — not stacking another)")
+            log.i("   connect-out in flight — handing it :${t.port}")
             return
         }
-        try { dialOut(serviceName, host, peerPort) } finally { dialInFlight.set(false) }
+        log.i("   dispatching connect-out to '${t.serviceName}' at ${t.key}")
+        dispatchDialChain(null)
     }
 
-    private fun dialOut(serviceName: String, host: InetAddress, peerPort: Int) {
+    /** Runs a dial chain on the pool; [dialInFlight] is already held. Releases it if the pool refuses. */
+    private fun dispatchDialChain(accepted: Accepted?) {
+        try {
+            pool.execute { dialChain(accepted) }
+        } catch (t: java.util.concurrent.RejectedExecutionException) {
+            // stop() raced this resolve. Same guard acceptLoop and reannounce() carry: the resolver
+            // runs on NsdManager's own HandlerThread, where an uncaught throw is fatal.
+            dialInFlight.set(false)
+            log.i("   (receiver stopped — not dispatching the connect-out)")
+        }
+    }
+
+    /**
+     * One dispatch chain: drain [pendingTarget] until empty or a dial is accepted, then release
+     * [dialInFlight] and re-dispatch if a target landed after the last check (the window between that
+     * check and the release). [accepted] is the chain's own record of the endpoint it just had
+     * accepted: a target EQUAL to it inside [REDIAL_COOLDOWN_MS] is not re-nudged — a second nudge
+     * while the phone is dialling back is the harm — and the record dies with the chain, so a later
+     * resolve (~12 s) starts fresh and dials the same endpoint, which is what lets the stall counter
+     * ([STALL_DIALS]) advance exactly as before.
+     */
+    private fun dialChain(accepted: Accepted?) {
+        var last = accepted
+        try {
+            while (true) {
+                val t = pendingTarget.getAndSet(null) ?: break
+                val a = last
+                if (a != null && a.key == t.key && android.os.SystemClock.elapsedRealtime() - a.at < REDIAL_COOLDOWN_MS) {
+                    log.i("connect-out to :${t.port} just accepted — not re-nudging")
+                    continue
+                }
+                val ok = dialOut(t)
+                if (ok != null) {
+                    // Accepted: drop anything a re-resolve set meanwhile and stop — nudging again
+                    // while the phone dials back is the harm. A target set AFTER this clear comes
+                    // back through the post-finally check below.
+                    pendingTarget.set(null)
+                    last = Accepted(ok, android.os.SystemClock.elapsedRealtime())
+                    break
+                }
+            }
+        } finally {
+            dialInFlight.set(false)
+        }
+        if (pendingTarget.get() != null && running.get() && dialInFlight.compareAndSet(false, true)) dispatchDialChain(last)
+    }
+
+    /** Returns the accepted endpoint's `addr:port`, or null if no dial was accepted. */
+    private fun dialOut(target: Target): String? {
+        val serviceName = target.serviceName
+        var host = target.host
+        var peerPort = target.port
+        log.i("connect-out worker started for '$serviceName' at ${host.hostAddress}:$peerPort")
         // Hold off until the advert has been up long enough for iOS to have committed it to the
         // endpoint index it is about to search. Dialing early is not merely wasted — the pending
         // autoconnect is consumed and resolved against an index that does not contain us yet.
@@ -746,17 +1026,17 @@ class CarPlayRx(
         // BOUNDED, and logged once. This used to spin at 4 Hz with a log line per tick and no exit
         // but stop(), so a dropped onServiceRegistered callback parked a pool thread for the life of
         // the process while filling the capture.
-        val holdUntil = System.currentTimeMillis() + ADVERT_WAIT_MS
+        val holdUntil = android.os.SystemClock.elapsedRealtime() + ADVERT_WAIT_MS
         var held = false
         while (running.get() && advertisedAt == 0L && !advertFailed) {
-            if (System.currentTimeMillis() >= holdUntil) {
+            if (android.os.SystemClock.elapsedRealtime() >= holdUntil) {
                 log.w("advert never REGISTERED within ${ADVERT_WAIT_MS / 1000}s — abandoning this connect-out")
-                return
+                return null
             }
             if (!held) { log.i("advert not yet REGISTERED — holding the connect-out until it is"); held = true }
-            try { Thread.sleep(250) } catch (_: InterruptedException) { return }
+            try { Thread.sleep(250) } catch (_: InterruptedException) { stoppedMidDial("advert wait"); return null }
         }
-        if (!running.get()) return
+        if (!running.get()) { stoppedMidDial("advert wait"); return null }
         if (advertisedAt == 0L) {
             // Registration failed outright. The self-hosted responder is a real advert in its own
             // right — it carries the same TXT, on a hostname we own — so if it is up there IS
@@ -764,20 +1044,20 @@ class CarPlayRx(
             // is published and the nudge can only be resolved against an index we are absent from.
             if (selfMdns == null) {
                 log.w("advert registration FAILED and no self-hosted advert — abandoning this connect-out")
-                return
+                return null
             }
             log.w("advert registration FAILED — dialling against the self-hosted advert instead")
         }
         var settled = advertisedAt + ADVERT_SETTLE_MS
-        while (running.get() && System.currentTimeMillis() < settled) {
+        while (running.get() && android.os.SystemClock.elapsedRealtime() < settled) {
             settled = advertisedAt + ADVERT_SETTLE_MS   // re-read: a re-register moves the mark
-            val left = settled - System.currentTimeMillis()
+            val left = settled - android.os.SystemClock.elapsedRealtime()
             if (left > 0) {
                 log.i("holding the connect-out ${left / 1000}s longer so iOS can index our advert first")
-                try { Thread.sleep(minOf(left, 2000L)) } catch (_: InterruptedException) { return }
+                try { Thread.sleep(minOf(left, 2000L)) } catch (_: InterruptedException) { stoppedMidDial("advert settle"); return null }
             }
         }
-        if (!running.get()) return
+        if (!running.get()) { stoppedMidDial("advert settle"); return null }
         // carplayd's connect-out (`ccpa/carplayd/src/discovery.rs`) retries up to 10x at 1s and only
         // marks a peer dialed on success. The phone
         // holds a 30s assertion on the connect command, so an early dial is simply wasted.
@@ -796,21 +1076,40 @@ class CarPlayRx(
         // kept as the last candidate — it is occasionally the only answer, because the wire query can
         // miss a reply (observed once here, succeeding 12 s later) — but it is never dialled first.
         // Re-query periodically rather than once: the peer can move mid-retry.
-        if (discoveryPaused.get()) { log.i("connect-out suppressed — discovery is paused"); return }
+        if (discoveryPaused.get()) { log.i("connect-out suppressed — discovery is paused"); return null }
         var candidates = dialCandidates(serviceName, host, peerPort)
-        for (attempt in 1..10) {
-            if (!running.get()) return
-            if (discoveryPaused.get()) { log.i("connect-out abandoned — discovery was paused"); return }
+        // A resettable budget (2026-10-06): a newer endpoint handed over mid-run gets a full 10
+        // attempts. At most MAX_RETARGETS resets per run, so a phone whose port keeps rotating cannot
+        // pin the worker; rediscovery re-resolves every ~12 s anyway.
+        var attempt = 0
+        var retargets = 0
+        while (++attempt <= 10) {
+            if (!running.get()) { stoppedMidDial("attempt $attempt"); return null }
+            if (discoveryPaused.get()) { log.i("connect-out abandoned — discovery was paused"); return null }
             // Same reason as the guard in onServiceResolved: once the phone has dialed in, further
             // nudges only provoke a hijack of the session we just won. A straggler retry thread that
             // re-queries at attempt 3 or 6 can pick up the phone's NEW ctrl port and nudge mid-session.
-            if (liveConnections.get() > 0) { log.i("connect-out: session is live — stopping retries"); return }
+            if (liveConnections.get() > 0) { log.i("connect-out: session is live — stopping retries"); return null }
+            // CONSUMED, not peeked: a peek would leave it set and the chain would re-dial it after this run.
+            pendingTarget.getAndSet(null)?.let { nt ->
+                if (nt.key != "${host.hostAddress}:$peerPort" && retargets < MAX_RETARGETS) {
+                    log.i("in-flight connect-out retargeted :$peerPort → :${nt.port}")
+                    retargets++
+                    host = nt.host; peerPort = nt.port
+                    candidates = (listOf(nt.host to nt.port) + candidates).distinct()
+                    attempt = 1
+                } else if (nt.key != "${host.hostAddress}:$peerPort") {
+                    // Budget of resets spent: give it back to the chain, which dials it after this run.
+                    pendingTarget.compareAndSet(null, nt)
+                }
+                // An equal endpoint is dropped silently: it is the one being dialled.
+            }
             for ((h, p) in candidates) {
-                if (!running.get()) return
+                if (!running.get()) { stoppedMidDial("attempt $attempt, candidate ${h.hostAddress}:$p"); return null }
                 if (connectOut(h, p)) {
                     log.i("connect-out accepted on attempt $attempt via ${h.hostAddress}:$p")
                     noteDialAccepted()
-                    return
+                    return "${h.hostAddress}:$p"
                 }
             }
             // Refresh on a cadence — cheap relative to a 3 s connect timeout, and it is the only way to
@@ -822,12 +1121,13 @@ class CarPlayRx(
                 val refreshed = dialCandidates(serviceName, host, peerPort)
                 candidates = (refreshed + candidates).distinct()
             }
-            try { Thread.sleep(1000) } catch (_: InterruptedException) { return }
+            try { Thread.sleep(1000) } catch (_: InterruptedException) { stoppedMidDial("retry sleep after attempt $attempt"); return null }
         }
         log.w("connect-out: 10 attempts with no usable response from the phone " +
               "(tried ${candidates.joinToString { "${it.first.hostAddress}:${it.second}" }})")
         // Do NOT hold the cooldown after a failure — the next resolve may carry a new (live) port.
         lastDial.clear()
+        return null
     }
 
     /**
@@ -969,43 +1269,65 @@ class CarPlayRx(
                     continue
                 }
                 acceptFailures = 0
+                // Admission (B1-4 F038, owner decision OD-7F, 2026-10-07): no new connection while an
+                // ENCRYPTED session is live, and never one from this host. Decided HERE, before the
+                // liveness increment, so a refused dial takes no liveness slot, builds no native core,
+                // resets no dial counter and fires no session-down. Only this thread installs into the
+                // slot, so the incumbent the gate read is still the one `install` replaces below unless
+                // its own pump released it meanwhile (then the newcomer simply meets an empty slot).
+                // A refused newcomer is closed and logged inside the gate.
+                val admitted = acceptGate.admit(c, android.os.SystemClock.elapsedRealtime()) ?: continue
+                val verdict = admitted.verdict
                 log.i(">>> INBOUND CONTROL CONNECTION from ${c.inetAddress?.hostAddress}:${c.port}")
                 dialsSinceInbound.set(0)
+                // The record every party names this connection by (F040). Built by the gate, before the
+                // liveness increment.
+                val rec = admitted.rec
                 // Claim the liveness slot HERE, before anything else — specifically before the
                 // incumbent is closed below.
                 //
-                // The count used to be taken at the top of handleNative/handleStub, i.e. on the pool
+                // The count used to be taken at the top of handleNative, i.e. on the pool
                 // thread AFTER startNativeFor()'s JNI init. Closing the incumbent unblocks its read()
                 // essentially instantly, so on every hijack the old pump's decrement landed while the
                 // new connection had not yet incremented: the counter dipped 1 -> 0 -> 1 and
                 // fireSessionDown() reported "session ended" in the middle of a perfectly healthy
                 // reconnect — and, depending on which side won, either double-launched the CarPlay
-                // screen or left the launcher stuck showing WAITING over a live session. Hijack is the
-                // phone's NORMAL reconnect path, not an edge case, so this fired routinely.
+                // screen or left the launcher stuck showing WAITING over a live session. (That comment
+                // once called the hijack the phone's normal reconnect path; no capture shows one, and
+                // since OD-7F, 2026-10-07, only a not-yet-encrypted or closed incumbent can be replaced
+                // at all. A newcomer against an ENCRYPTED incumbent is refused above.)
                 //
                 // Incrementing on the accept thread makes the count a property of "a socket has been
                 // accepted and not yet finished", which is what liveness actually means, and pairs it
                 // 1:1 with the single decrement in handle()'s finally.
                 liveConnections.incrementAndGet()
-                // Connection hijack (Apple's _HijackHTTPServerConnections): a new control connection
-                // supersedes the incumbent. Close the previous socket so its pump unblocks, breaks,
-                // and destroys its own native generation. Without this a reconnecting phone starves
-                // behind the incumbent and its fresh session is torn down when the old one cleans up.
-                val prev = currentSocket
-                currentSocket = c
+                // Connection hijack (Apple's _HijackHTTPServerConnections), limited by OD-7F: the gate
+                // above admitted this newcomer only if there is no incumbent, it is closed, or it has not
+                // finished pair-verify. Such an incumbent is superseded: close its socket so its pump
+                // unblocks, breaks, and destroys its own native generation. An ENCRYPTED incumbent is
+                // never superseded; it ends only by its own pump (EOF, keepalive / USER_TIMEOUT, idle
+                // backstop), and the phone's next connect then meets an empty slot.
+                // One atomic swap: an exiting pump can only clear its OWN record (compareAndSet), so it
+                // can no longer blank the slot this install just filled (F040).
+                val prev = incumbent.install(rec)
                 if (prev != null) {
-                    log.i("hijack: closing incumbent control connection")
-                    try { prev.close() } catch (_: Throwable) {}
+                    log.i("hijack: closing incumbent control connection (encrypted=${prev.encryptedAt != 0L})")
+                    // Residual race, not prevented: the incumbent's pump stamps encryptedAt just after it
+                    // writes the pair-verify reply, so a newcomer decided in the microseconds between the
+                    // admission read and this install can still supersede a just-encrypted session.
+                    if (prev.encryptedAt != 0L && verdict == Admission.Verdict.ALLOW_NOT_ENCRYPTED)
+                        log.w("hijack raced the incumbent's ENCRYPTED milestone (admitted as not yet encrypted)")
+                    try { prev.sock.close() } catch (_: Throwable) {}
                 }
                 try {
-                    pool.execute { handle(c) }
+                    pool.execute { handle(rec) }
                 } catch (t: Throwable) {
                     // The pool is shut down (stop() raced us). Release the slot we just took or the
                     // count never returns to zero and no session-end is ever reported again.
                     log.w("could not dispatch control connection: ${t.javaClass.simpleName}")
                     try { c.close() } catch (_: Throwable) {}
-                    if (currentSocket === c) currentSocket = null
-                    if (liveConnections.decrementAndGet() == 0) fireSessionDown()
+                    incumbent.release(rec)
+                    if (liveConnections.decrementAndGet() == 0) fireSessionDown(EndReason.CLOSED)
                 }
             }
         } catch (t: Throwable) {
@@ -1031,28 +1353,35 @@ class CarPlayRx(
         }
     }
 
-    private fun handle(c: Socket) {
+    private fun handle(rec: Incumbent) {
+        val c = rec.sock
         // The matching decrement for acceptLoop's increment lives here and NOWHERE else, so it pairs
-        // 1:1 with the accept even when startNativeFor() throws before either pump is entered.
+        // 1:1 with the accept even when startNativeFor() throws before the native pump is entered.
+        // Only the native pump can classify its end; every other path is CLOSED. No shared field:
+        // the reason travels by return value, and the connection whose decrement reaches 0 wins.
+        var reason = EndReason.CLOSED
         try {
-            // Prefer the ported receiver core. It owns the RTSP state machine, pairing (including the
-            // Ed25519/X25519 that API 32 cannot do), the ChaCha20-Poly1305 channel, /auth-setup and
-            // SETUP/RECORD. Kotlin only shuttles bytes.
+            // The ported receiver core is the only one. It owns the RTSP state machine, pairing
+            // (including the Ed25519/X25519 that API 32 cannot do), the ChaCha20-Poly1305 channel,
+            // /auth-setup and SETUP/RECORD. Kotlin only shuttles bytes.
             val h = startNativeFor(c)
             if (h == NativeCore.BUSY) {
                 // The incumbent still owns the native core (it is inside ControlServer::feed, most
-                // likely MFi). Close and say so: the stub path cannot pair, so running it here would
-                // turn a recoverable redial into a guaranteed failed session. See [NativeCore.BUSY].
+                // likely MFi). Close and say so: there is no fallback, and a busy core frees up, so the
+                // phone's redial is the recovery. See [NativeCore.BUSY].
                 log.w("native core BUSY — closing so the phone redials into a free generation")
                 try { c.close() } catch (_: Throwable) {}
-                if (currentSocket === c) currentSocket = null
+                incumbent.release(rec)
                 return
             }
-            if (h != 0L) { handleNative(c, h); return }
-            log.w("native core unavailable — Kotlin stub path (pair-setup M1..M4 only)")
-            handleStub(c)
+            if (h != 0L) { reason = handleNative(rec, h); return }
+            // No core at all (h == 0; startNativeFor logged which bail). Same shape as BUSY above:
+            // there is no fallback, so close, release the incumbent slot and let finally decrement.
+            log.e("native core unavailable — closing; there is no fallback (see the startNativeFor error above)")
+            try { c.close() } catch (_: Throwable) {}
+            incumbent.release(rec)
         } finally {
-            if (liveConnections.decrementAndGet() == 0) fireSessionDown()
+            if (liveConnections.decrementAndGet() == 0) fireSessionDown(reason)
         }
     }
 
@@ -1098,7 +1427,7 @@ class CarPlayRx(
             // Stand the A/V consumers up NOW, not when the phone asks. Streams are SETUP within
             // ~300 ms of RECORD and the producer dials the seam per access unit, so anything not
             // already listening loses frames outright.
-            onSessionUp?.let { cb -> fenced("onSessionUp") { cb() } }
+            onSessionUp?.let { cb -> fenced("onSessionUp") { cb(h) } }
         } else {
             log.e("native core failed to start")
             SessionTrace.Board.failed(B_CORE, "NativeCore.start returned 0 for $addr")
@@ -1157,12 +1486,46 @@ class CarPlayRx(
         override fun createSignatureFast(digest: ByteArray): ByteArray = inner.createSignatureFast(digest)
     }
 
-    /** Raw byte pump into ControlServer::feed() — the sans-IO seam. [handle] is this connection's gen. */
-    private fun handleNative(c: Socket, handle: Long) {
+    /**
+     * Raw byte pump into ControlServer::feed() — the sans-IO seam. [handle] is this connection's gen.
+     * Returns why it ended (2026-10-06): [EndReason.LINK_LOST] on dead-link evidence, else CLOSED.
+     *
+     * Link loss (52A, 2026-10-06). Three parts, one per failure it covers:
+     *  1. Kernel TCP keepalive 3/3/3 + TCP_USER_TIMEOUT 12 s ([armKeepalive]) is the dead-link
+     *     detector: ~12 s, no gate. It detects that the TRANSPORT died, not that the app went quiet —
+     *     the phone's kernel ACKs the probes whether or not iOS sends `/feedback` — so it cannot tear
+     *     down a quiet-but-live phone. USER_TIMEOUT closes keepalive's one gap: Linux probes only
+     *     while nothing sent is unacked, and this pump writes a reply to every request.
+     *  2. Stage 1: [QUIET_MS] of control silence once armed ([ARM_AFTER_MS]) and with A/V not fresh
+     *     -> one W line and [onLinkQuiet] (the overlay); bytes again -> [onLinkResumed].
+     *  3. The [IDLE_BACKSTOP_MS] backstop replaces the old unconditional 30 s read-timeout break: it
+     *     continues only while the receiver core reports A/V or keepAlive beacons fresher than 30 s
+     *     ([NativeCore.avIdleMs]), which is what the reference does (receiver net.rs) and what keeps a
+     *     sleeping phone that stops `/feedback` but keeps beaconing alive. Beacons are stamped only on
+     *     RECEIVED data, so a dead link cannot hold it open; with keepalive unarmed it ends a dead link.
+     */
+    private fun handleNative(rec: Incumbent, handle: Long): EndReason {
+        val c = rec.sock
         // No liveConnections bookkeeping here — acceptLoop increments, handle()'s finally decrements.
         val peer = "${c.inetAddress?.hostAddress}:${c.port}"
         val xVerify = "pair-verify gen=$handle"
         var wasEncrypted = false
+        var reason = EndReason.CLOSED
+        // From accept, not 0: a 0 would read as "silent forever" on the first poll tick and turn a
+        // peer RST before the first byte into LINK_LOST.
+        var lastRxAt = android.os.SystemClock.elapsedRealtime()
+        val acceptedAt = lastRxAt
+        var encryptedAt = 0L
+        // A-F1: the unverified-connection deadline, checked on BOTH read outcomes below — a peer that
+        // keeps sending plaintext never hits the poll tick, and a silent one never hits the data path.
+        fun unverifiedOverdue(now: Long): Boolean {
+            if (!UnverifiedConnRule.overdue(wasEncrypted, acceptedAt, now, PAIR_VERIFY_MS)) return false
+            log.w("control connection gen=$handle from $peer still not encrypted ${(now - acceptedAt) / 1000}s after accept — closing it (unverified-connection deadline)")
+            return true
+        }
+        var armed = false
+        var quiet = false          // an announced silent episode is open
+        var quietSkipNoted = false // silence seen but A/V fresh — said once per episode
         // Per-generation names, so a superseded pump's cancel in its finally cannot drop the
         // expectation the hijacking connection just armed under the same step name.
         SessionTrace.Board.up(B_CTRL, "$peer gen=$handle plaintext — pair-verify pending")
@@ -1171,29 +1534,72 @@ class CarPlayRx(
             "iOS opens with pair-verify (or pair-setup then pair-verify) and the channel should be " +
             "encrypted within ~60 ms")
         try {
-            c.soTimeout = 30000
+            c.soTimeout = POLL_MS
             c.tcpNoDelay = true
+            armKeepalive(c, handle)
             val ins = c.getInputStream()
             val out = c.getOutputStream()
             val buf = ByteArray(16384)
             while (running.get()) {
-                // 30 s SO_RCVTIMEO matches the reference (`set_read_timeout(30 s)` just before `arm_keepalive` in
-                // `run_pairing_server`'s per-connection path, `ccpa/carplayd/src/main.rs`). Breaking on timeout
-                // is reference-correct for the pre-A/V phase: the `WouldBlock` arm of `serve_connection`
-                // (`crates/vendor/receiver/src/net.rs`) closes the connection when
-                // `av_idle_ms()` is None (no A/V ever flowed) or A/V has been idle >= 30 s.
-                //
-                // NOT YET IMPLEMENTED (both are real gaps, see docs/11_HARDENING_PLAN.md status ledger rows N13–N16):
-                //   • the A/V-flowing case — the reference CONTINUES on timeout while A/V is live,
-                //     which needs `ControlServer::av_idle_ms()` (`crates/vendor/receiver/src/server.rs`) exported over JNI;
-                //   • `arm_keepalive` 3s/3s/3 (`fn arm_keepalive`, `ccpa/carplayd/src/main.rs`, armed per control connection) for ~12 s dead-link detect, which
-                //     java.net.Socket cannot express but android.system.Os.setsockoptInt can.
-                // Until av_idle_ms is exported, an unconditional `continue` here would match no
-                // reference state at all and would leak sessions on silent link loss.
-                val n = try { ins.read(buf) } catch (t: Throwable) {
-                    log.i("read ended (gen=$handle): ${t.javaClass.simpleName}: ${t.message}"); -1
+                val n = try { ins.read(buf) } catch (t: java.net.SocketTimeoutException) {
+                    // The 1 s poll tick — not an end. (If the platform ever surfaced a kernel
+                    // ETIMEDOUT as this class, the next read would see EOF and end CLOSED; the
+                    // proof's "read ended <= 13 s, LINK_LOST" requirement exists to catch that.)
+                    val now = android.os.SystemClock.elapsedRealtime()
+                    if (unverifiedOverdue(now)) { reason = UnverifiedConnRule.reason(); break }
+                    val silent = now - lastRxAt
+                    if (armed && !quiet && silent >= QUIET_MS) {
+                        val av = NativeCore.avIdleMs(handle)
+                        if (av in 0 until QUIET_MS) {
+                            if (!quietSkipNoted) {
+                                quietSkipNoted = true
+                                log.i("control channel silent ${silent / 1000}s but A/V idle only $av ms — not an interruption (gen=$handle)")
+                            }
+                        } else {
+                            quiet = true
+                            log.w("control channel silent ${silent / 1000}s (feedback cadence 2 s), A/V idle ${avIdleText(av)} — link interrupted? (gen=$handle)")
+                            // Only the newest generation owns the Board entries. See [latestGen].
+                            if (latestGen == handle) SessionTrace.Board.note(B_CTRL, "$peer gen=$handle ENCRYPTED — control silent ${silent / 1000}s, link interrupted?")
+                            onLinkQuiet?.let { cb -> fenced("onLinkQuiet") { cb(handle) } }
+                        }
+                    }
+                    if (silent >= IDLE_BACKSTOP_MS) {
+                        val av = NativeCore.avIdleMs(handle)
+                        // -1 (no A/V ever), -2 (core busy/superseded: this pump is being replaced)
+                        // and >= 30 s all end it — the old unconditional rule; it cannot leak a
+                        // connection on a stuck -2.
+                        if (av in 0 until IDLE_BACKSTOP_MS) continue
+                        log.w("control channel silent ${silent / 1000}s, A/V idle ${avIdleText(av)} — idle backstop, ending gen=$handle")
+                        reason = EndReason.LINK_LOST
+                        break
+                    }
+                    continue
+                } catch (t: Throwable) {
+                    // Taken HERE, before the finally releases the slot: both of our own closes write
+                    // their state first (stop(): running=false before the close; the hijack: the new
+                    // record installed before prev.close()), so this needs no flag. Exact since F040:
+                    // only this pump can clear its own record, so a live slot naming us means a real loss.
+                    val closedByUs = incumbent.endedByUs(running.get(), rec)
+                    val silent = android.os.SystemClock.elapsedRealtime() - lastRxAt
+                    // The FULL cause chain: how Android surfaces a kernel keepalive/USER_TIMEOUT kill
+                    // on a blocking read is not shown in this tree (U-R); this line is the record.
+                    log.i("read ended (gen=$handle, silent ${silent}ms${if (closedByUs) ", closed by us" else ""}): ${causeChain(t)}")
+                    if (!closedByUs && (linkErrno(t) || silent >= LOST_MIN_SILENCE_MS)) reason = EndReason.LINK_LOST
+                    -1
                 }
                 if (n <= 0) break
+                val now = android.os.SystemClock.elapsedRealtime()
+                if (quiet) {
+                    quiet = false
+                    log.i("control channel resumed after ${(now - lastRxAt) / 1000}s (gen=$handle)")
+                    if (latestGen == handle) SessionTrace.Board.up(B_CTRL, "$peer gen=$handle ENCRYPTED")
+                    onLinkResumed?.let { cb -> fenced("onLinkResumed") { cb(handle) } }
+                }
+                quietSkipNoted = false
+                lastRxAt = now
+                rec.lastRxAt = now
+                // Armed on DATA, not on a clock: the first byte >= ARM_AFTER_MS after ENCRYPTED.
+                if (!armed && wasEncrypted && now - encryptedAt >= ARM_AFTER_MS) armed = true
                 // null reply = the core signalled close (feed error, panic, or this generation was
                 // superseded by a hijacking reconnect). Either way, end this connection.
                 val reply = NativeCore.feed(handle, buf.copyOf(n))
@@ -1202,6 +1608,8 @@ class CarPlayRx(
                 // The flip is the milestone worth calling out: pair-verify completed.
                 if (!wasEncrypted && NativeCore.isEncrypted(handle)) {
                     wasEncrypted = true
+                    encryptedAt = android.os.SystemClock.elapsedRealtime()
+                    rec.encryptedAt = encryptedAt
                     // A success marker is narration, not a warning. Three of these were W and made
                     // `NETPROBE:W` useless as a problem filter (2026-09-09 capture).
                     log.i("*** MILESTONE: control channel is ENCRYPTED — pair-verify completed (gen=$handle)")
@@ -1212,17 +1620,21 @@ class CarPlayRx(
                         "control channel gen=$handle is encrypted (pair-verify completed) and iOS sends " +
                         "POST /auth-setup next — 6 ms later on 2026-09-09; observed as the first MFi chip " +
                         "op the native core requests from the relay")
+                    onPairVerified?.let { cb -> fenced("onPairVerified") { cb(handle) } }
                 }
+                if (unverifiedOverdue(now)) { reason = UnverifiedConnRule.reason(); break }
             }
         } catch (t: Throwable) {
-            log.w("native control connection: ${t.javaClass.simpleName}: ${t.message}")
+            log.w("native control connection: ${causeChain(t)}")
         } finally {
             try { c.close() } catch (_: Throwable) {}
             // Destroy only THIS generation. If a hijacking reconnect already installed a newer core,
             // the Rust slot's gen no longer matches and this is a safe no-op — it will not tear down
             // the fresh session.
             NativeCore.destroy(handle)
-            if (currentSocket === c) currentSocket = null
+            incumbent.release(rec)
+            // Clear-on-exit: a pump that announced a silent episode never leaves the overlay up.
+            if (quiet) onLinkResumed?.let { cb -> fenced("onLinkResumed") { cb(handle) } }
             // Ending unencrypted is a fault in its own right — the phone connected and never got
             // through pair-verify — and the line that says so is here, not the watchdog's. Whatever
             // was still armed for this generation is then moot: dropped, not missing.
@@ -1232,50 +1644,98 @@ class CarPlayRx(
             SessionTrace.cancel("auth-setup chip ops gen=$handle", "connection gen=$handle ended")
             // Only the newest generation owns the Board entries. See [latestGen].
             if (latestGen == handle) {
-                SessionTrace.Board.down(B_CTRL, "gen=$handle from $peer ended" + if (wasEncrypted) "" else " unencrypted")
+                SessionTrace.Board.down(B_CTRL, "gen=$handle from $peer ended" + (if (wasEncrypted) "" else " unencrypted") +
+                    when (reason) { EndReason.LINK_LOST -> " — link lost"; EndReason.UNVERIFIED -> " — unverified deadline"; EndReason.CLOSED -> "" })
                 SessionTrace.Board.down(B_CORE, "gen=$handle destroyed with its connection")
             }
         }
+        return reason
     }
 
-    private fun handleStub(c: Socket) {
-        // Mirror handleNative's session bookkeeping. Without it liveConnections stays 0 on this path,
-        // so rediscoverLoop believes nothing is connected, tears discovery down every 12 s, re-dials
-        // connect-out, and the resulting inbound connection hijacks the one already in progress. A
-        // multi-message handshake can never finish — the churn is self-inflicted, not the phone
-        // retrying. The count itself is taken by acceptLoop and released by handle()'s finally.
-        try {
-            c.soTimeout = 30000
-            val ins = BufferedInputStream(c.getInputStream())
-            val out = c.getOutputStream()
-            while (running.get()) {
-                val req = readRequest(ins) ?: break
-                log.i("--- ${req.method} ${req.path}")
-                req.headers.forEach { (k, v) -> if (k.lowercase() in INTERESTING) log.i("      $k: $v") }
-                if (req.body.isNotEmpty()) {
-                    log.i("      body(${req.body.size}B): ${req.body.take(48).joinToString("") { "%02x".format(it) }}${if (req.body.size > 48) "…" else ""}")
-                }
-                milestone(req)
-                respond(req, out)
+    /**
+     * Arm kernel TCP keepalive 3 s/3 s/3 probes plus TCP_USER_TIMEOUT 12 s on the accepted control
+     * socket — Apple's receiver values (carplayd `arm_keepalive`, armed on every control connection).
+     * SO_KEEPALIVE alone is useless here: the kernel default idle is 7200 s.
+     *
+     * `java.net.Socket` cannot express the three TCP-level options, so they go through
+     * [android.system.Os.setsockoptInt] (public since API 26) on a descriptor from
+     * [android.os.ParcelFileDescriptor.fromSocket]. At this app's API level (minSdk 32, OD-4) that is
+     * a DUP of the socket's fd (android-32 ParcelFileDescriptor.fromSocket -> dup -> fcntl
+     * F_DUPFD_CLOEXEC): the options belong to the socket, so closing the dup leaves the connection
+     * and its options in place. (Below API 29 fromSocket wrapped the socket's OWN fd and `use{}`
+     * would have closed the connection — the reason minSdk had to move off 26 before this shipped.)
+     * There is no public getsockoptInt at compileSdk 32, so the only readback is `c.keepAlive`;
+     * whether this unit's kernel (4.19.283) honours the four options as set and whether SELinux
+     * allows them is shown by this line and by the link-loss timing, not asserted. Never fails the
+     * connection: a refusal is one W line, and a dead link then ends at the 30 s idle backstop.
+     */
+    private fun armKeepalive(c: Socket, handle: Long) {
+        runCatching {
+            c.keepAlive = true   // SO_KEEPALIVE through java.net.Socket
+            val pfd = android.os.ParcelFileDescriptor.fromSocket(c) ?: error("fromSocket returned null")
+            pfd.use {
+                val fd = it.fileDescriptor
+                val tcp = android.system.OsConstants.IPPROTO_TCP
+                android.system.Os.setsockoptInt(fd, tcp, TCP_KEEPIDLE_LINUX, KEEPALIVE_S)
+                android.system.Os.setsockoptInt(fd, tcp, TCP_KEEPINTVL_LINUX, KEEPALIVE_S)
+                android.system.Os.setsockoptInt(fd, tcp, TCP_KEEPCNT_LINUX, KEEPALIVE_S)
+                android.system.Os.setsockoptInt(fd, tcp, android.system.OsConstants.TCP_USER_TIMEOUT, USER_TIMEOUT_MS)
             }
-        } catch (t: Throwable) {
-            log.i("control connection closed: ${t.javaClass.simpleName}: ${t.message}")
-        } finally {
-            try { c.close() } catch (_: Throwable) {}
-            // Identity guard, not a null check: during a hijack acceptLoop has ALREADY installed the
-            // new connection's socket here, so an unconditional clear would blank the live one — and
-            // the next hijack would then see prev == null and leave two pumps fighting over one phone.
-            if (currentSocket === c) currentSocket = null
+        }.onSuccess {
+            log.i("control keepalive armed (${KEEPALIVE_S}s/${KEEPALIVE_S}s/$KEEPALIVE_S + user-timeout ${USER_TIMEOUT_MS / 1000}s → ~12s dead-link detect; SO_KEEPALIVE=${runCatching { c.keepAlive }.getOrNull()}) gen=$handle")
+        }.onFailure {
+            log.w("keepalive arm failed (gen=$handle): ${it.javaClass.simpleName}: ${it.message} — a dead link now ends at the 30 s backstop")
         }
     }
 
+    /** [NativeCore.avIdleMs] for a log line: -1 = no A/V ever, -2 = core busy / superseded. */
+    private fun avIdleText(av: Long): String = when (av) {
+        -1L -> "n/a (no A/V yet)"
+        -2L -> "unknown (core busy or superseded)"
+        else -> "$av ms"
+    }
+
+    /** Every cause, outermost first: class, message, and the errno name of an ErrnoException. */
+    private fun causeChain(t: Throwable): String = buildString {
+        var e: Throwable? = t
+        var depth = 0
+        while (e != null && depth < 8) {
+            if (depth > 0) append(" <- caused by ")
+            append(e.javaClass.name).append(": ").append(e.message)
+            if (e is android.system.ErrnoException) append(" [errno=").append(android.system.OsConstants.errnoName(e.errno)).append(']')
+            val next = e.cause
+            e = if (next === e) null else next
+            depth++
+        }
+    }
+
+    /** An ErrnoException anywhere in the chain carrying a dead-link errno. Message text is never parsed. */
+    private fun linkErrno(t: Throwable): Boolean {
+        var e: Throwable? = t
+        var depth = 0
+        while (e != null && depth < 8) {
+            if (e is android.system.ErrnoException && e.errno in LINK_ERRNOS) return true
+            val next = e.cause
+            e = if (next === e) null else next
+            depth++
+        }
+        return false
+    }
+
+    private val LINK_ERRNOS = setOf(
+        android.system.OsConstants.ETIMEDOUT, android.system.OsConstants.EHOSTUNREACH, android.system.OsConstants.ENETUNREACH,
+    )
+
     // ---- session-end + stall reporting ------------------------------------------------------------
 
-    /** The last control connection went away. Clean and abrupt are indistinguishable here. */
-    private fun fireSessionDown() {
+    /**
+     * The last control connection went away. [reason] is that connection's [EndReason]: LINK_LOST
+     * only on the native pump's dead-link evidence, CLOSED for everything else.
+     */
+    private fun fireSessionDown(reason: EndReason) {
         if (stopped) { log.i("suppressing session-down from a stopped receiver"); return }
-        log.w("*** SESSION DOWN — no live control connection")
-        onSessionDown?.let { cb -> fenced("onSessionDown") { cb() } }
+        log.w("*** SESSION DOWN — no live control connection (reason=$reason)")
+        onSessionDown?.let { cb -> fenced("onSessionDown") { cb(reason) } }
     }
 
     /**
@@ -1294,9 +1754,8 @@ class CarPlayRx(
         if (n != STALL_DIALS) return   // report the crossing once, not every dial after it
         log.e("!! STALLED: $n consecutive connect-outs accepted with no inbound control connection on :$port")
         log.e("!! The phone can reach this receiver and is answering the nudge — it is choosing not to")
-        log.e("!! dial back. Observed cause: iOS reads our _airplay TXT and never resolves SRV, so it")
-        log.e("!! holds no address for us. Reconnecting Bluetooth to the car FROM THE IPHONE clears it;")
-        log.e("!! restarting this app or power-cycling the adapter does not. Device-observed 2026-08-27.")
+        log.e("!! dial back. Cause not determined from this side. Reconnecting Bluetooth to the car")
+        log.e("!! FROM THE IPHONE cleared it on 2026-08-27.")
         onStalled?.let { cb -> fenced("onStalled") { cb(n) } }
     }
 
@@ -1313,9 +1772,10 @@ class CarPlayRx(
      * pair, Wi-Fi handoff — into an app with no listener and no advert, and reported no error anywhere.
      * The log looked like a textbook bring-up. `listening` below is the check that catches exactly that.
      *
-     * Deliberately does NOT dial :7011 on loopback. That would land in [acceptLoop], take a liveness
-     * slot, spin up a native core and then fire a spurious session-down when it closed — a readiness
-     * check must not perturb the thing it is measuring. Holding the bound, open ServerSocket is the
+     * Deliberately does NOT dial :7011 on loopback. Since OD-7F (2026-10-07) [acceptLoop] refuses any
+     * local newcomer before the liveness count, so such a dial would only log a refusal and prove
+     * nothing about a phone's path. (Before OD-7F it took a liveness slot, spun up a native core and
+     * fired a spurious session-down.) Holding the bound, open ServerSocket is the
      * capability that matters and it is directly observable — PROVIDED the socket is closed whenever
      * nobody is accepting on it, which is what [acceptLoop]'s finally guarantees; without it a dead
      * accept thread left this check green over a listener that only ever filled the kernel backlog.
@@ -1338,9 +1798,14 @@ class CarPlayRx(
         out += Check("/info", info != null,
             info?.let { "${it.size} B from assets/info.bplist" } ?: "assets/info.bplist missing — cannot answer GET /info")
 
+        // v5.7 U4 (F025): the relay is the process-delegating one, which resolves the CURRENT probe on
+        // every call. `ok` stays "a relay exists" — link state goes into the detail only, because the
+        // receiver is built (and this runs) BEFORE runAll makes the link, and any `ok = false` here
+        // becomes RX_UNHEALTHY with no guard (SessionSupervisor.onReceiverReady).
         out += Check("MFi relay", mfiRelay != null,
-            if (mfiRelay != null) "OCBM CH_MFI relay attached"
-            else "no relay — /auth-setup will fail on every connection")
+            (mfiRelay as? zeno.gmccpa.ProcessMfiRelay)?.describe()
+                ?: if (mfiRelay != null) "OCBM CH_MFI relay attached"
+                else "no relay — /auth-setup will fail on every connection")
 
         val br = runCatching {
             java.net.NetworkInterface.getNetworkInterfaces()?.toList()?.firstOrNull {
@@ -1349,7 +1814,7 @@ class CarPlayRx(
         }.getOrNull()
         val brAddr = br?.inetAddresses?.toList()?.filterIsInstance<java.net.Inet4Address>()?.firstOrNull()
         out += Check("hotspot bridge", brAddr != null,
-            brAddr?.let { "${br?.name} ${it.hostAddress}" } ?: "no br* interface with an IPv4 — nothing to advertise on")
+            brAddr?.let { "${br.name} ${it.hostAddress}" } ?: "no br* interface with an IPv4 — nothing to advertise on")
 
         // Advisory, not gating. This asks the link for our OWN record, and a multicast query that has
         // to come back through our own responder can miss for reasons that are not faults. It is
@@ -1367,7 +1832,50 @@ class CarPlayRx(
     /** Hold discovery and dialling still without stopping the receiver. See [discoveryPaused]. */
     fun pauseDiscovery() { if (discoveryPaused.compareAndSet(false, true)) log.i("discovery PAUSED") }
 
-    fun resumeDiscovery() { if (discoveryPaused.compareAndSet(true, false)) log.i("discovery RESUMED") }
+    fun resumeDiscovery() {
+        if (discoveryPaused.compareAndSet(true, false)) log.i("discovery RESUMED")
+        // Outside the CAS branch on purpose: the supervisor calls this on EVERY non-quiet phase
+        // transition, and most of those find discovery already running — the reset must land anyway.
+        resetRediscoverBackoff()
+    }
+
+    /**
+     * The supervisor's phase lever for [backoffEligible]. Enabling says "the phases where nothing
+     * more is expected from the phone"; disabling (or re-enabling) resets the cadence, so any BT
+     * progress the supervisor relays through here starts the count over.
+     */
+    fun setDiscoveryBackoff(enabled: Boolean) {
+        val was = backoffEligible.getAndSet(enabled)
+        if (was != enabled) log.i("rediscover backoff ${if (enabled) "ELIGIBLE (nothing left to find — cadence may lengthen to ${REDISCOVER_MAX_MS / 1000}s)" else "off"}")
+        resetRediscoverBackoff()
+    }
+
+    private fun resetRediscoverBackoff() {
+        val changed = synchronized(backoffLock) {
+            emptyCycles = 0
+            val was = rediscoverIntervalMs
+            rediscoverIntervalMs = REDISCOVER_MS
+            was != REDISCOVER_MS
+        }
+        if (changed) log.i("rediscover cadence back to ${REDISCOVER_MS / 1000}s")
+    }
+
+    /**
+     * The OCBM link just came up (or came back): restart discovery NOW so a nudge that
+     * [nudgeAllowed] held goes out within the 600 ms restart rather than at the next tick. Safe
+     * from any thread and in any state — the loop re-checks `running`, a live session and the
+     * pause before acting, so a wake under a streaming session is a no-op. Also resets the backoff:
+     * a link-up is progress.
+     */
+    fun wakeDiscovery(why: String) {
+        if (!running.get()) return
+        log.i("waking the rediscover loop — $why")
+        resetRediscoverBackoff()
+        rediscoverWake.release()
+    }
+
+    /** One line for a connect-out that found the receiver stopped under it, instead of a bare return. */
+    private fun stoppedMidDial(where: String) = log.i("connect-out abandoned at $where — receiver stopped")
 
     /**
      * Re-assert our mDNS records without tearing the receiver down — cheapest recovery rung.
@@ -1382,117 +1890,12 @@ class CarPlayRx(
      * caller is the supervisor thread that owns every timer.
      */
     fun reannounce(): Boolean {
-        val r = selfMdns ?: run { log.w("reannounce: self-hosted responder is not up"); return false }
+        val r = selfMdns ?: run {
+            log.w("reannounce: self-hosted responder is not up (it did not start — see advert-self)")
+            return false
+        }
         return try { pool.execute { r.reannounce() }; true }
         catch (t: Throwable) { log.w("reannounce: not dispatched — ${t.javaClass.simpleName}"); false }
-    }
-
-    /** Call out the requests that mark real progress, so they are greppable in a long capture. */
-    private fun milestone(r: Req) {
-        val p = r.path
-        when {
-            p.startsWith("/info") ->
-                log.i("*** MILESTONE: iOS is querying /info on the CarPlay path")
-            p.startsWith("/pair-setup") ->
-                log.i("*** /pair-setup — SRP-6a is implemented; see the M1..M4 lines that follow")
-            p.startsWith("/pair-verify") ->
-                log.w("*** WALL: /pair-verify reached — needs Curve25519/Ed25519. Not implemented.")
-            p.startsWith("/auth-setup") ->
-                log.w("*** /auth-setup reached — this is where the proven CH_MFI relay plugs in.")
-            r.method == "SETUP" ->
-                log.i("*** MILESTONE: SETUP — this is A/V stream negotiation. Body above is the stream dict.")
-            r.method == "RECORD" ->
-                log.i("*** MILESTONE: RECORD — the session is starting.")
-            r.method == "ANNOUNCE" || r.method == "FLUSH" || r.method == "TEARDOWN" ->
-                log.i("*** RTSP ${r.method}")
-        }
-    }
-
-    private fun respond(r: Req, out: OutputStream) {
-        val cseq = r.headers.entries.firstOrNull { it.key.equals("CSeq", true) }?.value
-        when {
-            r.method == "OPTIONS" -> write(out, 200, cseq, mapOf(
-                "Public" to "ANNOUNCE, SETUP, RECORD, PAUSE, FLUSH, TEARDOWN, OPTIONS, GET_PARAMETER, SET_PARAMETER, POST, GET"),
-                ByteArray(0), r.version)
-            r.path.startsWith("/pair-setup") -> {
-                val body = handlePairSetup(r.body)
-                write(out, 200, cseq, mapOf("Content-Type" to "application/octet-stream"), body, r.version)
-            }
-            // /info is served for GET *and* POST, matched by suffix — iOS sends absolute request
-            // URIs (`rtsp://host/info`) and may POST with a bplist qualifier. rtsp/src/route.rs:54-81.
-            r.path.contains("/info") -> {
-                val blob = infoBlob()
-                if (blob == null) {
-                    log.e("/info requested but assets/info.bplist is missing — regenerate it")
-                    write(out, 500, cseq, emptyMap(), ByteArray(0), r.version)
-                } else {
-                    log.i("*** MILESTONE: serving /info (${blob.size}B binary plist)")
-                    write(out, 200, cseq, mapOf("Content-Type" to BPLIST), blob, r.version)
-                }
-            }
-            // Anything we do not implement must NOT be answered with a bodyless 200. iOS's first
-            // request on the control connection is pair-verify M1, and a false success looks like a
-            // valid empty M2 — strictly worse than an error. 05_SESSION_FLOW §8 "Ordering rules that
-            // kill sessions", rule 9, makes the same point for SETUP stream types: never answer with
-            // silence; omit and log loudly. Its HTTP-level counterpart is a 501, not a fake 200.
-            else -> {
-                log.w("UNIMPLEMENTED ${r.method} ${r.path} -> 501 (deliberately not a fake 200)")
-                write(out, 501, cseq, emptyMap(), ByteArray(0), r.version)
-            }
-        }
-    }
-
-    /**
-     * pair-setup, states M1..M4 (SRP-6a). Ported from `pairing/src/setup.rs`.
-     *
-     * M1{State=1,Method}            -> M2{State=2,Salt,PublicKey=B}
-     * M3{State=3,PublicKey=A,Proof} -> M4{State=4,Proof=M2}
-     *
-     * M5/M6 exchange Ed25519 long-term keys inside ChaCha20 and are NOT implemented here: Ed25519 is
-     * API 33+, so that step needs either a bundled provider or the JNI'd Rust core. Reaching a
-     * correct M4 is still worth it on its own — it proves SRP wire-compatibility with a real iPhone,
-     * which `setup.rs` itself flags as "the single thing not provable offline".
-     */
-    private fun handlePairSetup(body: ByteArray): ByteArray {
-        val tlv = Tlv8.decode(body)
-        return when (val state = Tlv8.state(tlv)) {
-            1 -> {
-                val salt = ByteArray(16).also { SecureRandom().nextBytes(it) }
-                val s = SrpServer(SrpServer.USERNAME, SrpServer.SETUP_CODE, salt)
-                srp = s
-                log.i("pair-setup M1 -> M2 (salt 16B, B ${s.bPub().size}B, setup code 3939)")
-                Tlv8.encode(listOf(
-                    Tlv8.STATE to byteArrayOf(2),
-                    Tlv8.SALT to s.salt,
-                    Tlv8.PUBLIC_KEY to s.bPub()
-                ))
-            }
-            3 -> {
-                val s = srp
-                val a = tlv[Tlv8.PUBLIC_KEY]
-                val proof = tlv[Tlv8.PROOF]
-                if (s == null || a == null || proof == null) {
-                    log.w("pair-setup M3 malformed (srp=${s != null} A=${a?.size} proof=${proof?.size})")
-                    return Tlv8.error(4, Tlv8.ERR_UNKNOWN)
-                }
-                log.i("pair-setup M3: A=${a.size}B proof=${proof.size}B — verifying SRP")
-                val m2 = s.verify(a, proof)
-                if (m2 == null) {
-                    // Either the setup code differs or our SRP is wire-incompatible. Both look the same.
-                    log.e("*** pair-setup M3 PROOF MISMATCH — setup code wrong, or SRP not wire-compatible")
-                    return Tlv8.error(4, Tlv8.ERR_AUTHENTICATION)
-                }
-                log.i("*** MILESTONE: SRP-6a PROOF VERIFIED against a real iPhone — M4 going out")
-                log.i("*** This closes the gap pairing/src/setup.rs calls unprovable offline.")
-                Tlv8.encode(listOf(Tlv8.STATE to byteArrayOf(4), Tlv8.PROOF to m2))
-            }
-            5 -> {
-                log.w("*** pair-setup M5 reached — the Ed25519 LTPK exchange. Needs API 33+ curve")
-                log.w("*** primitives (or the JNI'd Rust core). SRP is DONE; this is the next gate.")
-                Tlv8.error(6, Tlv8.ERR_UNKNOWN)
-            }
-            else -> { log.w("pair-setup: unexpected state $state"); Tlv8.error(2, Tlv8.ERR_UNKNOWN) }
-        }
     }
 
     /**
@@ -1515,49 +1918,6 @@ class CarPlayRx(
     } catch (t: Throwable) { log.e("assets/info.bplist: ${t.message}"); null }
 
     private var infoCache: ByteArray? = null
-
-    private fun write(out: OutputStream, code: Int, cseq: String?, headers: Map<String, String>,
-                      body: ByteArray, version: String = "HTTP/1.1") {
-        // Echo the REQUEST's protocol version. iOS sends RTSP verbs on this same socket, and
-        // answering an RTSP/1.0 request with an HTTP/1.1 status line ends the session.
-        val reason = when (code) {
-            200 -> "OK"
-            500 -> "Internal Server Error"
-            else -> "Not Implemented"
-        }
-        val sb = StringBuilder("$version $code $reason\r\n")
-        sb.append("Server: AirTunes/$SRCVERS\r\n")
-        if (cseq != null) sb.append("CSeq: $cseq\r\n")
-        headers.forEach { (k, v) -> sb.append("$k: $v\r\n") }
-        sb.append("Content-Length: ${body.size}\r\n\r\n")
-        out.write(sb.toString().toByteArray())
-        if (body.isNotEmpty()) out.write(body)
-        out.flush()
-    }
-
-    // ---- minimal HTTP/RTSP parsing ------------------------------------------------------------------
-
-    private class Req(val method: String, val path: String, val version: String,
-                      val headers: Map<String, String>, val body: ByteArray)
-
-    private fun readRequest(ins: BufferedInputStream): Req? {
-        var line = readLine(ins) ?: return null
-        while (line.isBlank()) line = readLine(ins) ?: return null
-        val parts = line.split(" ")
-        val headers = LinkedHashMap<String, String>()
-        while (true) {
-            val h = readLine(ins) ?: break
-            if (h.isBlank()) break
-            val i = h.indexOf(':')
-            if (i > 0) headers[h.substring(0, i).trim()] = h.substring(i + 1).trim()
-        }
-        val len = headers.entries.firstOrNull { it.key.equals("Content-Length", true) }?.value?.toIntOrNull() ?: 0
-        val body = ByteArray(len)
-        var read = 0
-        while (read < len) { val n = ins.read(body, read, len - read); if (n < 0) break; read += n }
-        return Req(parts.getOrElse(0) { "?" }, parts.getOrElse(1) { "?" },
-            parts.getOrElse(2) { "HTTP/1.1" }, headers, body)
-    }
 
     private fun readLine(ins: BufferedInputStream): String? {
         val sb = StringBuilder()

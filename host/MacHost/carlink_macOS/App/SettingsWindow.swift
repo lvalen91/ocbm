@@ -95,14 +95,16 @@ final class VehicleConfigModel: ObservableObject {
     // Android Auto (our `android_auto:` YAML extension, docs/androidauto/02_ARBITRATION.md). The box's session_supervisor reads
     // it: when an Android phone is on the USB bus and no CarPlay transport owns the box, it arms
     // `aa-bridge` (AOAP switch + byte pump) and reports `pmWiredAa`, on which this app runs its own AA
-    // head-unit engine over CH_IP. Default ON — the box's own default is opt-out (`android_auto: false`).
+    // head-unit engine over CH_IP. Default ON in this app, emitted EXPLICITLY in every push. The box
+    // treats Android Auto as opt-in since 2026-10-19 (absent key or absent file = OFF; only
+    // `android_auto: true` arms it), so this app's `true` is what turns it on.
     // CarPlay is unaffected either way: an iPhone always wins the CarPlay path first.
     @Published var androidAutoEnabled: Bool { didSet { markDirty() } }
     // Wi-Fi access point (our `wifi_ap:` YAML extension). The box's session_supervisor.sh
     // `wifi_ap_enabled()` greps the pushed document for an EXPLICIT `wifi_ap: false`; anything else
-    // (absent, true, misspelt) means enabled. So the default is emitted as NOTHING — the document
-    // stays byte-identical to every pre-2026-09-04 push — and only a deliberate `false` reaches the
-    // wire (`yaml`, beside the other emit-nothing-for-default blocks). false = the BT-only bridge
+    // (absent, true, misspelt) means enabled. Since 2026-10-19 the app emits the key UNCONDITIONALLY
+    // (`wifi_ap: true|false`) so the pushed document states the value rather than leaning on the
+    // box's absent-means-enabled default, which stays only for older hosts. false = the BT-only bridge
     // role (radio_ap_up.sh: Bluetooth + MFi only, no SoftAP is raised, so no wireless projection
     // gets a Wi-Fi leg). Until 2026-09-04 this key had no UI at all (DESIGN.md §7 defect 8).
     @Published var wifiAccessPoint: Bool { didSet { markDirty() } }
@@ -133,7 +135,8 @@ final class VehicleConfigModel: ObservableObject {
     // `animationDurationMillis` on its `updateViewArea` answer (our top-level `view_area_anim_ms:`
     // YAML extension; device-proven 2026-09-09: 1000 visibly beat the hardcoded 3000). Absent on the
     // wire = 3000, so the emitter writes the key ONLY when the value differs and every existing
-    // document stays byte-identical (the `wifi_ap` idiom, DESIGN.md §2). Range 0…10000, clamped.
+    // document stays byte-identical (the emit-nothing-for-the-default idiom, DESIGN.md §2; `wifi_ap`
+    // used it until 2026-10-19 and is now emitted on every push). Range 0…10000, clamped.
     @Published var viewAreaAnimMs: Int { didSet { markDirty() } }
     /// What the last `clampInPlace()` CHANGED, one line each; empty when it stored every value as
     /// typed. Not persisted, never dirties the model. The Vehicle tab renders it under the panel
@@ -1165,11 +1168,12 @@ final class VehicleConfigModel: ObservableObject {
             }
         }
         // `wifi_ap` — our top-level extension read by the box's session_supervisor.sh
-        // (`wifi_ap_enabled()` greps for an explicit `wifi_ap: false`; absent = enabled). Enabled ⇒
-        // emit nothing, so every pre-existing configuration pushes a byte-identical document — the
-        // drift-guard fixture (tools/regen_app_yaml_fixture.py) runs with the default and pins that.
-        // Only a deliberate OFF (the BT-only bridge role) reaches the wire.
-        if !wifiAccessPoint { y += "wifi_ap: false\n" }
+        // (`wifi_ap_enabled()` greps for an explicit `wifi_ap: false`; absent = enabled) and by btd
+        // (BOX_WIFI_AP, exported from it). Emitted UNCONDITIONALLY since 2026-10-19: the app states
+        // the value instead of leaning on the box's absent-means-enabled default (doctrine:
+        // configurable values are app-pushed). The drift-guard fixture
+        // (tools/regen_app_yaml_fixture.py) pins the default `wifi_ap: true` line.
+        y += "wifi_ap: \(wifiAccessPoint)\n"
         // `view_area_anim_ms` — our top-level extension, the box's `animationDurationMillis` on its
         // `updateViewArea` answer. Absent = 3000 on the box, so 3000 emits NOTHING (same idiom, same
         // byte-identical fixture); the stub in tools/regen_app_yaml_fixture.py carries 3000.

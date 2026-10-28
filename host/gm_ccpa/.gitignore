@@ -78,3 +78,8 @@ logs
 # iCloud conflict copies. They appear anywhere, are never wanted, and have broken builds here.
 *[ ]2.*
 *[ ]2
+
+# Tool scratch that must never dirty the build stamp (E-F4, 2026-10-08): python's bytecode cache from
+# tools/*.py, and the capture adb_radio_probe.sh used to write beside itself (now /tmp by default).
+__pycache__
+radio_probe_*.txt

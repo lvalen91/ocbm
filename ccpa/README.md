@@ -1,7 +1,10 @@
 # ccpa/ — box-side (armv7 / i.MX6UL)
 
 The open CCPA userspace that runs on the adapter, on top of the fixed vendor floor
-(HAB-signed U-Boot + OTPMK-encrypted kernel, unmodified). See [`../docs/carplay/00_ARCHITECTURE.md`](../docs/carplay/00_ARCHITECTURE.md).
+(HAB-signed U-Boot, never written: env-block erase only; stock 3.14.52 kernel, unmodified by this userspace and not part of the
+frozen floor. A mainline
+kernel can replace it through U-Boot's staging path, a separate track in `../baseline/`; corrected
+2026-10-20). See [`../docs/carplay/00_ARCHITECTURE.md`](../docs/carplay/00_ARCHITECTURE.md).
 
 ## `rootfs/` — the box-side script overlay (source of truth for the OWNED files)
 
@@ -26,7 +29,7 @@ These are the **owned, vanilla-stripped, dead-code-free** scripts (2026-07-08 au
 |---|---|
 | `etc/inittab` | boot table — **reference copy; the installers DERIVE the on-box file.** `::sysinit:/script/early_console.sh` (before rcS), `console::sysinit:/etc/init.d/rcS`, the two OCBM `::respawn` wrappers (`run_ocbmd.sh`, `run_supervisor.sh` — the task-#28 respawn protection, appended on-box by `ocbm_install.sh`), askfirst/restart/ctrlaltdel, `::shutdown:/script/after_shutdown.sh` |
 | `etc/init.d/rcS` | boot: mount, dropbear/telnetd, mdev, sysctls, → `start_main_service` |
-| `etc/mdev/udisk_insert.sh` | USB-storage hotplug auto-mount → `/mnt/UPAN` |
+| `etc/mdev/usb_mount.sh` | the one mdev USB-storage hook (both sd rules, add + remove): vfat at `/mnt/UPAN`, idempotent, unmounts only its own device, `flock`-serialised. Replaced the stock `udisk_insert.sh`/`udisk_hotplug.sh` 2026-10-19; `ncm_base_install.sh bootpath` rewires `/etc/mdev.conf`, `strip` deletes the stock hooks |
 | `script/early_console.sh` | **Lever 1** — earliest self-respawning 115200 UART root console |
 | `script/custom_init.sh` | early CDC-NCM arm (primary NCM bring-up) |
 | `script/start_main_service.sh` | minimal boot orchestrator (79 lines; projection cruft removed) — dispatches to `ocbm_boot.sh` when neither NCM flag is set |
@@ -41,12 +44,12 @@ These are the **owned, vanilla-stripped, dead-code-free** scripts (2026-07-08 au
 | `script/ocbm_boot.sh` | OCBM appliance boot: pure-accessory gadget + `ocbmd` + session supervisor, plus the first-boot dead-man (`/script/ocbm_trial`) and the opt-in NCM failover watchdog (`/script/ocbm_failover`). Installed by `tools/ocbm_install.sh` |
 | `script/run_ocbmd.sh` | inittab `::respawn` wrapper for `ocbmd` (+ a temporary deploy dead-man). **See the note under the table** |
 | `script/init_gpio.sh` | BT-reset + quick-charge GPIO |
-| `script/copy_to_tmp.sh` | stage gadget kernel modules (`ko.tar.gz`) to /tmp |
+| `script/copy_to_tmp.sh` | stage gadget kernel modules (`ko.tar.gz`) to /tmp — extracts EVERY member, which is why the Apple-gadget ones are filtered out of the archive itself (2026-10-19, see `script/ko.tar.gz`) |
 | `script/mount_usb.sh` | manual USB-stick mount + staging area |
 | `script/after_shutdown.sh` | shutdown: sync + unmount |
 | `script/sync_box_time.sh` | NTP time sync (US IP servers) |
 | `script/uart_console.sh` | (superseded by `early_console.sh`; retained) |
-| `script/ko.tar.gz` | gadget kernel modules (`g_android_accessory.ko`, …) — binary artifact |
+| `script/ko.tar.gz` | gadget kernel modules — binary artifact, members `g_android_accessory.ko` + `storage_common.ko`. **Reference only, never installed:** the bundle is built against each unit's own kernel (vermagic), so no installer ships it. *(2026-10-19, owner decision — this is an OCBM board now):* `tools/ncm_base_install.sh strip` FILTERS the unit's own `/script/ko.tar.gz` in place, dropping HeWei's Apple-gadget members `g_iphone.ko`, `f_ptp.ko`, `f_ptp_appledev.ko`, `f_ptp_appledev2.ko` (and their `/tmp` copies) and keeping every other member byte-identical (stock also carries `cdc_ncm.ko` and the `snd-soc-*` codec modules). It refuses, leaving the original untouched, unless the result lists cleanly and still carries both members above; the original stays as `ko.tar.gz.pre` until `tidy`. OCBM never used them: the phone-facing gadget is the built-in `g_android` (`android0`, `iap2,ncm`) — docs/carplay/07_PHONE_SIDE.md. `tools/audit_scripts.sh` flags any script still naming `g_iphone`/`f_ptp`. This overlay copy already had none of the four |
 
 Runtime triggers (not committed): `/script/ncm_only` **or** `/script/ncm_wifi` selects an NCM boot;
 with **neither** present the box boots the OCBM appliance. Always test

@@ -16,7 +16,7 @@ one data-capable micro-USB (dwc2 OTG) plus one power-only micro-USB.
 
 | Fact the daemons depend on | CCPA | C2Air | Pi Zero 2 W |
 |---|---|---|---|
-| MFi 2.0C coprocessor | `/dev/i2c-1 @0x11` | `/dev/i2c-1 @0x11` | **absent** |
+| MFi coprocessor | 2.0C at `/dev/i2c-1 @0x11` | 3.x at `/dev/i2c-1 @0x11` | **absent** |
 | Host-facing bulk transport | `f_accessory` -> `/dev/usb_accessory` | `f_accessory` | **no `f_accessory` in mainline** — functionfs instead |
 | USB gadget state | `/sys/class/android_usb*/android0/state` | same | **`/sys/class/udc/<udc>/state`** (configfs) |
 | USB **device** controllers | 2 (phone + host) | 2 | **1** |

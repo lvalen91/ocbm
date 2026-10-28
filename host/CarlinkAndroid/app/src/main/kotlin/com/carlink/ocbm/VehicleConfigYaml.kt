@@ -15,8 +15,11 @@ package com.carlink.ocbm
  * appDrivenSetup, audio and the metadata tier at once."
  *
  * So: the shape below is byte-derived from the schema fixture `APP_DOC` in
- * `crates/vendor/receiver/tests/r4_c2_schema.rs:20-103`, and `VehicleConfigYamlTest` pins the rendered
- * output byte for byte. **If you edit the emitter, update the golden test in the same commit** — a
+ * `crates/vendor/receiver/tests/r4_c2_schema.rs:30-113` — a 2026-08-10 SNAPSHOT of the macOS emitter,
+ * not its current output (which has since dropped `version`/`nightMode`; that file says so) — plus
+ * this host's own `wifi_ap:` / `android_auto:` lines, and `VehicleConfigYamlTest` pins the rendered
+ * output byte for byte. *(Corrected 2026-10-19: the cited range was 20-103 and the fixture was
+ * implied to track the macOS app.)* **If you edit the emitter, update the golden test in the same commit** — a
  * fixture nobody regenerates is hand-typed by definition, which is exactly how the incident happened.
  *
  * ## Values that are load-bearing
@@ -31,6 +34,13 @@ package com.carlink.ocbm
  *   wireless media entirely.
  * - `wireless: true` — this build uses the adapter's own radios, which is also why the negotiated media
  *   format is AAC-LC 48 kHz stereo (`preset: wireless_8`) rather than the wired PCM path.
+ * - `wifi_ap: true` — the box raises its own SoftAP. Emitted EXPLICITLY (2026-10-19) rather than left
+ *   to the box's absent-means-enabled default, so this host states what it wants; the box keeps that
+ *   default only for older hosts.
+ * - `android_auto: false` — this host runs no Android Auto head-unit engine. Android Auto is explicit
+ *   opt-in on the box (absent = OFF since 2026-10-19, docs/androidauto/02_ARBITRATION.md), and saying
+ *   `false` out loud keeps the box from AOAP-switching a plugged Android phone, advertising the AA SDP
+ *   record, or holding wireless CarPlay down for it.
  */
 data class VehicleConfigSpec(
     val name: String = "CarLink GM 2400x960",
@@ -45,6 +55,10 @@ data class VehicleConfigSpec(
     val safeHeight: Int = height,
     val drawUIOutsideSafeArea: Boolean = false,
     val wireless: Boolean = true,
+    /** `wifi_ap` — the box's own SoftAP. `false` is the BT-only bridge role. Always emitted. */
+    val wifiAp: Boolean = true,
+    /** `android_auto` — opt-in on the box; this host has no AA engine, so the default is `false`. */
+    val androidAuto: Boolean = false,
     val pairing: String = "just_works",
     val enablesHevc: Boolean = true,
     /** Steering-wheel media keys reach CarPlay through this HID, not a steering-wheel device. */
@@ -248,8 +262,10 @@ object VehicleConfigYaml {
         line("name: \"${escape(s.name)}\"")
         line("version: 1")
         line("wireless: ${s.wireless}")
+        line("wifi_ap: ${s.wifiAp}")
         line("hot_handover: false")
         line("pairing: ${s.pairing}")
+        line("android_auto: ${s.androidAuto}")
         line("rightHandDrive: false")
         // Emitted for shape parity with the pinned fixture; the box does not read it. Night mode is a
         // runtime /command (CMD_NIGHT_MODE), not a config value.

@@ -153,8 +153,8 @@ enum AAWire {
     /// At 1.7 a single lost/shed P-frame therefore corrupts the picture for up to a MINUTE, because
     /// the protocol has no keyframe request (verified: no PARAMETER_KEY_REQUEST_SYNC_FRAME anywhere
     /// in the app). The >= 6.0 path also stops the phone parsing our ACKs and floors max_unacked to
-    /// 24, and nothing in either source proves the framing is identical at 6.x — so this is an
-    /// EXPERIMENT, off by default: `AA_PROTO=6.1` to try it, and A/B before adopting.
+    /// 24, and nothing in either source proves the framing is identical at 6.x. It began as an
+    /// experiment (`AA_PROTO=6.1`, A/B before adopting) and is now the default.
     /// DEFAULT 6.1 as of 2026-08-25: device-proven to move the phone's IDR cadence from 60 s to 2 s
     /// (IDRs at frames #61/#121/#181/... = every 60 frames at 30 fps), which is the fix for the
     /// long-lived pixelation. Soaked ~5 minutes / 2700 frames / 45 IDRs / 0 teardowns — solid, but not

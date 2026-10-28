@@ -13,11 +13,12 @@ import zeno.gmccpa.ProbeLog
  * `0x5001 NowPlayingUpdate` messages against a single 78-byte one. Publishing each record verbatim
  * would blank the title and artist twice a second — a merge bug that presents as a metadata bug.
  *
- * Every field is therefore MERGED, never replaced, and fields are cleared only on an inferred track
- * change, because iAP2 sends no "new track" marker.
+ * Every field is therefore MERGED, never replaced — on an inferred track change too (plan v5.9 MED M1:
+ * a same-artist skip carries only the title, and the old blank-base rebuild lost artist, album and
+ * art). A field is cleared only when a record carries it empty. The rules are [NowPlayingMerge]'s.
  *
  * ## Wire keys
- * `metadata.rs:333-418`: title, artist, album, genre, composer, appName, durationMs, elapsedMs,
+ * `metadata.rs` `now_playing()`: title, artist, album, genre, composer, appName, durationMs, elapsedMs,
  * trackNumber, trackCount, discNumber, discCount, queueIndex, queueCount, shuffleMode, repeatMode,
  * playbackStatus, playbackSpeed, artworkId. Only the subset an AAOS media card renders is kept.
  */
@@ -39,9 +40,9 @@ class NowPlayingState {
         /** Raw JPEG for [artworkId]. Decoding belongs to the consumer, off the seam thread. */
         val artwork: ByteArray? = null,
         /**
-         * iAP2 PlaybackAttributes id 0, verbatim: 0 stop, 1 play, 2 pause, 3 seek-forward,
-         * 4 seek-back (`metadata.rs:374-378`). Null until iOS says. Deliberately never inferred from
-         * the audio seam — bytes arriving on `:9002` mean the phone is sending, not that the user
+         * iAP2 PlaybackAttributes id 0, verbatim: 0 stop, 1 play, 2 pause, 3 seek-forward, 4 seek-back
+         * (`metadata.rs` `now_playing()`, group 1 id 0). Null until iOS says. Deliberately never inferred
+         * from the audio seam — bytes arriving on `:9002` mean the phone is sending, not that the user
          * considers it playing.
          */
         val playbackStatus: Int? = null,
@@ -96,6 +97,12 @@ class NowPlayingState {
     @Volatile var onPlaybackTick: ((Snapshot) -> Unit)? = null
 
     /**
+     * A `routeGuidance` record (0x5201) arrived; the argument is its `routeGuidanceState`, or -1 when
+     * the record did not carry one. Runs on `cp-meta`: the consumer must only stamp (U10, F159).
+     */
+    @Volatile var onRouteGuidance: ((Int) -> Unit)? = null
+
+    /**
      * Seam entry point. Runs on the `cp-meta` thread: JSON parse inline (cheap), callbacks must post
      * anything expensive elsewhere — see the blocking note on [MetadataSeam].
      */
@@ -104,9 +111,18 @@ class NowPlayingState {
             MetadataSeam.META_JSON -> {
                 val json = runCatching { JSONObject(String(payload, Charsets.UTF_8)) }.getOrNull() ?: return
                 // The seam also carries routeGuidance, maneuver, callState, artworkReady and more.
-                // Only the media picture is consumed — by scope decision there is no navigation or
+                // Only the media picture is DISPLAYED — by scope decision there is no navigation or
                 // telephony surface in this app, and half-handling a kind is worse than ignoring it.
-                if (json.optString("kind") != "nowPlaying") return
+                // One exception (plan v5.7 U10, F159): routeGuidance's state is handed to the voice
+                // router as a route-active signal; nothing is shown. The hook only stamps volatiles.
+                val kind = json.optString("kind")
+                if (kind == "routeGuidance") {
+                    val st = if (json.has("routeGuidanceState")) json.optInt("routeGuidanceState", -1) else -1
+                    runCatching { onRouteGuidance?.invoke(st) }
+                        .onFailure { log.e("routeGuidance consumer threw: ${it.message}") }
+                    return
+                }
+                if (kind != "nowPlaying") return
                 val changed = onNowPlaying(json)
                 if (changed != null) emit(changed)
                 else runCatching { onPlaybackTick?.invoke(snapshot) }
@@ -123,69 +139,69 @@ class NowPlayingState {
         }
     }
 
+    /**
+     * The merge state behind [snapshot]: the displayed picture plus the two art bookkeeping fields
+     * ([NowPlayingMerge.State.artCarried], the one-slot pending transfer). Written only under `this`.
+     */
+    private var merged = NowPlayingMerge.State()
+
+    /**
+     * Phone-side playback status hook (plan v5.9 MED M5): called with the new iAP2 playbackStatus each
+     * time a record CHANGES it, outside the merge lock, on `cp-meta`. The consumer must only stamp.
+     */
+    @Volatile var onPlaybackStatus: ((Int?) -> Unit)? = null
+
     /** Apply one nowPlaying record. Returns the new snapshot if the DISPLAYED picture changed. */
-    @Synchronized
-    fun onNowPlaying(json: JSONObject): Snapshot? {
-        val prev = snapshot
-        // Track change is inferred from a different non-empty title. NOT from artworkId: that key is
-        // absent from elapsed-only frames, so it would read as a change to -1 on every single tick.
-        val incomingTitle = json.optStringOrNull("title")
-        val trackChanged = incomingTitle != null && incomingTitle != prev.title
-        // On a track change, merge onto a BLANK record: a field the full record omits is genuinely
-        // absent for the new track. Merging onto the previous snapshot instead kept the old artist,
-        // album and duration alive beside the new title. playbackStatus carries across because it
-        // describes the PLAYER, not the item.
-        val base = if (trackChanged) Snapshot(playbackStatus = prev.playbackStatus) else prev
-        val artworkId = json.optIntOrNull("artworkId") ?: base.artworkId
-        val next = Snapshot(
-            title = incomingTitle ?: base.title,
-            artist = json.optStringOrNull("artist") ?: base.artist,
-            album = json.optStringOrNull("album") ?: base.album,
-            genre = json.optStringOrNull("genre") ?: base.genre,
-            composer = json.optStringOrNull("composer") ?: base.composer,
-            appName = json.optStringOrNull("appName") ?: base.appName,
-            durationMs = json.optLongOrNull("durationMs") ?: base.durationMs,
-            elapsedMs = json.optLongOrNull("elapsedMs") ?: base.elapsedMs,
-            trackNumber = json.optIntOrNull("trackNumber") ?: base.trackNumber,
-            trackCount = json.optIntOrNull("trackCount") ?: base.trackCount,
-            artworkId = artworkId,
-            // A JPEG is only valid for the id it arrived under. Drop it when the id moves — on a track
-            // change (base is blank, so this is the existing behaviour) AND when iOS swaps art under
-            // the same title. A brief blank cover is honest; the previous cover under a new id is not.
-            artwork = if (artworkId == base.artworkId) base.artwork else null,
-            playbackStatus = json.optIntOrNull("playbackStatus") ?: base.playbackStatus,
-        )
-        snapshot = next
+    fun onNowPlaying(json: JSONObject): Snapshot? = onRecord(json.toMap())
+
+    /**
+     * The delta merge itself is [NowPlayingMerge.record] (pure; see there for every rule). It works on a
+     * Map because android.jar's org.json is a stub at tier-0 runtime.
+     */
+    fun onRecord(rec: Map<String, Any?>): Snapshot? {
+        val prev: Snapshot
+        val next: Snapshot
+        synchronized(this) {
+            prev = snapshot
+            merged = NowPlayingMerge.record(merged, rec)
+            next = merged.snapshot
+            snapshot = next
+        }
+        if (next.playbackStatus != prev.playbackStatus)
+            runCatching { onPlaybackStatus?.invoke(next.playbackStatus) }
+                .onFailure { log.e("playbackStatus consumer threw: ${it.message}") }
         return if (next == prev) null else next
     }
 
     /**
-     * Album art arrived on the iAP2 file-transfer session (`metadata.rs:1262-1272`), forwarded as
-     * `META_ARTWORK`. It can land before OR after the record that references it, and iOS re-runs
-     * transfers on reconnect, so all three cases are handled here rather than assumed away.
+     * Album art arrived on the iAP2 file-transfer session (`metadata.rs`, the "Artwork — iAP2 File
+     * Transfer" section), forwarded as `META_ARTWORK`. It can land before OR after the record that
+     * references it, and iOS re-runs transfers on reconnect; [NowPlayingMerge.artwork] handles every
+     * case (adopt, replace, adopt under a carry, park in the one-slot pending).
      */
     @Synchronized
     fun onArtwork(id: Int, jpeg: ByteArray): Snapshot? {
-        val prev = snapshot
-        // A mismatched id is a late transfer for a track that has already changed.
-        if (prev.artworkId >= 0 && id != prev.artworkId) return null
-        if (jpeg.isEmpty()) return null
-        // Byte-identical re-send is not a change, and republishing would re-decode the bitmap.
-        if (prev.artworkId == id && prev.artwork.contentEqualsOrBothNull(jpeg)) return null
-        // ADOPT the id. While it is -1 the guard above accepts anything; recording what we took is
-        // exactly what lets the next stale transfer be rejected.
-        val next = prev.copy(artwork = jpeg, artworkId = id)
-        snapshot = next
-        return next
+        val prev = merged
+        val next = NowPlayingMerge.artwork(prev, id, jpeg)
+        if (next === prev) return null
+        merged = next
+        if (next.snapshot === prev.snapshot) return null   // parked only: nothing displayed changed
+        snapshot = next.snapshot
+        return next.snapshot
     }
 
     /**
-     * Session ended. Everything goes AND the cleared picture is published — a card still showing the
-     * last track over a dead session is the metadata twin of the frozen-frame bug that
-     * `CarPlayActivity.onSessionEnded` was written to fix.
+     * Session ended. Everything goes (merge base, carry, pending transfer) AND the cleared picture is
+     * published. Called from `CarPlayMediaBrowserService.onSessionDown` (plan v5.9 MED M4), i.e. on the
+     * SESSION's end, not the screen's: an Activity destroy with the session still up must not blank
+     * the merge base the next delta builds on.
      */
-    @Synchronized
-    fun clear() { snapshot = Snapshot(); emit(snapshot) }
+    fun clear() {
+        // The emit runs OUTSIDE this monitor: the caller holds CMBS's pubLock, and a monitor -> pubLock
+        // edge anywhere (emit -> publish) would close a lock cycle with it.
+        val s = synchronized(this) { merged = NowPlayingMerge.State(); snapshot = merged.snapshot; snapshot }
+        emit(s)
+    }
 
     private fun emit(s: Snapshot) {
         runCatching { onMetadataChanged?.invoke(s) }
@@ -201,16 +217,19 @@ class NowPlayingState {
     }
 }
 
-// org.json returns "" from optString and 0 from optLong for a MISSING key — indistinguishable from a
-// real value, and exactly wrong for a delta merge. These return null for absent so `?:` falls through
-// to the previous value. An empty string counts as absent too: iOS sends "" for a field it has no
-// value for, and letting that through would blank a good title.
-internal fun JSONObject.optStringOrNull(k: String): String? =
-    if (has(k) && !isNull(k)) optString(k).takeIf { it.isNotEmpty() } else null
-
-internal fun JSONObject.optLongOrNull(k: String): Long? = if (has(k) && !isNull(k)) optLong(k) else null
-
-internal fun JSONObject.optIntOrNull(k: String): Int? = if (has(k) && !isNull(k)) optInt(k) else null
+// JSONObject -> Map for [NowPlayingMerge]. A JSON null is treated as absent (the key carries over),
+// as the old optXOrNull helpers did. Values stay as org.json produced them (String, Int, Long, Double,
+// Boolean); the merge reads numbers through Number.
+internal fun JSONObject.toMap(): Map<String, Any?> {
+    val m = HashMap<String, Any?>()
+    val it = keys()
+    while (it.hasNext()) {
+        val k = it.next()
+        val v = opt(k)
+        if (v != null && v != JSONObject.NULL) m[k] = v
+    }
+    return m
+}
 
 internal fun ByteArray?.contentEqualsOrBothNull(o: ByteArray?): Boolean =
     if (this == null || o == null) this == null && o == null else contentEquals(o)

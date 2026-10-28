@@ -45,6 +45,16 @@
 # Matrix and centring arithmetic are those of tools/va_limit_sweep.sh: origin centred and forced
 # EVEN (odd x/y/w/h is a device-proven teardown, `carEndpoint_copyScreenInfo:7001` -> -16720).
 # The 800x480-in-3840x2160 case is already owner-confirmed and stays first as the control.
+#
+# ARMING IS APP-DOOR ONLY (2026-10-19). The box's /tmp/carplay_viewarea2 lever is NO-CONFIG-ONLY
+# since owner decision D3 (docs/carplay/04_CAPABILITIES_AND_CONFIG.md §2): every case here relaunches
+# the app, the app's pushed config is then in force, and carplayd IGNORES the lever (logged as
+# "CARPLAY_VIEWAREA2 bench lever ... IGNORED"). So the old "door verb missing -> fall back to the
+# box lever" path is gone — it would now measure a single-area session and score it as a result.
+# The one thing only the lever can express is `:initial` (INITIAL=1); that case is APP-LESS ONLY:
+# INITIAL=1 pushes the lever with the app DOWN and does not relaunch it, and the case is judged by
+# hand (no app = no control socket, no app log, no frame) — see `lever_arm_appless`. It therefore
+# takes exactly ONE case (`--case`, or a single `--only` label) and refuses to walk the matrix.
 
 set -u
 cd "$(dirname "$0")/.." || exit 2
@@ -65,7 +75,7 @@ BLACK_MEAN=${BLACK_MEAN:-12}    # LOCKOUT thresholds, see CLASSIFICATION
 BLACK_DARK=${BLACK_DARK:-0.85}
 WIN_TOP=${WIN_TOP:-96}          # px of title bar in a winshot capture (48 pt at 2x on this display)
 NO_RESTART=${NO_RESTART:-0}     # 1 = arm through the door but do not restart the app (owner applies)
-INITIAL=${INITIAL:-0}           # 1 = append :initial to the BOX-LEVER spec (door path never authors it)
+INITIAL=${INITIAL:-0}           # 1 = APP-LESS :initial case: push the box lever with the app down, judge by hand
 KEEP=${KEEP:-0}                 # 1 = leave the last rect armed at the end
 WINSHOT="$REPO/tools/winshot.sh"
 OCBM_HOST="$REPO/target/release/ocbm-host"
@@ -209,22 +219,23 @@ launch_app() {
 
 ensure_app() { [ -n "$(ctl status)" ] || { log "app not listening — launching"; launch_app; }; }
 
-# Fallback lever, app-less: the spec file on the box. `ocbm-host push` claims the same USB device
-# the app holds, so the app MUST be down first — this is the ONLY place the script touches USB.
-# /tmp on the box is tmpfs: the file persists across app restarts until the box reboots, and this
-# script cannot remove it without USB, so a later door-path case runs with the lever still present.
-lever_arm() { # PW PH RECT
+# APP-LESS ONLY (INITIAL=1): the `:initial` spec file on the box. The box honours it only while NO
+# host config is in force, so the app is killed and deliberately NOT relaunched — relaunching it
+# would push a config and make the lever inert. `ocbm-host push` claims the same USB device the app
+# holds, which is the other reason the app must be down; this is the ONLY place the script touches
+# USB. /tmp on the box is tmpfs: the file persists until the box reboots, and later door-path cases
+# that run with it still present are unaffected (the app's config is in force, the lever is ignored).
+# The panel comes from whatever drives the box app-less, not from this Mac's defaults.
+lever_arm_appless() { # RECT
   kill_app
-  defaults write "$BID" vc.mainWidth -int "$1"
-  defaults write "$BID" vc.mainHeight -int "$2"
-  defaults write "$BID" vc.enablesViewAreas -bool true
-  local spec="$3"; [ "$INITIAL" = 1 ] && spec="$spec:initial"
+  local spec="$1:initial"
   printf '%s' "$spec" > "$CASEDIR/va2spec"
   if ! "$OCBM_HOST" push 1314 2d00 "$CASEDIR/va2spec" /tmp/carplay_viewarea2 644 >"$CASEDIR/push.log" 2>&1; then
     log "lever push FAILED (box not on USB?) — see $CASEDIR/push.log"; return 1
   fi
-  log "lever armed: /tmp/carplay_viewarea2 = '$spec'"
-  launch_app
+  log "APP-LESS: lever armed: /tmp/carplay_viewarea2 = '$spec'. The app stays DOWN. Judge by hand:" \
+      "the box log should show '[carplayd] view areas: 2 declared ... initialViewArea=1' on the next" \
+      "connection with no host config in force; remove the file (or reboot the box) when done."
 }
 
 frame_stats() { # png rect src [top] -> "mean dark" (empty on failure)
@@ -250,16 +261,29 @@ run_one() { # PW PH AW AH LABEL
   log "=== $LABEL  panel ${PW}x${PH}  area $RECT"
 
   # a. arm ---------------------------------------------------------------------------------------
+  if [ "$INITIAL" = 1 ]; then
+    # `:initial` has no app equivalent — app-less only, not judged here (see lever_arm_appless).
+    ARM="box-lever"
+    if lever_arm_appless "$RECT"; then VERDICT="APP-LESS"; NOTE="lever armed with :initial, app down — judge by hand"
+    else VERDICT="INCONCLUSIVE"; NOTE="lever push failed"; fi
+    # NO panel was applied: the app is down, so the box runs whatever geometry drives it app-less.
+    # PWxPH only decided the centred origin — print it as that, never as the panel of the result.
+    local line
+    line=$(printf 'panel n/a (app-less, none applied)  area %-20s arm=%-9s => %s%s  [origin centred for a %sx%s panel]' \
+      "$RECT" "$ARM" "$VERDICT" "${NOTE:+  ($NOTE)}" "$PW" "$PH")
+    echo "$LABEL  $line" | tee -a "$RESULTS"
+    return 0
+  fi
   ensure_app
   local r
   r=$(ctlr "set width $PW");  is_err "$r" && log "set width: $r"
   r=$(ctlr "set height $PH"); is_err "$r" && log "set height: $r"
   r=$(ctlr "viewarea arm $RECT")
   if [ -z "$r" ] || printf '%s' "$r" | grep -q "^ERR unknown command"; then
-    # The VERB is missing (older app build) — only then is the box lever the right fallback.
-    ARM="box-lever"
-    log "app door has no 'viewarea arm' ($r) — falling back to the box lever"
-    lever_arm "$PW" "$PH" "$RECT" || { VERDICT="INCONCLUSIVE"; NOTE="lever push failed"; }
+    # The VERB is missing (older app build). There is no fallback any more: the box lever is ignored
+    # while the relaunched app's config is in force, so falling back would measure ONE area.
+    VERDICT="INCONCLUSIVE"; NOTE="app has no 'viewarea arm' door ($r) — rebuild the app; the box lever is no-config-only"
+    log "$NOTE"
   elif is_err "$r"; then
     # Any other ERR is the door rejecting THIS spec (parse/usage) — a local refusal, not a fallback.
     VERDICT="REFUSED-LOCALLY"; NOTE="door: $r"
@@ -280,7 +304,7 @@ run_one() { # PW PH AW AH LABEL
       log "PANEL GUARD: $NOTE"
     fi
   fi
-  if [ -z "$VERDICT" ] && [ "$ARM" != "box-lever" ]; then
+  if [ -z "$VERDICT" ]; then
     # Reply shape (ControlServer.viewarea, 2026-09-07): {"ok":bool,"armed":{"legal":bool,
     # "verdict":string|null,"active":bool,...},"dirty":bool}. `legal:false` carries the same
     # ViewArea2Rule message the Settings form shows — that is the app refusing before the phone.
@@ -368,7 +392,7 @@ run_one() { # PW PH AW AH LABEL
       if live_log | grep -q "full TEARDOWN" || [ "$(jf "$(ctl "get session")" .sessionActive)" != "true" ]; then
         VERDICT="TEARDOWN"; NOTE="after trigger ($TRIGGER)"; break; fi
       # The box refuses an updateViewArea for an index it never declared — the rect did not land in
-      # the declaration (lever/door mismatch), so the phone was never asked.
+      # the declaration (e.g. the app's push did not carry viewAreas[1]), so the phone was never asked.
       if live_log | grep -q "host viewArea index=1 REFUSED"; then
         VERDICT="INCONCLUSIVE"; NOTE="box REFUSED index 1 — area [1] not declared this session"; break; fi
       RECT1=$(observed_rect)
@@ -414,7 +438,19 @@ run_one() { # PW PH AW AH LABEL
 
 # ---- main ---------------------------------------------------------------------------------------
 mkdir -p "$OUT"
-[ -x "$OCBM_HOST" ] || echo "note: $OCBM_HOST missing — the box-lever fallback is unavailable" >&2
+# INITIAL=1 arms ONE app-less case and leaves the app DOWN to be judged by hand. Walking the matrix
+# would overwrite the box lever once per case, judge none of them, and print a column of APP-LESS
+# results that each describe a rect the box no longer holds. So it needs exactly one named case.
+if [ "$INITIAL" = 1 ]; then
+  if [ -z "$ADHOC" ] && { [ -z "$ONLY" ] || printf '%s' "$ONLY" | grep -q ","; }; then
+    echo "INITIAL=1 is ONE app-less, judge-by-hand case: name it with --case PW PH AW AH or a single --only <label>" \
+         "(refusing to walk the matrix — each case would overwrite the box lever and none would be judged)" >&2
+    exit 2
+  fi
+fi
+if [ "$INITIAL" = 1 ] && [ ! -x "$OCBM_HOST" ]; then
+  echo "INITIAL=1 needs $OCBM_HOST (the app-less lever push) — not found" >&2; exit 2
+fi
 { echo "=== va_wired_sweep $(date '+%Y-%m-%d %H:%M:%S')  TAP='${TAP:-unset}'  NO_RESTART=$NO_RESTART"; } | tee -a "$RESULTS"
 if [ -n "$ADHOC" ]; then
   # shellcheck disable=SC2086
@@ -427,7 +463,7 @@ else
     run_one "$@"
   done
 fi
-if [ "$KEEP" != 1 ] && [ -n "$(ctl status)" ]; then
+if [ "$INITIAL" != 1 ] && [ "$KEEP" != 1 ] && [ -n "$(ctl status)" ]; then
   r=$(ctl "viewarea off"); is_err "$r" || { ctl save >/dev/null; echo "disarmed via door (lands at the next SUBSCRIBE)"; }
 fi
 echo "=== DONE — results: $RESULTS ; captures under $OUT/<label>/" | tee -a "$RESULTS"

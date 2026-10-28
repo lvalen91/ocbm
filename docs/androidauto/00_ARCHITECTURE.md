@@ -1,6 +1,6 @@
 # Android Auto — architecture, credential and transport
 
-> **STATUS:** CURRENT · single owner for this topic. Split out of `docs/host/02_ANDROID_AUTO.md` on 2026-08-31 when Android Auto got its own category. Correct this file in place — do not add a sibling.
+> **STATUS:** CURRENT · single owner for this topic. Split out of the retired host/02 Android Auto doc on 2026-08-31 when Android Auto got its own category (provenance map: docs/README.md). Correct this file in place — do not add a sibling.
 
 **Contents:** scope → why AA does not map onto the CarPlay OCBM model → established facts about the
 stock stack → the head-unit credential → the box/host split → video geometry → proposed OCBM
@@ -21,6 +21,10 @@ projection protocol. Android Auto is Google's documented head-unit protocol; the
 implementation used here is the widely-published open-source `aasdk`/`openauto` stack (GPLv3). All
 testing is against first-party developer tooling (Google's in-app head-unit server / Desktop Head Unit)
 and the owner's own devices.
+
+Status (owner, 2026-10-28): Android Auto is a shipped, tested feature — it has run over OCBM to a full A/V
+session, wired and wireless (evidence in `01_SESSION_AND_AV.md` and `03_WIRELESS.md`). Android Auto on the
+Raspberry Pi port is out of scope for now.
 
 The doctrine of `docs/carplay/04_CAPABILITIES_AND_CONFIG.md` applies unchanged: **anything configurable about the projection session is
 host-application-driven; the box presents a transport, not policy.**
@@ -90,7 +94,7 @@ workstream is therefore already answered; see §3.
 
 | Area | Finding |
 |---|---|
-| TLS | cipher `ECDHE-RSA-AES128-GCM-SHA256`; AA protocol version `1.7` |
+| TLS | cipher `ECDHE-RSA-AES128-GCM-SHA256`; AA protocol version `1.7` (stock firmware and the phone's reported ceiling; the macOS host requests `6.1` by default, `AAWire.versionMajor/versionMinor` — selects the 2 s IDR interval and ack-less media, see `01_SESSION_AND_AV.md` §1; the `host/aa-headunit` harness requests 1.7) |
 | Video | H.264; SPS `1920×1088` (macroblock-aligned from 1080); 30 fps; IDR interval ~60 s; keyframe-request throttle 1 s |
 | Audio | MEDIA 48 kHz/16-bit/stereo; SPEECH 16 kHz/16-bit/mono; SYSTEM 16 kHz/16-bit/mono; throughput ~184–192 KB/s on MEDIA |
 | Audio-state bitmask | `BOX_TMP_DATA_AUDIO_TYPE`: `0x0000` silent, `0x0110` media, `0x0114` media+mic, `0x0404` speech/VR |
@@ -115,16 +119,20 @@ Prior working directory (`/Volumes/stuff/misc/research/CPC200-CCPA/`):
 ### 3. Credential handling
 
 Given §2b, the host application uses the same published GAL-issued head-unit certificate and private
-key used by the reference open-source stack (`hu_cert.pem`, `hu_key.pem`; shipped here as the leaf-only
-`host/aa-headunit/certs/headunit.{crt,key,p12}`). No extraction from a specific adapter is required;
-three independent copies already agree byte-for-byte.
+key used by the reference open-source stack (`hu_cert.pem`, `hu_key.pem`). Kept locally as the leaf-only
+`host/aa-headunit/certs/headunit.{crt,key,p12}`; the directory is gitignored and the credential is NOT
+distributed with this repository (`NOTICE.md`; obtain it per `host/aa-headunit/README.md`). No extraction
+from a specific adapter is required; three independent copies already agree byte-for-byte.
 
 **Corrected 2026-09-02:** no `galroot_cert.pem` exists in this repo or on the host, and neither host
 verifies the phone's chain — `host/aa-headunit/src/tls.rs` sets `SSL_VERIFY_NONE` and the macOS app's
 `AATLS` breaks on server auth and continues; the reference `aasdk` stack does the same. Until a GAL
-root is sourced, the only feasible check is log-only (compare the phone's presented issuer against
-`O=Google Automotive Link`), which is required before wireless AA, where a rogue peer would receive
-mic audio.
+root is sourced, the only feasible check is on the phone's presented issuer (against
+`O=Google Automotive Link`). That check is implemented LOG-ONLY in both hosts
+(`tls.rs` `log_peer_certificate_issuer`; `AATLS.logPeerCertificateIssuer`, called from `AASession`; the
+Rust side matches the substring, the Swift side compares against its own certificate's issuer). Wireless
+AA currently runs on the log alone. **Owner decision (2026-10-28): the check will be ENFORCED before
+wireless AA ships (a rogue peer would receive mic audio). Open implementation work, not done.**
 
 Handling rules:
 
@@ -141,7 +149,7 @@ Handling rules:
         │  Android Auto: one TLS 1.2 stream (control/video/audio/input/sensors), protobuf-framed
         │
    ┌────┴─────┐   AOAP (wired) or Wi-Fi+BT (wireless)
-   │   Box    │   role-switch + raw byte pump. No TLS, no protobuf, no certificate on the box.
+   │   Box    │   role-switch + raw byte pump. No TLS, no AA-session protobuf, no certificate on the box.
    │ (CCPA)   │
    └────┬─────┘
         │  OCBM: opaque byte stream on a dedicated channel (prototype on CH_IP; then CH_AA)
@@ -152,11 +160,12 @@ Handling rules:
 ```
 
 **Box responsibilities (transport only):**
-- Wired: perform the AOAP accessory handshake on the idle host-side USB port (`usb1`; controllers
-  `ci_hdrc.0/.1` present). This mirrors the existing CarPlay role-switch (`iap_role_switch`), with AOAP
+- Wired: perform the AOAP accessory handshake on the phone-facing host-side USB port (bus 1,
+  `ci_hdrc.0`; `aa-bridge` header). This mirrors the existing CarPlay role-switch (`iap_role_switch`), with AOAP
   control requests 51/52/53 in place of Apple's `0x51`.
-- Wireless (later): bring up the SoftAP + Bluetooth using the existing `crates/vendor/wireless` seam and
-  the RTL8822CS radio; exchange the `WifiInfo`/`WifiStart` protobufs (already present in `aasdk`) over
+- Wireless (built, device-run — see `03_WIRELESS.md` §1): bring up the SoftAP + Bluetooth using the
+  existing `crates/vendor/wireless` seam and the unit's own radio (never a chipset whitelist; see
+  `docs/wireless/01_BT_AND_RADIO.md`); exchange the `WifiInfo`/`WifiStart` protobufs (already present in `aasdk`) over
   RFCOMM; then carry the phone's TCP session bytes.
 - Either transport: move the resulting byte stream onto OCBM unmodified, exactly as ocbmd already does
   for other seams.

@@ -7,16 +7,22 @@
 //! no config). So the env names below describe the SEED, not the authority (docs/carplay/04_CAPABILITIES_AND_CONFIG.md: the app owns
 //! configurable values).
 //!
-//! Three distinct env-vs-config shapes exist, deliberately — do NOT "unify" them:
-//!  1. **Vestigial** (`CARPLAY_HEVC`): cleared per connection, the YAML is the only live control
-//!     (docs/carplay/04_CAPABILITIES_AND_CONFIG.md).
-//!  2. **Sanctioned force-arm** (`CARPLAY_CORNERMASKS` docs/carplay/06_AV_PIPELINE.md §4, `CARPLAY_LOGTRANSFER` docs/carplay/04_CAPABILITIES_AND_CONFIG.md
-//!     §2): ORed over the pushed value on the config path, so the env DOES override a pushed
-//!     `false`, and honoured on the no-config paths.
-//!  3. **No-config fallback only** (`CARPLAY_MAINBUFFERED`): the config path takes the YAML value
-//!     ALONE, because a stale bench flag overriding a pushed `false` there could silence media
-//!     (docs/carplay/04_CAPABILITIES_AND_CONFIG.md B4). `CARPLAY_APP_SETUP` is the tri-state variant — a value, not a presence, so
-//!     `0` can force OFF.
+//! Two env-vs-config shapes exist (docs/carplay/04_CAPABILITIES_AND_CONFIG.md §2, "on-box levers"):
+//!  1. **Vestigial** (`CARPLAY_HEVC` and every schema-derived lever): cleared per connection, the
+//!     YAML is the only live control.
+//!  2. **Subordinate bench lever** (`CARPLAY_CORNERMASKS`, `CARPLAY_LOGTRANSFER`,
+//!     `CARPLAY_MAINBUFFERED`, `CARPLAY_APP_SETUP=1` — the four in [`SubordinateLevers`]): the
+//!     pushed YAML wins in BOTH directions; the env reaches the wire ONLY on the no-config /
+//!     parse-failure paths (carplayd's `clear_levers`). [`SubordinateLevers::resolve`] is the one
+//!     place that rule lives, and it takes the pushed set WHOLE, so a per-field `config || env`
+//!     cannot be written back in by accident.
+//!
+//! RETIRED 2026-10-19 (owner decision D2): the third shape, the "sanctioned force-arm", which ORed
+//! `CARPLAY_CORNERMASKS`/`CARPLAY_LOGTRANSFER` over a pushed `false`, and the `CARPLAY_APP_SETUP`
+//! override that beat the YAML in both directions. A stale `/tmp/cornermask_test` used to strip the
+//! app's pushed main-view `safeArea` (cornerMasks and safeArea are mutually exclusive in
+//! `info::view_areas`), and a stale `/tmp/logtransfer_test` produced the one-sided
+//! `logTransferInfo`-without-echo shape iOS-27 aborts on. Both now need the app to say so.
 //!
 //! carplayd's `load_device_config` used to publish these via `std::env::set_var`/`remove_var` on the
 //! serve thread on EVERY control connection, while other live threads concurrently `getenv` the same
@@ -53,6 +59,104 @@ pub fn fwd_enc() -> bool {
                 || v.eq_ignore_ascii_case("off"))
         }
         Err(_) => true, // absent → safe default: forward-encrypted
+    }
+}
+
+/// The four per-connection levers that have an app-less bench form, as one value.
+///
+/// Used twice per control connection by carplayd's `load_device_config`: once built from the pushed
+/// YAML (the success path), once from the env (`from_env`, the bench form). [`Self::resolve`] picks
+/// between them and [`Self::arm`] stores the result — so the precedence rule is a pure function that
+/// can be tested without touching the process environment or `/tmp`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SubordinateLevers {
+    /// `accessoryConfig.enablesCornerMasks` / bench `CARPLAY_CORNERMASKS` (presence;
+    /// `/tmp/cornermask_test` at both spawn sites).
+    pub cornermasks: bool,
+    /// `accessoryConfig.enablesLogTransfer` / bench `CARPLAY_LOGTRANSFER` (presence;
+    /// `/tmp/logtransfer_test`, wired spawn only).
+    pub logtransfer: bool,
+    /// `accessoryConfig.enablesMainBufferedAudio` / bench `CARPLAY_MAINBUFFERED` (presence;
+    /// `/tmp/mainbuffered_test`).
+    pub mainbuffered: bool,
+    /// `accessoryConfig.appDrivenSetup` / bench `CARPLAY_APP_SETUP` == `"1"`. Any other value is
+    /// off: the old `"0"` force-OFF only meant something while the env could beat a pushed `true`,
+    /// and on the no-config path it is indistinguishable from unset.
+    pub appsetup: bool,
+}
+
+impl SubordinateLevers {
+    /// The bench form, from this process's environment.
+    pub fn from_env() -> Self {
+        Self::from_lookup(|k| std::env::var(k).ok())
+    }
+
+    /// The bench form from an arbitrary lookup — the testable core of [`Self::from_env`]. Presence
+    /// means ON for the first three (matching the `[ -f flag ] && VAR=1` injection at the spawn
+    /// sites); `CARPLAY_APP_SETUP` is a value and only `"1"` arms it.
+    pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Self {
+        Self {
+            cornermasks: get("CARPLAY_CORNERMASKS").is_some(),
+            logtransfer: get("CARPLAY_LOGTRANSFER").is_some(),
+            mainbuffered: get("CARPLAY_MAINBUFFERED").is_some(),
+            appsetup: get("CARPLAY_APP_SETUP").as_deref() == Some("1"),
+        }
+    }
+
+    /// THE precedence rule. `pushed` = the levers the host's parsed config asked for (`None` = no
+    /// host config is in force: absent, empty, oversized, unreadable or rejected). The pushed set
+    /// wins WHOLE, in both directions; the bench set applies only when there is nothing pushed.
+    pub fn resolve(pushed: Option<Self>, bench: Self) -> Self {
+        pushed.unwrap_or(bench)
+    }
+
+    /// The pushed form: what a parsed host config asks for, field by field.
+    pub fn from_config(vc: &crate::vehicle_config::VehicleConfig) -> Self {
+        Self {
+            cornermasks: vc.corner_masks_enabled(),
+            logtransfer: vc.log_transfer_enabled(),
+            mainbuffered: vc.accessory_config.enables_main_buffered_audio,
+            appsetup: vc.app_driven_setup(),
+        }
+    }
+
+    /// THE decision carplayd's `load_device_config` arms, once per control connection, for every
+    /// branch of its config read: a [`PushedCfgRead::Parsed`] config arms the PUSHED set alone; each
+    /// fallback (rejected / empty / oversized / unreadable / absent) arms the bench set. It is the
+    /// only call site, so the tests below on this function are the guard against a `config || env`
+    /// revert.
+    ///
+    /// [`PushedCfgRead::Parsed`]: crate::vehicle_config::PushedCfgRead::Parsed
+    pub fn to_arm(read: &crate::vehicle_config::PushedCfgRead, bench: Self) -> Self {
+        Self::resolve(read.config().map(Self::from_config), bench)
+    }
+
+    /// Names of bench levers that are ARMED but lost to a pushed config that said otherwise — for
+    /// the one log line that tells an operator their `/tmp/*_test` flag did nothing. A bench lever
+    /// that agrees with the pushed value is not reported (it changed nothing either way).
+    pub fn ignored_bench(pushed: &Self, bench: &Self) -> Vec<&'static str> {
+        let mut v = Vec::new();
+        if bench.cornermasks && !pushed.cornermasks {
+            v.push("CARPLAY_CORNERMASKS");
+        }
+        if bench.logtransfer && !pushed.logtransfer {
+            v.push("CARPLAY_LOGTRANSFER");
+        }
+        if bench.mainbuffered && !pushed.mainbuffered {
+            v.push("CARPLAY_MAINBUFFERED");
+        }
+        if bench.appsetup && !pushed.appsetup {
+            v.push("CARPLAY_APP_SETUP");
+        }
+        v
+    }
+
+    /// Store into the lever cells.
+    pub fn arm(self) {
+        set_cornermasks(self.cornermasks);
+        set_logtransfer(self.logtransfer);
+        set_mainbuffered(self.mainbuffered);
+        set_appsetup(self.appsetup);
     }
 }
 
@@ -98,8 +202,8 @@ fn seed() {
         };
         ALT_W.store(dim("CARPLAY_ALT_W"), Ordering::Relaxed);
         ALT_H.store(dim("CARPLAY_ALT_H"), Ordering::Relaxed);
-        // appsetup seeds from the VALUE (=="1"), not presence: CARPLAY_APP_SETUP is a 1/0 override
-        // (harness use — "0" must force OFF over a YAML "true", so its presence alone can't mean on).
+        // appsetup seeds from the VALUE (=="1"), not presence — same reading as
+        // `SubordinateLevers::from_lookup`, so a stray CARPLAY_APP_SETUP=0 can never mean on.
         APPSETUP.store(
             std::env::var("CARPLAY_APP_SETUP").is_ok_and(|v| v == "1"),
             Ordering::Relaxed,
@@ -228,9 +332,10 @@ pub fn set_viewareas(on: bool) {
 /// experiment: advertise the feature so the phone starts streaming its `topLeftCornerMask` buffer, which
 /// `CARPLAY_CORNERMASK_CAPTURE` (server.rs) dumps so we can learn the (undocumented) wire format.
 ///
-/// Unlike [`logtransfer`], this lever has no one-sided-emission hazard under the app-driven SETUP
-/// relay: the `viewAreas` structure it rides on is emitted unconditionally, so an env force-arm the
-/// host's echo cannot see produces structure-without-echo, which iOS ignores.
+/// Pushed `accessoryConfig.enablesCornerMasks` wins; the bench env only applies with no host config
+/// in force ([`SubordinateLevers`]). That matters beyond the echo: arming this lever DROPS the main
+/// view's `safeArea`, so the retired force-arm let a stale `/tmp/cornermask_test` silently strip an
+/// app-pushed curved-panel inset.
 pub fn cornermasks() -> bool {
     seed();
     CORNERMASKS.load(Ordering::Relaxed)
@@ -289,15 +394,13 @@ pub fn set_focus_transfer(on: bool) {
 /// is NOT implemented; an inbound LogTransfer RCS SETUP is accepted as a stream and its frames are
 /// logged-and-dropped, which is the correct passive-responder posture until the wire shapes are known.
 ///
-/// APP-LESS BENCH CORNER, wider here than for cornerMasks — arm the YAML, not the env, whenever the
-/// app-driven SETUP relay is up. The host authors the `enabledFeatures` echo from the pushed YAML and
-/// cannot see this lever's env force-arm, so an env-armed `logTransferInfo` in `/info` can pair with
-/// an echo that omits the token — the iOS-27 `carEndpoint_validateInfoResponseKeyPresentForFeature`
-/// "found but not negotiated" abort. Reachable both on the config path (`/tmp/logtransfer_test`
-/// armed while the app pushes `enablesLogTransfer: false`) and, since the app-less paths stopped
-/// wiping the seed, with `CARPLAY_APP_SETUP=1` and no/unparseable config. `cornerMasks` is exempt:
-/// its backing `viewAreas` structure is emitted unconditionally, so only the harmless direction
-/// (structure without echo) can occur there.
+/// Pushed `accessoryConfig.enablesLogTransfer` wins; the bench env only applies with no host config
+/// in force ([`SubordinateLevers`]). The config-path hazard (`/tmp/logtransfer_test` armed while
+/// the app pushes `false` → `logTransferInfo` in `/info` paired with a host-authored echo that omits
+/// the token → the iOS-27 `carEndpoint_validateInfoResponseKeyPresentForFeature` "found but not
+/// negotiated" abort) is therefore closed since 2026-10-19. One app-less corner remains: no/
+/// unparseable config AND `CARPLAY_APP_SETUP=1` — arm the YAML, not the env, when running the
+/// relay harness.
 pub fn logtransfer() -> bool {
     seed();
     LOGTRANSFER.load(Ordering::Relaxed)
@@ -311,8 +414,9 @@ pub fn set_logtransfer(on: bool) {
 /// mainBufferedAudio arm (docs/carplay/04_CAPABILITIES_AND_CONFIG.md B4): config-primary — armed per connection from the pushed
 /// `accessoryConfig.enablesMainBufferedAudio` (app default OFF); on the no-config/parse-failure
 /// paths it falls back to `CARPLAY_MAINBUFFERED` presence (app-less bench, subordinate to pushed
-/// config). Deliberately NOT the cornerMasks OR-force-arm shape: OR-ing a stale bench flag over an
-/// app that said `false` could silence media if iOS moves to a buffered stream we don't serve.
+/// config — [`SubordinateLevers`], the shape all four bench levers now share). OR-ing a stale bench
+/// flag over an app that said `false` could silence media if iOS moves to a buffered stream we
+/// don't serve.
 /// Both the `/info` `mainBufferedInfo` emission and the SETUP `"mainBuffered"` echo read THIS
 /// lever, preserving the both-sides-or-neither coupling iOS validates.
 ///
@@ -329,7 +433,8 @@ pub fn set_mainbuffered(on: bool) {
     MAINBUFFERED.store(on, Ordering::Relaxed);
 }
 
-/// App-driven-SETUP lever (`accessoryConfig.appDrivenSetup`, env override `CARPLAY_APP_SETUP=1/0`):
+/// App-driven-SETUP lever (`accessoryConfig.appDrivenSetup`; bench `CARPLAY_APP_SETUP=1`, no-config
+/// paths only — [`SubordinateLevers`]; it no longer beats the YAML in either direction):
 /// selects `relay::RemoteSession` over the plain `AvSession` on BOTH transports when the host relay
 /// seam is up (carplayd's per-connection delegate selection — plan P1; wireless joined at the
 /// 2026-08-10 flip). The YAML arrives from the host at SUBSCRIBE, so this lever doubles as the
@@ -392,6 +497,154 @@ pub fn set_view_area_anim_ms(ms: i64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const ALL_ON: SubordinateLevers =
+        SubordinateLevers { cornermasks: true, logtransfer: true, mainbuffered: true, appsetup: true };
+    const ALL_OFF: SubordinateLevers =
+        SubordinateLevers { cornermasks: false, logtransfer: false, mainbuffered: false, appsetup: false };
+
+    fn lookup(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+        move |k| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string())
+    }
+
+    /// The F5 regression: a stale bench flag (`/tmp/cornermask_test`, `/tmp/logtransfer_test`) used
+    /// to be ORed over an app that pushed `false`. A pushed config now wins in the OFF direction…
+    #[test]
+    fn pushed_false_beats_every_armed_bench_lever() {
+        assert_eq!(SubordinateLevers::resolve(Some(ALL_OFF), ALL_ON), ALL_OFF);
+    }
+
+    /// …and in the ON direction (the old `CARPLAY_APP_SETUP=0` force-revert is gone too).
+    #[test]
+    fn pushed_true_beats_a_bench_off_including_app_setup_zero() {
+        let bench = SubordinateLevers::from_lookup(lookup(&[("CARPLAY_APP_SETUP", "0")]));
+        assert_eq!(bench, ALL_OFF, "CARPLAY_APP_SETUP=0 is just 'off' now");
+        assert_eq!(SubordinateLevers::resolve(Some(ALL_ON), bench), ALL_ON);
+    }
+
+    /// The pushed set is taken WHOLE — no field leaks through from the bench set.
+    #[test]
+    fn mixed_pushed_set_is_taken_whole() {
+        let pushed = SubordinateLevers { cornermasks: false, logtransfer: true, mainbuffered: false, appsetup: true };
+        let bench = SubordinateLevers { cornermasks: true, logtransfer: false, mainbuffered: true, appsetup: false };
+        assert_eq!(SubordinateLevers::resolve(Some(pushed), bench), pushed);
+    }
+
+    /// No host config in force (absent / empty / oversized / unreadable / rejected): bench applies.
+    #[test]
+    fn no_config_falls_back_to_the_bench_form() {
+        assert_eq!(SubordinateLevers::resolve(None, ALL_ON), ALL_ON);
+        assert_eq!(SubordinateLevers::resolve(None, ALL_OFF), ALL_OFF);
+    }
+
+    #[test]
+    fn bench_form_parses_presence_and_the_app_setup_value() {
+        let env = lookup(&[
+            ("CARPLAY_CORNERMASKS", "1"),
+            ("CARPLAY_LOGTRANSFER", ""), // presence, any value — the spawn sites inject `=1`
+            ("CARPLAY_APP_SETUP", "1"),
+        ]);
+        assert_eq!(
+            SubordinateLevers::from_lookup(env),
+            SubordinateLevers { cornermasks: true, logtransfer: true, mainbuffered: false, appsetup: true }
+        );
+        for v in ["0", "", "true", "yes", " 1"] {
+            let s = SubordinateLevers::from_lookup(move |k| (k == "CARPLAY_APP_SETUP").then(|| v.to_string()));
+            assert!(!s.appsetup, "CARPLAY_APP_SETUP={v:?} must not arm the relay");
+        }
+        assert_eq!(SubordinateLevers::from_lookup(|_| None), ALL_OFF);
+    }
+
+    // ---- carplayd's arming decision, per branch of its config read (`SubordinateLevers::to_arm`
+    // over `PushedCfgRead::classify`). These are the guard against a `config || env` revert: each
+    // asserts the exact set armed, not just one field.
+    use crate::vehicle_config::PushedCfgRead;
+
+    const PUSH_ALL_FALSE: &[u8] = b"accessoryConfig:\n  enablesCornerMasks: false\n  enablesLogTransfer: false\n  enablesMainBufferedAudio: false\n  appDrivenSetup: false\n";
+    const PUSH_ALL_TRUE: &[u8] = b"accessoryConfig:\n  enablesCornerMasks: true\n  enablesLogTransfer: true\n  enablesMainBufferedAudio: true\n  appDrivenSetup: true\n";
+
+    fn arm_for(read: std::io::Result<Vec<u8>>, bench: SubordinateLevers) -> SubordinateLevers {
+        SubordinateLevers::to_arm(&PushedCfgRead::classify(read), bench)
+    }
+
+    #[test]
+    fn parsed_config_false_beats_every_bench_flag() {
+        // All four bench forms set (the /tmp/*_test flags + CARPLAY_APP_SETUP=1) …
+        let bench = SubordinateLevers::from_lookup(lookup(&[
+            ("CARPLAY_CORNERMASKS", "1"),
+            ("CARPLAY_LOGTRANSFER", "1"),
+            ("CARPLAY_MAINBUFFERED", "1"),
+            ("CARPLAY_APP_SETUP", "1"),
+        ]));
+        assert_eq!(bench, ALL_ON);
+        // … lose to a pushed `false`. `config || env` would arm ALL_ON here.
+        assert_eq!(arm_for(Ok(PUSH_ALL_FALSE.to_vec()), bench), ALL_OFF);
+        // Absent keys are a pushed `false` too (serde default), not "no opinion".
+        assert_eq!(arm_for(Ok(b"name: Minimum\n".to_vec()), ALL_ON), ALL_OFF);
+    }
+
+    #[test]
+    fn parsed_config_true_arms_without_any_bench_flag() {
+        assert_eq!(arm_for(Ok(PUSH_ALL_TRUE.to_vec()), ALL_OFF), ALL_ON);
+        // Per-field mapping: each YAML key drives its own lever, no cross-wiring.
+        let one = |k: &str| format!("accessoryConfig:\n  {k}: true\n").into_bytes();
+        let f = SubordinateLevers { cornermasks: false, logtransfer: false, mainbuffered: false, appsetup: false };
+        assert_eq!(arm_for(Ok(one("enablesCornerMasks")), ALL_OFF), SubordinateLevers { cornermasks: true, ..f });
+        assert_eq!(arm_for(Ok(one("enablesLogTransfer")), ALL_OFF), SubordinateLevers { logtransfer: true, ..f });
+        assert_eq!(arm_for(Ok(one("enablesMainBufferedAudio")), ALL_OFF), SubordinateLevers { mainbuffered: true, ..f });
+        assert_eq!(arm_for(Ok(one("appDrivenSetup")), ALL_OFF), SubordinateLevers { appsetup: true, ..f });
+    }
+
+    #[test]
+    fn every_fallback_branch_arms_the_bench_set() {
+        use std::io::{Error, ErrorKind};
+        let mixed = SubordinateLevers { cornermasks: true, logtransfer: false, mainbuffered: true, appsetup: false };
+        let cases: Vec<(&str, std::io::Result<Vec<u8>>)> = vec![
+            ("rejected", Ok(b"accessoryConfig: [unclosed\n".to_vec())),
+            ("empty", Ok(Vec::new())),
+            ("oversized", Ok(vec![b'#'; PushedCfgRead::MAX_BYTES + 1])),
+            ("read-error", Err(Error::new(ErrorKind::PermissionDenied, "x"))),
+            ("absent", Err(Error::new(ErrorKind::NotFound, "x"))),
+        ];
+        for (name, read) in cases {
+            let r = PushedCfgRead::classify(read);
+            assert!(r.config().is_none(), "{name}: must not read as a config in force");
+            for bench in [ALL_ON, ALL_OFF, mixed] {
+                assert_eq!(SubordinateLevers::to_arm(&r, bench), bench, "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn classify_names_each_branch() {
+        use std::io::{Error, ErrorKind};
+        assert!(matches!(PushedCfgRead::classify(Ok(PUSH_ALL_TRUE.to_vec())), PushedCfgRead::Parsed { .. }));
+        assert!(matches!(PushedCfgRead::classify(Ok(b"accessoryConfig: [x\n".to_vec())), PushedCfgRead::Rejected(_)));
+        assert!(matches!(PushedCfgRead::classify(Ok(Vec::new())), PushedCfgRead::Empty));
+        // The cap is inclusive: MAX_BYTES itself is parsed, one more is refused.
+        let at_cap = vec![b'#'; PushedCfgRead::MAX_BYTES];
+        assert!(!matches!(PushedCfgRead::classify(Ok(at_cap)), PushedCfgRead::Oversized(_)));
+        assert!(matches!(
+            PushedCfgRead::classify(Ok(vec![b'#'; PushedCfgRead::MAX_BYTES + 1])),
+            PushedCfgRead::Oversized(n) if n == PushedCfgRead::MAX_BYTES + 1
+        ));
+        assert!(matches!(PushedCfgRead::classify(Err(Error::new(ErrorKind::NotFound, "x"))), PushedCfgRead::Absent));
+        assert!(matches!(
+            PushedCfgRead::classify(Err(Error::new(ErrorKind::PermissionDenied, "x"))),
+            PushedCfgRead::Unreadable(_)
+        ));
+    }
+
+    #[test]
+    fn ignored_bench_names_only_the_levers_the_push_overruled() {
+        let pushed = SubordinateLevers { cornermasks: false, logtransfer: false, mainbuffered: true, appsetup: true };
+        assert_eq!(
+            SubordinateLevers::ignored_bench(&pushed, &ALL_ON),
+            vec!["CARPLAY_CORNERMASKS", "CARPLAY_LOGTRANSFER"]
+        );
+        assert!(SubordinateLevers::ignored_bench(&ALL_OFF, &ALL_OFF).is_empty());
+        assert!(SubordinateLevers::ignored_bench(&ALL_ON, &ALL_ON).is_empty(), "agreement is not an override");
+    }
 
     #[test]
     fn view_area_anim_ms_clamps_to_nearest_bound_and_passes_in_range() {

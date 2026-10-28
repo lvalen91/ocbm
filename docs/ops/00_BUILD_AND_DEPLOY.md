@@ -2,7 +2,14 @@
 
 > **STATUS:** CURRENT · single owner for this topic. Consolidated 2026-08-31 from pre-consolidation docs 05; the originals are in git history and in the 2026-08-31 backup. Correct this file in place — do not add a sibling.
 
-How the box binaries are built, what they cost in flash/RAM, and how they are pushed.
+How the box binaries are built, what they cost in flash/RAM, and how they are pushed. Scope: the CCPA
+(armv7, stock firmware plus the OCBM userspace). Other build trees live elsewhere:
+- `baseline/README.md` (build order section 4, install flow section 5): the mainline-kernel recovery + busybox
+  rootfs image for the CCPA, built with `baseline/build.sh`. It carries no OCBM yet.
+- `c2air/README.md`: the C2Air (Allwinner V821, riscv32), a different box; shared Rust sources, own toolchain.
+- `pi/docs/00_PI_AAOS_PORT.md`: the Raspberry Pi / AAOS arm64 port of the box daemons.
+- Research repo `CPC200-CCPA_resources` (`~/Downloads/github/CPC200-CCPA_resources`, `custom/kernel_rootfs/`):
+  baseline hardware test records, backups, handoff.
 
 ## Build footprint
 
@@ -60,10 +67,11 @@ opt-level = 2
 The size cost of those five lands almost entirely in `carplayd` — the only binary carrying crypto
 **and** full A/V forwarding. `Cargo.toml` is the authority; this is a quote of it.
 
-### Storage budget (the box has very little)
+### Storage budget (the CCPA has very little)
 
-- Flash: **16 MB** SPI NOR — `mtd0` uboot 256 K / `mtd1` kernel 3328 K / `mtd2` **rootfs 12800 K
-  (jffs2)**. Partition sizes are fixed by the vendor kernel/U-Boot.
+- Flash: **16 MB** SPI NOR — on the stock 3.14.52 kernel `mtd0` uboot 256 K / `mtd1` kernel 3328 K / `mtd2`
+  **rootfs 12800 K (jffs2)**, fixed by the vendor kernel/U-Boot. The baseline's DTS defines its own map
+  (`baseline/README.md`), and its rootfs is squashfs.
 - Live free after stripping riddleBox: **~6 MB** on the jffs2 rootfs. jffs2 **compresses on write**,
   so compressible binaries consume less on-media than their raw size.
 - RAM: **128 MB**, ~107 MB free (tmpfs) — a real staging option.
@@ -71,7 +79,8 @@ The size cost of those five lands almost entirely in `carplayd` — the only bin
 ### Component footprint
 
 *(The pre-build estimate table that stood here is dropped: its three C rows described helpers that
-were never written — every box daemon is Rust — and MEASURED figures follow below.)*
+were never written — every box daemon is Rust. The only measured sizes kept in this file are the UPX
+figures in the next section; no other per-binary footprint is recorded here.)*
 
 ### Fitting the heavy case (stackable)
 
@@ -90,6 +99,6 @@ were never written — every box daemon is Rust — and MEASURED figures follow 
 ### What the size plan got right, and what it did not
 
 The original recommendation was "keep the low-level glue in C, write OCBM in Rust". **The C half was
-not taken** — every box daemon is Rust — and the "hard measured number" it deferred was produced (see
-the measured blocks above). What held: the Rust size profile, UPX packing, and the box's scope —
+not taken** — every box daemon is Rust — and the "hard measured number" it deferred was produced for
+ocbmd and aa-bridge (UPX figures above). What held: the Rust size profile, UPX packing, and the box's scope —
 pairing + key-derivation + the RTSP relay, with no decode on the box.

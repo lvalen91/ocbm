@@ -7,7 +7,7 @@ checklist for the head-unit app.
 
 **Source:** traced across `~/Documents/carlink/ccpa_custom` — the `wireless`, `receiver`,
 `pairing`, `mfi`, `rtsp` and `metadata` crates, plus that project's on-hardware captures
-(`docs/captures/`) and unredacted iPhone-side logs (`scratchpad/syslog_profile.log`, 2026-08-02, iOS 27).
+(`docs/ops/captures/`) and unredacted iPhone-side logs (`scratchpad/syslog_profile.log`, 2026-08-02, iOS 27).
 Timings and failure modes below are measured, not inferred, unless marked otherwise. iPhone-side log
 lines cannot be re-verified from this repo; they are kept as reported, not re-checked here.
 

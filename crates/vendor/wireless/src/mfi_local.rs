@@ -2,8 +2,10 @@
 //!
 //! The ported `bt_driver` originally called `carplay_iap2_core::mfi`, which is an auth-service TCP client
 //! (`192.168.50.2:5290`) — the PoC's way of borrowing a *remote* CCPA's MFi chip because the Pi had
-//! none. THIS box IS the CCPA: the genuine MFi 2.0C coprocessor sits on `/dev/i2c-1 @0x11` and is
-//! driven directly, exactly as the wired `iap2d` daemon does (`ccpa/iap2d/src/main.rs`). This module
+//! none. On a CCPA the genuine MFi 2.0C coprocessor sits on `/dev/i2c-1 @0x11` and is
+//! driven directly, exactly as the wired `iap2d` daemon does (`ccpa/iap2d/src/main.rs`). (A host without
+//! a chip of its own, such as the Pi 4 / AAOS port, sets `CARPLAY_MFI_ADDR` and reaches a CCPA's chip
+//! through `ccpa/mfid` instead; see `REMOTE_ADDR_ENV` below and `crates/mfi-wire`.) This module
 //! is that same proven direct-I2C cert-copy + challenge-sign, exposing `cert()`/`sign()` with the
 //! same signatures the auth-service module had, so `bt_driver` swaps backends with a two-line change.
 //!

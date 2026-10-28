@@ -359,6 +359,10 @@ arm_aa() {
 #
 # Gated on wifi_ap_enabled because in the `wifi_ap: false` bridge role the box raises no SoftAP at
 # all, so that address never exists and the pump could only spin on a bind that cannot succeed.
+# And on aa_enabled (explicit `android_auto: true`, D1 2026-10-19): with Android Auto not requested
+# there is nothing for the pump to serve, and btd omits the AA SDP record and drops channel-4 dials
+# on the same lever. A pump ALREADY resident when the toggle goes off is not killed here: it refuses
+# every phone itself (aa-bridge wireless.rs, `aa_requested`), and wireless_down reaps it.
 # $1 non-empty => this is a bring-up, so SAY why we are skipping. Empty (the per-tick self-heal
 # call) => stay silent about the standing conditions; one line per second is not a diagnostic.
 # `_`-prefixed local, per this script's convention: bare names clobber the main loop's variables.
@@ -366,6 +370,10 @@ arm_aa_wireless() {
   _aaw_v="${1:-}"
   if ! wifi_ap_enabled; then
     [ -n "$_aaw_v" ] && echo "[sup] wifi_ap:false -> wireless Android Auto pump NOT started (the box has no SoftAP to listen on)"
+    return 0
+  fi
+  if ! aa_enabled; then
+    [ -n "$_aaw_v" ] && echo "[sup] android_auto not requested by the pushed config -> wireless Android Auto pump NOT started"
     return 0
   fi
   if [ ! -x "$AA_BRIDGE" ]; then
@@ -379,7 +387,7 @@ arm_aa_wireless() {
   if pgrep aa-bridge >/dev/null 2>&1; then
     return 0
   fi
-  echo "[sup] wireless stack up + AP enabled -> launching aa-bridge --wireless (wireless Android Auto pump)"
+  echo "[sup] wireless stack up + AP enabled + android_auto requested -> launching aa-bridge --wireless (wireless Android Auto pump)"
   setsid "$AA_BRIDGE" --wireless >> /tmp/aa-bridge.log 2>&1 &
 }
 
@@ -436,16 +444,19 @@ arm() {
   # deliberately does NOT set that var: info.rs/session.rs's iAPChannelInfo/enabledFeatures echoes it
   # gates are NOT wireless-scoped (only events.rs's actual tunnel send is), so setting it here would
   # silently change the proven wired session's /info + SETUP-response bytes with zero live wired testing.
-  # cornerMask experiment (Phase 1): OPT-IN via the on-box flag file /tmp/cornermask_test (tmpfs, so a
-  # reboot disarms it — mirrors the /tmp/carplay_metadata lever philosophy). When present, arm the
-  # SETUP `enabledFeatures`/viewAreas `cornerMasks` advertisement (CARPLAY_CORNERMASKS) and dump any
-  # `topLeftCornerMask` the phone streams (CARPLAY_CORNERMASK_CAPTURE=/tmp). Absent = byte-identical to
-  # the proven wired spawn. Re-arm after a reboot with: echo 1 > /tmp/cornermask_test
+  # cornerMask experiment (Phase 1): APP-LESS bench flag /tmp/cornermask_test (tmpfs, so a reboot
+  # disarms it). It seeds CARPLAY_CORNERMASKS, which since 2026-10-19 (D2) is NO-CONFIG-ONLY: any
+  # parsed pushed config takes enablesCornerMasks from the YAML alone, in both directions, and
+  # carplayd logs "bench lever(s) CARPLAY_CORNERMASKS IGNORED" when the flag loses. (It used to be
+  # ORed over a pushed false, which stripped the app's main-view safeArea.) With the app connected,
+  # use Settings ▸ cornerMasks instead. CARPLAY_CORNERMASK_CAPTURE=/tmp rides the flag and dumps any
+  # `topLeftCornerMask` the phone streams. Absent = byte-identical to the proven wired spawn.
   CM=
   [ -f /tmp/cornermask_test ] && CM="CARPLAY_CORNERMASKS=1 CARPLAY_CORNERMASK_CAPTURE=/tmp"
-  # logTransfer Tier-1 experiment (docs/carplay/04_CAPABILITIES_AND_CONFIG.md Half A): OPT-IN via /tmp/logtransfer_test, same tmpfs
-  # philosophy as the cornermask flag above. Arms `logTransferInfo` in /info + the `logTransfer`
-  # enabledFeatures echo. Absent = byte-identical to the proven wired spawn.
+  # logTransfer Tier-1 experiment (docs/carplay/04_CAPABILITIES_AND_CONFIG.md Half A): APP-LESS bench flag
+  # /tmp/logtransfer_test, same tmpfs philosophy and the same NO-CONFIG-ONLY precedence (D2,
+  # 2026-10-19) as the cornermask flag above. Arms `logTransferInfo` in /info + the `logTransfer`
+  # enabledFeatures echo only when no pushed config is in force. Absent = byte-identical.
   LT=
   # SETUP_DUMP rides the same flag: each raw SETUP request plist lands at /tmp/setup_req.N, pinning
   # the feature-token array the iPhone actually proposes (the enabledFeatures intersection input —
@@ -715,13 +726,18 @@ WIRELESS_CFG=${CARPLAY_CFG_FILE:-/tmp/carplay_cfg.yaml}
 # file / missing key / `wireless: true` all mean enabled. Kept a raw grep so ocbmd + this shell need no
 # YAML parser (carplayd's receiver ignores the key; the supervisor is its sole consumer).
 wireless_enabled() { ! grep -qiE '^[[:space:]]*wireless:[[:space:]]*false' "$WIRELESS_CFG" 2>/dev/null; }
-# Android Auto enable lever (app-driven, docs/carplay/04_CAPABILITIES_AND_CONFIG.md). Default ON so a plugged Android phone projects out
-# of the box; the app opts out with `android_auto: false` in the pushed carplay_cfg.yaml (docs/androidauto/02_ARBITRATION.md).
-# This grep gates the LAUNCH only. An already-running aa-bridge reads the same key itself
-# (box_common::cfg::aa_enabled — the Rust-side definition this must stay in step with) and stands
-# down on it at every claim point AND mid-session, so turning the toggle off ends a live AA session
-# rather than waiting for the phone to be unplugged (docs/androidauto/02_ARBITRATION.md F3).
-aa_enabled() { ! grep -qiE '^[[:space:]]*android_auto:[[:space:]]*false' "$WIRELESS_CFG" 2>/dev/null; }
+# Android Auto enable lever (app-driven, docs/carplay/04_CAPABILITIES_AND_CONFIG.md). EXPLICIT OPT-IN since 2026-10-19
+# (owner decision D1, docs/androidauto/02_ARBITRATION.md): only a pushed `android_auto: true` (and no
+# `android_auto: false` line) enables it. A missing file or a missing key is OFF — until then they
+# meant ON, the box deciding a configurable value the app owns.
+# This grep gates the LAUNCHES (arm_aa, arm_aa_wireless). It is the shell twin of
+# box_common::cfg::aa_requested; tools/run_tests.sh extracts THIS line and runs it against
+# crates/box-common/tests/fixtures/aa_lever_cases.txt, which the Rust test reads too — keep the two in step.
+# An already-running aa-bridge stands down on its own via box_common::cfg::aa_withdrawn (an EXISTING
+# document that stops requesting AA), at every claim point AND mid-session, so turning the toggle off
+# ends a live AA session rather than waiting for the phone to be unplugged (02_ARBITRATION.md F3) —
+# while a config file DELETED mid-drive (ocbmd restart, go_idle) is left to the host-gone logic.
+aa_enabled() { grep -qiE '^[[:space:]]*android_auto:[[:space:]]*true' "$WIRELESS_CFG" 2>/dev/null && ! grep -qiE '^[[:space:]]*android_auto:[[:space:]]*false' "$WIRELESS_CFG" 2>/dev/null; }
 
 # Is a wired CarPlay session LIVE right now? Blocks arm_aa, because Android Auto must never be armed
 # on top of a running CarPlay session — aa-bridge would claim /tmp/projection_owner out from under it,
@@ -892,8 +908,14 @@ wireless_up() {
   # the wired AA path, exactly as a wired iPhone (phone_on_bus above) suppresses wireless. (docs/androidauto/02_ARBITRATION.md.)
   if aa_owns_session || { android_phone_on_bus && aa_enabled; }; then
     echo "[sup] wireless_up SUPPRESSED — a wired Android Auto phone owns/claims the box"
+    # EXTRA (2026-10-19): RECORD the hold. Every caller of this function is an edge, so returning
+    # here without a note meant that unplugging the Android phone left wireless CarPlay down until
+    # the app reconnected. The main loop retries once the hold has been clear for
+    # WL_AA_RETRY_TICKS consecutive ticks (see "_wl_held_for_aa" there).
+    _wl_held_for_aa=1; _wl_aa_clear_ticks=0   # every (re)hold starts a fresh clear-streak
     return
   fi
+  _wl_held_for_aa=0
   wireless_running && return   # idempotent guard (checked HERE, before the wrapper exists)
   # Clean slate before a fresh bring-up: reap any orphaned A/V children left by a prior session so the
   # new stack can NEVER latch onto / collide with a stale carplayd (the observed
@@ -1102,6 +1124,25 @@ wireless_down() {
 write_healthy 0
 echo "[sup] up; IDLE — gating the CarPlay session on $FLAG (waiting for a host app)"
 WIRELESS_RESTART_FLAG=/tmp/wireless_restart   # ocbmd touches this on the CCPA tab's Restart-wireless / Forget
+# Retry window for a wireless_up held for wired Android Auto (see the retry block in the main loop).
+# The hold reads CLEAR exactly when no AA owner flag is set AND no AA-enabled Android phone is on the
+# bus. During aa-bridge's AOAP switch both are false at once: the owner flag is claimed only AFTER
+# prepare_accessory() returns (ccpa/aa-bridge/src/main.rs, the set_owner(WiredAa) after the
+# "armed while we prepared" re-checks), and after AOAP_START the phone is OFF the bus until it
+# re-enumerates as 18d1:2d0x. aa-bridge tolerates that absence for wait_for_accessory(12 s), polled
+# every 300 ms (main.rs `wait_for_accessory(Duration::from_secs(12))`) — so a slow but successful
+# switch can look like a departure for up to ~12.3 s. (The other absences in that function are
+# shorter: the stale-node reset is 800 ms + wait_for_android_phone(6 s); the ~18 s figure in its
+# comments is those two waits back to back, with the phone visible between them.) The ANNOUNCE_WINDOW
+# (30 s) and re-announce budget do not matter here: while announcing, the owner flag holds the hold.
+# A supervisor tick is AT LEAST 1 s (the unconditional `sleep 1` at the bottom of the loop; loop work
+# only lengthens it), so N consecutive clear observations span at least N-1 seconds. Need
+# N-1 > 12.3 s plus slack for a slow GET_CONFIGURATION liveness probe -> N-1 = 14 -> N = 15.
+# Cost: after a real unplug, wireless CarPlay comes back >= 14 s (typically ~15-16 s) later.
+AA_ACCESSORY_WAIT_S=12  # = aa-bridge wait_for_accessory timeout; keep in step if that changes
+WL_AA_RETRY_TICKS=$((AA_ACCESSORY_WAIT_S + 3))
+_wl_held_for_aa=0       # set by wireless_up when it SUPPRESSED for wired Android Auto; cleared on any real pass
+_wl_aa_clear_ticks=0
 wireless_rebring_at=""                         # epoch(uptime) to re-bring-up after a requested restart
 wireless_was_owner=0    # tracks wireless_owns_session across ticks (see the reset check below)
 last_r=0                # tracks the CT_RADIO inhibit flag across ticks (docs/carplay/04_CAPABILITIES_AND_CONFIG.md radio gating)
@@ -1200,6 +1241,7 @@ while :; do
       fi
       if [ "$p" = 0 ] && [ "$last_p" = 1 ]; then
         wireless_down    # host went away: idle the wireless radios (wired baseline stays ready)
+        _wl_held_for_aa=0; _wl_aa_clear_ticks=0   # the next 0->1 edge owns bring-up again
       fi
       last_p="$p"
       ;;
@@ -1299,6 +1341,30 @@ while :; do
       # idempotence guard returns first otherwise), so without this a crashed pump would stay dead
       # until the next app reconnect. Internally silent + pgrep-guarded, so a tick costs one pgrep.
       wireless_running && arm_aa_wireless
+      # EXTRA (2026-10-19): retry a wireless bring-up that wireless_up SUPPRESSED for wired Android
+      # Auto, once the hold has been clear (no wired-aa/wireless-aa owner, and no AA-enabled Android
+      # phone on the bus) for WL_AA_RETRY_TICKS consecutive ticks. wireless_up re-runs every one of
+      # its own choke points (radio_off, wireless:false, wired-iPhone, the AA hold itself), so this
+      # can only ever do what a fresh host-present edge would have done. Debounced because the AOAP
+      # switch briefly drops the phone off the bus and an undebounced retry would raise BT pairing in
+      # exactly the window the AA choke point exists to close; WL_AA_RETRY_TICKS is derived from
+      # aa-bridge's own re-enumeration timeout (see its definition above the loop). It does NOT fire
+      # while a `wireless_rebring_at` deferral is pending (Restart-wireless / Forget / CT_RADIO on):
+      # that deferral exists to let wireless_down's detached rmmod teardown finish, and it calls
+      # wireless_up itself when it expires — which either brings the stack up or re-holds (and so
+      # restarts the streak).
+      if [ "$_wl_held_for_aa" = 1 ]; then
+        if aa_owns_session || { android_phone_on_bus && aa_enabled; }; then
+          _wl_aa_clear_ticks=0
+        else
+          _wl_aa_clear_ticks=$((_wl_aa_clear_ticks + 1))
+          if [ "$_wl_aa_clear_ticks" -ge "$WL_AA_RETRY_TICKS" ] && [ -z "$wireless_rebring_at" ]; then
+            _wl_held_for_aa=0; _wl_aa_clear_ticks=0
+            echo "[sup] wired Android Auto hold clear for $WL_AA_RETRY_TICKS ticks -> retrying the suppressed wireless bring-up"
+            wireless_up
+          fi
+        fi
+      fi
       if aa_owns_session; then
         # Android Auto owns ci_hdrc.0 right now (aa-bridge holds a live AOAP link + the wired-aa owner
         # flag). Hands off entirely: no projection_up, no arm(), no escalation — aa-bridge self-manages

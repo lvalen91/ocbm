@@ -6,7 +6,9 @@ import android.media.AudioRecord
 import android.media.MediaRecorder
 import zeno.gmccpa.ProbeLog
 import zeno.gmccpa.logging.SessionTrace
+import zeno.gmccpa.pair.NativeCore
 import java.io.BufferedReader
+import java.io.IOException
 import java.io.InputStreamReader
 import java.io.OutputStream
 import java.net.InetSocketAddress
@@ -21,7 +23,15 @@ import java.util.concurrent.atomic.AtomicLong
  * directions:
  *  - IN  (receiver → us): `uplink on <rate> <ch>\n` when iOS SETUPs type 100 with `input=true`, and
  *    `uplink off\n` at teardown. **This is the capture gate.**
- *  - OUT (us → receiver): `mic <len>\n` followed by `<len>` bytes of S16LE PCM.
+ *  - OUT (us → receiver): first `auth <hex>\n` (F136 — the per-process token from
+ *    [NativeCore.micAuth]; the receiver closes a connection that does not open with it in time and
+ *    tells it nothing until it does), then `mic <len>\n` followed by `<len>` bytes of S16LE PCM.
+ *  - The receiver answers a valid `auth` with `auth ok\n` BEFORE any gate line. The seam counts as
+ *    up only after that ack (F136 fix round 1): a wrong token, a full authenticated cap or a stale
+ *    listener close the socket without it, and that is a failed attempt, not a connection.
+ *  - We bind our socket to 127.0.0.1 BEFORE connecting and hand that port to [NativeCore.micAuth],
+ *    which reserves it: other apps flooding :9112 fill only the receiver's unreserved pool, never
+ *    the slot our connection gets.
  *
  * The Rust side does RTP framing, encryption with the stream INPUT key, and the byte-order swap.
  *
@@ -51,14 +61,43 @@ class MicUplink {
     @Volatile private var activeRate = 0
     @Volatile private var activeChannels = 0
     private var gateThread: Thread? = null
-    /** Written on `mic-gate`, read by [stopCapture] from the UI thread too — hence volatile. */
-    @Volatile private var captureThread: Thread? = null
-    /** Capture-thread latch for [EXPECT_FIRST_CHUNK]; [framesSent] is per session, this is per gate. */
-    @Volatile private var firstChunkThisCapture = false
     /** Captures started this session, so each capture's first-chunk line is attributable. */
     private var captures = 0
+
+    /** Where a capture thread is, for the stop-timeout line: the code cannot otherwise tell these apart. */
+    private enum class Phase { READ, SEND, TEARDOWN }
+
+    /**
+     * One capture's own state (2026-10-06, P5). Every capture used to share [capturing], so a STALE
+     * capture thread that unblocked after the next one had started re-tested the NEW capture's
+     * `true`: its failed read then logged a false E and cleared the flag, ending the new capture
+     * (no mic until the next gate), or its data was interleaved into the new uplink. A capture thread
+     * now tests only its own [live]; it may clear [capturing] only while it is still [current], under
+     * [capLock]; and only the owning thread's finally releases its own [rec].
+     */
+    private class Capture(val rec: AudioRecord, val n: Int) {
+        val live = AtomicBoolean(true)
+        @Volatile var phase = Phase.READ
+        @Volatile var thread: Thread? = null
+        /** Per-capture latch for [EXPECT_FIRST_CHUNK]; [framesSent] is per session. */
+        @Volatile var firstChunk = false
+        /** elapsedRealtime of [stopCapture] on this capture; 0 = it ended on its own. */
+        @Volatile var stoppedAt = 0L
+        @Volatile var exit = "gate"
+    }
+
+    /** Guards the start CAS + publish, the stop CAS + live clear, and a capture's own-failure clear. */
+    private val capLock = Any()
+    /** The capture [capturing] belongs to; published BEFORE `startRecording()`. Null between captures. */
+    @Volatile private var current: Capture? = null
+    /** A stopped capture whose thread outlived the 500 ms join; re-stopped and re-joined by the next start. */
+    @Volatile private var staleCapture: Capture? = null
     /** Consecutive failed connects to `:9112`, gate thread only — see [gateLoop] for the severity rule. */
     private var connectFailures = 0
+    /** The no-token condition was logged (once per instance, not once per 2 s attempt). Gate thread only. */
+    private var tokenMissingLogged = false
+    /** This attempt's bound source port, reserved via [NativeCore.micAuth]; 0 = none. Gate thread only. */
+    private var reservedPort = 0
 
     private companion object {
         const val PORT = 9112
@@ -67,6 +106,9 @@ class MicUplink {
         const val CHUNK_MS = 20
         /** Reconnect cadence to the gate seam while the receiver's listener is absent. */
         const val RECONNECT_MS = 2_000L
+        /** Wait for the receiver's `auth ok`. It answers within its own 1 s auth window for our
+         *  reserved port, so 1.5 s never times out a receiver that is still deciding. */
+        const val AUTH_ACK_MS = 1_500
         /** [SessionTrace] name for "the capture the gate just opened has sent a chunk". */
         const val EXPECT_FIRST_CHUNK = "av/mic-first-chunk"
         /**
@@ -101,35 +143,73 @@ class MicUplink {
     /**
      * Connect and follow the gate. Reconnects while running: the receiver may restart the listener.
      *
-     * Severity of a failed connect is by COUNT, not by kind. The first miss is normal — the
-     * receiver's `:9112` listener comes up at native-library load, which on the 2026-09-09 truck
-     * session was 208 ms AFTER this connect was attempted (attempt at 22:51:14.467, `control-in
-     * listening` at .675, connected on the retry at 22:51:16.471). Logging that at `W` on every app
-     * start is the false alarm that gets a mechanism ignored. The SECOND consecutive miss means the
-     * listener has been absent for over [RECONNECT_MS] + the 2 s connect timeout, which no ordering
-     * of our own explains — that one is a `W`, and the board shows the uplink as FAILED until it lands.
+     * An attempt fails on a connect error, on the receiver closing without `auth ok` (wrong token,
+     * or both live slots held — e.g. a superseded session's socket not yet closed), or on no ack
+     * within [AUTH_ACK_MS]. A missing token is NOT an attempt failure: it is logged once, below.
+     *
+     * Severity is by COUNT, not by kind. One isolated miss has an innocent explanation (the
+     * superseded-session overlap above clears within a reconnect), so the first is `I`. The SECOND
+     * consecutive miss is a `W`, and the board shows the uplink as FAILED until it lands.
+     * (CORRECTED 2026-10-07, F136 fix round 2: this used to call the first miss the native-library-
+     * load race — the 2026-09-09 truck session connected 208 ms before `control-in listening`. That
+     * race is gone: [NativeCore.micAuth] loads the library, `JNI_OnLoad` binds the listener
+     * synchronously, and the token exists only once it is bound.)
      */
     private fun gateLoop() {
         while (running.get()) {
             try {
-                val s = Socket().apply { connect(InetSocketAddress("127.0.0.1", PORT), 2000) }
-                sock = s; out = s.getOutputStream()
-                connectFailures = 0
-                log.i("connected to the uplink control seam :$PORT — waiting for the gate")
-                SessionTrace.Board.up(BOARD, "gate seam :$PORT connected — gate CLOSED")
-                val r = BufferedReader(InputStreamReader(s.getInputStream()))
-                while (running.get()) {
-                    val line = r.readLine() ?: break
-                    handleGate(line.trim())
+                // Bound BEFORE the connect, so the port is known (and held — no SO_REUSEADDR) when
+                // the core reserves it. NEVER log the token.
+                val s = Socket()
+                sock = s
+                s.reuseAddress = false
+                s.bind(InetSocketAddress("127.0.0.1", 0))
+                reservedPort = s.localPort
+                val token = NativeCore.micAuth(reservedPort)
+                if (token == null) {
+                    // Not a connect failure, and it does not change between attempts: the core is not
+                    // loadable, the .so is stale, or the receiver's listener never bound. Say so ONCE.
+                    if (!tokenMissingLogged) {
+                        tokenMissingLogged = true
+                        log.w("no mic token from the native core (library not loaded, stale .so, or the :$PORT listener " +
+                            "did not start — e.g. another process holds the port) — no mic for Siri; retrying silently every ${RECONNECT_MS}ms")
+                        SessionTrace.Board.note(BOARD, "FAILED (no mic token: the receiver's :$PORT listener is not ours or not up — no mic for Siri)")
+                    }
+                } else {
+                    if (tokenMissingLogged) {
+                        tokenMissingLogged = false
+                        log.i("mic token now available — connecting to :$PORT")
+                    }
+                    s.connect(InetSocketAddress("127.0.0.1", PORT), 2000)
+                    // The auth line goes out BEFORE [out] is published, so no `mic` chunk can precede it.
+                    val o = s.getOutputStream()
+                    o.write("auth $token\n".toByteArray(Charsets.US_ASCII)); o.flush()
+                    // Up only once the receiver ACCEPTED the auth: `auth ok` precedes any gate line.
+                    s.soTimeout = AUTH_ACK_MS
+                    val r = BufferedReader(InputStreamReader(s.getInputStream(), Charsets.US_ASCII))
+                    val ack = r.readLine()
+                    if (ack?.trim() != "auth ok") {
+                        throw IOException(if (ack == null) "receiver closed without `auth ok` (wrong token, connection cap, or not our listener)"
+                            else "receiver answered the auth with something other than `auth ok`")
+                    }
+                    s.soTimeout = 0
+                    out = o
+                    connectFailures = 0
+                    log.i("connected to the uplink control seam :$PORT (auth accepted) — waiting for the gate")
+                    SessionTrace.Board.up(BOARD, "gate seam :$PORT connected — gate CLOSED")
+                    while (running.get()) {
+                        val line = r.readLine() ?: break
+                        handleGate(line.trim())
+                    }
+                    if (running.get()) log.w("gate seam :$PORT closed by the receiver — reconnecting in ${RECONNECT_MS}ms")
                 }
-                if (running.get()) log.w("gate seam :$PORT closed by the receiver — reconnecting in ${RECONNECT_MS}ms")
             } catch (t: Throwable) {
                 if (running.get()) {
                     connectFailures++
                     val what = "uplink seam :$PORT: ${t.javaClass.simpleName}: ${t.message}"
                     if (connectFailures == 1) {
-                        log.i("$what — the receiver core may not be loaded yet; retrying in ${RECONNECT_MS}ms")
-                        SessionTrace.Board.down(BOARD, "gate seam :$PORT not up yet — retrying every ${RECONNECT_MS}ms")
+                        log.i("$what — attempt failed (connect error, auth refused, or no `auth ok`); retrying in ${RECONNECT_MS}ms")
+                        SessionTrace.Board.down(BOARD, "gate seam :$PORT attempt failed — retrying every ${RECONNECT_MS}ms")
                     } else {
                         log.w("$what — attempt $connectFailures; no mic for Siri until this connects")
                         SessionTrace.Board.note(BOARD, "FAILED (gate seam :$PORT unreachable, $connectFailures attempts — no mic for Siri)")
@@ -137,6 +217,10 @@ class MicUplink {
                 }
             } finally {
                 stopCapture("gate seam connection ended")
+                // Withdraw the source-port reservation WHILE the socket still holds the port: after a
+                // failed connect it would otherwise stay claimable by whatever socket gets the port
+                // next. A no-op when the receiver already consumed it on accept.
+                if (reservedPort > 0) { NativeCore.micRelease(reservedPort); reservedPort = 0 }
                 runCatching { sock?.close() }; sock = null; out = null   // deliberate: teardown
             }
             if (running.get()) try { Thread.sleep(RECONNECT_MS) } catch (_: InterruptedException) { return }
@@ -171,7 +255,21 @@ class MicUplink {
             log.i("format changed ${activeRate}Hz${activeChannels}ch -> ${rate}Hz${channels}ch — restarting")
             stopCapture("format changed ${activeRate}Hz${activeChannels}ch -> ${rate}Hz${channels}ch")
         }
-        if (!capturing.compareAndSet(false, true)) return
+        if (!synchronized(capLock) { capturing.compareAndSet(false, true) }) return
+        // A previous capture thread that outlived its stop: re-issue the stop on its own recorder and
+        // join again. Still alive -> say so and proceed: a mic for this turn beats a silent uplink, and
+        // the stale thread can no longer stop this capture or feed into it (it tests only its own live).
+        staleCapture?.let { st ->
+            val t = st.thread
+            if (t != null && t.isAlive) {
+                runCatching { st.rec.stop() }   // deliberate: best effort on a recorder we are abandoning
+                runCatching { t.join(500) }
+            }
+            if (t != null && t.isAlive) {
+                log.e("previous capture thread still alive (capture #${st.n}, phase=${st.phase}) — starting a second AudioRecord")
+                SessionTrace.Board.failed(BOARD, "capture #${st.n}'s thread is stuck (phase=${st.phase}) — a second AudioRecord is being started beside it")
+            } else staleCapture = null
+        }
         activeRate = rate; activeChannels = channels
         val mask = if (channels >= 2) AudioFormat.CHANNEL_IN_STEREO else AudioFormat.CHANNEL_IN_MONO
         val minBuf = AudioRecord.getMinBufferSize(rate, mask, AudioFormat.ENCODING_PCM_16BIT)
@@ -192,98 +290,151 @@ class MicUplink {
             capturing.set(false)
             SessionTrace.Board.note(BOARD, "FAILED (AudioRecord uninitialised — no mic this gate)"); return
         }
-        runCatching { rec.startRecording() }.onFailure {
-            log.e("startRecording: ${it.message} — no mic for this gate"); runCatching { rec.release() }   // deliberate: discard
-            capturing.set(false)
-            SessionTrace.Board.note(BOARD, "FAILED (startRecording threw — no mic this gate)"); return
-        }
-        val bytesPerChunk = rate / 1000 * CHUNK_MS * 2 * channels
-        firstChunkThisCapture = false
         captures++
-        // Armed here, after every synchronous failure above has had its own line: what remains
-        // silent is a read() that never returns data. Met in [send] on this capture's first chunk.
+        val cap = Capture(rec, captures)
+        val bytesPerChunk = rate / 1000 * CHUNK_MS * 2 * channels
+        // Armed BEFORE the publish, so a stop that finds this capture always finds the expectation
+        // armed and cancels it (armed after, a stop in between left a false EXPECTED-MISSING). What
+        // remains silent is a read() that never returns data. Met in [send] on the first chunk.
         SessionTrace.expect(EXPECT_FIRST_CHUNK, FIRST_CHUNK_MS,
             "the receiver said `uplink on ${rate} ${channels}` and AudioRecord is recording, so PCM " +
             "should reach the seam within one bring-up (262ms on 2026-09-09)")
-        captureThread = Thread({ captureLoop(rec, bytesPerChunk) }, "mic-capture").apply {
-            isDaemon = true; start()
+        // Published BEFORE startRecording, so a stop from here on finds it and stops its recorder.
+        synchronized(capLock) { current = cap }
+        runCatching { rec.startRecording() }.onFailure {
+            log.e("startRecording: ${it.message} — no mic for this gate"); runCatching { rec.release() }   // deliberate: discard
+            synchronized(capLock) { cap.live.set(false); if (current === cap) { current = null; capturing.set(false) } }
+            SessionTrace.cancel(EXPECT_FIRST_CHUNK, "startRecording threw — already reported")
+            SessionTrace.Board.note(BOARD, "FAILED (startRecording threw — no mic this gate)"); return
         }
+        // A stop that landed between the publish and here: no capture thread ever owned this
+        // recorder, so it is released on this thread.
+        if (!(cap.live.get() && capturing.get())) {
+            runCatching { rec.stop() }; runCatching { rec.release() }   // deliberate: discard
+            synchronized(capLock) { if (current === cap) current = null }
+            SessionTrace.cancel(EXPECT_FIRST_CHUNK, "capture #${cap.n} stopped before it started")
+            log.i("capture #${cap.n} stopped before its thread started — recorder released")
+            return
+        }
+        val t = Thread({ captureLoop(cap, bytesPerChunk) }, "mic-capture").apply { isDaemon = true }
+        cap.thread = t
+        t.start()
         log.i("capturing VOICE_COMMUNICATION ${rate}Hz ${channels}ch, ${bytesPerChunk}B/chunk (capture #$captures)")
         SessionTrace.Board.up(BOARD, "gate OPEN — capturing VOICE_COMMUNICATION ${rate}Hz ${channels}ch, ${bytesPerChunk}B/${CHUNK_MS}ms")
     }
 
-    private fun captureLoop(rec: AudioRecord, chunk: Int) {
+    private fun captureLoop(cap: Capture, chunk: Int) {
         android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
+        val rec = cap.rec
         val buf = ByteArray(chunk)
         try {
-            while (capturing.get() && running.get()) {
+            while (cap.live.get() && running.get()) {
                 var off = 0
-                while (off < chunk && capturing.get()) {
+                while (off < chunk && cap.live.get()) {
+                    cap.phase = Phase.READ
                     val n = rec.read(buf, off, chunk - off)
                     if (n <= 0) {
                         // Any non-positive read (0, ERROR, ERROR_BAD_VALUE, ERROR_INVALID_OPERATION,
                         // ERROR_DEAD_OBJECT) ends this capture; all are treated alike and none is
                         // retried here — the next `uplink on` re-arms. The
-                        // flag MUST be cleared here: the peer only sends `uplink off` on full control
-                        // teardown, not per-SETUP, so the gate edge that would have reset it may never
-                        // arrive — and iOS re-SETUPs MainAudio several times per Siri turn. Leaving it
-                        // set made every later `uplink on` fail its CAS silently and killed the mic for
-                        // the rest of the session.
-                        if (capturing.get()) {
+                        // flag MUST still be cleared here, defensively. (Corrected 2026-10-08, C-F3:
+                        // the receiver now sends `uplink off` per type-100 partial TEARDOWN as well —
+                        // `uplink.rs` `clear()` -> `notify_control("uplink off")`, called from
+                        // `session.rs`'s teardown arm, which cites the "424 armed / 0 off" bench
+                        // measurement this comment used to describe as current — so the gate edge
+                        // normally does arrive once per Siri turn. A read that dies before it, or a
+                        // lost line, would otherwise leave the flag set and make every later
+                        // `uplink on` fail its CAS silently, killing the mic for the session.) Only
+                        // THIS capture's: [endOwn] clears [capturing] only while this capture is still
+                        // [current].
+                        if (endOwn(cap, "read=$n")) {
                             // A mid-gate read failure is the mic dying under Siri: E, and the board
-                            // says so until the next `uplink on` re-arms it.
+                            // says so until the next `uplink on` re-arms it. A read ended by our own
+                            // stop (live already cleared) is not one.
                             log.e("AudioRecord.read -> $n mid-capture; ending this capture — no mic until the next `uplink on`")
                             SessionTrace.Board.note(BOARD, "FAILED (AudioRecord.read -> $n mid-capture — no mic until the next gate)")
-                            if (!firstChunkThisCapture) SessionTrace.cancel(EXPECT_FIRST_CHUNK, "AudioRecord.read failed ($n) first — already reported")
+                            if (!cap.firstChunk) SessionTrace.cancel(EXPECT_FIRST_CHUNK, "AudioRecord.read failed ($n) first — already reported")
                         }
-                        capturing.set(false)
                         return
                     }
                     off += n
                 }
-                if (off == chunk) send(buf, chunk)
+                // A capture stopped mid-read must not put its last chunk into the uplink.
+                // v5.9 MIC: a bench-armed clip (MicInject; armable only in a bench build) replaces this
+                // chunk in place — same thread, same send(), paced by this read. Idle: one atomic read.
+                if (off == chunk && cap.live.get()) { cap.phase = Phase.SEND; MicInject.nextChunk(cap, cap.n, rec.sampleRate, rec.channelCount, chunk)?.copyInto(buf); send(cap, buf, chunk) }
             }
         } finally {
+            cap.phase = Phase.TEARDOWN
             runCatching { rec.stop() }; runCatching { rec.release() }   // deliberate: teardown
+            val since = cap.stoppedAt
+            log.i("capture loop exited (capture #${cap.n}, reason=${cap.exit}, " +
+                (if (since > 0L) "${android.os.SystemClock.elapsedRealtime() - since} ms after stop)" else "not stopped from outside)"))
         }
     }
 
-    private fun send(pcm: ByteArray, len: Int) {
+    /**
+     * A capture ending on its own failure: clears its own [Capture.live], and [capturing] only while
+     * it is still [current] — atomically with [stopCapture]/[startCapture] under [capLock], so a
+     * stale thread can never clear a newer capture's flag. True if it was still live (a real fault,
+     * not our own stop).
+     */
+    private fun endOwn(cap: Capture, reason: String): Boolean = synchronized(capLock) {
+        val wasLive = cap.live.getAndSet(false)
+        if (wasLive) cap.exit = reason
+        if (current === cap) { current = null; capturing.set(false) }
+        wasLive
+    }
+
+    private fun send(cap: Capture, pcm: ByteArray, len: Int) {
         val o = out ?: return
         try {
             synchronized(o) {
+                if (!cap.live.get()) return
                 o.write("mic $len\n".toByteArray(Charsets.US_ASCII))
                 o.write(pcm, 0, len)
                 o.flush()
             }
             val n = framesSent.incrementAndGet()
-            if (!firstChunkThisCapture) {
+            if (!cap.firstChunk) {
                 // Per-capture latch (one branch per 20 ms chunk): each gate's first chunk is the
                 // event that clears the expectation, and the line names the capture so a session
                 // with several Siri turns stays attributable.
-                firstChunkThisCapture = true
-                log.i("FIRST MIC CHUNK SENT (capture #$captures, session chunk $n)")
+                cap.firstChunk = true
+                log.i("FIRST MIC CHUNK SENT (capture #${cap.n}, session chunk $n)")
                 SessionTrace.met(EXPECT_FIRST_CHUNK)
             }
             if (n % 250 == 0L) log.i("$n mic chunks sent")
         } catch (t: Throwable) {
-            log.w("mic write failed: ${t.message}")
-            capturing.set(false)
+            if (endOwn(cap, "write failed")) log.w("mic write failed: ${t.message}")
         }
     }
 
     /** [why] is what the board and the cancelled expectation (if any) record. */
     private fun stopCapture(why: String) {
-        if (!capturing.compareAndSet(true, false)) return
-        if (!firstChunkThisCapture) SessionTrace.cancel(EXPECT_FIRST_CHUNK, why)
-        captureThread?.let { t ->
-            runCatching { t.join(500) }   // deliberate: an interrupt here is the caller's, not a fault
-            // A join that TIMES OUT is a fault, and it was invisible: the thread is still inside
-            // AudioRecord.read while `captureThread` is nulled below, so the next `uplink on` builds a
-            // second recorder beside the stuck one.
-            if (t.isAlive) log.w("capture thread still alive 500ms after stop ($why) — AudioRecord.read is stuck; the next gate starts a second recorder")
+        val cap = synchronized(capLock) {
+            if (!capturing.compareAndSet(true, false)) return
+            current.also { c -> current = null; c?.live?.set(false) }
         }
-        captureThread = null   // the capture thread owns AudioRecord stop()/release() in its finally
+        // Null: the start had not published its capture yet; its own re-check releases the recorder.
+        if (cap != null) {
+            cap.stoppedAt = android.os.SystemClock.elapsedRealtime()
+            if (!cap.firstChunk) SessionTrace.cancel(EXPECT_FIRST_CHUNK, why)
+            // The cross-thread unblock for a read parked in the recorder. Whether stop() returns a
+            // blocked read() on this unit is AOSP behaviour not verified here (52I proof (2)).
+            // release() stays in the capture thread's finally — never from a foreign thread.
+            runCatching { cap.rec.stop() }   // deliberate: the capture thread reports its own exit
+            cap.thread?.let { t ->
+                runCatching { t.join(500) }   // deliberate: an interrupt here is the caller's, not a fault
+                // A join that TIMES OUT is a fault: kept as [staleCapture] so the next `uplink on`
+                // re-stops and re-joins it before building a second recorder. The phase names where it
+                // is; the code cannot tell a stuck read from a stuck socket write or teardown.
+                if (t.isAlive) {
+                    staleCapture = cap
+                    log.w("capture thread #${cap.n} still alive 500ms after stop ($why), phase=${cap.phase} — the next gate re-stops it before starting a second recorder")
+                }
+            }
+        }
         log.i("capture stopped — $why")
     }
 }

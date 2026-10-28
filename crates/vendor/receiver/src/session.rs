@@ -37,6 +37,13 @@ fn empty_plist_dict() -> Vec<u8> {
 }
 
 use crate::forward::{adts_from_aac_lc, annexb_from_avcc, tag_voice};
+#[cfg(feature = "voice-tag-v2")]
+use crate::forward::{
+    tag_voice_v2, voice_begin_v2, voice_end_v2, END_SESSION_RESET, END_SOCKET_ERROR, END_SUPERSEDED,
+    END_TEARDOWN,
+};
+#[cfg(feature = "voice-tag-v2")]
+use std::sync::atomic::AtomicU8;
 use crate::stream::{decrypt_audio_aad, derive_stream_keys, MIN_AUDIO_PACKET};
 
 /// Probe which HKDF input salts the DataStream(130) key schedule, and in which direction (docs/carplay/05_METADATA_AND_CONTROLS.md §1.4).
@@ -397,6 +404,11 @@ pub struct AvSession {
     /// accumulation on the retry path — which one archived session shows firing 15 times.
     /// A/V streams pass an empty string and keep their supersede-by-type behaviour exactly.
     av_streams: Mutex<HashMap<(i64, String), Arc<AtomicBool>>>,
+    /// Plan v5.8 V1a: the END cause of each voice stream, keyed like [`Self::av_streams`]. Stored
+    /// (Release) BEFORE the stream's flag is cleared, so the audio thread that sees the flag false
+    /// (Acquire) also sees why. Lock order: `av_streams` → `voice_causes`.
+    #[cfg(feature = "voice-tag-v2")]
+    voice_causes: Mutex<HashMap<(i64, String), Arc<AtomicU8>>>,
     /// `enabledFeatures` echoed at the last phase-1 SETUP — kept only to fold into the phase-2
     /// consolidated "SETUP negotiated" troubleshooting line (features and streams land in two
     /// separate RTSP requests, so phase 2 has no other way to name what phase 1 already negotiated).
@@ -466,6 +478,8 @@ impl AvSession {
             alive: Arc::new(AtomicBool::new(true)),
             activity: Arc::new(AtomicU64::new(0)),
             av_streams: Mutex::new(HashMap::new()),
+            #[cfg(feature = "voice-tag-v2")]
+            voice_causes: Mutex::new(HashMap::new()),
             negotiated_features: Vec::new(),
             resolution: (0, 0, 0),
         }
@@ -486,6 +500,8 @@ impl AvSession {
     fn stream_flag_keyed(&self, ty: i64, channel: String) -> Arc<AtomicBool> {
         let mut m = crate::plock(&self.av_streams);
         if let Some(prev) = m.remove(&(ty, channel.clone())) {
+            #[cfg(feature = "voice-tag-v2")]
+            self.set_voice_cause(&(ty, channel.clone()), END_SUPERSEDED);
             prev.store(false, Ordering::Release); // stop the superseded stream's thread + drop its socket
         }
         let flag = Arc::new(AtomicBool::new(true));
@@ -493,9 +509,51 @@ impl AvSession {
         flag
     }
 
+    /// Plan v5.8 V1a: a fresh END-cause cell for the voice stream just registered under `ty` by
+    /// [`Self::stream_flag`]. Call it right AFTER `stream_flag(ty)`: a supersede inside that call has
+    /// already marked the previous stream's cell, which this replaces.
+    #[cfg(feature = "voice-tag-v2")]
+    fn voice_cause(&self, ty: i64) -> Arc<AtomicU8> {
+        let _m = crate::plock(&self.av_streams);
+        let c = Arc::new(AtomicU8::new(crate::forward::END_UNKNOWN));
+        crate::plock(&self.voice_causes).insert((ty, String::new()), c.clone());
+        c
+    }
+
+    /// Store `cause` for the stream under `key` — before its flag is cleared. Called with
+    /// `av_streams` held (lock order `av_streams` → `voice_causes`); a key with no voice stream
+    /// (screen, RCS) is a no-op.
+    #[cfg(feature = "voice-tag-v2")]
+    fn set_voice_cause(&self, key: &(i64, String), cause: u8) {
+        if let Some(c) = crate::plock(&self.voice_causes).remove(key) {
+            c.store(cause, Ordering::Release);
+        }
+    }
+
     /// Stop all spawned stream threads and reset per-session global state (event channel, mic uplink,
     /// A/V sinks). Idempotent — safe to call from both TEARDOWN and `Drop` (abrupt connection loss).
     fn reset(&self) {
+        // Plan v5.8 V1a: every live voice stream ends with reason `session reset` — the causes are
+        // stored before the drain below clears the flags.
+        #[cfg(feature = "voice-tag-v2")]
+        {
+            let _m = crate::plock(&self.av_streams);
+            let mut c = crate::plock(&self.voice_causes);
+            for cause in c.values() {
+                cause.store(END_SESSION_RESET, Ordering::Release);
+            }
+            // Logged only when a voice stream was live (reset() runs from TEARDOWN and from Drop).
+            // SESSION_RESET is in practice a log-only reason: clear_sinks() below drops the socket
+            // before a voice thread wakes, so its END is skipped (never written after a clear).
+            if !c.is_empty() {
+                eprintln!(
+                    "[voice-v2] session reset handled at voice_clock_us={} ({} voice stream(s))",
+                    voice_clock_us(),
+                    c.len()
+                );
+            }
+            c.clear();
+        }
         self.alive.store(false, Ordering::Release);
         // Clearing this is what makes the next phase-1 SETUP bind again — the reference clears its
         // `controlSetup` in `_ControlTearDown` and nowhere else.
@@ -666,8 +724,9 @@ impl AvSession {
         // /info structure is always present (info.rs::view_areas), so echoing is safe — the teardown
         // risk is the reverse (echoing a feature whose /info structure is missing). Gated on a real
         // inset / explicit enable via the viewAreas lever so full-bleed sessions stay byte-identical.
-        // cornerMasks carries its per-view flag INSIDE the viewAreas structure, so negotiate viewAreas
-        // whenever cornerMasks is on (belt-and-suspenders so the phone fully processes the view desc).
+        // cornerMasks carries its flag PER DISPLAY (a `cornerMasks: true` key on the displays[] dict, not
+        // inside a viewAreas entry; docs/carplay/06_AV_PIPELINE.md cornerMasks §2), but we still negotiate
+        // viewAreas whenever cornerMasks is on (belt-and-suspenders so the phone fully processes the view desc).
         if crate::levers::viewareas() || crate::levers::cornermasks() {
             feats.push(Value::String("viewAreas".into()));
         }
@@ -991,6 +1050,7 @@ impl AvSession {
                         // destructive — calling it a second time for the same `ty` would flip the
                         // flag we just handed to `spawn_audio` and kill that stream immediately.
                         let ctrl_flag = flag.clone();
+                        #[cfg(not(feature = "voice-tag-v2"))]
                         spawn_audio(
                             data,
                             shared,
@@ -1004,6 +1064,51 @@ impl AvSession {
                             flag,
                             self.activity.clone(),
                         );
+                        // Plan v5.8 V1a: the same call, plus the voice-v2 inputs. The sink and port are
+                        // chosen HERE (production passes the statics) so tests/voice_seam.rs can hand
+                        // the thread its own Sink and an ephemeral port.
+                        #[cfg(feature = "voice-tag-v2")]
+                        {
+                            // `audioLatencyMs` (int, ms; -1 = absent). 80 on every type-100/101 SETUP
+                            // in cp8; carried to the app for its jitter-buffer target.
+                            let audio_latency_ms = sd
+                                .get("audioLatencyMs")
+                                .and_then(|v| {
+                                    v.as_signed_integer()
+                                        .or_else(|| v.as_unsigned_integer().map(|u| u as i64))
+                                })
+                                .map(|v| v.clamp(i32::MIN as i64, i32::MAX as i64) as i32)
+                                .unwrap_or(-1);
+                            let input = sd
+                                .get("input")
+                                .and_then(|v| {
+                                    v.as_boolean()
+                                        .or_else(|| v.as_unsigned_integer().map(|n| n != 0))
+                                })
+                                .unwrap_or(false);
+                            let cause = self.voice_cause(ty);
+                            eprintln!(
+                                "[voice-v2] SETUP audio({ty}) scid={scid} audioType={audio_type:?} \
+                                 audioLatencyMs={audio_latency_ms} handled at voice_clock_us={}",
+                                voice_clock_us()
+                            );
+                            let (sink, port): (&'static Sink, u16) =
+                                if is_media { (&MEDIA_SINK, 9002) } else { (&VOICE_SINK, 9003) };
+                            spawn_audio(
+                                data,
+                                shared,
+                                scid,
+                                ty,
+                                codec,
+                                is_media,
+                                atype,
+                                sr,
+                                ch,
+                                flag,
+                                self.activity.clone(),
+                                VoiceV2Args { sink, port, audio_latency_ms, input, cause },
+                            );
+                        }
                         let mut r = Dictionary::new();
                         r.insert("type".into(), Value::Integer(ty.into()));
                         r.insert(
@@ -1765,6 +1870,8 @@ impl SessionDelegate for AvSession {
             // exits on its next poll and drops its socket — instead of the old no-op that leaked a thread
             // + UDP/TCP socket per re-SETUP. The session (timing/event/keepAlive) stays alive.
             let mut stopped: Vec<i64> = Vec::new();
+            #[cfg(feature = "voice-tag-v2")]
+            let handled_us = voice_clock_us();
             {
                 let mut m = crate::plock(&self.av_streams);
                 for s in &streams {
@@ -1780,6 +1887,8 @@ impl SessionDelegate for AvSession {
                             m.keys().filter(|(k, _)| *k == ty).cloned().collect();
                         for k in keys {
                             if let Some(flag) = m.remove(&k) {
+                                #[cfg(feature = "voice-tag-v2")]
+                                self.set_voice_cause(&k, END_TEARDOWN);
                                 flag.store(false, Ordering::Release);
                                 stopped.push(ty);
                             }
@@ -1790,6 +1899,8 @@ impl SessionDelegate for AvSession {
             eprintln!(
                 "[session] partial TEARDOWN reason=host-request — stopped streams {stopped:?}, session kept"
             );
+            #[cfg(feature = "voice-tag-v2")]
+            eprintln!("[voice-v2] partial TEARDOWN {stopped:?} handled at voice_clock_us={handled_us}");
             // The mic uplink is the INPUT leg of the type-100 MainAudio stream, so it dies WITH that
             // stream — not only at session end (`reset()`, which was the sole `clear()` caller).
             // Apple reaches `_TearDownStream` from this same partial path
@@ -2022,6 +2133,11 @@ fn uplink_dst(peer: std::net::SocketAddr, port: u16) -> std::net::SocketAddr {
 /// Reset the persistent per-sink forwarding connections (`MEDIA_SINK`/`VOICE_SINK`/`META_SINK`) so the
 /// next session reconnects fresh rather than writing to a stale/closed carlink socket.
 fn clear_sinks() {
+    // Plan v5.8 V1a: with voice-tag-v2 the body is `clear_sink_set` over the statics (tests clear
+    // their own Sinks through it); without it, the original loop below, unchanged.
+    #[cfg(feature = "voice-tag-v2")]
+    clear_sink_set(&[&MEDIA_SINK, &VOICE_SINK]);
+    #[cfg(not(feature = "voice-tag-v2"))]
     for sink in [&MEDIA_SINK, &VOICE_SINK] {
         let mut g = crate::plock(&sink.slot);
         g.sock = None;
@@ -2042,6 +2158,18 @@ fn clear_sinks() {
     // CarPlay session boundary — so a socket held across sessions keeps a perfectly valid slot. A
     // reset would buy nothing and would force a reconnect whose eviction can discard the unread tail
     // of a frame still in ocbmd's buffer, desyncing the host's length-prefixed reader.
+}
+
+/// [`clear_sinks`] over an explicit sink set (plan v5.8 V1a refactor for testability). Same body as
+/// the original loop: drop the socket, bump the epoch, leave `busy` alone. `conn_gen` is NOT reset —
+/// a voice stream's END is already fenced by the epoch (it never writes after a clear).
+#[cfg(feature = "voice-tag-v2")]
+fn clear_sink_set(set: &[&Sink]) {
+    for sink in set {
+        let mut g = crate::plock(&sink.slot);
+        g.sock = None;
+        g.epoch = g.epoch.wrapping_add(1);
+    }
 }
 
 /// Read exactly `buf.len()` bytes, tolerating the shutdown-poll read timeout (re-checking `alive` on
@@ -2733,6 +2861,11 @@ struct SinkSlot {
     /// second writer on the same sink must WAIT on `Sink::busy`, not connect its own socket — see
     /// [`forward_to_sink`].
     busy: bool,
+    /// Plan v5.8 V1a: bumped on every successful connect. A voice stream re-sends its BEGIN when the
+    /// connection it is about to write on is not the one that carried its last BEGIN, and writes its
+    /// END only on that one.
+    #[cfg(feature = "voice-tag-v2")]
+    conn_gen: u64,
 }
 
 /// A sink slot plus the condvar a writer waits on when a sibling stream holds the socket.
@@ -2744,7 +2877,13 @@ struct Sink {
 impl Sink {
     const fn new() -> Self {
         Sink {
-            slot: Mutex::new(SinkSlot { sock: None, epoch: 0, busy: false }),
+            slot: Mutex::new(SinkSlot {
+                sock: None,
+                epoch: 0,
+                busy: false,
+                #[cfg(feature = "voice-tag-v2")]
+                conn_gen: 0,
+            }),
             busy: std::sync::Condvar::new(),
         }
     }
@@ -2831,6 +2970,11 @@ fn forward_to_sink(sink: &Sink, port: u16, framed: &[u8]) -> bool {
                     // Bound writes (audit R3): without a timeout a stalled local :9002/:9003 consumer
                     // makes write_all block the stream thread forever. Same 2 s as events.rs.
                     let _ = s.set_write_timeout(Some(Duration::from_secs(2)));
+                    #[cfg(feature = "voice-tag-v2")]
+                    {
+                        let mut g = crate::plock(&sink.slot);
+                        g.conn_gen = g.conn_gen.wrapping_add(1);
+                    }
                     s
                 }
                 Err(e) => {
@@ -2845,6 +2989,226 @@ fn forward_to_sink(sink: &Sink, port: u16, framed: &[u8]) -> bool {
     // On write failure the socket is simply dropped; the next AU reconnects.
     sink.release(if ok { Some(sock) } else { None }, epoch);
     ok
+}
+
+/// Plan v5.8 V1a: microseconds on a process-wide monotonic clock (a `OnceLock<Instant>` fixed by the
+/// first call). Every voice-v2 stamp — `rx_us` on each AU, `write_us` on BEGIN/END, and the
+/// SETUP/TEARDOWN "handled" log lines — is on this clock, and the app reads the SAME clock through
+/// `nativeVoiceClockUs()` (in-process JNI), so every age it reports is on one clock.
+#[cfg(feature = "voice-tag-v2")]
+pub fn voice_clock_us() -> u64 {
+    static T0: OnceLock<Instant> = OnceLock::new();
+    T0.get_or_init(Instant::now).elapsed().as_micros() as u64
+}
+
+/// The voice read timeout under voice-tag-v2 (500 ms otherwise): the stream's flag is checked on
+/// every packet AND on every timeout, so an END follows a TEARDOWN by ≤ 50 ms even on a silent stream.
+#[cfg(feature = "voice-tag-v2")]
+const VOICE_V2_POLL: Duration = Duration::from_millis(50);
+
+/// The voice-v2 inputs to [`spawn_audio`]: where to write (production: the statics), what to put in
+/// BEGIN, and the cell the session stores the END cause in.
+#[cfg(feature = "voice-tag-v2")]
+struct VoiceV2Args {
+    sink: &'static Sink,
+    port: u16,
+    audio_latency_ms: i32,
+    input: bool,
+    cause: Arc<AtomicU8>,
+}
+
+/// One voice stream's view of the seam connection, owned by its thread.
+#[cfg(feature = "voice-tag-v2")]
+#[derive(Debug, Default)]
+struct VoiceWriter {
+    /// `(epoch, conn_gen)` of the connection that carried this stream's last BEGIN; None = none yet.
+    begin_on: Option<(u64, u64)>,
+    /// The last write (BEGIN or AU) failed or was dropped: the next AU re-sends BEGIN.
+    last_failed: bool,
+    /// BEGINs attempted so far; the next BEGIN carries this value (0 = the first one).
+    begin_seq: u32,
+}
+
+/// Outcome of [`forward_to_sink_with`].
+#[cfg(feature = "voice-tag-v2")]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum V2Write {
+    Written,
+    /// Connect/write failed, or the busy wait expired: nothing (BEGIN included) reached the app.
+    Failed,
+    /// END only: no connection, or not the one that carried this stream's BEGIN — nothing written.
+    Skipped,
+}
+
+/// [`forward_to_sink`] for a voice-v2 stream (plan v5.8 V1a): one slot hold writes
+/// `[BEGIN if needed][frame]`, so a BEGIN and the frame it precedes always land on the same
+/// connection, contiguously, or not at all.
+///
+/// - `connect = true` (BEGIN at entry, every AU): (re)connects lazily like [`forward_to_sink`], and
+///   prefixes a BEGIN (built by `begin(begin_seq)`) when the connection is not the one that carried
+///   this stream's last BEGIN — a new `conn_gen` or a cleared epoch — or when this stream's last
+///   write failed. A busy-wait drop therefore loses BEGIN and AU together, and both are re-sent.
+/// - `connect = false` (END): never connects. Writes only on the connection whose `(epoch,
+///   conn_gen)` carried this stream's BEGIN, with no failed write since; otherwise `Skipped`. So an
+///   END never opens a connection after a session reset, and never lands on a connection on which
+///   the app has not seen this stream's BEGIN.
+#[cfg(feature = "voice-tag-v2")]
+fn forward_to_sink_with(
+    sink: &Sink,
+    port: u16,
+    vw: &mut VoiceWriter,
+    begin: &dyn Fn(u32) -> Vec<u8>,
+    frame: &[u8],
+    connect: bool,
+) -> V2Write {
+    let deadline = Instant::now() + SINK_BUSY_WAIT;
+    let (sock, epoch, gen) = {
+        let mut g = crate::plock(&sink.slot);
+        loop {
+            if let Some(s) = g.sock.take() {
+                g.busy = true;
+                break (Some(s), g.epoch, g.conn_gen);
+            }
+            if !g.busy {
+                if !connect {
+                    return V2Write::Skipped;
+                }
+                g.busy = true;
+                break (None, g.epoch, g.conn_gen);
+            }
+            let Some(rest) = deadline.checked_duration_since(Instant::now()) else {
+                eprintln!("[audio] sink :{port} held by a sibling stream past the wait — dropping voice frame");
+                sink.busy.notify_one();
+                if connect {
+                    vw.last_failed = true;
+                    return V2Write::Failed;
+                }
+                return V2Write::Skipped;
+            };
+            g = match sink.busy.wait_timeout(g, rest) {
+                Ok((g, _)) => g,
+                Err(e) => e.into_inner().0,
+            };
+        }
+    };
+    let (mut sock, gen) = match sock {
+        Some(s) => (s, gen),
+        None => {
+            let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+            match TcpStream::connect_timeout(&addr, Duration::from_secs(2)) {
+                Ok(s) => {
+                    let _ = s.set_write_timeout(Some(Duration::from_secs(2)));
+                    let gen = {
+                        let mut g = crate::plock(&sink.slot);
+                        g.conn_gen = g.conn_gen.wrapping_add(1);
+                        g.conn_gen
+                    };
+                    (s, gen)
+                }
+                Err(e) => {
+                    eprintln!("[audio] connect carlink :{port} failed: {e}");
+                    sink.release(None, epoch);
+                    vw.last_failed = true;
+                    return V2Write::Failed;
+                }
+            }
+        }
+    };
+    let on = (epoch, gen);
+    if !connect && (vw.last_failed || vw.begin_on != Some(on)) {
+        sink.release(Some(sock), epoch);
+        return V2Write::Skipped;
+    }
+    let need_begin = connect && (vw.last_failed || vw.begin_on != Some(on));
+    let mut buf: Vec<u8>;
+    let bytes: &[u8] = if need_begin {
+        buf = begin(vw.begin_seq);
+        vw.begin_seq = vw.begin_seq.wrapping_add(1);
+        buf.extend_from_slice(frame);
+        &buf
+    } else {
+        frame
+    };
+    let ok = sock.write_all(bytes).is_ok();
+    sink.release(if ok { Some(sock) } else { None }, epoch);
+    if ok {
+        if need_begin {
+            vw.begin_on = Some(on);
+        }
+        vw.last_failed = false;
+        V2Write::Written
+    } else {
+        vw.last_failed = true;
+        V2Write::Failed
+    }
+}
+
+/// Test-only door for `tests/voice_seam.rs` (plan v5.8 V1a: serialized; per-test Sink; ephemeral
+/// ports). Not used by production code; exists only with voice-tag-v2.
+#[cfg(feature = "voice-tag-v2")]
+#[doc(hidden)]
+pub mod voice_seam_test {
+    use super::*;
+
+    /// A Sink owned by one test, leaked so the stream thread can hold it for `'static`.
+    pub struct TestSink(Sink);
+
+    impl TestSink {
+        pub fn leak() -> &'static TestSink {
+            Box::leak(Box::new(TestSink(Sink::new())))
+        }
+        /// The session-reset half that touches sinks: `clear_sinks` over this one.
+        pub fn clear(&self) {
+            clear_sink_set(&[&self.0]);
+        }
+        pub fn conn_gen(&self) -> u64 {
+            crate::plock(&self.0.slot).conn_gen
+        }
+    }
+
+    /// `spawn_audio` exactly as SETUP calls it, on `sink` / `port`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn(
+        sock: UdpSocket,
+        shared: [u8; 32],
+        scid: u64,
+        stream_type: i64,
+        codec: AudioCodec,
+        is_media: bool,
+        atype: u8,
+        sr: u32,
+        ch: u16,
+        alive: Arc<AtomicBool>,
+        cause: Arc<AtomicU8>,
+        audio_latency_ms: i32,
+        sink: &'static TestSink,
+        port: u16,
+    ) {
+        spawn_audio(
+            sock,
+            shared,
+            scid,
+            stream_type,
+            codec,
+            is_media,
+            atype,
+            sr,
+            ch,
+            alive,
+            Arc::new(AtomicU64::new(0)),
+            VoiceV2Args { sink: &sink.0, port, audio_latency_ms, input: false, cause },
+        );
+    }
+
+    /// End a stream the way the session does: cause first (Release), then the flag.
+    pub fn end_stream(cause_cell: &AtomicU8, alive: &AtomicBool, cause: u8) {
+        cause_cell.store(cause, Ordering::Release);
+        alive.store(false, Ordering::Release);
+    }
+
+    pub fn clock_us() -> u64 {
+        voice_clock_us()
+    }
 }
 
 /// Audio data plane: receive RTP on the stream's dataPort, decrypt, and forward AAC to carlink — 102
@@ -2865,6 +3229,7 @@ fn spawn_audio(
     ch: u16,
     alive: Arc<AtomicBool>,
     activity: Arc<AtomicU64>,
+    #[cfg(feature = "voice-tag-v2")] v2: VoiceV2Args,
 ) {
     thread::spawn(move || {
         sock.set_read_timeout(Some(SHUTDOWN_POLL)).ok();
@@ -2884,15 +3249,71 @@ fn spawn_audio(
         // nav prompts, Siri speech and two-way calls were all working on his hardware. A stale
         // comment in a hot path is not cosmetic; it is the seed of a stale doc.
         let fwd_enc = crate::levers::fwd_enc(); // safe default: forward-encrypted unless OCBM_FWD_ENC explicitly =0/false/off/empty
+        // Plan v5.8 V1a. Voice streams only, on the on-box decode path the app runs (OCBM_FWD_ENC=0):
+        // media (:9002) stays byte-identical, and the forward-encrypted seam framing is a different
+        // wire whose consumer (ocbmd/host) knows nothing of v2.
+        #[cfg(feature = "voice-tag-v2")]
+        let voice_v2 = !is_media && !fwd_enc;
+        #[cfg(feature = "voice-tag-v2")]
+        if voice_v2 {
+            sock.set_read_timeout(Some(VOICE_V2_POLL)).ok();
+        }
         // Route to the PERSISTENT per-sink connection (shared across all stream SETUPs), not a fresh
         // per-stream socket — see MEDIA_SINK/VOICE_SINK. Route by audioType (media → :9002) not stream
         // type: wired media is stream type 100 (PCM), NOT 102.
+        #[cfg(feature = "voice-tag-v2")]
+        let (sink, port, label): (&Sink, u16, &str) =
+            (v2.sink, v2.port, if is_media { "media" } else { "voice" });
+        #[cfg(not(feature = "voice-tag-v2"))]
         let (sink, port, label): (&Sink, u16, &str) = if is_media {
             (&MEDIA_SINK, 9002, "media")
         } else {
             (&VOICE_SINK, 9003, "voice")
         };
         eprintln!("[audio] stream {stream_type} {codec:?} → {label} :{port} ({sr}Hz {ch}ch)");
+        // Plan v5.8 V1a: BEGIN on entry, before the first recv — so the app learns of the stream at
+        // SETUP, not at its first AU. Re-sent (begin_seq + 1) ahead of the next AU whenever the
+        // connection changed or a write failed; see `forward_to_sink_with`.
+        #[cfg(feature = "voice-tag-v2")]
+        let codec_code: u8 = match codec {
+            AudioCodec::Pcm => 0,
+            AudioCodec::AacLc => 1,
+            AudioCodec::AacEld => 2,
+            AudioCodec::Opus => 3,
+        };
+        #[cfg(feature = "voice-tag-v2")]
+        let begin_frame = |seq: u32| {
+            voice_begin_v2(
+                voice_clock_us(),
+                scid,
+                stream_type as u8,
+                atype,
+                codec_code,
+                sr,
+                ch,
+                v2.audio_latency_ms,
+                v2.input,
+                seq,
+            )
+        };
+        #[cfg(feature = "voice-tag-v2")]
+        let mut vw = VoiceWriter::default();
+        #[cfg(feature = "voice-tag-v2")]
+        let (mut rx_us, mut last_rx_us, mut max_ia_us, mut seq_gaps): (u64, u64, u64, u64) = (0, 0, 0, 0);
+        #[cfg(feature = "voice-tag-v2")]
+        let (mut rtp_seq, mut rtp_ts, mut last_seq): (u16, u32, Option<u16>) = (0, 0, None);
+        #[cfg(feature = "voice-tag-v2")]
+        let mut sock_err = false;
+        #[cfg(feature = "voice-tag-v2")]
+        if voice_v2 {
+            let r = forward_to_sink_with(sink, port, &mut vw, &begin_frame, &[], true);
+            eprintln!(
+                "[voice-v2] stream {stream_type} scid={scid} BEGIN {} at voice_clock_us={} (audioLatencyMs={})",
+                if r == V2Write::Written { "written" } else { "NOT written (re-sent with the first AU)" },
+                voice_clock_us(),
+                v2.audio_latency_ms
+            );
+        }
         let mut buf = [0u8; 4096];
         let mut frames: u64 = 0;
         let mut drops: u64 = 0;
@@ -2910,8 +3331,41 @@ fn spawn_audio(
                     }
                     break; // session torn down
                 }
+                #[cfg(not(feature = "voice-tag-v2"))]
                 Err(_) => break,
+                #[cfg(feature = "voice-tag-v2")]
+                Err(_) => {
+                    sock_err = true;
+                    break;
+                }
             };
+            // Plan v5.8 V1a: the flag on EVERY packet, not only in the timeout branch, so a
+            // TEARDOWN on a stream still receiving ends it at the next packet (≤ one packet late).
+            #[cfg(feature = "voice-tag-v2")]
+            if voice_v2 {
+                if !alive.load(Ordering::Acquire) {
+                    break;
+                }
+                rx_us = voice_clock_us();
+                if last_rx_us != 0 {
+                    max_ia_us = max_ia_us.max(rx_us.saturating_sub(last_rx_us));
+                }
+                last_rx_us = rx_us;
+                if n >= 12 {
+                    rtp_seq = u16::from_be_bytes([buf[2], buf[3]]);
+                    rtp_ts = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
+                    match last_seq {
+                        Some(prev) => {
+                            let d = rtp_seq.wrapping_sub(prev);
+                            if (1..0x8000).contains(&d) {
+                                seq_gaps += u64::from(d - 1);
+                                last_seq = Some(rtp_seq);
+                            }
+                        }
+                        None => last_seq = Some(rtp_seq),
+                    }
+                }
+            }
             if n < MIN_AUDIO_PACKET {
                 continue;
             }
@@ -3021,6 +3475,10 @@ fn spawn_audio(
                 // sink plays it raw). Voice :9003 carries MIXED formats (telephony/Siri 16k mono,
                 // alert/nav 48k stereo) over ONE persistent socket, so each AU is rate/ch-tagged.
                 AudioCodec::Pcm if is_media => au,
+                // Plan v5.8 V1a: every voice AU — ELD, PCM, Opus, and non-media AAC-LC (which v1
+                // sent as raw ADTS with no tag) — gets the v2 tag.
+                #[cfg(feature = "voice-tag-v2")]
+                _ if voice_v2 => tag_voice_v2(&au, sr, ch, atype, scid, rx_us, rtp_seq, rtp_ts, stream_type as u8),
                 AudioCodec::Pcm => tag_voice(&au, sr, ch, atype),
                 AudioCodec::AacLc => match adts_from_aac_lc(&au, sr, ch as u8) {
                     Some(f) => f,
@@ -3032,6 +3490,18 @@ fn spawn_audio(
                 // forwarded whole and this on-box path isn't taken.)
                 AudioCodec::Opus => tag_voice(&au, sr, ch, atype),
             };
+            #[cfg(feature = "voice-tag-v2")]
+            if voice_v2 {
+                if forward_to_sink_with(sink, port, &mut vw, &begin_frame, &framed, true) != V2Write::Written {
+                    drops += 1;
+                    continue;
+                }
+                frames += 1;
+                if frames == 1 {
+                    eprintln!("[audio] stream {stream_type}: first AU forwarded ({au_len} B)");
+                }
+                continue;
+            }
             // Persistent sink: a write failure means carlink is momentarily down — drop this AU and
             // let the sink reconnect on the next one. Do NOT break (the sink is shared across re-SETUPs).
             if !forward_to_sink(sink, port, &framed) {
@@ -3045,6 +3515,33 @@ fn spawn_audio(
             // No per-frame/per-100 running log (churn): the session-boundary total below is enough.
         }
         eprintln!("[audio] stream {stream_type} ended after {frames} frames ({drops} drops)");
+        // Plan v5.8 V1a: END, in no-connect mode, on the connection that carried this stream's BEGIN
+        // only (never after a clear_sinks, never an END-only connection). Otherwise skipped, and the
+        // app's reconnect rule covers the stream.
+        #[cfg(feature = "voice-tag-v2")]
+        if voice_v2 {
+            let reason = if sock_err { END_SOCKET_ERROR } else { v2.cause.load(Ordering::Acquire) };
+            let to_u32 = |v: u64| v.min(u64::from(u32::MAX)) as u32;
+            let end = voice_end_v2(
+                sr,
+                ch,
+                voice_clock_us(),
+                scid,
+                reason,
+                to_u32(frames),
+                to_u32(drops),
+                to_u32(seq_gaps),
+                to_u32(max_ia_us / 1000),
+            );
+            let r = forward_to_sink_with(sink, port, &mut vw, &begin_frame, &end, false);
+            eprintln!(
+                "[voice-v2] stream {stream_type} scid={scid} END reason={reason} frames={frames} drops={drops} \
+                 seq_gaps={seq_gaps} max_ia_ms={} {} at voice_clock_us={}",
+                max_ia_us / 1000,
+                if r == V2Write::Written { "written" } else { "SKIPPED (no connection that carried this BEGIN)" },
+                voice_clock_us()
+            );
+        }
     });
 }
 
@@ -3260,5 +3757,112 @@ mod tests {
         crate::plock(&sink.slot).busy = true;
         sink.release(None, 1);
         assert!(!crate::plock(&sink.slot).busy);
+    }
+
+    /// Plan v5.8 V1a (review round 1): the SESSION side of the END cause — SETUP registers a cause cell
+    /// per voice stream (`voice_cause(ty)` in the audio SETUP arm), and each way the session stops a
+    /// stream stores its reason BEFORE clearing the flag: a re-SETUP of the type → superseded, a
+    /// partial TEARDOWN → teardown, reset() → session reset.
+    #[cfg(feature = "voice-tag-v2")]
+    #[test]
+    fn end_causes_are_stored_by_supersede_partial_teardown_and_reset() {
+        use std::sync::atomic::AtomicU8;
+        fn audio_setup(scid: i64, ty: i64) -> Vec<u8> {
+            let mut st = Dictionary::new();
+            st.insert("type".into(), Value::Integer(ty.into()));
+            st.insert("streamConnectionID".into(), Value::Integer(scid.into()));
+            st.insert("audioFormat".into(), Value::Integer(((1u64 << 26) as i64).into())); // AAC-ELD 16k mono
+            st.insert("audioType".into(), Value::String("telephony".into()));
+            st.insert("audioLatencyMs".into(), Value::Integer(80i64.into()));
+            let mut req = Dictionary::new();
+            req.insert("streams".into(), Value::Array(vec![Value::Dictionary(st)]));
+            let mut buf = Vec::new();
+            Value::Dictionary(req).to_writer_binary(&mut buf).unwrap();
+            buf
+        }
+        fn cause_of(s: &AvSession, ty: i64) -> Arc<AtomicU8> {
+            crate::plock(&s.voice_causes).get(&(ty, String::new())).cloned().expect("SETUP registered a cause cell")
+        }
+        fn flag_of(s: &AvSession, ty: i64) -> Arc<AtomicBool> {
+            crate::plock(&s.av_streams).get(&(ty, String::new())).cloned().expect("SETUP registered a flag")
+        }
+        let mut s = AvSession::new();
+        s.on_paired([7u8; 32]);
+        s.setup(&audio_setup(11, 100)).unwrap();
+        let (c1, f1) = (cause_of(&s, 100), flag_of(&s, 100));
+        assert_eq!(c1.load(Ordering::Acquire), crate::forward::END_UNKNOWN);
+        // A re-SETUP of type 100 supersedes the first stream.
+        s.setup(&audio_setup(12, 100)).unwrap();
+        let (c2, f2) = (cause_of(&s, 100), flag_of(&s, 100));
+        assert!(!Arc::ptr_eq(&c1, &c2), "a fresh cell per stream");
+        assert!(!f1.load(Ordering::Acquire));
+        assert_eq!(c1.load(Ordering::Acquire), END_SUPERSEDED);
+        // Partial TEARDOWN of type 100.
+        let mut t = Dictionary::new();
+        t.insert("type".into(), Value::Integer(100i64.into()));
+        let mut req = Dictionary::new();
+        req.insert("streams".into(), Value::Array(vec![Value::Dictionary(t)]));
+        let mut buf = Vec::new();
+        Value::Dictionary(req).to_writer_binary(&mut buf).unwrap();
+        s.teardown(&buf);
+        assert!(!f2.load(Ordering::Acquire));
+        assert_eq!(c2.load(Ordering::Acquire), END_TEARDOWN);
+        // A third stream, then a full reset.
+        s.setup(&audio_setup(13, 101)).unwrap();
+        let (c3, f3) = (cause_of(&s, 101), flag_of(&s, 101));
+        s.reset();
+        assert!(!f3.load(Ordering::Acquire));
+        assert_eq!(c3.load(Ordering::Acquire), END_SESSION_RESET);
+        assert!(crate::plock(&s.voice_causes).is_empty());
+    }
+
+    /// Plan v5.8 V1a: a voice frame dropped on the busy wait loses its BEGIN with it, and the next
+    /// write re-sends BEGIN (begin_seq + 1) together with the frame, on one connection.
+    #[cfg(feature = "voice-tag-v2")]
+    #[test]
+    fn busy_wait_drop_loses_begin_and_au_together_then_resends_both() {
+        use std::io::Read as _;
+        let l = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = l.local_addr().unwrap().port();
+        let sink = Sink::new();
+        let mut vw = VoiceWriter::default();
+        let begin = |seq: u32| vec![0xB0, seq as u8];
+        // A sibling holds the slot past SINK_BUSY_WAIT: the BEGIN+AU write is dropped whole.
+        crate::plock(&sink.slot).busy = true;
+        let t = Instant::now();
+        assert_eq!(forward_to_sink_with(&sink, port, &mut vw, &begin, &[0xA1], true), V2Write::Failed);
+        assert!(t.elapsed() >= SINK_BUSY_WAIT);
+        assert!(vw.last_failed && vw.begin_on.is_none());
+        assert_eq!(vw.begin_seq, 0, "nothing was sent, so no BEGIN was used up");
+        // The sibling returns; the next AU carries BEGIN (seq 0) + AU, contiguous.
+        crate::plock(&sink.slot).busy = false;
+        assert_eq!(forward_to_sink_with(&sink, port, &mut vw, &begin, &[0xA2], true), V2Write::Written);
+        let (mut c, _) = l.accept().unwrap();
+        let mut got = [0u8; 3];
+        c.read_exact(&mut got).unwrap();
+        assert_eq!(got, [0xB0, 0, 0xA2]);
+        // Same connection, last write fine: no BEGIN.
+        assert_eq!(forward_to_sink_with(&sink, port, &mut vw, &begin, &[0xA3], true), V2Write::Written);
+        let mut one = [0u8; 1];
+        c.read_exact(&mut one).unwrap();
+        assert_eq!(one, [0xA3]);
+        // A failed write (here: a sibling busy past the wait) forces a re-send even on the same
+        // connection, and the re-send counts: begin_seq 1.
+        crate::plock(&sink.slot).busy = true;
+        let sock = crate::plock(&sink.slot).sock.take();
+        assert_eq!(forward_to_sink_with(&sink, port, &mut vw, &begin, &[0xA4], true), V2Write::Failed);
+        {
+            let mut g = crate::plock(&sink.slot);
+            g.sock = sock;
+            g.busy = false;
+        }
+        assert_eq!(forward_to_sink_with(&sink, port, &mut vw, &begin, &[0xA5], true), V2Write::Written);
+        c.read_exact(&mut got).unwrap();
+        assert_eq!(got, [0xB0, 1, 0xA5]);
+        // END (no-connect) after a clear: skipped, and no connection is opened for it.
+        clear_sink_set(&[&sink]);
+        assert_eq!(forward_to_sink_with(&sink, port, &mut vw, &begin, &[0xEE], false), V2Write::Skipped);
+        l.set_nonblocking(true).unwrap();
+        assert!(l.accept().is_err(), "END must never connect");
     }
 }

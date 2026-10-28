@@ -13,7 +13,8 @@ path = "src/main.rs"
 portable-atomic = "1"
 # receiver_core crates: reuse the proven ControlServer (pair-setup/verify + /info) and the pairing
 # crypto, but back MFi with the LOCAL i2c chip (LocalMfiSigner) instead of the remote NCM auth service.
-# receiver is built default-features=false + features=["mic-uplink-eld"]: BOTH mic-uplink legs are ON —
+# receiver is built default-features=false + features=["mic-uplink", "local-mfi"] (below), and this
+# crate's own default feature `mic-uplink-eld` adds `receiver/mic-uplink-eld`: BOTH mic-uplink legs are ON —
 # the wired PCM uplink AND the wireless AAC-ELD encoder (mic-uplink-eld → eld-codec → libfdk-aac,
 # statically linked into the binary). Cost: ~1.65 MB unpacked / ~840 KB packed vs the ~230 KB sibling
 # daemons, and building needs FDK_AAC_PREFIX pointing at a cross-compiled fdk-aac prefix (one lives at

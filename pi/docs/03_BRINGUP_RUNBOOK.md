@@ -14,7 +14,7 @@ after a power cycle. Making it survive a reboot is the top item in §5.
 | | Where | Why |
 |---|---|---|
 | The **CCPA is attached over USB-NCM** and reachable at `192.168.50.2:7789` | `mfid` on the CCPA | The Pi has no MFi coprocessor. Every cert/sign goes here. No MFi, no session. |
-| `hostapd` running on 5 GHz | `/data/local/tmp/hostapd_5g.conf` | The framework SoftAP path is blocked by the Wi-Fi HAL (`pi/docs/02`). |
+| `hostapd` running on 5 GHz | `/data/local/tmp/hostapd_5g.conf` | The framework SoftAP path is blocked by the Wi-Fi HAL (`pi/docs/04`). |
 | `apdhcpd` on `wlan0` | `pi/apdhcpd` | Android's bundled dnsmasq is a 2009 vestige that silently disables itself. |
 | Android's Bluetooth stack **off** | `settings put global bluetooth_on 0` | `btd` owns `hci0` directly; two owners fail confusingly. |
 | The **projection app installed** | `pi/tools/install_projection_app.sh` | It generates the config and is the only consumer of the A/V seams. |
@@ -78,7 +78,7 @@ adb shell 'ss -ltn | grep -E "9001|9002|9003|9004"'
   build with duplicate-class and invalid-resource-name errors. 416 of them appeared in one session.
   Delete with `find . -name "* [0-9].*" -not -path "./.git/*"` — verify none are tracked first.
 * **USB audio on this board cannot carry 24-bit stereo 48 kHz.** A full-speed device drops ~10
-  events/second in both directions. Prefer HDMI, or fix the altset selection (`pi/docs/02`).
+  events/second in both directions. Prefer HDMI, or fix the altset selection (`pi/docs/04`).
 * **The Pi 4 has no built-in microphone.** Removing the only USB audio device removes the only
   capture PCM.
 * **`android.app.Service` has a hidden final `setForeground(boolean)`** — overriding it compiles and
@@ -99,13 +99,13 @@ adb shell 'ss -ltn | grep -E "9001|9002|9003|9004"'
    rules; getting them wrong costs the whole session, not the feature.
 5. **The volume-group question.** AAOS car audio runs in **legacy mode** on this image
    (`Run in legacy mode? true`), so there are no volume groups at all. That is the likely cause of
-   the "volume jerks and resets" behaviour and it is an image fix — see `pi/docs/02`.
+   the "volume jerks and resets" behaviour and it is an image fix — see `pi/docs/04`.
 6. **Wired CarPlay** — out of scope by decision (OTG/UDC role toggling on the port carrying adb).
 7. **Android Auto** — licensing-gated, not engineering-gated. There is no public head-unit SDK.
 
 ## 6. Image-level changes
 
-All in `pi/docs/02_AAOS_IMAGE_CORRECTIONS_2026-08-16.md`, with the earlier round on the (currently
+All in `pi/docs/04_IMAGE_REBUILD_GUIDE.md` (including its "Measured notes"), with the earlier round on the (currently
 unmounted) `/Volumes/stuff/rpi/aaos`. The two with the largest payoff both **delete code this port
 had to write**: `CONFIG_BT_RFCOMM=y` removes `rfcomm_uspace.rs` entirely, and fixing the Wi-Fi
 vendor HAL's `setCountryCode` would let the framework SoftAP work and remove both standalone

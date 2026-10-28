@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Launcher glyph: the USB trident, drawn as an OUTLINE to match the GM HomeScreen's own tiles
+  (Audio, Cameras, Climate, Settings, Wi-Fi Hotspot), which are flat grey wireframe line glyphs with
+  no fill and no background. Colour #919191 is sampled from those glyphs on gminfo37.
+
+  The path is the trident from a USB logo SVG (viewBox 0 0 192.756 192.756; its white background
+  rect is dropped). The group scales it to ~64 of the 72 viewport units, centred, so the glyph is
+  about as tall as the OEM ones (~86 px vs ~80 px, measured on screen). strokeWidth is in PATH
+  units and is multiplied by the group scale: 5.0 * 0.3657 = 1.8 viewport units, about 2 px on screen. The OEM
+  lines are ~3 px, but a 3 px stroke fills in the gap between the two outlines of the trident's stem.
+
+  Deliberately a PLAIN drawable, NOT an <adaptive-icon> (device-proven 2026-10-15). An adaptive icon
+  with a transparent background rendered as a BLACK DISC on the HomeScreen tile:
+  AdaptiveIconDrawable.draw() paints its layer bitmap with drawColor(Color.BLACK) before compositing
+  the layers (API 32 source, line 361), so its background can never be see-through. HomeScreen
+  draws this plain vector as-is: no mask, no tint, no backing shape.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="72"
+    android:viewportHeight="72">
+    <group
+        android:scaleX="0.3657"
+        android:scaleY="0.3657"
+        android:translateX="1.55"
+        android:translateY="0.90">
+        <path
+            android:fillColor="#00000000"
+            android:strokeColor="#FF919191"
+            android:strokeWidth="5.0"
+            android:strokeLineJoin="round"
+            android:strokeLineCap="round"
+            android:pathData="M81.114 37.464l16.415-28.96 16.834 28.751-12.164.077-.174 70.181c.988-.552 2.027-1.09 3.096-1.643 6.932-3.586 15.674-8.11 15.998-28.05h-8.533V53.251h24.568V77.82h-7.611c-.334 25.049-11.627 30.892-20.572 35.519-3.232 1.672-6.012 3.111-6.975 5.68l-.09 36.683a14.503 14.503 0 0 1 10.68 14.02 14.5 14.5 0 0 1-14.533 14.532 14.5 14.5 0 0 1-14.533-14.532 14.504 14.504 0 0 1 9.454-13.628l.057-22.801c-2.873-1.613-5.62-2.704-8.139-3.705-11.142-4.43-18.705-7.441-18.857-33.4a14.381 14.381 0 0 1-10.43-13.869c0-7.946 6.482-14.428 14.428-14.428 7.946 0 14.428 6.482 14.428 14.428 0 6.488-4.21 11.889-10.004 13.74.116 20.396 5.54 22.557 13.528 25.732 1.61.641 3.303 1.312 5.069 2.114l.214-86.517-12.154.076z"/>
+    </group>
+</vector>

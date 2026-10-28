@@ -29,6 +29,7 @@
 //! the lifecycle is exactly what it was — exit, and let `arm_aa` relaunch.
 
 mod appport;
+mod gates;
 mod pump;
 mod wireless;
 
@@ -160,8 +161,9 @@ fn main() {
 /// wireless listener, `arm_aa`'s `pgrep aa-bridge` guard suppresses the relaunch that would
 /// otherwise re-run the wired arm when a phone is plugged in. The conditions are deliberately the
 /// same ones — an app subscribed, an Android phone (and no Apple device) on the bus, Android Auto
-/// enabled, and nobody else owning the box — so a resident bridge selects AA exactly when the
-/// supervisor would have launched one.
+/// explicitly REQUESTED by the pushed config (`cfg::aa_requested`, the shell's `aa_enabled`), and
+/// nobody else owning the box — so a resident bridge selects AA exactly when the supervisor would
+/// have launched one.
 fn wait_for_wired_work() {
     loop {
         thread::sleep(POLL * 4);
@@ -169,7 +171,7 @@ fn wait_for_wired_work() {
             && phone_on_bus()
             && !apple_on_bus()
             && !someone_else_owns()
-            && cfg::aa_enabled()
+            && gates::aa_allows(gates::WIRED_RESIDENT_WAKE)
         {
             return;
         }
@@ -217,8 +219,12 @@ fn run_wired_arm(app: &Arc<AppPort>) -> i32 {
             eprintln!("[aa-bridge {}] another projection ({}) owns the box — standing down, exiting", ts(), flags::owner().as_str());
             return 0; // NOT clear_owner: the flag is someone else's, not ours to clear
         }
-        if !cfg::aa_enabled() {
-            eprintln!("[aa-bridge {}] android_auto:false in the pushed config — exiting", ts());
+        // `aa_withdrawn`, not `!aa_requested`: this process only exists because a launch gate saw an
+        // explicit request (arm_aa / wait_for_wired_work). Inside it, ONLY a document that stops
+        // requesting AA ends things; an ABSENT file is ocbmd restarting or go_idle, and host
+        // departure is host_gone_confirmed's call above, debounced — not this check's.
+        if !gates::aa_allows(gates::WIRED_LOOP_TOP) {
+            eprintln!("[aa-bridge {}] android_auto not requested by the pushed config — exiting", ts());
             release_owner_if_ours();
             return 0;
         }
@@ -262,7 +268,7 @@ fn run_wired_arm(app: &Arc<AppPort>) -> i32 {
         }
         // The AOAP switch takes seconds, which is long enough for the toggle to have flipped since
         // the loop top. Claiming now would announce AA to the app the user just turned it off in.
-        if !cfg::aa_enabled() {
+        if cfg::aa_withdrawn() {
             eprintln!("[aa-bridge {}] android_auto turned off while we prepared — exiting", ts());
             release_owner_if_ours();
             release_accessory(acc);
@@ -334,8 +340,8 @@ fn run_wired_arm(app: &Arc<AppPort>) -> i32 {
                                 eprintln!("[aa-bridge {}] another projection ({}) owns the box — refusing this client", ts(), flags::owner().as_str());
                                 release_accessory(acc2);
                             }
-                            Ok(acc2) if !cfg::aa_enabled() => {
-                                eprintln!("[aa-bridge {}] android_auto:false — refusing this client", ts());
+                            Ok(acc2) if cfg::aa_withdrawn() => {
+                                eprintln!("[aa-bridge {}] android_auto not requested — refusing this client", ts());
                                 release_accessory(acc2);
                             }
                             Ok(acc2) => {
@@ -376,7 +382,7 @@ fn run_wired_arm(app: &Arc<AppPort>) -> i32 {
 fn nap_while_enabled(d: Duration) {
     let deadline = Instant::now() + d;
     while Instant::now() < deadline {
-        if !cfg::aa_enabled() {
+        if !gates::aa_allows(gates::PREPARE_BACKOFF_WAKE) {
             return;
         }
         thread::sleep(POLL.min(deadline.saturating_duration_since(Instant::now())));
@@ -447,8 +453,8 @@ fn accept_while_wanted(
         }
         // The user turned Android Auto off (app push -> ocbmd rewrote the config). `Gone` is the
         // right answer for both callers: it releases the claim, un-switches the phone, and drops to
-        // the loop top, whose own `aa_enabled` check exits the process.
-        if !cfg::aa_enabled() {
+        // the loop top, whose own `aa_withdrawn` check exits the process.
+        if !gates::aa_allows(gates::ANNOUNCE_WAIT) {
             eprintln!("[aa-bridge {}] android_auto turned off while waiting — standing down", ts());
             return Wait::Gone;
         }
@@ -604,13 +610,16 @@ fn serve_session(client: TcpStream, acc: Accessory) -> Result<(), String> {
             }
             // The android_auto lever, mid-session. Every other stand-down in this program guards a
             // point where we might CLAIM the box; this one is the only place that can honour the
-            // toggle while we already hold it. Without it, `aa_enabled` gated nothing but the
+            // toggle while we already hold it. Without it, the lever gated nothing but the
             // supervisor's launch (`arm_aa`), so turning Android Auto off during a live session did
             // NOTHING until the phone was unplugged — the box kept projecting and kept the claim
             // that stands `arm()` down, i.e. the setting silently lied (docs/androidauto/02_ARBITRATION.md F3).
             // Same teardown as a phone departure: shutting the socket unblocks the writer, which
             // releases and resets the accessory; the loop top then exits the process.
-            if !cfg::aa_enabled() {
+            // `aa_withdrawn`: an explicit stop only. A deleted config (ocbmd restart / go_idle
+            // mid-drive) must NOT end the session here — that would be faster than today's
+            // behaviour; host departure is decided by the debounced host-presence checks.
+            if !gates::aa_allows(gates::WIRED_MID_SESSION) {
                 eprintln!("[aa-bridge {}] android_auto turned off mid-session — ending session", ts());
                 alive_w.store(false, Ordering::Relaxed);
                 let _ = tcp_wd.shutdown(Shutdown::Both);

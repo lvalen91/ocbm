@@ -24,9 +24,10 @@
 // separate `wireless_android_auto:` key would alter the pushed YAML, which the drift guard forbids.
 //
 // DEFECT 8. `wifi_ap:` had no UI at all. The model field (`wifiAccessPoint`, Phase 0) is emitted as
-// `wifi_ap: false` ONLY when disabled — the box's `wifi_ap_enabled()` greps for an explicit `false`
-// and treats absent/anything-else as enabled — so the default document stays byte-identical to every
-// pre-2026-09-04 push. The control here just binds the field; the polarity lives in the emitter.
+// `wifi_ap: true|false` on EVERY push since 2026-10-19 (owner decision; until then only `false` was
+// emitted). The box's `wifi_ap_enabled()` still greps for an explicit `false` and treats
+// absent/anything-else as enabled, so older documents keep their meaning. The control here just
+// binds the field; the emission lives in the emitter.
 //
 // DEFECT 7 (this file's half). The Restart / NCM confirmations used to say "any live CarPlay session
 // will drop". An Android Auto session drops too; the wording is now protocol-neutral.
@@ -389,8 +390,8 @@ struct AdapterTab: View {
                 .disabled(!model.wirelessEnabled || !model.pairingNumericComparison)
 
         case .wifiAccessPoint:
-            // Defect 8. Polarity: ON is the default and emits NOTHING; only OFF reaches the wire as
-            // `wifi_ap: false` (emitter, SettingsWindow.swift `yaml`). Do not invert this binding.
+            // Defect 8. Polarity: ON is the default; the emitter writes `wifi_ap: true|false` on every
+            // push (SettingsWindow.swift `yaml`, unconditional since 2026-10-19). Do not invert this binding.
             InfoToggle(title: "Run the box's own Wi-Fi access point", key: "wifiAccessPoint", isOn: $model.wifiAccessPoint)
 
         case .androidAutoProjection:

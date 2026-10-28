@@ -136,7 +136,15 @@ for spec in "${FILES[@]:-}"; do
   base="$(basename "$dest")"
   want="$(md5 -q "$src")"
   say "pushing $(basename "$src") -> $dest ($(wc -c < "$src" | tr -d ' ') bytes)"
-  scp -O -q "$src" "$BOX_SSH:/tmp/.deploy.$base"
+  # `scp -O` (legacy protocol) needs an `scp` binary ON THE BOX. Not every rootfs has one: the
+  # i.MX6UL "Auto Box" (2026-10-19) has no scp in PATH but does have /usr/libexec/sftp-server, which
+  # dropbear serves as the SFTP subsystem — so fall back to SFTP-mode scp there. The md5 check below
+  # verifies either path.
+  if ssh "$BOX_SSH" 'command -v scp >/dev/null 2>&1'; then
+    scp -O -q "$src" "$BOX_SSH:/tmp/.deploy.$base"
+  else
+    scp -q "$src" "$BOX_SSH:/tmp/.deploy.$base"
+  fi
   got="$(ssh "$BOX_SSH" "md5sum /tmp/.deploy.$base 2>/dev/null | cut -d' ' -f1")"
   [ "$got" = "$want" ] || {
     ssh "$BOX_SSH" "rm -f /tmp/.deploy.$base" || true

@@ -64,7 +64,7 @@ echo; echo "##### G. PACKAGES: full + enabled state of key ones (PER USER — se
 sh "android users" "pm list users 2>&1"
 # The 'User N:' lines carry installed= and enabled= per user; the first 'enabled=' hit alone (the old
 # form) came from whichever user dumpsys printed first and said nothing about the other.
-sh "carplay/connection/tether/vending/zeno.gmccpa per-user install+enabled state" "for p in com.gm.hmi.applecarplay com.gm.hmi.connection com.gm.hmi.androidauto com.android.vending com.android.networkstack.tethering.inprocess com.google.android.gms zeno.gmccpa; do echo \"== \$p\"; dumpsys package \$p 2>/dev/null | grep -E '^ *User [0-9]+:' | sed 's/^ *//' | grep . || echo '   MISSING on every user (dumpsys has no User N: line)'; done"
+sh "carplay/connection/tether/vending/gm_ccpa (android.car.usb.handler) per-user install+enabled state" "for p in com.gm.hmi.applecarplay com.gm.hmi.connection com.gm.hmi.androidauto com.android.vending com.android.networkstack.tethering.inprocess com.google.android.gms android.car.usb.handler; do echo \"== \$p\"; dumpsys package \$p 2>/dev/null | grep -E '^ *User [0-9]+:' | sed 's/^ *//' | grep . || echo '   MISSING on every user (dumpsys has no User N: line)'; done"
 sh_users "total package count (installed / disabled)" "pm list packages" "wc -l | sed 's/^ *//;s/$/ installed/'"
 sh_users "disabled package count" "pm list packages -d" "wc -l | sed 's/^ *//;s/$/ disabled/'"
 sh_users "any apple/airplay/projection packages" "pm list packages" "grep -iE 'apple|airplay|projection|cinemo|carlink'"

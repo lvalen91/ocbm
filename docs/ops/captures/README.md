@@ -44,7 +44,7 @@ successful decrypts is cryptographic proof the box→host key handoff + encrypte
 Audio still decodes on the box in this run (the video path is the proof; audio mirrors it next).
 
 Key facts these pin down:
-- The genuine coprocessor returns a 945-byte MFi certificate (standard PKCS#7 DER `30 82 03 ad 06 09 2a 86 48 86 f7 0d 01 07 02 …`) and 128-byte RSA-1024 signatures during normal authentication; the same chip performs both iAP2 auth and AirPlay MFi-SAP. (No key material leaves the chip.)
+- On a CPC200-CCPA the genuine coprocessor returns a 945-byte MFi certificate (standard PKCS#7 DER `30 82 03 ad 06 09 2a 86 48 86 f7 0d 01 07 02 …`) and 128-byte RSA-1024 signatures during normal authentication; the same chip performs both iAP2 auth and AirPlay MFi-SAP. (No key material leaves the chip.) Other boxes carry other MFi generations (the C2Air reads DeviceVersion 0x07, 608 B certificate, 64 B ECDSA); these captures are all from CCPA units.
 - The iPhone's CarPlay control service lives at its **IPv6 link-local** on the phone-facing NCM link;
   the box has no `.local` resolver, so dials must use the resolved address + interface scope.
 - After pair-verify, `airplayd` (running `NoSession`) acks `SETUP` with placeholders — no A/V yet; that
@@ -76,7 +76,6 @@ transfers.
 
 Result: the wired session reached full `STREAMING` with real NowPlaying/RouteGuidance/Maneuver data
 flowing end-to-end, confirming the docs/wireless/00_WIRELESS_CARPLAY.md Phase 1+2 wireless-path fixes are isolated and safe.
-Phase 4 (wireless test with these fixes) and Phase 5 (wireless-Identify changes) remain untested.
 
 ## 2026-07-25 — wireless metadata
 

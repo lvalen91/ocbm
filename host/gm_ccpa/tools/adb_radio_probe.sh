@@ -11,7 +11,7 @@
 # Usage:
 #   ./adb_radio_probe.sh                 # probe the only/attached device
 #   ANDROID_SERIAL=<serial> ./adb_radio_probe.sh
-#   APP=zeno.gmccpa ./adb_radio_probe.sh    # also introspect a sideloaded app's grants
+#   APP=android.car.usb.handler ./adb_radio_probe.sh    # also introspect a sideloaded app's grants
 #   USERS="0 10" ./adb_radio_probe.sh       # which Android users to enumerate packages for
 #
 # Packages are PER ANDROID USER. `pm list packages` with no --user reports the CALLING user, which
@@ -22,10 +22,12 @@
 
 set -u
 ADB="${ADB:-adb}"
-APP="${APP:-zeno.gmccpa}"
+APP="${APP:-android.car.usb.handler}"   # gm_ccpa install package (zeno.gmccpa 2026-09-08..10-15)
 USERS="${USERS:-0 10}"
 STAMP="$(date +%Y%m%d_%H%M%S)"
-OUT="$(cd "$(dirname "$0")" && pwd)/radio_probe_${STAMP}.txt"
+# Output goes to /tmp (override with GM_OUT), never beside the script: a capture written into tools/
+# is an untracked file that makes build_apk.sh stamp the tree -dirty for the next APK.
+OUT="${GM_OUT:-/tmp}/radio_probe_${STAMP}.txt"
 
 # Run an adb shell command, labeled, tee'd. Never aborts the script on failure.
 sh() { echo; echo "----- $1 -----"; shift; $ADB shell "$@" 2>&1; }

@@ -21,8 +21,10 @@ class VehicleConfigYamlTest {
 name: "CarLink GM 2400x960"
 version: 1
 wireless: true
+wifi_ap: true
 hot_handover: false
 pairing: just_works
+android_auto: false
 rightHandDrive: false
 nightMode: false
 displayPanelsConfig:
@@ -111,6 +113,23 @@ metadata:
         assertTrue("document must end with a newline", doc.endsWith("\n"))
         assertFalse("no blank lines — serde tolerates them but the fixture does not", doc.contains("\n\n"))
         assertFalse("no trailing whitespace", doc.lines().any { it != it.trimEnd() })
+    }
+
+    /**
+     * The box reads these two with a raw grep (`session_supervisor.sh` `aa_enabled` / `wifi_ap_enabled`,
+     * `box_common::cfg::aa_requested`). Android Auto is opt-in on the box since 2026-10-19 and this host
+     * has no AA engine, so it must say `false` explicitly; `wifi_ap` is stated rather than left to the
+     * box's absent-means-enabled default.
+     */
+    @Test
+    fun `box levers android_auto and wifi_ap are always explicit`() {
+        val doc = VehicleConfigYaml.render(VehicleConfigSpec())
+        assertTrue(doc.lines().contains("android_auto: false"))
+        assertTrue(doc.lines().contains("wifi_ap: true"))
+        val bridge = VehicleConfigYaml.render(VehicleConfigSpec(wifiAp = false))
+        assertTrue("the BT-only bridge role still emits the key", bridge.lines().contains("wifi_ap: false"))
+        assertEquals(1, doc.lines().count { it.startsWith("android_auto:") })
+        assertEquals(1, doc.lines().count { it.startsWith("wifi_ap:") })
     }
 
     @Test

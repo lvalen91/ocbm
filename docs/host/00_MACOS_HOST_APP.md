@@ -79,10 +79,12 @@ the frame-cap fix lets the recovery keyframes actually land. Together they are t
    to the nil adapter, and the box only advertises a single-touch HID descriptor. **Fix:** 2-point
    `CH_INPUT` sub-frame + box `HIDTouchScreenMulti` descriptor (12-B report). Interim: degrade `scrollWheel`
    to a single-finger drag when `ocbmClient != nil` so map scroll works. (Ties to #20.)
+   **Host side LANDED (checked 2026-10-28):** `CarPlayView` delegates `didMultiTouch` and `didMultiTouchTwo`. The box-side multi-touch descriptor was not re-checked.
 6. **HELLO not gated on HELLO_ACK → boot-race silent death [session, USB].** Confirmed by 3 audits and
    task #34. On a boot race the HELLO is lost, the app SUBSCRIBEs into the void, the 5-error path can't fire
    (timeouts, not errors), and the UI shows a misleading "Waiting for phone…". **Fix:** retransmit HELLO
    until HELLO_ACK with a bounded deadline; gate SUBSCRIBE/heartbeat on it; surface a real "box not ready".
+   **RESOLVED (checked 2026-10-28):** `OCBMClient` retransmits HELLO until HELLO_ACK and gates SUBSCRIBE and the heartbeat on `helloAcked` ("#34 boot-race fix").
 
 ### Tier 2 — config completeness + robustness hardening
 7. **VehicleConfig completeness [config].** Add `enablesUIAppearance`/`enablesMapAppearance` (all templates
@@ -91,6 +93,7 @@ the frame-cap fix lets the recovery keyframes actually land. Together they are t
    (user directive):** iOS accepting the 4K `/info` + SETUP is the ground truth; Apple's simulator templates
    are examples, not the protocol ceiling, so the audit's "lower resolution / experimental" recommendation
    is OVERRULED. The project is optimized *for* clean, stable 4K@60 (see "4K@60 optimization track" below).
+   **Partly LANDED (checked 2026-10-28):** `enablesUIAppearance`/`enablesMapAppearance` and the second view area (`viewAreas`) are in `VehicleConfigModel`. `safeArea` and `hidConfig`/`primaryInput` were not re-checked.
 8. **Derive touch aspect from the decoded frame, not the advertised resolution [window].** Today safe only
    because iOS encodes at the advertised res; decoupling removes a latent touch-misregistration risk.
 9. **Make the 8 s A/V-stall path actionable or honest [session].** It shows "Reconnecting…" but does
@@ -98,6 +101,7 @@ the frame-cap fix lets the recovery keyframes actually land. Together they are t
    bounded STOP→reset→SUBSCRIBE, or relabel the status.
 10. **USB robustness [USB].** Only `ClearPipeStall` on a real `kIOReturnPipeStall` (not on every idle
     timeout); fix the mislabeled "5 consecutive errors" (timeout should reset it) + add retry backoff.
+    **Partly LANDED (checked 2026-10-28):** `USBTransport.swift` deliberately does not clear the pipe stall on a clean no-data timeout. The `consecutiveErrors` reset and retry backoff were not re-checked.
 
 ### Tier 3 — legacy retirement + diagnostics
 11. **Retire the dead legacy stack [legacy].** `AdapterProtocol`, `MessageSerializer`, `MessageParser`,
@@ -105,9 +109,11 @@ the frame-cap fix lets the recovery keyframes actually land. Together they are t
     adapter-only `MessageTypes` members + the dead `adapter?.…` call sites. **Preserve** the shared pieces:
     `USBDeviceID`/`kSupportedDevices`, `DisplayResolution`, the `Data` LE helpers. Keep `IAP2CallStateDecoder`'s
     TLV field maps as reference docs only.
+    **DONE (checked 2026-10-28):** none of these types has a source file; `Protocol/` is deleted. `USBDeviceID`/`kSupportedDevices` stay in `USB/USBDeviceManager.swift`. USB identities in that table: `1314:2d00` OCBM; `1314:1520`/`1521` stock Carlinkit firmware only (the table calls it "legacy"; it is not the NCM identity); a distinct NCM PID `1314:2d10` is decided and the table update is pending; the C2Air's own `1f3a:ace2` is in this macOS table only.
 12. **Rewire diagnostics to OCBM [legacy].** `SessionRecorder` + `ProtocolLogger` record NOTHING in OCBM
     mode (they hang off the skipped legacy framing) — "record a session" captures an empty file. Move their
     hooks to the OCBM raw-read/write path; keep the PIN-masking + throttling.
+    **MOOT (checked 2026-10-28):** the Session Capture feature was removed 2026-07-12; `SessionRecorder` and `ProtocolLogger` no longer exist (`App/SESSION_CAPTURE_FORMAT.md` is a historical record). Live diagnostics are `FileLogger` and `StreamMetrics`.
 13. **Finish disabling the legacy reinit path [session].** The nav-resolution and fullscreen-screen-native
     paths still call `reinitializeAdapterSession`, which can needlessly tear down a live OCBM session; make
     them window-only like the menu paths. (The transport-lost caller is the one legitimate use — keep it.)
@@ -161,8 +167,8 @@ armed 8000 Hz …` at the gate edge and `mic tx=<n> frames rms=<x>` each second,
 thing that distinguishes a live-but-silent uplink from a muted input device. Both lanes appear on the
 `AVmon` line as `tel=<pps>` and `mictx=<pps>`.
 
-#### Wideband (mSBC) on the same lane — 2026-09-04, NOT YET EXERCISED ON HARDWARE
-The lane is codec-tagged now: `SEAM_FORMAT` codec `4` (`OCBM.seamCodecMsbc`, `ocbm-proto::SEAM_CODEC_MSBC`)
+#### Wideband (mSBC) on the same lane — 2026-09-04, device-proven
+Device result 2026-09-04 (`docs/androidauto/01_SESSION_AND_AV.md`, "DEVICE RESULT (wideband)"): the phone negotiated mSBC, the app decoded 134 frames/s, the mic uplink armed at 16 kHz mSBC with 60 B packets accepted, and a 77 s call ran 10,222 frames. The lane is codec-tagged now: `SEAM_FORMAT` codec `4` (`OCBM.seamCodecMsbc`, `ocbm-proto::SEAM_CODEC_MSBC`)
 means the box negotiated HFP **wideband**, and each `SEAM_PKT_PLAIN` then carries one raw transparent-eSCO
 read — 2-byte H2 header + 57-byte mSBC frame + pad, 60 B per 7.5 ms — instead of 20 ms of PCM. macOS ships
 no SBC codec of any kind, so **the app decodes it itself**: `Audio/MSBCCodec.swift` is a from-the-spec mSBC
@@ -210,8 +216,11 @@ renderers consume it:
 - **CarPlay** — `VehicleConfigModel.yaml`, the Apple-schema document pushed to the box at SUBSCRIBE.
   The emitter's TEXT is unchanged and stays in `App/SettingsWindow.swift` under the string anchors
   `tools/regen_app_yaml_fixture.py` extracts; the fixture drift guard in `tests/run_tests.sh` still
-  governs, and no existing configuration emits different bytes (the only new emission is
-  `wifi_ap: false`, and only when the access point is switched off — absent still means enabled).
+  governs, and no existing configuration emits different bytes — with one recorded exception: since
+  2026-10-19 (owner decision) the emitter writes `wifi_ap: true|false` on EVERY push, so every
+  document gained a `wifi_ap:` line and the fixture was regenerated with `wifi_ap: true`. The box
+  still reads an absent `wifi_ap` as enabled. *(Corrected 2026-10-19: this said the only new emission
+  was `wifi_ap: false`, emitted only when the access point is off.)*
 - **Android Auto** — `AACapability(profile:adapter:warn:)` (`AA/AACapability+Profile.swift`), in-process,
   into the protobuf `gal.ServiceDiscoveryResponse`. **Correction (2026-09-04):** until this change the
   AA engine took a six-value snapshot of the CarPlay model (`AACapability.init(config:)`: main
@@ -233,26 +242,18 @@ control → one badge per projection (supported / limited / unsupported) → per
 → badged sub-groups for protocol-exclusive keys → a value note when the current value has one. Protocol
 names appear only in those rows; the save bar and the reboot / NCM alerts are worded neutrally.
 
-**Phase 3 — presentation — is designed but NOT implemented (2026-09-05).** The landed layout above is
-dense: the Vehicle tab rests at ~95–105 form rows because every honesty mechanism (badge row, two
-explanation rows, provenance glyph, value note) costs permanent vertical space. The contract for the
-re-layout is `App/Settings/DESIGN.md` §11: each section becomes collapsible (all collapsed at open),
-protocol-exclusive sub-groups become gate-and-reveal, the three separate explanation surfaces merge
-into one `FieldPopover` opened from either the (i) or a badge. The window stays NON-resizable and
-sizes itself to the current pane, with minimize/maximize dimmed, the title reflecting the visible
-pane and the last pane restored on reopen — Apple's Settings guidance, adopted after an intermediate
-draft proposed a resizable window and the owner reversed it (DESIGN.md §11.8). The pane switcher
-becomes a **window toolbar** using the macOS 27 tabs role (`NSToolbarItemGroup.role = .tabs` /
-SwiftUI `.pickerStyle(.tabs)`, both 27.0-only) — `TabView` and `.tabItem` leave the window. The
-pinned bottom bars carrying a primary action are retired, since current guidance reserves a bottom
-bar for small status information only; **where the Save control lands instead is the one decision
-still open** (DESIGN.md §11.9) — the toolbar is occupied by the pane switcher, so it is not
-automatically the answer. It is
-strictly cosmetic — no binding, no emitted byte, no `FeatureMatrix`/`FieldInfo` string content
-changes — and six live-computed warnings are pinned visible rather than moved behind hover.
-Deployment target is macOS 27 only, so Phase 3 uses no `if #available` guards; Liquid Glass is
-deliberately NOT applied, because Apple reserves it for the control layer and the SDK exposes no
-`Form`/`Section` glass API at all.
+**Phase 3 — presentation — LANDED 2026-09-09** (commit 9c7191a; it was designed on 2026-09-05, contract in
+`App/Settings/DESIGN.md` §11). The Vehicle tab had grown to ~95-105 form rows because every honesty mechanism
+(badge row, two explanation rows, provenance glyph, value note) costs permanent vertical space. What shipped:
+each section is a collapsed-by-default disclosure (`CollapsibleFeatureSection` in `FeatureBadges.swift`), the
+pane switcher is a real `NSToolbar` tabs group built in `SettingsWindowController` (`SettingsWindow.swift`;
+SwiftUI has no bridge for it), the window is non-resizable at width 460 and sizes its height per pane, the
+title reflects the pane, and the last pane is restored. The Save decision was settled 2026-09-08: **auto-save,
+no Save control** (DESIGN.md §11.9, option 3). It is cosmetic only: no binding, no emitted byte and no
+`FeatureMatrix`/`FieldInfo` string changed. Deployment target is macOS 27.0 only, so there are no
+`if #available` guards. Liquid Glass is deliberately not applied: Apple reserves it for the control layer and
+the SDK exposes no `Form`/`Section` glass API. (The status banner at the top of DESIGN.md still reads "NOT
+IMPLEMENTED" and needs the same correction.)
 
 **Provenance lives on `FeatureMatrix`** (`App/Settings/FeatureMatrix.swift`): 22 features × 2
 projections, each with a support level, the vendor's term and key, the effect, and a dated verification
@@ -313,7 +314,9 @@ sane — UserDefaults only for `nightMode`: the pushed YAML has carried neither 
 `rightHandDrive` returns to the pushed YAML**, derived from `driverPosition == right`, because it is a
 CarPlay `/info` boolean after all (R14G17 `AirPlayCommon.h:1103`); the box now parses it and emits
 `/info rightHandDrive` — unverified on a device (docs/carplay/04_CAPABILITIES_AND_CONFIG.md
-§rightHandDrive). Beyond that, nothing new is pushed to the box except `wifi_ap: false`.
+§rightHandDrive). Beyond that, nothing new is pushed to the box except `wifi_ap:`, which is written on
+every push (`true|false`) since 2026-10-19 *(corrected 2026-10-19: was "`wifi_ap: false`", i.e. only
+when off)*.
 
 **Vendor reference files.** Apple's CarPlay Simulator ships `VehicleConfigs/Configs/*.yaml`; Google's
 Desktop Head Unit ships the same kind of thing as `config/*.ini` (see `docs/ops/03_REFERENCE_INDEX.md`
@@ -353,8 +356,8 @@ transport-efficiency + recovery-correctness problem, not a resolution problem. O
 4. **Forward-path efficiency (next).** Cut the `carplayd → :9001 → ocbmd` local-TCP-loopback copies (unix
    socket / splice) so the box sustains 4K@60 bitrate headroom and backpressure rarely engages. The stock
    firmware forwarded 4K@60 with no drops on this hardware — the target is parity.
-5. **HEVC (later, halves bitrate).** Once H.264 4K@60 is clean, HEVC 4K@60 is easier (lower bandwidth); the
-   3 gates (publish hevcInfo, accept hevc at SETUP, decode hvc1) become the follow-on.
+5. **HEVC — DONE** (see Tier 4: full `.hevc` decode path, three gates armed per connection by `enablesHEVC`,
+   app default ON). It halves the bitrate versus H.264.
 
 ### Host decode pipeline — bounded FIFOs, off the main thread (2026-09-03)
 `Video/VideoDecoder.swift` moves each frame across two hand-offs: USB read queue → `decodeQueue`

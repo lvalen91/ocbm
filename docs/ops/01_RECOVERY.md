@@ -2,7 +2,11 @@
 
 > **STATUS:** CURRENT · single owner for this topic. Consolidated 2026-08-31 from pre-consolidation docs 04; the originals are in git history and in the 2026-08-31 backup. Correct this file in place — do not add a sibling.
 
-Getting a bricked or wedged box back, without touching the signed boot stack.
+Getting a bricked or wedged box back, without touching the signed U-Boot. Scope: the CCPA (NXP i.MX6UL/ULL,
+three flash parts: uboot, kernel, rootfs). The CCPA has no FEL and no U-Boot console. A firmware brick is
+permanent unless a SPI programmer is used (untested here) or a kernel-initramfs recovery boot is present
+(Tier 1b below). The C2Air is a different box (Allwinner V821): a button held at power-on enters FEL and the
+whole SPI NOR is rewritable over USB, so risky C2Air work has a recovery path the CCPA lacks (c2air/README.md).
 
 ## Recovery procedures
 
@@ -12,7 +16,8 @@ Getting a bricked or wedged box back, without touching the signed boot stack.
 
 | Tier | Channel | Survives | Needs |
 |---|---|---|---|
-| 1 | **SPI programmer** (hardware) | any state (brick-proof) | physical flash access |
+| 1 | **SPI programmer** (hardware) | any state (untested: no programmer restore has been run) | physical flash access |
+| 1b | **Baseline recovery boot** (kernel + built-in initramfs, `baseline/`) | a bad rootfs; a failed write with power still on | the baseline kernel installed and bootable; NOT available on a stock-firmware unit |
 | 2 | **UART console** (`ttymxc0`, TX1/RX1 pads) | dead userspace, wedged gadget, hung projection | kernel alive |
 | 3 | **OCBM `CONSOLE` mode** (this project) | any failure *downstream of the mode branch* — MFi/WiFi/iAP2/receiver | OCBM daemon + accessory gadget alive |
 | 4 | NCM telnet (no login) / NCM SSH (no password) / the same two over the Wi-Fi AP | least | gadget + netdev + DHCP + daemon, or hostapd + radio |
@@ -20,6 +25,21 @@ Getting a bricked or wedged box back, without touching the signed boot stack.
 Each lower tier rescues cases the tiers above it cannot. OCBM `CONSOLE` is *much* more robust than
 NCM/WiFi (it touches the network stack zero times and rides the primary transport) but does **not**
 replace UART (kernel-level) or the programmer (hardware) — it shares fate with the gadget + daemon.
+
+### Baseline recovery boot (Tier 1b)
+
+Source: `baseline/README.md` section 2.2 (Recovery, inside the kernel image) and section 5 (Install flow).
+The mainline kernel carries a recovery initramfs. Ways in: the UART shell (respawned); on NCM 192.168.50.2
+telnet :23 (unauthenticated) and SSH :22 (SSH, SCP, SFTP). USB-stick flashing: `usb-update` mounts the first
+suitable FAT/exFAT partition and, if the stick has `ccpa-baseline/{rootfs.img,kernel-part.img}` plus
+`.sha256`, runs the flash helpers. `flash-rootfs` and `flash-kernel` refuse without a matching sha256; an
+interrupted rootfs write is repairable. `reboot-recovery` from the rootfs works (README section 7.5).
+Limit: recovery cannot repair an interrupted write of its own kernel (power loss between the kernel write and
+the env erase leaves no bootable kernel; a SPI programmer is then needed, README section 2.2). U-Boot is
+never written; only its 64 KB env block is erased. Hardware status: proven on one IW416 unit, 2026-10-20
+(README Status and sections 7.4, 7.5). Update flow: the Carlinkit firmware accepts the update, then a
+recovery-capable boot image (kernel + initramfs) installs the baseline rootfs image (README section 5;
+the detailed flow was not re-read for this edit).
 
 ### OCBM `CONSOLE` mode
 
@@ -35,19 +55,19 @@ Solves the two target scenarios directly:
 - **"Wi-Fi AP won't come online"** — no `hostapd`, no radio.
 
 Rescue tool: **`ocbm-host console`** — there is no separate `ocbm-rescue` binary; that role shipped as
-a subcommand of the one host client (`mode_console`, `host/ocbm-host/src/main.rs:375`), which claims
+a subcommand of the one host client (`mode_console` in `host/ocbm-host/src/main.rs`), which claims
 the accessory interface, sends `MODE_SELECT { CONSOLE }`, and bridges the PTY to your terminal (raw
 mode). It works even if the main host app is broken, and `tools/ocbm_install.sh finalize` relies on it
-for the first-boot dead-man confirm. *(Its log lines still carry the historical `[ocbm-rescue]` tag,
-`main.rs:391`.)* Nice-to-haves for cheap: a `resize` TLV (window size/`TERM`), multiple sessions via a
+for the first-boot dead-man confirm. *(Its log lines still carry the historical `[ocbm-rescue]` tag
+in `mode_console`.)* Nice-to-haves for cheap: a `resize` TLV (window size/`TERM`), multiple sessions via a
 session id in the CONSOLE payload. (Neither exists today; there is no `streamId` field anywhere in
 OCBM — see docs/carplay/01_OCBM_PROTOCOL.md §Self-describing streams.)
 
 #### Access model (matches the stock firmware's existing open-access posture)
 
 The console mode adds no additional authentication because the platform already grants unauthenticated local access (see below). The stock vendor firmware already provides open local access (an SSH/telnet login with no password set, a root serial console, a read-write rootfs, and field-reflashability), so local physical access already implies full control by design. Providing a console over the accessory link therefore does not change the access model — it uses the same physical-USB trust boundary. Real protection
-would require deep encryption that is explicitly out of scope (and the HAB/OTPMK floor sits below
-all of it regardless). `MODE_SELECT` also prevents accidental entry: default is `PROJECTION`; only
+would require deep encryption that is explicitly out of scope (and HAB on U-Boot sits below
+all of it regardless; the kernel is replaceable through U-Boot staging, `baseline/`). `MODE_SELECT` also prevents accidental entry: default is `PROJECTION`; only
 our host requests `CONSOLE`.
 
 ### Install / deploy models
@@ -64,10 +84,13 @@ that closes behind itself.
    iteration. The optional Wi-Fi-AP backstop is the one place a credential exists, and only at the
    link layer: a device-derived WPA2 PSK. The shell behind it is the same open login.
 2. **Flashed `mtd2`** — bake the daemons into a custom jffs2 rootfs image, program it with the SPI
-   programmer. Reproducible image + guaranteed brick recovery. Best for release.
+   programmer. Reproducible image. The SPI programmer is the only recovery from a bad write on a stock-firmware
+   unit and has not been exercised here. Best for release.
 
-The partition layout is fixed by the vendor kernel/U-Boot (`mtd0` 256 K uboot / `mtd1` 3328 K
-kernel / `mtd2` 12800 K rootfs); you control everything inside `mtd2`. See
+On the stock 3.14.52 kernel the partition layout is fixed by the vendor kernel/U-Boot (`mtd0` 256 K uboot /
+`mtd1` 3328 K kernel / `mtd2` 12800 K rootfs); you control everything inside `mtd2`. The baseline's DTS defines
+its own map (`baseline/arm-imx6ul/dts/imx6ull-ccpa-baseline.dts`, `fixed-partitions`; in recovery the env
+is `/dev/mtd1` and the kernel `/dev/mtd2`, `baseline/README.md`), so do not reuse these mtd numbers there. See
 [`../ops/00_BUILD_AND_DEPLOY.md`](../ops/00_BUILD_AND_DEPLOY.md).
 
 #### Persistent FHS install — the layout that ships
@@ -80,7 +103,7 @@ down is still what ships:
 The rootfs is **jffs2 (rw)**, so the open userspace persists across reboots. `tools/install_fhs.sh`
 lays it out FHS-style (not binaries-in-`/script`) and repoints the boot hook:
 
-- **daemons → `/usr/sbin/`** — `ocbmd`, `iap2d`, `carplayd`, `rx-connect`;
+- **daemons → `/usr/sbin/`** — `ocbmd`, `iap2d`, `carplayd` (`tools/install_fhs.sh` loop `for b in ocbmd iap2d carplayd`);
 - **tools → `/usr/bin/`** — `iap_role_switch`;
 - **scripts → `/script/`** — `ocbm_boot.sh` (boot hook, launches ocbmd + `session_supervisor.sh`),
   `session_supervisor.sh` (the lifecycle actor), `projection_up.sh` (IDLE→projection bring-up),
@@ -112,8 +135,8 @@ and [`../carplay/07_PHONE_SIDE.md`](../carplay/07_PHONE_SIDE.md)).
 
 Pads **TX1/RX1** (+ GND) = i.MX6UL UART1 = `ttymxc0`, 3.3 V logic, always-on root serial console (physical-pad access only)
 shell. **115200 8N1** — `/script/early_console.sh` `stty`s `ttymxc0` to 115200 unconditionally inside
-its respawn loop before the login shell, and every host-side tool assumes it (`host/uart_cmd.sh:8`,
-`tools/uart_push.sh:19`). *(**CORRECTED 2026-08-16** — this read "Default **9600 8N1** (a persistent
+its respawn loop before the login shell, and every host-side tool assumes it (`host/uart_cmd.sh`,
+`tools/uart_push.sh`). *(**CORRECTED 2026-08-16** — this read "Default **9600 8N1** (a persistent
 115200 wrapper via inittab is available)". Whatever state that described predates this repo's
 history, which has shipped `early_console.sh` since the 2026-07-25 baseline; there is no 9600 state
 on a converted box.)* U-Boot 2015.04

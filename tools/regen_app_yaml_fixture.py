@@ -66,8 +66,8 @@ final class VehicleConfigModel {
     // which run_tests.sh tolerates for "xcrun swift unavailable") and the guard was silently OFF
     // for a day. check_app_yaml_fixture.py now treats a Swift compile error as FATAL for that reason.
     var pairingInteractiveAnswer = false
-    // `wifi_ap: false` is emitted ONLY when this is false (absent = enabled on the box). Default here
-    // so the fixture stays byte-identical; the OFF branch is a one-line append and is NOT covered.
+    // `wifi_ap: <bool>` is emitted UNCONDITIONALLY since 2026-10-19, so the default document carries
+    // `wifi_ap: true`; the OFF branch is the same line with `false` and is NOT covered here.
     var wifiAccessPoint = true
     var rightHandDrive = false, nightMode = false
     var mainWidth = 1920, mainHeight = 1080, maxFPS = 60

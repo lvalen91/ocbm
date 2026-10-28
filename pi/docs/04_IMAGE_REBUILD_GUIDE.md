@@ -1,8 +1,8 @@
 # What to change in the AAOS tree to improve CarPlay on this Pi
 
-Companion to `pi/docs/02`, which records what was **observed on the device**. This one is organised
-the other way round — by **where the change goes in the AOSP tree** — because that is the order you
-need when you have a build environment in front of you.
+Organised by **where the change goes in the AOSP tree**, because that is the order you need when you
+have a build environment in front of you. What was observed on the device that led here is folded in
+under "Measured notes" near the end (it was a separate dated document before 2026-10-28).
 
 Platform: `RaspberryVanillaAOSP16-20260413-rpi4_car.img`, kernel `6.12.73-g8af794a959ec-v8`,
 Raspberry Pi 4 Model B Rev 1.5. Upstream is the
@@ -203,7 +203,7 @@ None of this is a defect; it is the difference between a demo and a head unit.
   Benign — it is the designed trigger for the fallback **to** `BUFFERQUEUE` (allocatorID 18), a
   surface-backed gralloc pool. Every component that does not override the allocator logs it.
 * **`ro.boot.audio.tinyalsa.simulate_input=true`.** It looks like it should suppress capture and it
-  does not — measured speech at −4 dBFS peak through it. See `pi/docs/02` §1 for the retraction and,
+  does not — measured speech at −4 dBFS peak through it. See "Measured notes" below for the retraction and,
   more usefully, for how the wrong conclusion was reached.
 * **True zero-copy SAND scanout.** The silicon and the DRM/Mesa layers both understand SAND (vc4 KMS
   handles the modifiers, Mesa v3d can import them), but gralloc cannot describe or allocate one and
@@ -220,6 +220,73 @@ cannot express the CarPlay marker UUID**. That is a stack limitation rather than
 as I know — but I have not checked whether Fluoride's configuration can inject a custom EIR, and if
 it can, the raw-HCI layer (`crates/vendor/wireless/src/hci.rs`) could go too. Note this is
 independent of §1.1: even with `CONFIG_BT_RFCOMM=y` we would still need the EIR control.
+
+---
+
+## Measured notes (folded in from the former observation-ordered corrections document, 2026-08-16)
+
+That document was a dated sibling of this guide and was removed (folded here, 2026-10-28). It recorded
+what was observed on the device; items already covered by Tier 1-4 above are not repeated. Platform
+and image as at the top of this file. These changes are `/vendor` build-config and HAL changes: none
+can be made from userspace with root, each needs an image rebuild. The earlier round (UART overlay,
+Wi-Fi country code, SoftAP HAL, `CONFIG_BT_RFCOMM`) is in `/Volumes/stuff/rpi/aaos/docs/os-corrections-2026-08-16.md`.
+
+**Microphone: the "synthesised input" finding was WRONG and is retracted.** The claim was that
+`ro.boot.audio.tinyalsa.simulate_input=true` in `/vendor/build.prop`, only
+`AUDIO_DEVICE_IN_BUILTIN_MIC` in the audio policy and no USB audio HAL meant `AudioRecord` returns
+generated silence. Measured: peak -25.3 dBFS room noise, peak -5.7 / -4.1 / -8.7 dBFS on speech, so a
+real microphone captures at healthy level. The input is the USB EarPods (`/proc/asound/card3/pcm0c/sub0/status`
+`RUNNING`; `dumpsys media.audio_flinger` `Input device: 0x82000000 (AUDIO_DEVICE_IN_USB_HEADSET)`; card 3
+is the only capture-capable PCM, the Pi 4 has no built-in mic), so `simulate_input=true` is set and
+ignored. The reasoning error: properties and policy XML were read correctly but the inference to
+behaviour was never tested, and the first detector (all samples exactly zero) answered "no" and was
+reported as inconclusive instead of as contradicting the hypothesis. Config that looks like it should
+cause a symptom is not evidence that it did. Siri's failure was the ELD encoder emitting AAC-ELD v2 /
+LD-SBR (ASC `f8f0312c00bc00`), which iOS never negotiated (fixed in `536dfb8`); nothing to do with
+capture or this image.
+
+**Box-side defect found alongside (not image).** `uplink::clear()` is called only from full session
+teardown (`session.rs:473`), never on per-stream teardown. iOS creates and destroys a type-100
+`speechRecognition` stream per Siri turn, but the box's `UPLINK` state stays armed: 424 `armed=true`
+lines and 0 `armed=false` over a session with a completed Siri round trip. The mic is held open
+continuously and RTP is sent to a dataPort iOS already closed. The app-side half (capture not released
+on any pump exit path, `stop()` undoable by an in-flight arm) is fixed in `f3ee653`.
+
+**ALSA capture overruns and restarts about every 2 s (not resolved).** `trigger_time` advances every
+1.5-3.5 s with `hw_ptr` resetting (26352 to 912), and `avail`/`avail_max` reach 3000-4800 frames
+against `buffer_size` 480. Capture is lossy; whether this is HAL overrun recovery or a deliberate
+reopen was not determined. Format mono S24_3LE 48000 Hz, period 240, buffer 480. Resolve before
+judging Siri recognition quality.
+
+**HEVC hardware decode is verified, not software.** `c2.ffmpeg.hevc.decoder` drives `rpi-hevc-dec`
+on `/dev/video19` through ffmpeg's V4L2 stateless hwaccel. Evidence: pid 664
+(`android.hardware.media.c2-service-ffmpeg`) holds `/dev/media0`, `/dev/video19` and four
+`anon_inode:request` fds; `/sys/class/video4linux/video19/` reports `DRIVER=rpi-hevc-dec`; libavcodec
+exports `ff_hevc_v4l2request_hwaccel`; `/proc/interrupts` line 36 (`feb00000.codec`) counted 1732 IRQs
+in 30 s against 28 fps, 2.08 per frame (the rpivid two-phase pattern). The cost in section 2.3 was
+re-measured at 33.1% of one core (lifetime 259.9 s CPU over 785.0 s; an earlier 46% was a single
+`top -H` sample). Utime 18.2% / stime 18.7%: half of the cost being userspace is the copy. The only
+properties the HAL reads are `persist.vendor.ffmpeg_codec2.rank[.audio|.video]`, `.v4l2.h264`,
+`.v4l2.h265` and `debug.ffmpeg.loglevel`.
+
+**Not defects.** `CCodecBufferChannel: Query output surface allocator returned 0 params => BAD_INDEX`
+is the designed trigger for the fallback to BUFFERQUEUE (allocatorID 18) and is logged by every
+component that does not override the allocator. The V4L2 codec2 XML carries no HEVC entry on purpose
+(upstream `846ea6f78`; `V4L2Decoder` maps HEVC to the stateful fourcc, `rpi-hevc-dec` is stateless):
+`persist.vendor.ffmpeg_codec2.v4l2.h265=true`, `.h264=false`. Adding an entry would advertise a
+component that fails at creation.
+
+**Confirmed good (do not re-investigate).** The HEVC block is in the base DTB (`scb/codec@7eb10000`,
+`brcm,bcm2711-hevc-dec`), no overlay needed, and the boot partition has no `config.txt`.
+`CONFIG_VIDEO_RPI_HEVC_DEC=y` and `CONFIG_VIDEO_CODEC_BCM2835=y` are built in. `/dev/video19`
+advertises `V4L2_PIX_FMT_HEVC_SLICE` in, `NV12_COL128` / 10-bit `NC30` out, Request API present. CMA
+pool 512 MB with about 323 MB free. `/dev/video12` (`bcm2835-codec-isp`) is an unused hardware
+detile path, a possible alternative to the CPU pass in 2.3.
+
+**USB audio silently takes over output routing.** `persist.vendor.audio.device=hdmi0` is set, but with a
+USB audio device attached the policy prefers it: card 3 (EarPods) plays while card 0 (jack), card 1
+(`vc4hdmi0`) and card 2 (`vc4hdmi1`) sit closed. Correct Android behaviour, but a test that assumes
+HDMI or the jack is hearing the USB device.
 
 ---
 

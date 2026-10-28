@@ -68,8 +68,8 @@ other way are in §2.1 — check there before adding anything to param 7.** Appl
 | Id | Message | Subscribe |
 |---|---|---|
 | 0x5201 | RouteGuidanceUpdate — destination, current road, time/distance remaining, current maneuver index, guidance state | 0x5200 |
-| 0x5202 | RouteGuidanceManeuverInformation — one maneuver: description, road after, distance, exit info | 0x5200 |
-| 0x5204 | LaneGuidanceInformation | 0x5200 |
+| 0x5202 | RouteGuidanceManeuverInformation — one maneuver: description, road after, distance, exit info (**ExitInfo, id 13, only arrives if the 0x5200 subscribe carries selector 3 SupportsExitInfo — sent since 2026-10-19 as an interim test; arrival VERIFIED live 2026-10-19, §5.8**) | 0x5200 |
+| 0x5204 | LaneGuidanceInformation — declared only at tier `extended` and above (`features.rs` `lane_guidance`, `Trigger::RidesOn("route_guidance")`: no `Start*` of its own, it rides the 0x5200 subscribe and is dropped if `route_guidance` is skipped). The claimed 2026-07-29 delivery (`0x5204` ×12 beside `0x5201` ×574, `docs/ops/05_AUDITS.md` §"`0x5204` confirmed via `RidesOn`") is **UNVERIFIED (no archived evidence)** — no file under `docs/ops/captures/` contains it (2026-10-19). **Live-observed 2026-10-19** (tier `extended`, AirPlayTunnel arm, without Identify param 30 sub 8 declared): the box counted 0x5204 messages (9 in one route burst, 16 in another) and the app Lanes card populated; still **UNVERIFIED (no archived evidence)** as raw wire bytes, §5.8 | 0x5200 |
 | 0x10DB | DestinationInformation | 0x10DA |
 
 #### Telephony
@@ -116,31 +116,31 @@ un-strippable, so getting this backwards costs an unrecoverable `0x1D03` (§5.6)
 
 | Payload — param 6, ours to send | Its Start/Stop — param 7, phone sends | Declared today |
 |---|---|---|
-| 0x0D01 RoadObjectDetectionUpdate, Accessory (`spec.rs:580`) | 0x0D00 / 0x0D02, both Device (`spec.rs:579,581`) | no — would also need ident param 33 RoadObjectDetectionComponent |
-| 0xFFFB LocationInformation, Accessory (`spec.rs:712`) | 0xFFFA / 0xFFFC, both Device (`spec.rs:711,713`) | no — would also need ident param 22 LocationInformationComponent. **NOT implemented as a sender** — `crates/vendor/metadata/src/location.rs` has parsers only (`parse_location_information`, `parse_start_location_information`, `merge`); no 0xFFFB builder exists anywhere, and Identify param 22's `build_location_information_component` has zero callers. *(Corrected 2026-08-16 — an earlier version of this row claimed a sender.)* |
-| 0xA101 VehicleStatusUpdate, Accessory (`spec.rs:676`) | 0xA100 / 0xA102, both Device (`spec.rs:675,677`) | no — see the ⚠️ at `message.rs:908` before touching ident param 21 |
-| 0xB102 AccessoryBluetoothLowEnergyUpdate, Accessory (`spec.rs:697`) | 0xB100 / 0xB107, both Device (`spec.rs:695,702`) | no |
+| 0x0D01 RoadObjectDetectionUpdate, Accessory (`spec.rs IAP2_MESSAGES 0x0D01`) | 0x0D00 / 0x0D02, both Device (`spec.rs IAP2_MESSAGES 0x0D00/0x0D02`) | no — would also need ident param 33 RoadObjectDetectionComponent |
+| 0xFFFB LocationInformation, Accessory (`spec.rs IAP2_MESSAGES 0xFFFB`) | 0xFFFA / 0xFFFC, both Device (`spec.rs IAP2_MESSAGES 0xFFFA/0xFFFC`) | no — would also need ident param 22 LocationInformationComponent. **NOT implemented as a sender** — `crates/vendor/metadata/src/location.rs` has parsers only (`parse_location_information`, `parse_start_location_information`, `merge`); no 0xFFFB builder exists anywhere, and Identify param 22's `build_location_information_component` has zero callers. *(Corrected 2026-08-16 — an earlier version of this row claimed a sender.)* |
+| 0xA101 VehicleStatusUpdate, Accessory (`spec.rs IAP2_MESSAGES 0xA101`) | 0xA100 / 0xA102, both Device (`spec.rs IAP2_MESSAGES 0xA100/0xA102`) | no — see the ⚠️ at the SESSION-CRITICAL opt-in identify components comment block in `message.rs` before touching ident param 21 |
+| 0xB102 AccessoryBluetoothLowEnergyUpdate, Accessory (`spec.rs IAP2_MESSAGES 0xB102`) | 0xB100 / 0xB107, both Device (`spec.rs IAP2_MESSAGES 0xB100/0xB107`) | no |
 
 Two ids listed in §2 are genuinely Device-sourced but have **no accessory-sendable subscribe at all**,
 because both halves of their trigger pair are Device-sourced. There is nothing to put in param 6 for
 them; the phone starts them or they do not start.
 
-* **0xB101 DeviceBluetoothLowEnergyUpdate** (`spec.rs:696`) — 0xB100 Start and 0xB107 Stop are both
+* **0xB101 DeviceBluetoothLowEnergyUpdate** (`spec.rs IAP2_MESSAGES 0xB101`) — 0xB100 Start and 0xB107 Stop are both
   `Source::Device`. Declaring 0xB100 in param 6 is a direction error. Our half of this feature is
   0xB102, above.
-* **0x6807 HIDComponentUpdate** (`spec.rs:671`) — not gated by 0x6800 StartHID, which is Accessory
-  (`spec.rs:666`) and gates 0x6801 DeviceHIDReport only. 0x6807's counterpart 0x6806 StartNativeHID is
-  `Source::Device` (`spec.rs:670`).
+* **0x6807 HIDComponentUpdate** (`spec.rs IAP2_MESSAGES 0x6807`) — not gated by 0x6800 StartHID, which is Accessory
+  (`spec.rs IAP2_MESSAGES 0x6800`) and gates 0x6801 DeviceHIDReport only. 0x6807's counterpart 0x6806 StartNativeHID is
+  `Source::Device` (`spec.rs IAP2_MESSAGES 0x6806`).
 
 ⚠️ **`features::Feature` cannot express the inverted shape.** `sent_ids` is the trigger's start/stop and
-`received_ids` is `updates` (`features.rs:649-660`), so a naive
+`received_ids` is `updates` (`features.rs` `sent_ids`/`received_ids`), so a naive
 `Feature { start: 0xFFFA, stop: 0xFFFC, updates: &[0xFFFB] }` declares BOTH backwards. The plan at
 `docs/carplay/04_CAPABILITIES_AND_CONFIG.md` §Mechanism B step (3) contains exactly that error for both 0xFFFA/0xFFFB and 0xA100/0xA101 —
 fix it there before implementing.
 
 Direction is machine-checked for what we actually declare: `declared_message_lists_are_direction_correct`
-(`message.rs:1139`) asserts every param-6 id is `Source::Accessory` and every param-7 id is
-`Source::Device`, and `declared_directions_match_apples_catalog` (`features.rs:677`) does the same for
+(`message.rs`) asserts every param-6 id is `Source::Accessory` and every param-7 id is
+`Source::Device`, and `declared_directions_match_apples_catalog` (`features.rs`) does the same for
 the generated table. **THIS DOCUMENT IS NOT COVERED BY EITHER TEST**, which is why five entries in §2
 were wrong until 2026-08-16. Re-derive from `spec.rs` — which is generated verbatim from Apple's
 `i2mspecarchive` and marked do-not-hand-edit — never from this prose.
@@ -177,10 +177,10 @@ Box log `/tmp/carplayd_wl.log`, wireless session of 2026-07-25, before §5:
 
 | Message | Count | Where it surfaces |
 |---|---|---|
-| 0x5001 NowPlayingUpdate | 692 | Media |
+| 0x5001 NowPlayingUpdate | 692 (**UNVERIFIED (no archived evidence)** — the archived `2026-07-25_SUCCESS_airplayd_wl_handshake.txt` holds only 4) | Media |
 | 0x5201 / 0x5202 RouteGuidance | present | Navigation |
 | session-2 file transfer | 2 | album artwork |
-| **0x4155 CallStateUpdate** | **3** (110, 122, 127 B bodies) | Phone, and Call History on hang-up |
+| **0x4155 CallStateUpdate** | **3** (110, 122, 127 B bodies — **UNVERIFIED (no archived evidence)**; the only archived 0x4155 in that session is one 5 B body, `2026-07-25_SUCCESS_airplayd_wl_handshake.txt:121`) | Phone, and Call History on hang-up |
 | 0x4158 CommunicationsUpdate | 0 | Telephony — empty |
 | 0x4171 ListUpdate | 0 | — |
 
@@ -207,16 +207,23 @@ So four categories arrive, not two. Call state works over the RCS tunnel.
 **Call History is locally derived, not received.** `MetadataWindow.swift` moves `activeCall` into
 `callHistory` when a 0x4155 reports the call disconnected. Those entries are calls this session
 observed. The iPhone's own Recents and Favorites lists — 0x4171 ListUpdate, the `recentCall` and
-`favorite` JSON kinds — have never arrived; across 131 host-app logs there is not one `recentCall`.
+`favorite` JSON kinds — had not arrived as of this pre-§5 measurement; across 131 host-app logs there was
+not one `recentCall` (**UNVERIFIED (no archived evidence)** for the 131-log census).
 The Call History tab is real but shows only what happened while connected.
+*(Corrected 2026-10-19: "never arrived" is stale. Three `0x4171 ListUpdate` frames DID arrive over the
+tunnel at tier `extended` after the Contacts & Favorites consent — §6.6 and
+`docs/ops/captures/2026-07-25_SUCCESS_metadata_declaration_accepted.txt`, plus the byte capture
+`2026-07-29_iphone_0x4171_listupdate.txt`. Whether they surface as `recentCall`/`favorite` kinds in the app
+is not shown by any archived capture; `MetadataWindow.swift` handles those kinds.)*
 
-**Telephony is the genuinely empty tab.** It is fed exclusively by 0x4158 CommunicationsUpdate:
+**Telephony was the genuinely empty tab (pre-§5; one `0x4158` arrived at `extended` on 2026-07-25, two on 2026-08-10 — §4 callout, §6.6).** It is fed exclusively by 0x4158 CommunicationsUpdate:
 carrier, signal strength, registration status, active call count, voicemail count, airplane mode, mute,
 telephony-enabled.
 
 Two distinct reasons for the two gaps:
 
-1. **0x4158 and 0x4171 are undeclared.** Neither appears in Identify param 7 on either transport, so no
+1. **0x4158 and 0x4171 are undeclared** *(at the time of this measurement; both are declared at tier `extended`
+   and above today, §5.3)*. Neither appeared in Identify param 7 on either transport, so no
    subscribe can produce them. A subscribe for an undeclared id is silently ignored — the 2026-07-24
    wired capture shows `TX 0x4157 StartCommunicationsUpdates` and `TX 0x4170 StartListUpdates` going out
    and nothing coming back. Both subscribes were removed on 2026-07-25 in lockstep with the Identify
@@ -229,8 +236,10 @@ The parsing and display sides are not the constraint. `iap2-core::metadata` has 
 `MetadataWindow.swift` handles the `communications`, `recentCall` and `favorite` JSON kinds. The
 pipeline is complete from the wire inwards. Nothing arrives to feed it.
 
-Note on measuring this from the host app's log: it records only records #1–3 and every 50th
-(`if jsonCount <= 3 || jsonCount % 50 == 0`). Kind counts taken from it are a sample, not a census. Use the box log.
+Note on measuring this from the host app's log: it records records #1–3, every 50th, and (added since)
+the first record of each kind (`if firstOfKind || jsonCount <= 3 || jsonCount % 50 == 0`,
+`MetadataWindow.swift`; corrected 2026-10-19, the `firstOfKind` arm was missing). Kind counts taken from
+it are a sample, not a census. Use the box log.
 
 ---
 
@@ -242,15 +251,21 @@ Note on measuring this from the host app's log: it records only records #1–3 a
 sequence are all GENERATED from, on both transports — never hand-edit one of the three independently
 (the generation invariant, §5.6). Each entry names the `Start*` id we send, the `*Update` ids we
 expect, and the field selectors for the subscribe body. Per docs/carplay/04_CAPABILITIES_AND_CONFIG.md, the app's pushed config is the
-single source of truth for WHICH tier/content is selected; the compiled table and the levers of §5.2
-are the interim, box-side mechanism pending migration to app-pushed config.
+source of truth for WHICH TIER (and skip list) is selected — landed 2026-08-10 (§5.2 MIGRATED paragraph). The
+table CONTENT (ids, selectors, which tier each feature belongs to) is compiled and is not app-pushed; the levers
+of §5.2 are the app-less bench path only. *(Corrected 2026-10-19: this paragraph still described the tier
+selection as "interim … pending migration to app-pushed config".)*
 
 They used to be three hand-maintained lists in three files, and they drifted: 0x4157 and 0x4170 were
 being subscribed while 0x4158 and 0x4171 were absent from param 7, so iOS ignored both for the
-project's entire history. `message.rs::ident_info_wired_message_lists_are_byte_pinned` asserts that every expected update is
-declared receivable. It deliberately does NOT assert the sendable half, because the refuted `rx-only`
-mode breaks that direction on purpose — so this is a test assertion covering one direction, not a
-compile-time guarantee covering both.
+project's entire history. `message.rs::ident_info_wired_message_lists_are_byte_pinned` (`message.rs` test)
+byte-pins BOTH wired lists (params 6 and 7) at the proven policy and asserts the full extended-tier id vectors;
+its closing loop asserts only that every expected update is declared receivable (the sendable half of that
+loop is not asserted, because the refuted `rx-only` mode breaks it on purpose). Rule 2/3 below are separately
+tested in `features.rs` (`no_receive_is_declared_without_its_send`,
+`subscribe_tier_never_exceeds_the_declared_send_tier`), and direction by
+`declared_message_lists_are_direction_correct` — a test assertion, not a compile-time guarantee.
+*(Corrected 2026-10-19: the earlier sentence described only the closing loop.)*
 
 Field ids come from Apple's `iap2messages-internal.i2mspecarchive` via `tools/i2mspec_dump.py`, which
 decodes the NSKeyedArchiver graph the Simulator ships. `tools/i2mspec_dump.py --message 0x4158 --text`
@@ -261,9 +276,9 @@ parameter ids; do not hand-derive them.
 
 | Tier | Contents | Default |
 |---|---|---|
-| `Proven` | NowPlaying, RouteGuidance, CallState — the pre-expansion baseline | recovery only |
-| `Extended` | + Communications, ListUpdate, Power, AppDiscovery, LaneGuidance, Destination, device info | device-accepted |
-| `Capability` | + VoiceOver, VoiceOver cursor, AssistiveTouch, MediaLibrary | off |
+| `Proven` | NowPlaying, RouteGuidance, CallState — the pre-expansion baseline | compiled default AND the app's shipped default (`VehicleProfile.swift` `metadataTier` default); the recovery baseline |
+| `Extended` | + Communications, ListUpdate, Power, AppDiscovery, LaneGuidance, Destination, device info | device-accepted on the AirPlayTunnel arm (2026-07-25, re-measured 2026-08-10); **no recorded run on the WIRED Identify** (`message.rs` `ident_info_wired_message_lists_are_byte_pinned`: "The wired A/B has not been run") |
+| `Capability` | + VoiceOver, VoiceOver cursor, AssistiveTouch, MediaLibrary | off — tier `all` **refuted as a whole on the AirPlayTunnel arm** (named `voice_over_cursor` ids, then a generic reject with them skipped; which Capability feature(s) beyond that are refused is not isolated; 2026-08-10, §4 callout; `docs/ops/captures/2026-08-10_TUNNEL_IDENT_REJECT_tier_all_voiceover_cursor.txt`) |
 
 `Capability` is separated because those four declare that the accessory *does* something — renders
 VoiceOver, hosts AssistiveTouch, browses the library — which changes how iOS drives the head unit,
@@ -278,8 +293,8 @@ configurable values are to be retired as the app-pushed config covers tier selec
 defaults to a declaration the device may reject cannot hold a session, and the failure is
 unrecoverable within it.
 
-Levers (interim, box-side — per docs/carplay/04_CAPABILITIES_AND_CONFIG.md tier selection migrates to app-pushed config; until then these
-are how the current build is driven), resolved ONCE per process (not per Identify) and cached —
+Levers (box-side, APP-LESS BENCH ONLY since the 2026-08-10 migration below — with an app connected the pushed tier wins; corrected 2026-10-19,
+this said "until then these are how the current build is driven"), resolved ONCE per process (not per Identify) and cached —
 editing the file mid-run has no effect until the daemon restarts, which matters for the long-lived
 `iap2d`:
 
@@ -295,10 +310,12 @@ reboot** with `echo extended > /tmp/carplay_metadata`.
 
 **MIGRATED 2026-08-10 (docs/carplay/04_CAPABILITIES_AND_CONFIG.md B3) — these levers are now the APP-LESS BENCH PATH ONLY.** Tier
 selection rides the app-pushed `metadata: {tier, skip}` section: the app emits it in every config
-push (shipping `proven`, byte-equivalent to the compiled floor) and each daemon arms it once per
+push (macOS: Settings ▸ Vehicle ▸ Data feeds ▸ Metadata declaration + Skip features, `VehicleTab.swift` Data feeds section,
+emitter `SettingsWindow.swift` `metadataYAML`, pickers offer proven/extended/all only; Android: `tier` only, no skip,
+`VehicleConfigYaml.kt` `metadata:` emit; shipping `proven`, byte-equivalent to the compiled floor) and each daemon arms it once per
 process before its Identify — iap2d at startup and again at SendIdentify, carplayd per control
-connection, via `iap2_core::config::Iap2Config::arm_metadata_policy` →
-`features::arm_pushed_policy` (first-arm-wins, so one link's declaration and its subscribes always
+connection (`iap2d/src/main.rs` at startup and at SendIdentify, `carplayd/src/main.rs` config load), via `iap2_core::config::Iap2Config::arm_metadata_policy` (`config.rs`) →
+`features::arm_pushed_policy` (`features.rs`; first-arm-wins, so one link's declaration and its subscribes always
 come from one snapshot). Precedence is **pushed > env > file > compiled `proven`**, so with an app
 connected the re-arm instruction above has no effect — raise the tier in the app. The app-pushed
 path REFUSES `rx-only` outright, and the app re-pushes on every SUBSCRIBE, which retires the re-arm
@@ -310,6 +327,8 @@ NOT an app reconnect. A differing push against an already-armed process logs
 `pushed metadata tier … IGNORED`. The BT-time Identify is unreachable from the pushed tier at all
 (its params 6/7 are a hardcoded list in `message.rs`). The `skip` list from a pushed config REPLACES the bench lists rather than
 concatenating: app intent must not be silently mixed with stale on-box experiment state.
+
+**gm_ccpa pushes no tier.** The gm_ccpa app runs the receiver in-process (`carplay-jni`) with a static `/info` and `CARPLAY_WIRELESS_METADATA=1`; no `metadata:` section is pushed and no `arm_metadata_policy` call exists under `host/gm_ccpa`, so its tunnel Identify uses the compiled/env/file default (`proven`). **UNVERIFIED** beyond that code search: no run has confirmed the declared tier on that host.
 
 #### 5.3 What the declaration became
 
@@ -325,8 +344,12 @@ param 7  0x5001  0x5201 0x5202  0x4155  0x4158  0x4171  0xAE01  0xAD01 0xAD04
 ```
 
 Every Start is paired with its Stop except `0x4154 StartCallStateUpdates`, whose unpaired form is
-device-accepted and deliberately left alone (§6.3). See §5.6 rule 1. Wired is this unioned with its own floor, which
-additionally carries the call-control cluster (0x415A–0x4161).
+device-accepted and deliberately left alone (§6.3). See §5.6 rule 1. Wired is this unioned with its own floor
+(`SENT_MSG_IDS`/`RCV_MSG_IDS` in `message.rs`, unioned in `build_ident_info`), which additionally carries the
+call-control cluster (0x415A–0x4161) in param 6 and 0x4E0A/0x4E0B/0x4E0E in param 7 — and is NOT affected by `skip=`
+or by the pushed tier. The AirPlayTunnel arm uses the table alone (`message.rs`, `AirPlayTunnel` branch of `build_ident_info`). `0x5204` in param 7 is
+legal only while `0x5200` is in param 6; `active_with_skip` drops `lane_guidance` when `route_guidance` is skipped
+(`features.rs`).
 
 The Bluetooth-time Identify is untouched and must stay that way: docs/wireless/00_WIRELESS_CARPLAY.md recorded iOS
 rejecting params-6/7 growth there twice, breaking the WiFi handoff. Note that those rejects carried
@@ -354,9 +377,13 @@ one-off telephony pane. Unmapped kinds still land in the category's event list, 
 
 #### 5.6 Declaration rules iOS enforces
 
-Learned from the device, not inferred. Rules 1 and 2 are structural in `features.rs` (the `Trigger`
-type makes an unpaired Start unwritable and names rider dependencies); rule 3 is a test assertion;
-rule 4 (consent) is not encoded at all and is not representable as a protocol invariant.
+Learned from the device, not inferred. Rule 1 is structural in `features.rs` (the `Trigger` type makes an
+unpaired Start a deliberate, evidence-carrying `UnpairedStart` — `0x4154` is the only one — and
+`every_start_is_paired_with_apples_own_stop` checks the Stop is Apple's own); rule 2 is enforced by rider
+dependencies (`Trigger::RidesOn`) plus the test `no_receive_is_declared_without_its_send`; rule 3 is a test
+assertion (`subscribe_tier_never_exceeds_the_declared_send_tier`); rule 4 (consent) is not encoded at all and is
+not representable as a protocol invariant. *(Corrected 2026-10-19: earlier text said Rules 1 and 2 are structural
+and an unpaired Start is "unwritable".)*
 
 1. **A `Start*` must be declared with its `Stop*`.** Omitting the Stop returns
    `RequiredInfoMissing` against the Stop id and rejects the whole feature (§6.3). Declaration is a
@@ -371,7 +398,9 @@ rule 4 (consent) is not encoded at all and is not representable as a protocol in
 
 A `0x1D03` is unrecoverable within a session: params 6/7 are in `REQUIRED_IDENT_PARAMS`, so the retry is
 byte-identical, the second reject aborts, and the session is cleared with no auth, no identify and no
-subscribes. Recovery is `CARPLAY_METADATA=proven`, pinned by test to the pre-expansion bytes.
+subscribes. Recovery is `CARPLAY_METADATA=proven` app-less, or `proven` in the app's Metadata declaration picker when an
+app is connected (the pushed tier wins, §5.2), pinned by test (`proven_tier_is_the_device_accepted_baseline`) to the
+pre-expansion ids.
 
 #### 5.7 Not included
 
@@ -381,6 +410,101 @@ project's hardware. Adding it to the tunnel is a separate, deliberate change. Pe
 per-transport sequencing decision (pushed config needs per-transport-arm applicability, docs/carplay/04_CAPABILITIES_AND_CONFIG.md),
 not a permanent box-side scope policy.
 
+#### 5.8 Subscribe selectors and parse coverage for RouteGuidance (added 2026-10-19)
+
+Checked against Apple's catalog (`tools/i2mspec_dump.py --message 0x5200|0x5201|0x5202|0x5204 --text`) and the
+code, because selectors gate whether fields exist at all.
+
+**What we send.** `metadata::start_route_guidance` (`metadata.rs`) builds: id 0 `RouteGuidanceDisplayComponentID`
+= 42 (matches Identify param 30, `message.rs`, param 30 block) + selector 1 `SourceName` + selector 2
+`SourceSupportsRouteGuidance` + selector 3 `SupportsExitInfo` (18 B body). Nothing else.
+
+*(Changed 2026-10-19 — ExitInfo test, RESULT BELOW (verified): selector 3 is now sent UNCONDITIONALLY (`metadata.rs`; body was 14 B
+with selectors 1/2 only, so the tunnel-arm link frame grows 30 B -> 34 B). Motivation: an iPhone-side capture
+showed iOS holding gated 0x5201 ids 21/23 in carkitd's dict while stripping them from the wire, and a 13-maneuver
+0x5202 burst on a highway route carried ids 0..11 only while the iPhone itself displayed "Exit 9". Identify is
+unchanged (0x5200/0x5203 were already declared, `features.rs` `route_guidance`). This is a test/interim placement: per
+docs/carplay/04_CAPABILITIES_AND_CONFIG.md the selector set should become app-pushed config once the result is in.
+Result: see "Verified 2026-10-19" below.)*
+
+**Verified 2026-10-19 (live, tier `extended`, AirPlayTunnel arm via carplayd, highway route; route data deliberately not recorded here).**
+1. *Control:* with selectors 1,2 only (body 14 B, tunnel frame 30 B) a 13-maneuver 0x5202 burst carried param ids 0..11
+   only: no id 12 (LinkedLaneGuidanceInformation), no id 13 (ExitInfo).
+2. *Treatment:* with selector 3 added (body 18 B, frame 34 B; iPhone-side accessoryd log shows the accessory 0x5200 with
+   param ids 0,1,2,3) iOS delivered ExitInfo: the macOS app's "Exit Info (raw)" card showed `exitInfo: Exit 9` on maneuver
+   idx 6 (maneuverType 53 = Change Highway Right) of an 18-maneuver route, in two successive route bursts; the app logged
+   "iAP2 metadata: exitInfo seen on maneuver idx 6"; the box logged 36x 0x5202 and 16x 0x5204. Other maneuvers had none.
+   Conclusion: the gate is real, selector 3 suffices, and the parser path (0x5202 id 13 -> `exitInfo` JSON -> app) works
+   end to end.
+3. *Not proven:* (a) the iPhone-side capture (`idevicesyslog -p accessoryd -p carkitd`) caught 0x5201 frames but dropped the
+   0x5202/0x5204 burst (stream drop), so id 13 was never seen as raw wire bytes *on this OCBM box*; the evidence is the box parser's JSON (only
+   id 13 yields `exitInfo`). *(Follow-up 2026-10-19, second accessory type: on a stock CPC200 with patched ARMiPhoneIAP2 v6
+   the same iPhone-side capture caught the 0x5202 frames: accessory 0x5200 ids [0,1,2,3], a 20-maneuver burst with id 13 on one
+   maneuver, text "Exit 9" decoded from raw wire bytes. Raw hex still not archived. Ledger `R-49-13`; CPC200 `ARMiPhoneIAP2_patches/02_nav_patch.md` §6c.)* The raw-hex lever above was built but left off. (b) One exit, one route, no off-ramp
+   (maneuver type 8/22/23) tested. (c) Whether the NEXT MANEUVER card renders the exit text was not observed. (d) The
+   logs/screenshots hold route data and are NOT archived in `docs/ops/captures/`: **UNVERIFIED (no archived evidence)** as
+   files; a future session should archive a scrubbed raw capture.
+4. *Lane guidance (0x5204):* delivered live at tier `extended` on the tunnel arm without Identify param 30 sub 8 declared
+   (counts above; Lanes card populated). This is live-observed evidence replacing the unarchived 2026-07-29 "x12" claim,
+   but there is still no archived raw capture. On the wire the pre-change 13-maneuver burst had NO id 12 on any maneuver
+   although 5 lane records (0x5204 LaneGuidanceIndex 0..4) arrived: maneuvers are not linked to lane records on the wire.
+   The app's "for maneuver #N" label (`MetadataWindow.swift`, "for maneuver #" label) is built from the 0x5204 record's own `guidanceIndex`
+   (`MetadataWindow.swift`, lane `guidanceIndex` handling, box JSON `guidanceIndex`), i.e. the app's reading of that index as a maneuver number;
+   that mapping is **UNVERIFIED (no archived evidence)**.
+5. *iPhone-side wire evidence works:* accessoryd logs one `LOG; ...; iPod|Acc; ... payload(len=N chk=..)=<hex>` line per
+   iAP2 frame, including mid-route; carkitd logs the pre-wire dictionary keyed by numeric ids. Decoding 25 wire 0x5201
+   frames showed ids 0..20 only while carkitd's dictionary also held id 21 (timezone) and id 23 (charging list), so
+   selectors 4/5 gate ids 21+ the same way (inference; selectors 4/5 NOT yet sent to confirm). This also explains the old
+   "iPhone sends all 21 fields" note: 21 is what iOS sends with selectors 1,2 only.
+6. *Code state:* test build deployed to the box, committed in `bbf3325` (corrected 2026-10-19: this said "uncommitted"); selector 3 unconditional (`metadata.rs`, comment marks it
+   test/interim); selectors 4/5 unsent; app change = Exit Info (raw) card + os_log in `MetadataWindow.swift`. Follow-up not
+   done: make selectors 3/4/5 part of the app-pushed config.
+
+**Raw route-guidance hex lever (added 2026-10-19, bench/logging only, OFF by default).** `touch /tmp/carplay_rg_hex`
+on the box (or spawn the daemon with `CARPLAY_RG_HEX` set) and both receive paths — wireless `receiver::events`
+(`events.rs`, tag `[events]`) and wired `iap2d` (`iap2d/src/main.rs`, tag `[iap2]`) — print every received
+0x5201/0x5202/0x5204 body as `[events] rg-hex 0x5202 (N B) off=0000: <hex>`, 128 B per line, capped at 1024 B per
+message with a `...(+K B truncated)` marker (`iap2_core::metadata::log_route_guidance_hex`, `metadata.rs`).
+The file is checked per route-guidance message, so `rm /tmp/carplay_rg_hex` disarms it without a restart; `/tmp` is
+tmpfs, so a reboot disarms it too. The lines land in the daemon's own log (`/tmp/carplayd_wl.log` wireless,
+`/tmp/carplayd.log` / `/tmp/iap2d.log` wired), which ocbmd tails onto CH_LOG (`ocbmd/src/main.rs` log-source table) into the
+app's box log (`~/Library/Logs/Carlink/box-*.log`). Bodies carry
+road/destination text — arm it only for a capture.
+
+**What Apple's catalog gates behind selectors** (selector 3: sent since 2026-10-19 and verified, above; 4/5 not sent):
+
+| 0x5200 selector | Apple note | Field it unlocks | Parsed by us? |
+|---|---|---|---|
+| 3 `SupportsExitInfo` | "Must be included to receive ExitInfo in RouteGuidanceManeuverInformation" | 0x5202 id 13 `ExitInfo` | yes (`metadata.rs` `route_maneuver`, host `exitInfo`) — requested since 2026-10-19 (interim test); arrival VERIFIED live 2026-10-19 (see above) |
+| 4 `DestinationTimeZoneOffsetMinutes` | "Must be included to receive DestinationTimeZoneOffsetMinutes" | 0x5201 id 21 | yes (`metadata.rs` `route_guidance`) — never requested |
+| 5 `EVChargeInfo` | gates DestinationChargingInfo, ChargingStationInfo, ArrivalBatteryLevel, DepartureBatteryLevel, CompletedTripBatteryLevel | 0x5201 ids 22–26 | only id 24 (`metadata.rs` `route_guidance`) — never requested |
+
+*(Corrected 2026-10-19: the `start_route_guidance` comment in `metadata.rs` already says ExitInfo/timezone/EV are gated by ids 3/4/5; no
+doc stated the consequence. Superseded for selector 3 and 0x5201 ids 21/23: withholding verified live 2026-10-19 (above). The raw-wire
+evidence is not archived, so it is **UNVERIFIED (no archived evidence)** as files; selectors 4/5 withholding was inferred
+from the iPhone-side decode, not tested by sending them.)*
+
+Selectors 1/2 are sent, and the fields they unlock (0x5201 id 19 `SourceName`, id 20 `SourceSupportsRouteGuidance`) are
+NOT decoded by `iap2_core::metadata::route_guidance` (`metadata.rs`); only the box-side typed decoder
+`carplay_metadata::tlv::parse_route_guidance` reads id 19 (`crates/vendor/metadata/src/tlv.rs`, `route_guidance` constants), and that feeds
+only the box log summary (`receiver/src/events.rs`), not the host JSON.
+
+**Ids the host-bound parsers drop** (no match arm; `_ => {}`):
+
+* 0x5201: 0 (component id), 15 `RouteGuidanceVisibleInApp`, 16 `LaneGuidanceCurrentIndex`, 17 `LaneGuidanceTotalCount`,
+  18 `PresentLaneGuidance`, 19 `SourceName`, 20 `SourceSupportsRouteGuidance`, 22 `DestinationChargingInfo`,
+  23 `ChargingStationInfoGroup`, 25 `DepartureBatteryLevel`, 26 `CompletedTripBatteryLevel`.
+  (`carplay_metadata::tlv` additionally omits 13/14/21/24 but does read 19.)
+* 0x5202: 0 (component id), 10 `JunctionElementAngle`, 11 `JunctionElementExitAngle`, 12 `LinkedLaneGuidanceInformation`
+  (`metadata.rs` `route_maneuver`; `tlv.rs` `parse_route_guidance_maneuver` also omits 8/9).
+* 0x5204: 0 (component id) and 3 `LaneGuidanceDescription` (`metadata.rs` `lane_guidance`).
+
+Because 0x5201 ids 16–18 and 0x5202 id 12 are dropped, lane guidance cannot be tied to its maneuver or gated by
+`PresentLaneGuidance` on the host side today (and the 2026-10-19 wire burst carried no id 12 anyway). Also note Identify param 30 omits sub 8
+`MaxLaneGuidanceStorageCapacity`, which Apple's note says "must be included to receive Lane Guidance"
+(`message.rs`, param 30 comment); that code comment records that the claimed 2026-07-29 `0x5204` delivery contradicts the
+gate, but that capture is not archived (§2 table row for 0x5204), so the gate is **UNVERIFIED either way** (2026-10-19: 0x5204 was live-delivered without sub 8 declared, which weighs against
+the gate, but is counted at the box, not an archived capture).
 
 ---
 
@@ -600,7 +724,7 @@ Stream type 130. Observed request:
 ```
 reqKeys = [controlType, channelID, seed, clientUUID, type, wantsDedicatedSocket,
            sendMessageAsIs, clientTypeUUID]
-channelID            = "5E:F7:F7:A9:CB:CD-RCS-1"
+channelID            = "<BT_MAC>-RCS-1"
 clientTypeUUID       = E9459FD0-BCAD-4C45-820F-1E72447EF2F2
 controlType          = 2
 wantsDedicatedSocket = true
@@ -850,8 +974,8 @@ Deployed and verified: `carplayd c1db72bea1c8aa0756d9a44d7f33a612`.
 3. The v2 checksum path is understood but untested.
 4. We declare 2 link sessions where Apple's transport-type-2 template declares 3, and session version 1
    where it uses 2. Deferred so the first hardware test had one variable; that test has run.
-5. `viewAreas` is emitted in `/info` but not echoed in the SETUP feature list, drawing a warning from the
-   phone. `extendedFeatures` is nested inside the HEVC block and so is absent from non-HEVC sessions.
+5. `viewAreas` is always emitted in `/info`, but is echoed in the SETUP `enabledFeatures` only when the viewAreas or
+   cornerMasks lever is armed (`session.rs` phase-1 SETUP); otherwise the phone logs a warning. `extendedFeatures` is nested inside the HEVC block and so is absent from non-HEVC sessions.
 6. RESOLVED. The tunnel Identify now declares the full metadata set, generated from
    `iap2-core::features`; 0x4157/0x4170 and nine other ids were re-added and accepted. See docs/carplay/05_METADATA_AND_CONTROLS.md §6.
 
@@ -940,7 +1064,7 @@ asked directly, ask it — `accessoryd` names the parameter, the message id and 
 future session reads before touching this code, and because the failure mode is invisible in the
 place people look.
 
-**What broke.** `5ce9d1c` (2026-07-31) added a guard rejecting any SETUP stream whose
+**What broke.** The 2026-07-31 commit that added the scid guard (its hash no longer resolves after the history rewrite) added a guard rejecting any SETUP stream whose
 `streamConnectionID` was 0 or absent, applied to **every** stream type. Per §1.3 the RCS iAP channel
 carries no `streamConnectionID` at all, so `unwrap_or(0)` yielded 0 and every type-130 SETUP was
 skipped *before reaching its own handler*. No `streamID` transport token went back, so — exactly as
@@ -951,7 +1075,7 @@ skipped *before reaching its own handler*. No `streamID` transport token went ba
 1. **It is silent by construction.** A/V is a different stream set on a different code path. Video and
    audio stayed perfect (32–37 fps, zero decrypt failures) for the whole outage. Every health check
    that sampled A/V reported green.
-2. **The guard was never written down.** It appears only in `5ce9d1c`'s commit message, credited to
+2. **The guard was never written down.** It appears only in that commit's message, credited to
    "the docs/carplay/03_SDK_GROUND_TRUTH.md Simulator-verification fixes" — and docs/carplay/03_SDK_GROUND_TRUTH.md §7 does not mention it. Nobody could
    review a scope that was never stated.
 3. **The error counters all read zero, correctly.** Zero `iAPSendMessage` 400s, because there were
@@ -978,9 +1102,9 @@ one session, the SYN → reject → resent-SYN causal sequence, and the before/a
 `2026-07-25_SUCCESS_airplayd_wl_handshake.txt:25,36` (same `scid=0`, accepted, `seed` salt solved).
 
 **⚠️ The fix is not hardware-validated, and the arm behind it has ZERO hardware hours.** At the last
-07-25 commit (`c1c5901`) `session.rs` had no 130 arm, no scid guard and no key probe, and
+07-25 commit (hash no longer resolves; the last commit before the 2026-07-31 guard) `session.rs` had no 130 arm, no scid guard and no key probe, and
 `datastream.rs` did not exist. The code that produced the 07-25 success was never committed in that
-form — it was rewritten into `5ce9d1c` alongside the guard that made it unreachable. So the 07-25
+form — it was rewritten into the 2026-07-31 guard commit alongside the guard that made it unreachable. So the 07-25
 capture proves the **protocol shape**, not this implementation. Treat the next wireless session as a
 first run of the accept path, the key probe, the RCS reassembly buffer and the supersede logic.
 
@@ -1001,7 +1125,7 @@ Claims are **[E]** evidenced (string / exported symbol / extracted const bytes /
 
 ### 0. Sources used (beyond docs/carplay/03_SDK_GROUND_TRUTH.md)
 - **CarPlaySDK binary** (arm64e): `…/CarPlaySimulator.devicekitplugin/Contents/Frameworks/CarPlaySDK.framework/Versions/A/CarPlaySDK` (6.6 MB). `strings`/`nm -gU`/`otool -tV`. Strings dumped to scratchpad `sdk_strings.txt`.
-- **iAP2 spec crate** (machine-generated from the plugin): `~/Downloads/github/carplayd/rust/carplayd/crates/iap2-core/src/spec.rs` — message IDs + Apple's own param-ID names.
+- **iAP2 spec crate** (machine-generated from the plugin): `crates/vendor/iap2-core/src/spec.rs` (the live copy; an older one remains under `~/Downloads/github/carplayd`) — message IDs + Apple's own param-ID names.
 - **Wire captures** (stock CCPA, byte-decoded): `ncm_carplayd/research/WIRED_METADATA_PLANE.md`, `WIRED_ALBUM_ART.md`, `WIRED_NAV_METADATA.md`.
 - **ios27 HID inventory:** `ncm_carplayd/research/ios27_sdk_inventory/11_hid_input.md`.
 - **Live code:** `ccpa/carplayd/src/main.rs`, `ccpa/iap2d/src/main.rs`; `ncm_carplayd/receiver_core/crates/receiver/src/{session.rs,events.rs,hid.rs,info.rs}`; sibling `carplayd/vendor/ncm_carplayd/.../src/{hid.rs,info.rs}`.
@@ -1017,7 +1141,7 @@ across both** [E — `WIRED_METADATA_PLANE.md` §"The load-bearing fact"; docs/c
 | Plane | Transport | Terminated today by | Carries |
 |---|---|---|---|
 | **AirPlay/IP session** | RTSP `/command` (binary-plist, encrypted "Events" channel) + A/V/HID streams | ccpa `carplayd` + ncm `receiver_core` (the "box"/Mac) | UI/session control: modes, ducking, night-mode, appearance, limitedUI, focus, view-area, vehicle-info, HID reports, Siri trigger. **NO now-playing/nav/call text.** |
-| **iAP2 control session** | iAP2 TLV messages over the MFi link (msgId + nested param TLVs) | ccpa `iap2d` (MFi auth + Identify **+ the generated declare/subscribe metadata plane**, corrected 2026-08-16) | NowPlaying (artist/title/album/artwork), CallState, RouteGuidance/turn-by-turn, MediaLibrary, Location, Vehicle. |
+| **iAP2 control session** | iAP2 TLV messages over the MFi link (msgId + nested param TLVs) | ccpa `iap2d` (MFi auth + Identify **+ the generated declare/subscribe metadata plane**, corrected 2026-08-16) | NowPlaying (artist/title/album/artwork), CallState, RouteGuidance/turn-by-turn, MediaLibrary; Location and Vehicle ride the same session but are accessory-SOURCED (we would send them, not receive them — §2.1; not implemented as senders). |
 
 **Consequence for the Metadata window:** artist/title/nav/call text is an **iAP2** feed that the box's
 `iap2d` must subscribe to — it never rides the AirPlay `/command` channel. The AirPlay `/command` inbound
@@ -1052,7 +1176,7 @@ schemas below are **[E]** where the adjacent key strings sit next to the command
 **ccpa_custom status (anchors + verdict corrected 2026-08-16):** `receiver::session::AvSession::command()`
 **logs every inbound `/command` type** and forwards the raw plist to the host over the `:9004` metadata
 seam (`META_CMD`) — the `[command] ← iPhone POST /command type='{ty}'` log, then
-`iap2_core::metadata::emit_command_plist(request_plist)`. *(The old `session.rs:324/330/839` anchors are
+`iap2_core::metadata::emit_command_plist(request_plist)`. *(The old line anchors are
 dead, and so is the `META_SINK` static they named: `metadata::emit_command_plist` now owns the single
 `:9004` connection this process makes, because ocbmd keeps one producer per channel and two sockets from
 the same process evicted each other in a loop.)* So the Metadata window can *already* display the inbound
@@ -1089,7 +1213,7 @@ now-playing text; the CarPlay *video* already renders the now-playing UI, so the
 head unit's own surfaces (cluster / dashboard / our host window). [E — `WIRED_METADATA_PLANE.md` §"metadata
 is iAP2, NOT AirPlay"]
 
-**iAP2 message IDs** [E — `spec.rs:149-156`, wire-confirmed `WIRED_METADATA_PLANE.md`]:
+**iAP2 message IDs** [E — `spec.rs` NOW_PLAYING consts, wire-confirmed `WIRED_METADATA_PLANE.md`]:
 
 | msgId | name | source | role |
 |---|---|---|---|
@@ -1098,7 +1222,7 @@ is iAP2, NOT AirPlay"]
 | `0x5002` | StopNowPlayingUpdates | Accessory | unsubscribe |
 | `0x5003` | SetNowPlayingInformation | Accessory | accessory→iOS push (rarely used) |
 
-`0x5001` carries **two param groups** [E — `spec.rs:920` `now_playing`]:
+`0x5001` carries **two param groups** [E — `spec.rs` `mod now_playing`]:
 - **MediaItemAttributes** (group id 0) — wire-verified param map [E — `WIRED_METADATA_PLANE.md` L120-127]:
 
 | attr id | field | type |
@@ -1136,7 +1260,7 @@ negotiate session-2 as type 1 in the link SYN, send the `[id][0x01]` Accept, rea
 ### 1.3 (c) Navigation metadata — distinguish THREE directions [E]
 Three distinct nav mechanisms; do not conflate them:
 
-**(i) Turn-by-turn / route guidance = iAP2, iOS → accessory** [E — `spec.rs:157-163`, wire-verified
+**(i) Turn-by-turn / route guidance = iAP2, iOS → accessory** [E — `spec.rs` ROUTE_GUIDANCE consts, wire-verified
 `WIRED_NAV_METADATA.md`]. This is the one that feeds a nav card in the Metadata window.
 
 | msgId | name | source |
@@ -1147,19 +1271,19 @@ Three distinct nav mechanisms; do not conflate them:
 | `0x5203` | StopRouteGuidanceUpdates | Accessory |
 | `0x5204` | LaneGuidanceInformation | Device |
 
-`0x5201` param names (Apple's own) [E — `spec.rs:928` `route_guidance_update`]: RouteGuidanceState,
+`0x5201` param names (Apple's own) [E — `spec.rs` `mod route_guidance_update`]: RouteGuidanceState,
 ManeuverState, CurrentRoadName(3, utf8), DestinationName(4), EstimatedTimeOfArrival(5, u64 epoch),
 TimeRemainingToDestination(6, u64 s), DistanceRemaining(7, u32 m), DistanceRemainingDisplayString(8),
 …Units(9), DistanceRemainingToNextManeuver(10, u32 m) + display string(11)/units(12),
-RouteGuidanceManeuverCurrentList(13), …TotalCount(14), plus EV/charging/timezone fields (22-26).
-`0x5202` [E — `spec.rs:986` `route_maneuver`]: ManeuverDescription(2, utf8), ManeuverType(3, enum),
+RouteGuidanceManeuverCurrentList(13), …TotalCount(14), VisibleInApp(15), LaneGuidanceCurrentIndex/TotalCount(16/17), PresentLaneGuidance(18), SourceName(19), SourceSupportsRouteGuidance(20), DestinationTimeZoneOffsetMinutes(21), and EV/charging fields (22-26) *(corrected 2026-10-19: this said "timezone/EV fields (22-26)" — timezone is id 21 and ids 15-20 were omitted; which of these we parse is in §5.8)*.
+`0x5202` [E — `spec.rs` `mod route_maneuver`]: ManeuverDescription(2, utf8), ManeuverType(3, enum),
 AfterManeuverRoadName(4), DistanceBetweenManeuver(5, u32 m) + string(6)/units(7), DrivingSide(8),
-JunctionType(9), ExitInfo(13). Wire-verified live values in `WIRED_NAV_METADATA.md`.
+JunctionType(9), JunctionElementAngle(10)/ExitAngle(11), LinkedLaneGuidanceInformation(12), ExitInfo(13 — only sent when the 0x5200 subscribe includes selector 3, sent since 2026-10-19 as a test, §5.8). Wire-verified live values in `WIRED_NAV_METADATA.md`.
 
 **Extra offer gate for nav** [E — `WIRED_NAV_METADATA.md` §"offer gate"]: beyond declaring 0x5201/0x5202
 receivable + subscribing, iOS withholds route guidance unless the accessory declares a
 **RouteGuidanceDisplayComponent (id 30)** in `0x1D01` — `{identifier:u16=42, name:utf8="RouteGuidance"}`
-(`spec.rs:776` `RouteGuidanceDisplayComponent` group; `spec.rs:897` sub-params). Only then do updates flow
+(`spec.rs` `ident::ROUTE_GUIDANCE_DISPLAY_COMPONENT` and its sub-params). Only then do updates flow
 on an active Apple Maps route.
 
 **(ii) VDC vehicle-data-channel navigation = accessory → iOS, the OPPOSITE direction** [E — docs/carplay/03_SDK_GROUND_TRUTH.md §6].
@@ -1179,19 +1303,21 @@ belongs to a GPS-uplink workstream. [E — direction is explicit in docs/carplay
 | `0x4155` | CallStateUpdate | Device |
 | `0x4156` | StopCallStateUpdates | Accessory |
 
-`0x4155` params [E — `spec.rs:1018` `call_state`]: RemoteID(0), DisplayName(1, utf8), Status(2, enum),
+`0x4155` params [E — `spec.rs` `mod call_state`]: RemoteID(0), DisplayName(1, utf8), Status(2, enum),
 Direction(3, enum), CallUUID(4), AddressBookID(6), Label(7), Service(8, enum), IsConferenced(9),
 ConferenceGroup(10), DisconnectReason(11), StartTimestamp(12, secs64). Stock subscribe = flat attrs 0-4;
 idle wire `41 55 00 05 00 02 00` → Status(id2,u8)=0. [E — `WIRED_METADATA_PLANE.md` L105-118,131]
 
 Declare `0x4155` receivable + subscribe `0x4154`. Phonebook / call-history (List-Updates `0x4170`) are
 **not** in the stock declared set and are likely BT-consent gated — deferred. [E — `WIRED_METADATA_PLANE.md`
-L138-140]
+L138-140] *(Corrected 2026-10-19: "BT-consent gated" is refuted by §6.4 — the Contacts & Favorites prompt is driven
+by the iAP2 declaration of `0x4170`, with no Bluetooth phonebook profile involved; `0x4170`/`0x4171` ARE declared at
+tier `extended` and above and ListUpdate frames arrived, §6.6.)*
 
 ### 1.5 (e) Everything else
 | Category | Direction | Transport | Fields (evidenced) |
 |---|---|---|---|
-| **MediaLibrary** | iOS→acc | iAP2 `0x4C00-0x4C09` [E `spec.rs:109`] | library info/updates + `PlayMediaLibrary*` (accessory can request playback). Not captured wired; low value. |
+| **MediaLibrary** | iOS→acc | iAP2 `0x4C00-0x4C09` [E `spec.rs`] | library info/updates + `PlayMediaLibrary*` (accessory can request playback). Not captured wired; low value. |
 | **Night mode** | iOS→acc | AirPlay `/command setNightMode` **and** `/info nightMode` [E] | day/night. `/info nightMode` is the static declaration; `setNightMode` is the live Class-B update. |
 | **UI / map appearance** | iOS→acc | AirPlay `uiAppearanceUpdate` / `mapAppearanceUpdate` [E] | `appearanceMode` + `appearanceSetting`. |
 | **limitedUI** | iOS→acc | AirPlay `/info limitedUI`/`limitedUIElements` + `/command setLimitedUI` [E] | element-token set the head unit restricts. |
@@ -1211,7 +1337,7 @@ L138-140]
 | Album artwork | iOS→acc | iAP2 File Transfer (session 2, ref by NowPlaying attr 0x1a) | **YES** — `metadata::Artwork` reassembles the session-2 transfer inside `iap2d`'s link loop |
 | Route guidance / turn-by-turn | iOS→acc | iAP2 `0x5200`/`0x5201`/`0x5202` (+ id30 component gate) | **YES** — same generated declare/subscribe plane |
 | CallState | iOS→acc | iAP2 `0x4154`/`0x4155` | **YES** — declared + subscribed at the default *proven* tier (`features.rs` `call_state`) |
-| MediaLibrary | iOS→acc | iAP2 `0x4C00-09` | **TIER-GATED** — in the generated table as `media_library` at the `capability` tier (`features.rs`: start 0x4C03, stop 0x4C05, also 0x4C00/0x4C02, updates 0x4C01/0x4C04); NOT declared or subscribed at the default *proven* tier, so nothing arrives unless the app pushes `metadata.tier: all` |
+| MediaLibrary | iOS→acc | iAP2 `0x4C00-09` | **TIER-GATED** — in the generated table as `media_library` at the `capability` tier (`features.rs`: start 0x4C03, stop 0x4C05, also 0x4C00/0x4C02, updates 0x4C01/0x4C04); NOT declared or subscribed at the default *proven* tier, so nothing arrives unless the app pushes `metadata.tier: all` — but tier `all` (which includes it) is **refuted as a whole on the AirPlayTunnel arm** (`0x1D03`, 2026-08-10, §4 callout). The phone named only the three `voice_over_cursor` ids, then rejected generically with them skipped, so `media_library` itself was never isolated as a culprit or as innocent. No recorded wired run (corrected 2026-10-19; the first pass over-attributed the reject to this feature) |
 | GPS / vehicle telemetry (nav INPUT) | **acc→iOS** | VDC `Navigation` + NMEA | NO — separate uplink workstream, not a display feed |
 | Night mode / appearance / limitedUI / oemIcon / vehicleInfo | iOS→acc / acc→iOS | AirPlay `/command` + `/info` | **PARTIAL** — inbound `/command` variants are logged/forwarded; the outbound `setNightMode` / `uiAppearanceUpdate` / `mapAppearanceUpdate` / `setLimitedUI` senders are host-driven |
 
@@ -1227,8 +1353,8 @@ once Identified, fires every `Start*Updates` in the active tier from the same ge
 ### 2.0 Transport recap [E]
 Every HID input report is accessory→iOS: `AirPlayReceiverSessionSendHIDReport(session, uuid, report, len)`
 → AirPlay `/command {type:"hidSendReport", uuid:<hex>, hidReport:<bytes>}` on the encrypted event channel
-(`events.rs:231`). Over iAP2 the same is `AccessoryHIDReport 0x6802` after `StartHID 0x6800`
-(`spec.rs:215-226`). Each report is addressed by the **UID** the accessory declared in `/info hidDevices[]`;
+(`events::send_hid_report`). Over iAP2 the same is `AccessoryHIDReport 0x6802` after `StartHID 0x6800`
+(`spec.rs` `MSG_START_HID`/`MSG_ACCESSORY_HID_REPORT`). Each report is addressed by the **UID** the accessory declared in `/info hidDevices[]`;
 there is **no report-ID prefix** — devices are disambiguated purely by `uuid`. Coordinates (touch/touchpad)
 are **absolute 16-bit in [0, LogicalMaximum]**, LogicalMax = advertised display resolution, written into
 the descriptor at build time. [E — docs/carplay/03_SDK_GROUND_TRUTH.md §8, `nm` symbols]
@@ -1322,18 +1448,18 @@ transition. Two idioms [E — `HIDMediaButtonsFillReport` shape + sibling `hid.r
 - **Single-press / "tap"** (array-index devices: MediaButtons, TelephonyButtons): send the press report
   `[index]` **immediately followed by** the release report `[0]` (index 0 = the descriptor's unassigned
   usage). This is exactly what ccpa does: the `INPUT_MEDIA_BTN` arm of carplayd's `handle_input_frame`
-  (~`main.rs:907-918`) sends `hid::media_button_report(index)` then
+  sends `hid::media_button_report(index)` then
   `hid::media_button_report(hid::media_button::NONE)`. `HIDMediaButtonsFillReport` implies release because
   the report is an Array whose value 0 = "no usage asserted" — you MUST send a following 0 or the button
   stays logically held. [E — `hid::media_button_report`, carplayd `handle_input_frame`'s `INPUT_MEDIA_BTN`
   arm; anchors corrected 2026-08-16]
 - **Press-and-hold** (Var-bitfield devices: DPad, Knob buttons, SteeringWheel, TouchpadButtons, and touch):
   emit the **down** report (bit set / tip=1) on mouse-down and the **up** report (bit cleared / tip=0) on
-  mouse-up. Touch already does this: carplayd `handle_input_frame` (`main.rs:882`, touch arm ~`:1160-1197`)
+  mouse-up. Touch already does this: carplayd `handle_input_frame` (touch arm)
   DOWN/MOVE → tip=1, UP → tip=0, and `hid::touch_report(0, …)` keeps coords but clears the contact bit on
   release. For a Controls window button, a click = down-then-up back to back (a tap); a held button = down
   on press, up on release. [E — `hid::touch_report` / `hid::touch_report_multi`, carplayd
-  `handle_input_frame`; the old `hid.rs:172-180` anchor and its `touch_report_len_and_release` test never
+  `handle_input_frame`; the old `hid.rs` anchor and its `touch_report_len_and_release` test never
   existed in this file — corrected 2026-08-16]
 - **Knob rotation** is a **relative** i8 delta (`+CW/−CCW`), sent per detent; there is no "release" — send
   the delta then optionally a 0. [E — Wheel `81 06` Input(Rel)]
@@ -1360,9 +1486,9 @@ enum's string forms) [E — `sdk_strings.txt:9279-9282`]:
 
 **⇒ Siri via the button IS a hold.** A press-and-hold Siri button maps to `requestSiri{siriAction:
 buttondown}` on mouse-down and `requestSiri{siriAction: buttonup}` on mouse-up (optionally `prewarm` on
-hover/first-touch). `voiceactivation` is the separate always-listening path. This **corrects the current
-ccpa/ncm implementation**, which sends a single bare `{type:"requestSiri"}` with no `siriAction` and a
-comment "a single command, not a press/hold pair" (`events.rs:216-228`) — that shape was never
+hover/first-touch). `voiceactivation` is the separate always-listening path. This corrected the then-current
+ccpa/ncm implementation (historical; fixed 2026-07-30, §2.4b), which sent a single bare `{type:"requestSiri"}` with no `siriAction` and a
+comment "a single command, not a press/hold pair" (`events::send_request_siri`) — that shape was never
 wire-captured and, per the enum, is under-specified: the Controls window should send the
 buttondown/buttonup pair with `siriAction`. [E — enum vs current code]
 
@@ -1492,10 +1618,10 @@ disassembly. So the accessory does **not** need to declare a Siri capability for
 it only needs the encrypted event channel up. (Whether a given iOS build silently ignores requestSiri from an
 undeclared accessory is [I] — untested — but the SDK send-path imposes no such requirement.) [E send-path / I iOS-side]
 
-#### VERDICT — is our buttondown/buttonup `requestSiri` correct + complete?
-**NO — one concrete bug: `siriAction` must be an INTEGER, not a string.** Our
+#### VERDICT (as of the original research; RESOLVED 2026-07-30, see the LANDED note below) — is our buttondown/buttonup `requestSiri` correct + complete?
+**At the time: NO — one concrete bug (since fixed): `siriAction` must be an INTEGER, not a string.** Our
 `events.rs:send_request_siri_action(action:&str)` sends `params:{siriAction:"buttondown"}` (a CFString);
-carplayd `main.rs:507‑508` wires `CMD_SIRI_DOWN→"buttondown"`, `CMD_SIRI_UP→"buttonup"`. The SDK ground truth
+carplayd `carplayd/src/main.rs` Siri command arms wires `CMD_SIRI_DOWN→"buttondown"`, `CMD_SIRI_UP→"buttonup"`. The SDK ground truth
 (`CFDictionarySetInt64` + simulator passing `rawValue:Int32`) is that the wire value is an **integer enum**:
 - press → `params:{siriAction: 2}` (buttondown) (corrected 2026-08-01: was `siriAction: 1`)
 - release → `params:{siriAction: 3}` (buttonup) (corrected 2026-08-01: was `siriAction: 2`)
@@ -1505,13 +1631,13 @@ Everything else in our approach is **correct/complete**:
 - Envelope `{type:"requestSiri", params:{…}}` ✓ (matches the resolved cfstrings). [E]
 - Omitting `siriTriggerTimestamp`/`siriTriggerZone` ✓ — the plain button call passes NULL for both; zone is
   voiceactivation-only. [E]
-- Down/up **HOLD** semantics ✓ — matches `cinc` pressed→1/2. [E]
+- Down/up **HOLD** semantics ✓ — matches `cinc` pressed→2/3 (down=2, up=3; the 1/2 here was the off-by-one corrected 2026-08-01). [E]
 - **No** `accessoryAcquireFocus` needed ✓. [E]
 - **No** mic/AuxIn/`enhancedSiri` needed for the button to bring up Siri ✓ (that's Enhanced Siri only). [E]
 
 **Fix = change the value type from string to int** — **2 on press / 3 on release, NOT 1/2** (corrected
 2026-07-31: 1 is prewarm, so 1/2 was off by one; the values eight lines above are the right ones).
-**LANDED 2026-07-30** — `events.rs:1023` now takes `action: i64` and `carplayd/src/main.rs:985-986`
+**LANDED 2026-07-30** — `events::send_request_siri_action` (`events.rs`) now takes `action: i64` and `carplayd/src/main.rs` (Siri command arms)
 passes 2 and 3. The bare `{type:"requestSiri"}` shape
 (`send_request_siri`, `CMD_REQUEST_SIRI`) is under-specified (no `siriAction`) and already validated-negative
 — keep only the integer down/up pair. The prior string-valued attempt was never SDK-conformant; the string
@@ -1534,18 +1660,18 @@ the separate iAP2 session to stop reconnecting, unrecoverable even by USB replug
 cleared the descriptor bytes themselves (HID 1.11 valid) and every other file; `hidDevices` growing to a
 never-before-seen third entry in the unconditional `/info` was the only remaining cause. Reverted to **two**
 devices. The knob code (`knob_descriptor`/`HID_UID_KNOB`/`hid::knob`) is kept but **not advertised**. [E —
-`info.rs:8-18` module doc]
+`info.rs` module doc]
 
 **⇒ SUPERSEDED 2026-08-16 — the descriptor set today is FIVE uids, two unconditional and three app-gated**
-(`info.rs` `build_info`'s `hids` vec, ~`:766-811`): touchscreen **uid 1** and media buttons **uid 2** always;
+(`info.rs` `build_info`'s `hids` vec): touchscreen **uid 1** and media buttons **uid 2** always;
 **uid 3 D-Pad**, **uid 4 Knob** and **uid 5 Telephony** each emitted only when the app-pushed `hidConfig`
-arms the matching lever (`carplayd/src/main.rs:682/684/686` → `events::set_dpad_advertised` /
+arms the matching lever (`carplayd/src/main.rs` config load (levers reset to off first) → `events::set_dpad_advertised` /
 `set_knob_advertised` / `set_telephony_advertised`). Host defaults: `dPadSupport` **true**, `knobSupport`
 and `telephonyButtonsSupport` **false**. The 2026-07-06 incident no longer gates advertising — a
 five-entry `hidDevices[]` has run on hardware. The original two-device conclusion follows.
 
 **⇒ (ORIGINAL, superseded) SAFE descriptor set to advertise today = exactly two devices:** touchscreen **UID 1** + media buttons
-**UID 2** (`info.rs:196-213`, both bound to `DISPLAY_UUID`). The Controls window can safely drive **touch
+**UID 2** (`info.rs`, both bound to `DISPLAY_UUID`). The Controls window can safely drive **touch
 (uid 1)** and **media buttons (uid 2)** plus the AirPlay `/command` actions (`requestUI`, `requestSiri`,
 `changeMapZoomLevel`, focus, etc.) which need no new `hidDevices[]` entry. Adding knob/telephony/dpad HID
 devices is **gated on resolving the incident** (isolate whether it was the third-entry count, a specific
@@ -1560,16 +1686,16 @@ until the incident is resolved — not a box-owned constant.
 | Control | Transport | Report / payload | On our stack today? |
 |---|---|---|---|
 | Touch (tap / drag) | HID `hidSendReport` uid 1 | 5 B `[tip][X u16 LE][Y u16 LE]` abs; tip=1 down / 0 up | **YES** — `hid.rs` + ccpa `main.rs` ingest `:9110` |
-| Media buttons (play/pause/next/prev) | HID `hidSendReport` uid 2 | 1 B Consumer array index; tap = `[i]` then `[0]` | **YES** — ccpa `main.rs:459-467` |
-| Home / Back | HID uid 3 D-Pad, byte0 bit0 AC Home / bit1 AC Back | 2 B Var bitfield, press then all-zero release | **WIRED** — `AppDelegate.swift:746-749` → `carplayd:914-915`; D-Pad advertised by default. `requestUI` is NOT Home and is no longer sent by the host |
-| Siri | AirPlay `/command requestSiri` | `{siriAction:<int>}` — **2** on press, **3** on release (HOLD); timestamp/zone omitted | **WIRED** — `ControlsWindow.swift:102-127` → `carplayd:985-986` → `events.rs:1023`. Bare `{type:requestSiri}` retained deprecated, A/B only |
-| Map zoom | AirPlay `/command changeMapZoomLevel` | `{uuid:<ALT_DISPLAY_UUID>, zoomDirection: 0 in / 1 out}` | **WIRED (cluster only)** — `VideoChromeOverlay.swift:334-337` → `events.rs:704`; dropped unless the alt screen is advertised (`carplayd:1012-1029`) |
-| Knob (rotate / select / nudge) | HID **uid 4** | 4 B `[flags][nudge_x i8][nudge_y i8][rotation i8]`, press then all-zero release | **WIRED, arming-gated** — `ControlsWindow.swift:635-681` → `carplayd:936-948`; needs app-pushed `hidConfig.knobSupport` (default off) |
-| D-Pad | HID **uid 3** (Apple's `HIDDPadCreateDescriptor`) | 2 B Var bitfield (Home/Back/Select/Up/Down/Left/Right) | **WIRED** — `AppDelegate.swift:750-754` → `carplayd:913-927`; advertised by default (`dPadSupport` defaults true) |
+| Media buttons (play/pause/next/prev) | HID `hidSendReport` uid 2 | 1 B Consumer array index; tap = `[i]` then `[0]` | **YES** — `carplayd/src/main.rs` (`INPUT_MEDIA_BTN` arm, `send_hid_report(2, …)`) |
+| Home / Back | HID uid 3 D-Pad, byte0 bit0 AC Home / bit1 AC Back | 2 B Var bitfield, press then all-zero release | **WIRED** — host `ControlsWindow.swift` `nav(_:_:)` (Home: `AppDelegate.swift` `bridge.nav(OCBM.navHome, Wire.home)`, in the `.mediaHome` case; not `ControlsWindow.swift`) → `carplayd/src/main.rs` (`INPUT_NAV` arm, `send_hid_report(3, …)`); D-Pad advertised by default. `requestUI` is NOT Home and is no longer sent by the host |
+| Siri | AirPlay `/command requestSiri` | `{siriAction:<int>}` — **2** on press, **3** on release (HOLD); timestamp/zone omitted | **WIRED** — `ControlsWindow.swift` (Siri down/up) → `carplayd/src/main.rs` (`CMD_SIRI_DOWN`/`CMD_SIRI_UP` arms) → `events::send_request_siri_action`. Bare `{type:requestSiri}` retained deprecated, A/B only |
+| Map zoom | AirPlay `/command changeMapZoomLevel` | `{uuid:<ALT_DISPLAY_UUID>, zoomDirection: 0 in / 1 out}` | **WIRED (cluster only)** — `VideoChromeOverlay.swift` (zoom buttons) → `carplayd/src/main.rs` (`CMD_NAV_ZOOM_IN`/`_OUT` arms) → `events::send_change_map_zoom`; dropped unless the alt screen is advertised (`CMD_NAV_ZOOM_IN`/`_OUT` are also in the `if !levers::altscreen()` guard arm of `carplayd/src/main.rs`; alt-display appearance is gated separately by `levers::altscreen()`) |
+| Knob (rotate / select / nudge) | HID **uid 4** | 4 B `[flags][nudge_x i8][nudge_y i8][rotation i8]`, press then all-zero release | **WIRED, arming-gated** — `ControlsWindow.swift` `sendKnob` → `carplayd/src/main.rs` (`INPUT_KNOB` arm, `send_hid_report(4, …)`); needs app-pushed `hidConfig.knobSupport` (default off) |
+| D-Pad | HID **uid 3** (Apple's `HIDDPadCreateDescriptor`) | 2 B Var bitfield (Home/Back/Select/Up/Down/Left/Right) | **WIRED** — `ControlsWindow.swift` `nav(_:_:)` → `carplayd/src/main.rs` (`INPUT_NAV` arm); advertised by default (`dPadSupport` defaults true) |
 | Steering wheel / touchpad | HID (2-3 B Var bitfields) | — | **ABSENT** — no descriptor entry, no OCBM opcode; `steeringWheelSupport` is **parse-only in our code** — nothing consumes it (`vehicle_config.rs`, under the "Nothing consumes these yet, deliberately" block). *(Corrected 2026-08-16 — this said it "only sets the display features bit 0x20", which is true of Apple's `HIDConfig.displayFeatures` but false of ours: the word we emit is the constant `if levers::dpad() { 0x1A } else { 0x0A }` in `info.rs`, so `dPadSupport` is its only input.)* |
-| Telephony (answer/end/flash/mute/DTMF) | HID **uid 5** + iAP2 `0x4155` for state | 1 B Telephony array index, then `[0]` | **WIRED, arming-gated** — `ControlsWindow.swift:733-771` → `carplayd:952-961`; needs pushed `telephonyButtonsSupport` (default off). **Call state IS declared + subscribed** at the default *proven* tier (`features.rs:440-452`, `iap2d/src/main.rs:604-613`) |
-| Appearance / limitedUI outbound | AirPlay `/command` | `uiAppearanceUpdate` / `mapAppearanceUpdate` / `setNightMode` / `setLimitedUI` | **WIRED** — `ControlsWindow.swift:181-259` → `events.rs:899/937/945/978`; alt-display appearance is alt-screen gated |
-| Focus / haptic outbound | AirPlay `/command` | `changeModes` / `performHapticFeedback` | **NO host-driven** — take-screen `changeModes` fires automatically at RECORD (`events.rs:732`, `session.rs:1802`); no outbound haptic exists (inbound decode label only) |
+| Telephony (answer/end/flash/mute/DTMF) | HID **uid 5** + iAP2 `0x4155` for state | 1 B Telephony array index, then `[0]` | **WIRED, arming-gated** — `ControlsWindow.swift` `sendTelephony` → `carplayd/src/main.rs` (`INPUT_TELEPHONY` arm, `send_hid_report(5, …)`); needs pushed `telephonyButtonsSupport` (default off). **Call state IS declared + subscribed** at the default *proven* tier (`features.rs` `call_state`, `iap2d/src/main.rs` post-Identified subscribe block) |
+| Appearance / limitedUI outbound | AirPlay `/command` | `uiAppearanceUpdate` / `mapAppearanceUpdate` / `setNightMode` / `setLimitedUI` | **WIRED** — `ControlsWindow.swift` `sendAppearance` and the limitedUI toggle, `OCBM/OCBMClient.swift` (night) → `carplayd/src/main.rs` (appearance/night/limitedUI command arms) → `events::send_ui_appearance_update` / `send_map_appearance_update` / `send_set_night_mode` / `send_set_limited_ui`; alt-display appearance is alt-screen gated (`levers::altscreen()` in `carplayd/src/main.rs`) |
+| Focus / haptic outbound | AirPlay `/command` | `changeModes` / `performHapticFeedback` | **NO host-driven** — take-screen `changeModes` fires automatically at RECORD (`events::send_take_screen`, called from `session.rs` at RECORD); no outbound haptic exists (inbound decode label only) |
 
 ---
 
@@ -1617,8 +1743,8 @@ until the incident is resolved — not a box-owned constant.
   (`AirPlaySiriActionFromString()` exists in the header but has **zero call sites** anywhere in the drop —
   it is a logging helper, not a wire parser, so the string form was never accepted on any iOS.)
   `siriTriggerTimestamp`/`siriTriggerZone` are deliberately **omitted** — the plain-button path passes NULL
-  for both and the zone is written only when `siriAction == 4`. Live path: `events.rs:1023`,
-  `carplayd/src/main.rs:985-986`, host `ControlsWindow.swift:102-127` / `AppDelegate.swift:755-767`.
+  for both and the zone is written only when `siriAction == 4`. Live path: `events::send_request_siri_action` (`events::send_request_siri_action`),
+  `carplayd/src/main.rs` (Siri command arms), host `ControlsWindow.swift` (Siri down/up) (anchors corrected 2026-10-19).
   **Still not device-proven as a trigger:** the 2026-08-10 hardware confirmation covers Siri *audio* (mic
   uplink), not that our `/command` initiated the session.
 - **~~Do NOT advertise a third `hidDevices[]` entry~~ — RETIRED 2026-08-16.** uid 3/4/5 all ship under
@@ -1630,7 +1756,7 @@ until the incident is resolved — not a box-owned constant.
 ### 2.7 Simulator D-Pad send-path trace [E]
 
 Full end-to-end trace from Apple's `CarPlaySimulator` (SIM) + `CarPlaySDK` (SDK) arm64e binaries.
-Every claim cites a symbol/address. **Diagnosis — SUPERSEDED 2026-07-30, see `info.rs:530-563`.** The
+Every claim cites a symbol/address. **Diagnosis — SUPERSEDED 2026-07-30, see the `disp_features` comment in `info.rs` `build_info`.** The
 `DisplayFeatures` labels below are permuted. The real map is `0x02 Knobs · 0x04 LowFidelityTouch ·
 0x08 HighFidelityTouch · 0x10 Touchpad · 0x20 DirectionButtons` — so **`0x10` is Touchpad, not Direction
 Buttons**, and `dPadSupport` contributes **nothing** to this word (`0x10` is ORed from `touchpadSupport`,
@@ -1708,6 +1834,8 @@ No press+release/hold/repeat trickery: `handleDPadInput` sends exactly ONE 2-byt
 as touch. No auto-repeat in the transmit path. Timing is not the cause.
 
 #### 2.7.6 FIX for our failing uid-3 D-pad
+
+> **REFUTED 2026-08-16 — do not apply.** The premise (0x10 = "Direction Buttons", a D-pad routing gate) is wrong: 0x10 is Touchpad, 0x20 is DirectionButtons, and `dPadSupport` contributes nothing to `displays[].features`. See §2.7.4 and the `disp_features` comment in `info.rs` `build_info`. The text below is kept as history only.
 1. In `receiver_core .../info.rs build_info` DISPLAY dict (line ~232) our display `features` is currently
    `0x0A` (HighFidelityTouch 0x02 | 0x08) and **lacks the D-pad bit**. Change it to **`0x1A`** (`0x0A |
    0x10`), i.e. OR in `0x10` = "Direction Buttons". This is the missing routing gate (the display
@@ -1733,8 +1861,8 @@ as touch. No auto-repeat in the transmit path. Timing is not the cause.
   previously said the numeric `AirPlaySiriAction` / `AirPlayZoomDirection` values "remain [I] (only string
   forms emitted)". Both are wrong now:** `AirPlaySiriAction` is **[E]** (R14G17 `AirPlayCommon.h:1366-1369`
   — 0 n/a · 1 prewarm · 2 buttondown · 3 buttonup; 4 voiceactivation is from `CarPlaySDK.framework`, not
-  the 2017 header) and we emit it as an integer (`events.rs:1023`); `AirPlayZoomDirection` is likewise
-  emitted as an integer (`events.rs:707`). `AirPlayAppearanceMode/Setting` numeric values **do** remain
+  the 2017 header) and we emit it as an integer (`events::send_request_siri_action`); `AirPlayZoomDirection` is likewise
+  emitted as an integer (`events::send_change_map_zoom`). `AirPlayAppearanceMode/Setting` numeric values **do** remain
   [I]. Telephony usage semantics (§2.5) are [I] label-mapped from the HID Telephony page.
 - Descriptor bytes in §2.1 are [E] extracted from `CarPlaySDK` `__TEXT __const`; touchscreen bytes are
   runtime-built (X/Y max injected) so only their 5-/12-byte report *layout* is [E], per docs/carplay/03_SDK_GROUND_TRUTH.md §8.
@@ -1910,8 +2038,8 @@ observations above are the record.
 > sections as a secondary record and re-derive before relying on a detail. Note `accessoryd` itself is
 > NOT in the split cache. [../ops/06_CORRECTIONS_LEDGER.md](../ops/06_CORRECTIONS_LEDGER.md) `R-32-8`.
 
-Decompiled evidence *was* saved at (paths retained for the record only — do not follow):
-`/private/tmp/claude-501/-Users-zeno/ca0b6a3c-4963-4ecc-a1b4-6ec2c380d527/scratchpad/{processIncomingData_remote,copyConnUUID2,manager2_processIncomingDataForConnectionEndpoint,manager2_block_invoke,outlined_18_33,getConnectionStruct,connection2_processIncomingDataForEndpoint_internal,endpoint2_processIncomingData,isTransportRestricted}.txt`
+Decompiled evidence *was* saved as these scratch files (no path retained):
+(per-session scratchpad; the path is deliberately not recorded) files: `processIncomingData_remote`, `copyConnUUID2`, `manager2_processIncomingDataForConnectionEndpoint`, `manager2_block_invoke`, `outlined_18_33`, `getConnectionStruct`, `connection2_processIncomingDataForEndpoint_internal`, `endpoint2_processIncomingData`, `isTransportRestricted`
 
 ---
 
@@ -2014,11 +2142,11 @@ protocol demands.
 
 ### Artifacts
 
-Extracted (read-only) to
-`/private/tmp/claude-501/-Users-zeno/ca0b6a3c-4963-4ecc-a1b4-6ec2c380d527/scratchpad/gm_silverado_extract/`
-— all 26 Silverado `libNme*.so`, `GMConnections.apk`, and its jadx decompile. Copied into
-`~/Downloads/Carplay WWDC/GM CarPlay Reference/` (persistent, alongside the CT5 material) —
-see that folder's `README.md`.
+Originally extracted to a session scratch directory under `/private/tmp` (gone; not re-derivable). The persistent
+copies (all 26 Silverado `libNme*.so`, `GMConnections.apk`, and its jadx decompile) live in
+`~/Documents/carlink/misc/Carplay WWDC/GM CarPlay Reference/` (alongside the CT5 material; see its `README.md`) and
+the repo mirror `reference/gm_cinemo/`. *(Corrected 2026-10-19: the earlier path `~/Downloads/Carplay WWDC/GM CarPlay
+Reference/` no longer exists; the `/private/tmp` scratch path is also gone.)*
 
 ---
 

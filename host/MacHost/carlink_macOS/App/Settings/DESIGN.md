@@ -204,8 +204,11 @@ Therefore:
   anchors. Only VIEW code moves out (§6 Phase 0).
 - The fixture document is NOT the default config — it is the hostile cluster-on / limitedUI-on /
   OEM-icon-on / custom-audio document in the regen stub. Any emitter change must leave that output
-  byte-identical. New emission is allowed only in the "emit nothing for the default value" idiom
-  already used by `limitedUIConfig` / `oemIconConfig` (e.g. `wifi_ap: false` only when disabled).
+  byte-identical, with ONE recorded exception: on 2026-10-19 (owner decision, tranche 1) `wifi_ap:`
+  became unconditional (`wifi_ap: true|false`), which added a `wifi_ap: true` line to the fixture
+  output; the fixture was regenerated in the same change. Otherwise new emission is allowed only in
+  the "emit nothing for the default value" idiom already used by `limitedUIConfig` / `oemIconConfig`
+  / `view_area_anim_ms`. *(Corrected 2026-10-19: `wifi_ap` used to be the example of that idiom.)*
 - If the emitter starts referencing a NEW model field, the stub class in
   `tools/regen_app_yaml_fixture.py` must gain that field (with the value that emits nothing) in the
   SAME commit, and `python3 tools/check_app_yaml_fixture.py .` must exit 0. Integrator only.
@@ -304,7 +307,7 @@ except `wifiAccessPoint` and `viewAreaAnimMs` (§2 stub rule).
 | `diagonalInches` | Double (0 = nil) | `diagonalInches` | 0 | none |
 | `hideClock`, `hideSignal`, `hideBattery` | Bool | same | false | none |
 | `restrictVideo`, `restrictVoiceInput`, `restrictConfiguration` | Bool | same | false | none (AA-only members; the Apple five stay on `limitedUI*`) |
-| `wifiAccessPoint` | Bool | `wifiAccessPoint` | true | none; emitter adds `wifi_ap: false` ONLY when false |
+| `wifiAccessPoint` | Bool | `wifiAccessPoint` | true | emitter writes `wifi_ap: <bool>` on every push (unconditional since 2026-10-19; was "only when false") |
 | `voiceRateHz` | Int | `voiceRateHz` | 48000 | none |
 | `telephonyOverProjection` | Bool | same | false | none |
 | `metadataNowPlaying`, `metadataNavigation`, `metadataTelephony` | Bool | same | true | none |
@@ -397,7 +400,7 @@ worker has crossed the line.
 | 5 | `enablesHEVC` ignored by AA | **W2** | `hevcAllowed=false` ⇒ clamp tier to ≤1080p and note it; `true` ⇒ HEVC on tiers that need it; `androidAuto.preferHEVC` ⇒ HEVC at ≤1080p. |
 | 6 | DHU .ini table says 3840×1260 for tier 5 | **W2** | Keep `r3840x2160 = 5` (the DHU's protobuf enum is `VIDEO_3840x2160`; the `.ini` string is a DHU typo). **Corrected 2026-09-04:** this row used to say "Tier 5 unverified … the `valueNote` stays `unverified` until a device run", and that instruction was WRONG on the day it was written — tier 5 (H.265) was device-verified 2026-09-04 at 30→30 and 60→60, 0 drops (`docs/androidauto/01_SESSION_AND_AV.md`). The `valueNote` records the (tier, fps) pairings that have run, not a blanket "unverified". |
 | 7 | CarPlay-only prose on agnostic controls | **W3** (save bar), **W4** (reboot/NCM alerts) | Neutral wording; protocol names only in `FeatureSupport.effect` rows. |
-| 8 | `wifi_ap:` has no UI | **W4** (control from `.wifiAccessPoint`), **Integrator** (field + `wifi_ap: false` emission + regen stub) | Emit only when false; absent stays the enabled default. |
+| 8 | `wifi_ap:` has no UI | **W4** (control from `.wifiAccessPoint`), **Integrator** (field + `wifi_ap: false` emission + regen stub) | Emit only when false; absent stays the enabled default. *(Superseded 2026-10-19: emitted unconditionally.)* |
 
 ## 8. Rendering rules (both renderers derive from the same neutral value)
 
@@ -422,7 +425,7 @@ themselves, and this table as their source of truth, are unchanged.
 | `input` | `hidConfig` + `primaryInput` (`touchscreen`/`touchpad` → "Touchpad", `rotary` → "Knobs"; `touchscreen == nil` → `touchScreenMode: Disabled`) | touchscreen presence + keycodes (existing) |
 | `audio.voiceRateHz`, `telephonyOverProjection` | via CarPlay audio table only | `voiceSinkRate`, telephony sink (replace `AA_VOICE_RATE` / `AA_TELEPHONY_SINK` defaults; env still overrides) |
 | `metadata.*` | tier picker governs | three service descriptors individually (replaces `AA_METADATA`) |
-| `AdapterSettings` | `wireless`, `hot_handover`, `pairing`, `android_auto`, `wifi_ap` (only when false), `appDrivenSetup` | — |
+| `AdapterSettings` | `wireless`, `hot_handover`, `pairing`, `android_auto`, `wifi_ap` (always, since 2026-10-19), `appDrivenSetup` | — |
 
 The CarPlay column is achieved WITHOUT touching the emitter: W1's `profile` getter derives neutral
 values from the existing `@Published` fields (`restrictions.declared` ← `limitedUIConfigEnabled`,
@@ -509,7 +512,11 @@ non-empty `effect`") is what guarantees `FieldPopover` always has something to s
   the neutral profile has no field for them. (`VehicleProfile.swift` still describes the pair as
   "identical" in its preset comments — a source correction outside this document's scope.)
 - **`wifi_ap`**: default is ENABLED when absent (`wifi_ap_enabled()` greps only for an explicit
-  `false`); the map did not state the polarity, which matters for byte-identical emission.
+  `false`); the map did not state the polarity, which matters for byte-identical emission. *(2026-10-19:
+  the app now emits the key on every push, so the box default only matters for older hosts.
+  `android_auto` has had the OPPOSITE box polarity since the same date — absent = OFF, D1. That was
+  a BOX change: this app already emitted `android_auto:` on every push before D1, so its documents
+  are unaffected; only a host that omits the key now reads as AA off.)*
 - Nothing else in the map was contradicted by the code or the DHU files.
 
 ## 11. Presentation contract (Phase 3, designed 2026-09-05)

@@ -37,7 +37,7 @@ rm -f "$OUT"/.pid_* 2>/dev/null
   echo "headunit=$(adb shell 'date' 2>/dev/null | tr -d '\r')"
   echo "headunit_epoch=$(adb shell 'date +%s' 2>/dev/null | tr -d '\r')"
   echo "offset_hu_minus_mac_s=$(( $(adb shell 'date +%s' 2>/dev/null | tr -d '\r') - $(date +%s) ))"
-  echo "app_uid=$(adb shell "dumpsys package zeno.gmccpa | sed -n 's/.*userId=\([0-9]*\).*/\1/p' | head -1" 2>/dev/null | tr -d '\r')"
+  echo "app_uid=$(adb shell "dumpsys package android.car.usb.handler | sed -n 's/.*userId=\([0-9]*\).*/\1/p' | head -1" 2>/dev/null | tr -d '\r')"
   echo "log_tag=$(adb shell 'getprop persist.log.tag' 2>/dev/null | tr -d '\r')"
 } >> "$OUT/clock_and_env.txt" 2>&1
 

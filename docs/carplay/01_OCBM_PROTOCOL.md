@@ -1,7 +1,23 @@
-# 02 — OCBM: the Open CCPA Bulk Multiplexer
+# 01 — OCBM: the Open CCPA Bulk Multiplexer
 
 > **STATUS:** CURRENT · the OCBM wire specification, kept in step with `crates/ocbm-proto` and
 > `ccpa/ocbmd`
+
+**Scope.** Sizes and chip behaviour quoted in this document are CCPA-only (MFi 2.0C). OCBM is
+MFi-version agnostic: `CH_MFI` relays the chip's own frames and the envelope fixes no cert or
+signature size. The C2Air (Allwinner V821B) is a different box whose chip differs (DeviceVersion
+0x07, 64-byte ECDSA signature). OCBM has not been run on the C2Air's new baseline; an earlier run on
+a stock-firmware-based C2Air image (2026-08-17) is recorded in `c2air/README.md`.
+
+**USB identity.** The box exposes one USB function toward the host at a time: OCBM or NCM, never
+both. OCBM enumerates as `1314:2d00`; NCM (stock firmware and the NCM maintenance mode) enumerates
+as `1314:1520` (`ccpa/rootfs/script/ocbm_boot.sh`). Same vendor id, so a host that speaks OCBM must
+match product id `2d00`, not the vendor alone.
+
+**Other hosts of the same box.** A Raspberry Pi 4 (AAOS) and a Linux workstation have each run full
+CarPlay A/V with a CCPA in NCM mode used only as the MFi source (cert/sign over `crates/mfi-wire`,
+`CARPLAY_MFI_ADDR`, `ccpa/mfid`); the host runs its own radios and does not speak OCBM. That path is
+not specified here; see `CLAUDE.md` (remote MFi path).
 
 **OCBM is projection-agnostic.** It carries CarPlay and Android Auto over the same envelope — CarPlay
 A/V on its own channels, Android Auto as the phone's own byte stream over `CH_IP` — and the channel
@@ -136,6 +152,17 @@ host → box:  MODE_SELECT { mode }        (only when the host wants a non-defau
   evolve independently; unknown capabilities are ignored. There is **no host→box capability word** —
   that slot is the host instance nonce (see the note under the CTRL table). A host's capability is
   expressed by which channels and opcodes it actually uses.
+- **`box_caps` bits** (`CAP_*` in `crates/ocbm-proto/src/lib.rs`; set in the `CT_HELLO` arm of
+  `Daemon::handle`):
+
+  | Bit | Name | Meaning |
+  |---|---|---|
+  | `0x01` | `CAP_CONSOLE` | root PTY on `CH_CONSOLE` (always set) |
+  | `0x02` | `CAP_ECHO` | `CH_ECHO` / `CH_DISCARD` benchmark channels (always set) |
+  | `0x04` | `CAP_MFI` | `CH_MFI` relay to a local MFi chip. **Conditional:** set only when ocbmd holds a chip handle, so a box without a local chip does not advertise it |
+  | `0x08` | `CAP_IP` | `CH_IP` stream-mux (always set) |
+  | `0x10` | `CAP_FILE` | `CH_FILE` push / pull (always set) |
+  | `0x20` | `CAP_ETH` | `CH_ETH` raw-frame bridge (always set) |
 - **Optional host label** (added 2026-08-27). Anything after the nonce in `CT_HELLO` is an optional
   UTF-8 label naming *what kind* of host this is — the box serves several (a GM head-unit app using it
   as a BT+MFi bridge, an Android Auto host driving `aa-bridge` over `CH_IP`, bench tooling) and its
@@ -182,7 +209,7 @@ host → box:  MODE_SELECT { mode }        (only when the host wants a non-defau
 
 | Bit | Name | Meaning |
 |---|---|---|
-| `0x01` | `BH_HCI_PRESENT` | `hci0` exists **and is UP** (`HCI_UP` in `/sys/class/bluetooth/hci0/flags`) |
+| `0x01` | `BH_HCI_PRESENT` | `hci0` exists **and is UP** (`HCIGETDEVINFO` on a raw HCI socket reports `HCI_UP`; see the correction below) |
 | `0x02` | `BH_SSP` | Secure Simple Pairing enabled on `hci0` |
 | `0x04` | `BH_IAP2D` | `iap2d` running (wired CarPlay identify path) |
 | `0x08` | `BH_AIRPLAYD` | `carplayd` running |
@@ -200,8 +227,8 @@ against a snapshot it took minutes ago.
 it has to be cheap enough never to think twice about. `MGMT_INFO` remains the place for detail
 (identity, bonded list, free space).
 
-**`BH_HCI_PRESENT` — read this bit first when Bluetooth "does nothing".** It now reads `HCI_UP` from
-`/sys/class/bluetooth/hci0/flags`, so it reflects the radio's actual power state.
+**`BH_HCI_PRESENT` — read this bit first when Bluetooth "does nothing".** It reads `HCI_UP` via
+`HCIGETDEVINFO` on a raw HCI socket (not from sysfs), so it reflects the radio's actual power state.
 
 > CORRECTED 2026-08-29, TWICE — the second correction is the one that stands.
 >
@@ -210,7 +237,7 @@ it has to be cheap enough never to think twice about. `MGMT_INFO` remains the pl
 > So the bit did not clear on a mid-session hci-down, the very case it would be most useful for.
 >
 > The first fix read `HCI_UP` from `/sys/class/bluetooth/hci0/flags` and this section said so.
-> **That file does not exist on this box.** The 3.14 kernel's `hci0/` exposes exactly `address
+> **That file does not exist on the stock 3.14 kernel (not checked on the `baseline/` mainline kernel).** The 3.14 kernel's `hci0/` exposes exactly `address
 > device name power subsystem type uevent`; the read failed every time and reported "no controller"
 > against an `hci0` that was `UP RUNNING` — strictly worse than the node-exists test it replaced,
 > and wrong in the most misleading direction, since a clear bit is what this section tells you to
@@ -268,15 +295,15 @@ lifecycle section below.
 > Only `HELLO_ACK`'s u32 is a capability bitmask.
 >
 > **Conformance (2026-08-16, updated 2026-09-01).** The Android host supplies a real nonce
-> (`CarlinkManager.kt:360`, random per manager, never 0, held stable across the clients it builds).
+> (`CarlinkManager`'s `instanceNonce`, via `HostInstanceNonce.fresh()`, random per manager, never 0, held stable across the clients it builds).
 > `ocbm-host` now does too: `host_instance_nonce()` in `host/ocbm-host/src/main.rs` derives a
 > per-process value (pid ⊕ wall-clock nanos, forced non-zero) once and re-sends it, so the bench
 > tool exercises replacement detection instead of defeating it. Until 2026-09-01 it sent the
 > caps-era constant `0x13`, which was worse than 0 — two successive runs looked like one host to the
 > box, so the re-arm never fired.
-> `OCBMClient.swift:197` still sends zeros — legal, but it forfeits replacement detection on macOS,
-> and its comment calling the field "caps" is stale. That remains a client bug against this spec,
-> not an alternative reading of it.
+> The macOS client (`OCBMClient.sendHello`, `instanceNonce`) now also sends a per-process random
+> non-zero nonce, so all three clients get replacement detection. (Until then it sent zeros, which was
+> legal but forfeited it. Corrected 2026-10-28.)
 
 
 ### `CT_BT_PHASE` (`0x17`) — Bluetooth/iAP2 handshake progress
@@ -298,6 +325,7 @@ endpoint, stand its A/V consumers up, show progress UI) had nothing to trigger o
 | `0x04` | `BTP_IDENTIFYING` | `0x1D01` IdentificationInformation sent |
 | `0x05` | `BTP_IDENTIFIED` | `0x1D02` accepted — the phone has the accessory |
 | `0x06` | `BTP_WIFI_HANDOFF` | `0x5703` sent: the phone now has the hotspot credentials |
+| `0x07` | `BTP_PAIR_REJECTED` | the phone rejected N re-pair confirmations without a NEW_LINK_KEY — the stored key no longer matches; the app should tell the user to re-pair on the iPhone or forget the box (`BTP_PAIR_REJECTED` in `crates/ocbm-proto/src/lib.rs`, published by the `on_pair_rejected` closure in `crates/vendor/wireless/src/main.rs`; row added 2026-10-19 — the table stopped at `0x06`) |
 
 **Transport.** `wireless::bt_driver::publish_bt_phase` writes the value to `/tmp/bt_phase`; `ocbmd`'s
 `bt_phase_tick` mirrors it to the host on change. This is deliberately the **same mechanism as
@@ -634,11 +662,11 @@ and never writes to them; only source 0 is rotated. Sources:
 | `2` | `carplayd_wl` | `/tmp/carplayd_wl.log` | tail-only |
 | `3` | `iap2d` | `/tmp/iap2d.log` | tail-only |
 | `4` | `aa-bridge` | `/tmp/aa-bridge.log` | tail-only |
-| `5` | `rx-connect` | `/tmp/rx-connect.log` | tail-only |
+| `5` | `rx-connect` | *(none)* | **RETIRED 2026-09-08** (merged into carplayd; output is in `carplayd.log`). Id reserved, never reused, not emitted |
 | `6` | `bt` | `/tmp/bt.log` | tail-only |
 | `7` | `radio_ap_dhcp` | `/tmp/radio_ap_dhcp.log` | tail-only |
 | `8` | `radio_bt_attach` | `/tmp/radio_bt_attach.log` | tail-only |
-| `9` | `rx-connect-wl` | `/tmp/rx-connect-wl.log` | tail-only |
+| `9` | `rx-connect-wl` | *(none)* | **RETIRED 2026-09-08**, as source 5. Id reserved, not emitted |
 | `10` | `wl` | `/tmp/wl.log` | tail-only (btd stdout) |
 | `255` | `internal` | — | the tailer itself: rotation / restart notes and drop reports |
 
@@ -683,7 +711,7 @@ helpers that funnel a daemon's own log lines (`iap2d`, `bt-common`'s `sdp_server
 `btd`'s `main`/`bt_driver`/`control`/`sdp_client`/`reconnect`/`arbiter_client`,
 `receiver`'s `iap_tunnel`) emit this prefix on every line; ocbmd's own `eprintln!`s into `box.log`
 and the shell-script writers (`session_supervisor.sh`, `ocbm_boot.sh`, `radio_hal.sh` et al.,
-`aa-bridge`/`rx-connect`'s ad hoc `eprintln!`s) do not, and stay read-time-stamped — deliberately:
+`aa-bridge`'s and carplayd's ad hoc `eprintln!`s) do not, and stay read-time-stamped — deliberately:
 this is a cheap `SystemTime::now()` in a handful of central Rust helpers, not a per-line shell pipe
 in the supervisor, which is CPU-bound.
 
@@ -706,7 +734,7 @@ poll no longer blocks indefinitely when fully idle: it wakes at 2 s to run that 
 
 ### FILE channel (`0x0011`) — verified binary deploy
 
-The box rootfs is a tiny jffs2 and the shipped head-unit link is OCBM-only (no NCM/SSH), so
+The stock box rootfs is a tiny jffs2 and the shipped head-unit link is OCBM-only (no NCM/SSH), so
 deploying a rebuilt daemon otherwise means base64-over-UART, which drops bytes without hardware
 flow control and silently corrupts. The FILE channel makes a binary deploy ride the reliable
 accessory pipe instead. The **box** advertises `CAP_FILE` (`0x10`) in its `HELLO_ACK` caps.

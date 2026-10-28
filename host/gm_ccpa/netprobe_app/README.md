@@ -1,110 +1,66 @@
-# NetProbe — non-privileged AAOS network capability prober
+# netprobe_app — the gm_ccpa Android app (applicationId `android.car.usb.handler`, class package `zeno.gmccpa`)
 
-A single-screen Android app that answers one question empirically: **with only an ordinary app UID
-(10xxx), what can this app see and reach on the Wi-Fi segment the vehicle hotspot puts it on?**
+*Rewritten in place 2026-10-08. This file used to describe the 2026-07-31 NetProbe network prober ("does no
+CarPlay / iAP2 / MFi / CCPA work", a Run all / Save screen, `netprobe-debug-v3.1.apk`). That app is gone:
+`MainActivity.kt`'s header records the feasibility probes as retired 2026-08-12, and the project name
+"NetProbe" survives only in the directory name, the `NETPROBE` logcat tag and the golden `netprobe-debug-v4.0.apk`.*
 
-It does **no** CarPlay / iAP2 / MFi / CCPA work. It only characterizes:
+The directory holds the wireless-CarPlay receiver: a Kotlin shell around a JNI'd Rust core. What the app is and
+does: [`../docs/04_SYSTEM_MODEL.md`](../docs/04_SYSTEM_MODEL.md) (§4e is the current app surface).
 
-| Probe | Answers |
-|-------|---------|
-| Identity / install / overlay | uid, installer attribution (`com.android.vending`?), `canDrawOverlays`, own `distractionOptimized` meta |
-| Permissions | which network/location/multicast/overlay perms are actually granted |
-| Driver distraction | live `CarUxRestrictions` (read-only, via reflection) — is the car in a driving-restricted state right now |
-| Interfaces | every NIC, up/multicast/mtu, addresses & prefixes |
-| Connectivity | every `Network`, its transports, internet/validated, which is **default**, per-net IPs/DNS |
-| Wi-Fi / band | SSID/BSSID, IP, **frequency → 2.4 / 5 / 6 GHz**, link speed, DHCP gateway/netmask |
-| mDNS / multicast | sends real mDNS queries on 224.0.0.251:5353 and lists responders — proves multicast **both directions** and enumerates the iPhone's advertised services |
-| mDNS advertise | registers its own `_airplay._tcp` — proves an ordinary app can be **discoverable** |
-| Reachability | ICMP + TCP connect to an iPhone IP (optionally after **binding to the Wi-Fi network**) — proves no AP client isolation |
-| Subnet sweep | fast /24 sweep to locate the iPhone |
-| Raw sockets | confirms ephemeral bind works and privileged (<1024) bind is denied |
+## Screen
 
-Each probe is isolated — one failure never aborts the run. Output shows on screen, goes to `logcat -s
-NETPROBE`, and **Save** writes a text report for `adb pull`.
-
-> **Status:** feasibility phase complete (captures 2026-07-31); results live in
-> [`../docs/01_FINDINGS.md`](../docs/01_FINDINGS.md). This is **not** archival — it is the foundation the
-> next build phase grows on (see [`../docs/03_BUILD_PLAN.md`](../docs/03_BUILD_PLAN.md) §11).
+One launcher (`MainActivity`): status on the left (state, driver line, pairing code, adapter Bluetooth name, rekey
+hint, hotspot chip), actions on the right — **Set hotspot / Start / Restart session / Stop / Adapter & logs**.
+Hotspot credentials are entered once in the dialog (no compiled-in defaults). The CarPlay screen
+(`av/CarPlayActivity`) appears when a session is live. No Recover, Box Info, Log Scope or Log Status button
+exists any more.
 
 ## Build
 
-Zero external dependencies, pure platform SDK.
-
-**Use the Gradle-free path** — the Mac's JDK is 21, which fights AGP 7.4:
-
-```bash
-bash ../tools/build_apk.sh        # kotlinc -> d8 -> aapt2 -> zipalign -> apksigner
-# -> ../apk/netprobe-debug-v3.1.apk
-```
-
-The Gradle files are kept for Android Studio editing/indexing. If you do want a Gradle build:
+Not Gradle. The Gradle files exist for Android Studio indexing only (`app/build.gradle` header: a Gradle APK is
+pairing-incapable because it does not package the native `.so`). Use, from `host/gm_ccpa`:
 
 ```bash
-cd netprobe_app
-gradle wrapper --gradle-version 7.6   # if no wrapper is checked in
-./gradlew :app:assembleDebug
-# -> app/build/outputs/apk/debug/app-debug.apk
+bash tools/test.sh                      # Tier-0 gate (cargo, JNI cross-build, JVM test classes listed in tools/jvm_tests.txt, docs budget, proto check)
+bash tools/build_apk.sh                 # release flavor -> apk/gmccpa-debug-<STAMP>.apk
+GMCCPA_BENCH=1 bash tools/build_apk.sh  # bench flavor (adds mic_inject / finish_launcher) -> ...-bench.apk
 ```
 
-## Install (Play-attributed, distraction-optimized)
+`STAMP` is `<sha>` or `<sha>-dirty.<h8>`; `versionCode` is the git commit count; `versionName` is `4.0+<STAMP>`
+(`-bench` suffix for the bench flavor). Exactly one of `src/nobench/java` and `src/bench/java` is compiled.
 
-Attribute the install to the Play Store so the distraction-optimized activity is eligible in motion,
-and auto-grant the runtime perms:
+## Install
 
 ```bash
-adb install -i com.android.vending -g app/build/outputs/apk/debug/app-debug.apk
+adb shell am get-current-user     # must print 10
+adb install --user 10 -g -r -i com.android.vending apk/gmccpa-debug-<STAMP>.apk
 ```
 
-If `-g` didn't grant everything (older platform), grant explicitly via `shell` (uid 2000):
+`-i com.android.vending` keeps the in-motion display path eligible; `-g` grants the runtime permissions;
+wait 30 s between any uninstall and the following reinstall. After an uninstall + reinstall re-run the persistent
+USB grant (`../docs/06_BRINGUP_RUNBOOK.md` §4, "USB permission grant"). `SYSTEM_ALERT_WINDOW` is `development`
+and granted by `-g`; never set its appop to `ignore`/`deny`.
+
+## Run and observe
 
 ```bash
-P=zeno.gmccpa
-adb shell pm grant $P android.permission.ACCESS_FINE_LOCATION
-adb shell pm grant $P android.permission.ACCESS_COARSE_LOCATION
-adb shell pm grant $P android.permission.NEARBY_WIFI_DEVICES   # no-op pre-A13, harmless
-adb shell appops set $P SYSTEM_ALERT_WINDOW allow              # overlay = in-motion display lever
-# location services must also be ON, or SSID reads back as "<unknown ssid>":
-adb shell settings put secure location_mode 3
+adb shell am start --user 10 -n android.car.usb.handler/zeno.gmccpa.MainActivity
+adb logcat -d -b all | grep -a NETPROBE       # the app's narrative; `grep -a` is needed on binary-laden captures
 ```
 
-Verify the install attribution stuck (the app also reports this on screen):
+Scripted verbs (`--es run <verb>`) and their arguments are listed in
+[`../docs/06_BRINGUP_RUNBOOK.md`](../docs/06_BRINGUP_RUNBOOK.md) §4. `--es ssid/--es pass` apply to that run only.
 
-```bash
-adb shell dumpsys package $P | grep -i installerPackageName
-```
+## Layout
 
-## Run
-
-```bash
-adb shell am start -n zeno.gmccpa/.MainActivity   # foregrounds even if hidden from the car launcher
-adb logcat -c && adb logcat -s NETPROBE                    # live output
-```
-
-1. Connect the iPhone to the vehicle hotspot manually.
-2. In the app, optionally type the iPhone's IP (iPhone: Settings ▸ Wi-Fi ▸ ⓘ on the network).
-3. Optionally tick **Bind process to Wi-Fi network** (do this if the Connectivity probe shows the
-   hotspot is *not* the default/validated network — otherwise sockets leak out cellular).
-4. Tap **Run all**, then **Save**.
-
-```bash
-adb pull /sdcard/Android/data/zeno.gmccpa/files/netprobe_report_<ts>.txt
-```
-
-## How to read it (maps to the open questions)
-
-- **2.4 vs 5 GHz** → `WI-FI INFO / BAND` line (`freq=...MHz => BAND=`).
-- **Client isolation** → `REACHABILITY`: any completed TCP handshake or OPEN port to the iPhone = not
-  isolated. Absence in mDNS alone is *not* proof of isolation (a plain iPhone may advertise nothing
-  until an app runs) — always cross-check with a direct reachability hit.
-- **Multicast / discovery survivable?** → `mDNS / MULTICAST`: responders listed = the AP passes
-  multicast and Bonjour discovery is viable; empty = the most likely silent blocker.
-- **Can we be the accessory?** → `mDNS ADVERTISE`: `REGISTERED` = an ordinary app can be discoverable.
-- **In-motion display** → `IDENTITY` (`canDrawOverlays`, `distractionOptimized`) + `DRIVER
-  DISTRACTION` (whether the car is restricted right now). With a Play-attributed install this is where
-  you confirm the activity is allowed to run moving.
-- **Wrong-network egress** → `CONNECTIVITY`: if the hotspot net isn't `[DEFAULT]`, bind before testing.
+`ocbm/` OCBM client and USB transport · `pair/NativeCore.kt` JNI bindings · `av/` video, audio, voice, mic, media
+service, status notification · `logging/` capture, export, redaction, session summary · top level: session core,
+supervisor, receiver, launcher UI, auto-claim. Tests: `app/src/test/java` (host JVM, listed in
+`../tools/jvm_tests.txt`).
 
 ## Scope
 
-Read-only characterization on your own hardware. It changes nothing on the vehicle, opens no CarPlay
-session, and holds no privileged permission. Delete with `adb uninstall zeno.gmccpa`.
+Interoperability and accessory development on the owner's own hardware. The app holds no privileged permission.
+Remove with `adb uninstall android.car.usb.handler` (a plain uninstall also removes the pairing, the accessory key and the
+saved hotspot details).

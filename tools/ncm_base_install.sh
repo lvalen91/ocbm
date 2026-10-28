@@ -35,9 +35,14 @@
 # UART pads (armed at step 3) and the SPI programmer with the step-2 image.
 #
 # ============================== WHAT IS NEVER TOUCHED ==================================
-# * mtd0 (HAB-signed U-Boot) / mtd1 (OTPMK-encrypted kernel) — read for backup, never written.
+# * mtd0 (HAB-signed U-Boot) / mtd1 (kernel: first 192 KB per-chip DCP-encrypted, rest plain
+#   zImage; replaceable via U-Boot staging, but not by this tool) — read for backup, never written.
 # * /script/ko.tar.gz — gadget modules built against THIS unit's kernel. Overwriting them
-#   with another unit's copy loses the gadget, and with it NCM, and with it the box.
+#   with another unit's copy loses the gadget, and with it NCM, and with it the box. It is
+#   never REPLACED. Since 2026-10-19 strip FILTERS the unit's own file in place: HeWei's
+#   Apple-gadget members (KO_DROP: g_iphone.ko, f_ptp*.ko) are dropped, every other member is
+#   repacked byte-identical, and the result must still list cleanly and carry KO_NEED
+#   (g_android_accessory.ko, storage_common.ko) or the original is left untouched.
 # * ANYTHING WLAN/BT — see the variant rule below. This is the single biggest hazard here.
 # * /etc/riddle.conf, unit MACs, dropbear host keys, hostapd SSID/PSK — unit identity.
 # * dropbear / telnetd / udhcpd and the gadget itself — that is the control channel you are
@@ -320,6 +325,14 @@ libnss_hesiod.so.2 libnss_nisplus-2.20.so libnss_nisplus.so libnss_nisplus.so.2 
 libpcprofile.so libpthread.so libSegFault.so libstdc++.so libthread_db-1.0.so \
 libthread_db.so libthread_db.so.1 libubsan.so libubsan.so.0"
 ETC_B="riddle_default.conf riddle.conf"          # riddle.conf carries unit config — --deep only
+# HeWei's Apple-gadget modules, FILTERED out of the unit's own /script/ko.tar.gz by strip
+# (owner decision 2026-10-19: this is an OCBM board now). OCBM's phone-facing gadget is the
+# BUILT-IN g_android (android0, functions=iap2,ncm, /dev/android_iap2) and the car-facing one is
+# g_android_accessory — docs/carplay/07_PHONE_SIDE.md. Their only loaders were start_iphone.sh,
+# check_mfg_mode.sh and start_mass_storage.sh, all in SCRIPT_A. KO_NEED must survive the filter
+# or the archive is left untouched: g_android_accessory.ko IS the NCM gadget.
+KO_DROP="g_iphone.ko f_ptp.ko f_ptp_appledev.ko f_ptp_appledev2.ko"
+KO_NEED="g_android_accessory.ko storage_common.ko"
 # Vendor daemons/loops to STOP before deleting their files. dropbear/telnetd/udhcpd and the
 # radio stack are absent from this list on purpose.
 KILL_PROCS="ARMadb-driver ARMiPhoneIAP2 ARMAndroidAuto ARMHiCar ARMandroid_Mirror AppleCarPlay \
@@ -400,9 +413,10 @@ echo \$t" 2>/dev/null | tr -d ' \r\n')
   │  Carlinkit stack ${vb:-?} projection binaries still installed
   ├─ WHAT THIS WILL DO ──────────────────────────────────────────────
   │  remove         the Carlinkit projection stack (~${reclaim:-?}K)
+  │  filter         g_iphone/f_ptp* out of this unit's own /script/ko.tar.gz
   │  install        the owned boot scripts + UART early console
   │  KEEP UNTOUCHED all WLAN/BT files for ${var:-this variant},
-  │                 /script/ko.tar.gz, unit identity, mtd0/mtd1,
+  │                 the other ko.tar.gz members, unit identity, mtd0/mtd1,
   │                 and dropbear/telnetd/udhcpd (your way in)
   └──────────────────────────────────────────────────────────────────
 
@@ -593,7 +607,11 @@ echo "--- /etc/inittab ---"; cat /etc/inittab
     [ -f "$OVERLAY/script/$f" ] && push "$OVERLAY/script/$f" "/script/$f.new"
   done
   push "$OVERLAY/etc/init.d/rcS" /etc/init.d/rcS.new
-  push "$OVERLAY/etc/mdev/udisk_insert.sh" /etc/mdev/udisk_insert.sh.new
+  # USB storage: ONE owned mdev hook, /etc/mdev/usb_mount.sh (2026-10-19), replaces the stock
+  # udisk_insert.sh (sd[a-z][0-9], @) and udisk_hotplug.sh (sd[a-z], *). The box side installs it,
+  # checks it, and only then points both mdev.conf sd rules at it (`*`: add and remove). The stock
+  # hooks stay on disk until strip, which deletes them only once no active rule names them.
+  push "$OVERLAY/etc/mdev/usb_mount.sh" /etc/mdev/usb_mount.sh.new
   box '
 set -e
 inst() { n="$1.new"; [ -f "$n" ] || return 0
@@ -620,7 +638,54 @@ for f in /script/start_main_service.sh /script/after_shutdown.sh /script/init_gp
 # draft of this comment did.
 [ -x /script/radio_detect.sh ] && { echo "--- radio platform ---"; sh /script/radio_detect.sh 2>/dev/null | grep -E "CHIP|SDIO_DEVICE|FW_TREE|BT_ATTACH_CMD|WLAN_INSMOD|BACKEND|WIRELESS"; } || true
 inst /etc/init.d/rcS
-mkdir -p /etc/mdev && inst /etc/mdev/udisk_insert.sh
+mkdir -p /etc/mdev
+# USB storage. Not boot-critical, so nothing here may abort this set -e payload before the
+# boot-critical post-checks below: each step warns, and on any doubt mdev.conf stays on the stock
+# hooks (still on disk until strip), so USB storage keeps working either way.
+act() { grep -v "^[[:space:]]*#" "$1" || true; }
+usb_wire() {
+  f=/etc/mdev/usb_mount.sh; MC=/etc/mdev.conf
+  [ -f "$f" ] || { echo "WARN: no $f"; return 1; }
+  for p in /mnt/UPAN "mount -t vfat -o utf8=1" "umount -l"; do
+    grep -qF -- "$p" "$f" || { echo "WARN: $f lacks [$p]"; return 1; }
+  done
+  [ -f "$MC" ] || { echo "WARN: no $MC"; return 1; }
+  sed -e "s#^\(sd\[a-z\][[:space:]].*\)[*@\$]/etc/mdev//*udisk_hotplug\.sh[[:space:]]*\$#\1*/etc/mdev/usb_mount.sh#" \
+      -e "s#^\(sd\[a-z\]\[0-9\][[:space:]].*\)[*@\$]/etc/mdev//*udisk_insert\.sh[[:space:]]*\$#\1*/etc/mdev/usb_mount.sh#" \
+      "$MC" > "$MC.new" || { rm -f "$MC.new"; return 1; }
+  # Accept only the intended edit: one whole-disk and one partition rule on usb_mount.sh, no active
+  # line left on a stock udisk hook, every other active line unchanged.
+  n1=$(act "$MC.new" | grep -c "^sd\[a-z\][[:space:]].*\*/etc/mdev/usb_mount\.sh" || true)
+  n2=$(act "$MC.new" | grep -c "^sd\[a-z\]\[0-9\][[:space:]].*\*/etc/mdev/usb_mount\.sh" || true)
+  n0=$(act "$MC.new" | grep -c "udisk_[a-z]*\.sh" || true)
+  r0=$(act "$MC" | grep -v -e "udisk_[a-z]*\.sh" -e "usb_mount\.sh" || true)
+  r1=$(act "$MC.new" | grep -v -e "udisk_[a-z]*\.sh" -e "usb_mount\.sh" || true)
+  if [ "$n1" != 1 ] || [ "$n2" != 1 ] || [ "$n0" != 0 ] || [ "$r0" != "$r1" ]; then
+    rm -f "$MC.new"; echo "WARN: $MC sd rules are not the stock pair (whole-disk=$n1 partition=$n2 stale=$n0)"; return 1
+  fi
+  if [ "$(cat "$MC")" = "$(cat "$MC.new")" ]; then rm -f "$MC.new"; echo "  $MC already on usb_mount.sh"; return 0; fi
+  [ -f "$MC.pre" ] || cp "$MC" "$MC.pre" || { rm -f "$MC.new"; return 1; }
+  chmod 644 "$MC.new" && mv "$MC.new" "$MC" && echo "  $MC: sd[a-z] + sd[a-z][0-9] -> */etc/mdev/usb_mount.sh"
+}
+inst /etc/mdev/usb_mount.sh || echo "WARN: usb_mount.sh not replaced - unit copy kept"
+usb_wire || echo "WARN: mdev.conf left on the stock udisk hooks - USB storage unchanged"
+# USB storage must survive whichever way it ended up wired: every hook an active sd rule names must
+# exist and parse, and usb_mount.sh must still carry /mnt/UPAN, the vfat mount and the umount -l
+# fallback. Not fatal (USB staging is not the control channel): put mdev.conf.pre back and say so.
+usbbad=
+for h in usb_mount udisk_hotplug udisk_insert; do
+  act /etc/mdev.conf | grep "^sd" | grep -q "/$h\.sh" || continue
+  f=/etc/mdev/$h.sh
+  { [ -f "$f" ] && sh -n "$f" 2>/dev/null; } || { usbbad="$usbbad $f:missing-or-unparsable"; continue; }
+  [ "$h" = usb_mount ] || continue
+  for p in /mnt/UPAN "mount -t vfat -o utf8=1" "umount -l"; do grep -qF -- "$p" "$f" || usbbad="$usbbad $f:lacks[$p]"; done
+done
+if [ -n "$usbbad" ]; then
+  echo "WARN: USB storage hook broken:$usbbad"
+  if [ -f /etc/mdev.conf.pre ]; then
+    cp /etc/mdev.conf.pre /etc/mdev.conf && echo "  restored /etc/mdev.conf from .pre" || echo "  RESTORE FAILED for /etc/mdev.conf"
+  fi
+fi
 # Post-checks. A bad rcS on a unit with no UART wired is a reflash, so each of these reverts
 # from the .pre copy rather than leaving a box that will not come back.
 fail=0
@@ -685,6 +750,7 @@ phase_strip() {
     echo "SBIN_A=\"$SBIN_A\""; echo "SBIN_B=\"$SBIN_B\""; echo "SCRIPT_A=\"$SCRIPT_A\""
     echo "ETC_A=\"$ETC_A\""; echo "ETC_B=\"$ETC_B\""
     echo "KILL_PROCS=\"$KILL_PROCS\""; echo "KILL_LOOPS=\"$KILL_LOOPS\""
+    echo "KO_DROP=\"$KO_DROP\""; echo "KO_NEED=\"$KO_NEED\""
     cat <<'EOS'
 set -u
 # THE WLAN/BT GUARD. Every deletion goes through this, so no kill list — present or future —
@@ -762,6 +828,122 @@ for e in $ETC_A; do kill_one "/etc/$e"; done
 if [ "$KEEP_WEB" = 1 ]; then echo "  KEEP /etc/boa + /usr/sbin/boa (--keep-web)"; else kill_one /etc/boa; fi
 if [ "$DEEP" = 1 ]; then for e in $ETC_B; do kill_one "/etc/$e"; done; kill_one /etc/RiddleBoxData; fi
 
+echo "--- stock USB hooks (/etc/mdev) ---"
+# bootpath points both sd rules at the owned /etc/mdev/usb_mount.sh. The stock hooks it replaced
+# (udisk_insert.sh, udisk_hotplug.sh) and udisk_remove.sh (shipped with its rule commented out; its
+# remove branch rebooted on /tmp/update_status, whose writers are all in SCRIPT_A) are deleted only
+# when NO active mdev.conf line still names them: a unit whose mdev.conf bootpath could not rewire
+# keeps its stock hooks, and with them working USB storage.
+MC=/etc/mdev.conf
+for h in udisk_insert udisk_hotplug udisk_remove; do
+  if [ -f "$MC" ] && grep -v '^[[:space:]]*#' "$MC" | grep -q "/$h\.sh"; then
+    echo "  KEEP /etc/mdev/$h.sh (an ACTIVE mdev.conf rule still calls it - rerun bootpath)"
+  else
+    kill_one "/etc/mdev/$h.sh"
+  fi
+done
+# Then drop the commented stock rules naming those hooks (#sd[a-z] ... $/etc/mdev/udisk_remove.sh),
+# once no active rule names any of them. Only comment lines may change: compare the active rule
+# set before and after, and leave the file alone on any difference.
+UC='^[[:space:]]*#.*udisk_[a-z]*\.sh'
+if [ -f "$MC" ] && grep -q "$UC" "$MC" && ! grep -v '^[[:space:]]*#' "$MC" | grep -q 'udisk_[a-z]*\.sh'; then
+  if [ "$DRY" = 1 ]; then
+    echo "  WOULD DROP from $MC:"; grep -n "$UC" "$MC" | sed 's/^/      /'
+  else
+    [ -f "$MC.pre" ] || cp "$MC" "$MC.pre"
+    grep -v "$UC" "$MC" > "$MC.new"
+    if [ "$(grep -v '^[[:space:]]*#' "$MC")" = "$(grep -v '^[[:space:]]*#' "$MC.new")" ]; then
+      { chmod 644 "$MC.new" && mv "$MC.new" "$MC" && echo "  dropped the commented udisk_*.sh rules from $MC"; } \
+        || { rm -f "$MC.new"; echo "  FAILED to rewrite $MC - left as is"; }
+    else
+      rm -f "$MC.new"; echo "  KEEP $MC (edit would change an active rule - left as is)"
+    fi
+  fi
+fi
+
+echo "--- HeWei Apple-gadget modules (g_iphone / f_ptp*) in the unit's own ko.tar.gz ---"
+# FILTER, never replace: the bundle is built against THIS unit's kernel (vermagic), so a shipped
+# copy is not an option (see the header). Extract to a tmpfs work dir, repack every member except
+# KO_DROP under its original name, prove the result (lists cleanly, member list exactly as
+# expected, KO_NEED present, KO_DROP absent, every kept member byte-identical), and only then
+# rename it over the original. Any surprise - an unlistable archive, a member that is not a flat
+# plain name, a missing KO_NEED, no tar create, no space - leaves the original as it was.
+# kill_one is not used for these: is_radio() matches every *.ko by design, and these four exact
+# names are USB gadget drivers, not radio files. Second run: nothing to drop, prints OK.
+KO=/script/ko.tar.gz
+KO_STAGE=/tmp
+ko_fail() { [ "$DRY" = 1 ] || rm -f "$KO.new" "$KO.pre.tmp"; echo "  KEEP $KO ($1) - left as is"; echo "KO_FILTER_FAILED"; return 1; }
+ko_filter() {
+  [ -f "$KO" ] || { echo "  $KO absent - nothing to filter"; return 0; }
+  L=$(tar -tzf "$KO" 2>/dev/null) || { ko_fail "does not list cleanly"; return 1; }
+  keep=""; drop=""; bad=""
+  oIFS=$IFS; IFS='
+'; set -f
+  for m in $L; do
+    n=${m#./}
+    case "$n" in
+      "") ;;                                            # the archive's own ./ entry
+      */*|.|..|-*|*[!A-Za-z0-9._+-]*) bad="$bad $m" ;;  # not a flat plain member name
+      *) case " $KO_DROP " in *" $n "*) drop="$drop $m" ;; *) keep="$keep $m" ;; esac ;;
+    esac
+  done
+  IFS=$oIFS; set +f
+  [ -z "$bad" ] || { ko_fail "unexpected member layout:$bad"; return 1; }
+  [ -n "$drop" ] || { echo "  OK $KO carries none of: $KO_DROP"; return 0; }
+  for n in $KO_NEED; do
+    case " $keep " in *" $n "*|*" ./$n "*) ;; *) ko_fail "would not contain $n afterwards"; return 1 ;; esac
+  done
+  if [ "$DRY" = 1 ]; then
+    echo "  WOULD FILTER $KO ($(du -sk "$KO" | cut -f1) KB): drop$drop"
+    echo "               keep$keep"
+    return 0
+  fi
+  W=$(mktemp -d "$KO_STAGE/kofilter.XXXXXX") || { ko_fail "no work dir in $KO_STAGE"; return 1; }
+  ko_build "$W"; rc=$?
+  rm -rf "$W"
+  return $rc
+}
+ko_build() {
+  W=$1
+  mkdir "$W/x" "$W/v" || { ko_fail "work dir"; return 1; }
+  tar -xzf "$KO" -C "$W/x" || { ko_fail "extract failed"; return 1; }
+  for m in $keep; do [ -f "$W/x/$m" ] || { ko_fail "member $m did not extract as a file"; return 1; }; done
+  rm -f "$KO.new"
+  tar -czf "$KO.new" -C "$W/x" $keep || { ko_fail "repack failed"; return 1; }
+  tar -tzf "$KO.new" > "$W/new.list" 2>/dev/null || { ko_fail "repacked archive does not list cleanly"; return 1; }
+  printf '%s\n' $keep > "$W/want.list"
+  cmp -s "$W/want.list" "$W/new.list" || { ko_fail "repacked member list is not the expected one"; return 1; }
+  for n in $KO_NEED; do
+    grep -qx -e "$n" -e "./$n" "$W/new.list" || { ko_fail "repacked archive lacks $n"; return 1; }
+  done
+  for n in $KO_DROP; do
+    grep -qx -e "$n" -e "./$n" "$W/new.list" && { ko_fail "repacked archive still has $n"; return 1; }
+  done
+  tar -xzf "$KO.new" -C "$W/v" || { ko_fail "repacked archive does not extract"; return 1; }
+  for m in $keep; do cmp -s "$W/x/$m" "$W/v/$m" || { ko_fail "member $m changed in the repack"; return 1; }; done
+  # On-box undo, same convention as every other .pre: the FIRST original is kept and tidy drops
+  # it. Staged through .pre.tmp so a short write (full flash) can never pose as a good .pre.
+  if [ ! -f "$KO.pre" ]; then
+    { cp "$KO" "$KO.pre.tmp" && cmp -s "$KO" "$KO.pre.tmp" && mv -f "$KO.pre.tmp" "$KO.pre"; } \
+      || { ko_fail "could not save $KO.pre"; return 1; }
+  fi
+  chmod 644 "$KO.new" && mv -f "$KO.new" "$KO" || { ko_fail "rename failed"; return 1; }
+  echo "  filtered $KO: removed$drop ($(du -sk "$KO" | cut -f1) KB now; kept$keep)"
+}
+ko_filter
+# The tmpfs copies copy_to_tmp.sh extracted at this boot. Exact names only; they would also go
+# with the coldtest2 reboot, after which the filtered archive no longer carries them.
+for m in $KO_DROP; do
+  f=$KO_STAGE/$m
+  [ -e "$f" ] || continue
+  if [ "$DRY" = 1 ]; then echo "  WOULD REMOVE $f (tmpfs copy)"; else rm -f "$f" && echo "  removed $f"; fi
+done
+# Report, never rmmod: the strip does not bounce a gadget. Nothing in the owned boot path loads
+# these, so a hit means something outside it did; the coldtest2 reboot clears it.
+for m in $KO_DROP; do
+  if grep -q "^${m%.ko} " /proc/modules 2>/dev/null; then echo "  NOTE: ${m%.ko} is LOADED - not unloaded here; gone after the next reboot"; fi
+done
+
 echo "=== free after: $(df -k / | tail -1 | awk '{print $4}') KB ==="
 echo "--- still running (should be: init, dropbear, telnetd, udhcpd, radios, early_console) ---"
 ps | grep -vE "\[.*\]"
@@ -780,6 +962,9 @@ EOS
     die "vendor daemons are still running: the owned boot path has not taken effect. Run 'bootpath' then 'coldtest' before stripping."
   fi
   grep -q STRIP_DONE "$RUN_DIR/strip.txt" || die "strip did not report STRIP_DONE — inspect /tmp/strip.log before doing anything else"
+  # Not fatal: a refused filter leaves the original ko.tar.gz intact and the unit fully working;
+  # the Apple-gadget modules simply remain until the reason printed above is dealt with.
+  grep -q KO_FILTER_FAILED "$RUN_DIR/strip.txt" && warn "ko.tar.gz was NOT filtered (g_iphone/f_ptp* remain on the unit) - see the KEEP line above"
   [ "$DRY" = 1 ] && { say "(dry-run) nothing was removed"; return 0; }
 
   say "strip complete. The boot path was already owned before this ran, so nothing that was"
@@ -799,11 +984,21 @@ phase_baselinediff() {
   #
   # Everything else that differs is signal. EXTRA = still to remove; MISSING = the baseline had
   # something this box does not (usually the owned scripts, installed by `strip`).
-  local base_tar="$REPO/ccpa/backup/base/rootfs.tar.gz"
-  [ -f "$base_tar" ] || { warn "no baseline snapshot at $base_tar — skipping"; return 0; }
-  say "=== baselinediff — this box vs the 07-08 vanilla rootfs (WLAN/BT + identity excluded) ==="
-
-  tar tzf "$base_tar" 2>/dev/null | sed 's|^\./||' | grep -v '/$' | sort > "$RUN_DIR/baseline.files"
+  # Only the file LIST is used. rootfs.tar.gz left the repo on 2026-10-20 (it embeds device
+  # credentials; kept local, see ccpa/backup/base/README.md); rootfs.files.txt is its listing,
+  # produced by the same pipeline as below, so the result is identical. A local tarball, if
+  # present, still wins.
+  local base_dir="$REPO/ccpa/backup/base"
+  local base_tar="$base_dir/rootfs.tar.gz" base_list="$base_dir/rootfs.files.txt"
+  if [ -f "$base_tar" ]; then
+    say "=== baselinediff — this box vs the 07-08 vanilla rootfs (WLAN/BT + identity excluded) ==="
+    tar tzf "$base_tar" 2>/dev/null | sed 's|^\./||' | grep -v '/$' | sort > "$RUN_DIR/baseline.files"
+  elif [ -f "$base_list" ]; then
+    say "=== baselinediff — this box vs the 07-08 vanilla rootfs (WLAN/BT + identity excluded) ==="
+    sort "$base_list" > "$RUN_DIR/baseline.files"
+  else
+    warn "no baseline snapshot at $base_tar or $base_list — skipping"; return 0
+  fi
   # -type f OR -type l: /bin and /sbin are ~200 symlinks to busybox and the tar listing counts
   # them, so enumerating only regular files here reports the entire busybox applet set as
   # "missing from this box".

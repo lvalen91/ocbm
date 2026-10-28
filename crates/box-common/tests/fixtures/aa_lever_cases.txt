@@ -1,0 +1,33 @@
+# Shared shell/Rust parity fixture for the `android_auto` opt-in lever (owner decision D1, 2026-10-19).
+#
+# Format: <expected>|<document>
+#   expected 1 = Android Auto REQUESTED (explicit true, no explicit false); 0 = not requested.
+#   document: `\n` separates lines; `\t` `\v` `\f` `\r` are tab / vertical tab / form feed / CR
+#   (decoded by printf '%b' in tools/run_tests.sh and by the Rust test
+#   `box_common::cfg::tests::aa_lever_matches_the_shared_shell_fixture`).
+# Both sides assert this column, so a drift in EITHER matcher fails the suite. Do not put `|` in a document.
+1|android_auto: true
+1|name: "CarLink"\nwireless: true\nandroid_auto: true\nwifi_ap: true
+1|  android_auto:true
+1|\tandroid_auto:   TRUE
+1|Android_Auto: True   # on for this trip
+1|\vandroid_auto: true
+1|\fandroid_auto: true
+1|\randroid_auto: true
+1|android_auto:\v\ftrue
+0|android_auto: true\n\vandroid_auto: false
+1|android_auto: trueish
+0|android_auto: false
+0|android_auto: FALSE
+0|android_auto: true\nandroid_auto: false
+0|android_auto: false\nandroid_auto: true
+0|wireless: true\nwifi_ap: true
+0|android_auto:
+0|android_auto: yes
+0|android_auto: 1
+0|android_auto_debug: true
+0|# android_auto: true
+0|  nested:\n    android_autox: true
+0|android_auté: true
+0|android_auto: tré
+0|

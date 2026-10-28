@@ -17,7 +17,7 @@
 
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{Mutex, MutexGuard, OnceLock, TryLockError};
 use std::time::{Duration, Instant};
 
 use jni::objects::{GlobalRef, JByteArray, JClass, JObject, JString};
@@ -30,6 +30,10 @@ use pairing::verify::{Identity, PeerStore};
 use receiver::server::ControlServer;
 
 static JVM: OnceLock<JavaVM> = OnceLock::new();
+/// The `:9112` mic-ingest listener (F136), set in `JNI_OnLoad` ONLY once its bind succeeded: the
+/// auth token lives inside it, and `nativeMicAuth` reads it out only while the listener is serving.
+/// Nothing logs the token.
+static MIC_SEAM: OnceLock<receiver::uplink::ControlListener> = OnceLock::new();
 static IDENTITY: OnceLock<Identity> = OnceLock::new();
 
 // The one live native session, keyed by a generation token handed back to Kotlin as the `jlong`
@@ -51,10 +55,9 @@ fn core() -> MutexGuard<'static, Option<(u64, Native)>> {
 
 /// Returned by `nativeInit` when CORE could not be taken inside [`INIT_LOCK_BUDGET`].
 ///
-/// Distinct from 0 ("no core available, fall back to the Kotlin stub") because the correct caller
-/// response is the opposite one: close the connection and let the phone redial into a core that is
-/// by then free. The stub path cannot pair, so answering a busy core with it guarantees a failed
-/// session where a redial would have succeeded.
+/// Distinct from 0 ("no core; the connection is closed (no fallback)", v5.9 UC1) because the cause
+/// differs: a busy core is transient, so the caller closes this connection and the phone redials into
+/// a core that is by then free. Both answers close the connection; there is no fallback path.
 const INIT_BUSY: jlong = -1;
 
 /// How long a NEW control connection will wait for the incumbent to release CORE.
@@ -74,7 +77,36 @@ const INIT_LOCK_BUDGET: Duration = Duration::from_secs(3);
 // The receiver core logs with ~138 println!/eprintln! calls. On Android those go to /dev/null, and
 // combined with the nine documented silent session-killers that turns a debuggable problem into an
 // undebuggable one. Pipe fd 1/2 into __android_log_write before anything else runs.
+//
+// ONE pipe for both streams, on purpose (A-F2/A-X1, 2026-10-08): two reader threads would lose the
+// cross-stream ordering the capture sequences in docs/12 rely on, and the receiver crate prints
+// SUCCESS lines on stderr ("[receiver] pair-verify OK"), so stderr cannot be mapped to WARN
+// wholesale. Severity instead rides on the line: this crate's own failure sites write through
+// [`jni_log`] with a `[jni] E: ` / `[jni] W: ` marker, and the reader maps the marker to the logcat
+// priority ([`log_prio`]) so `adb logcat -s NETPROBE:W` surfaces a peer-store write failure, an
+// init failure or a JNI_OnLoad panic. Everything else stays INFO. Receiver-side severity (its own
+// eprintln! of real faults) is an upstream matter; the crate is static.
 // ---------------------------------------------------------------------------------------------
+/// logcat priority for one pipe line: 6 (ERROR) for `[jni] E: `, 5 (WARN) for `[jni] W: `, else 4.
+fn log_prio(line: &[u8]) -> i32 {
+    if line.starts_with(b"[jni] E: ") {
+        6
+    } else if line.starts_with(b"[jni] W: ") {
+        5
+    } else {
+        4
+    }
+}
+
+/// This crate's own failure lines: `level` is 'E' or 'W'. Formatted into ONE buffer and written with
+/// a single `write_all`, because `eprintln!` on the unbuffered stderr issues one write per format
+/// piece and interleaves with the receiver's stdout lines on the shared pipe (A-X1).
+fn jni_log(level: char, msg: std::fmt::Arguments<'_>) {
+    use std::io::Write;
+    let line = format!("[jni] {level}: {msg}\n");
+    let _ = std::io::stderr().lock().write_all(line.as_bytes());
+}
+
 fn redirect_stdio_to_logcat() {
     unsafe {
         let mut fds = [0i32; 2];
@@ -103,10 +135,11 @@ fn redirect_stdio_to_logcat() {
                 for &b in &buf[..n as usize] {
                     if b == b'\n' {
                         // Prefix so it sorts with the Kotlin side's subsystem fields.
+                        let prio = log_prio(&line);
                         let mut out = b"[rust ] ".to_vec();
                         out.extend_from_slice(&line);
                         if let Ok(c) = std::ffi::CString::new(out) {
-                            android_log(&tag, &c);
+                            android_log(prio, &tag, &c);
                         }
                         line.clear();
                     } else {
@@ -118,11 +151,11 @@ fn redirect_stdio_to_logcat() {
     }
 }
 
-unsafe fn android_log(tag: &std::ffi::CStr, msg: &std::ffi::CStr) {
+unsafe fn android_log(prio: i32, tag: &std::ffi::CStr, msg: &std::ffi::CStr) {
     extern "C" {
         fn __android_log_write(prio: i32, tag: *const libc::c_char, text: *const libc::c_char) -> i32;
     }
-    __android_log_write(4 /* INFO */, tag.as_ptr(), msg.as_ptr());
+    __android_log_write(prio, tag.as_ptr(), msg.as_ptr());
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -131,6 +164,12 @@ unsafe fn android_log(tag: &std::ffi::CStr, msg: &std::ffi::CStr) {
 // Without persistence every session re-runs pair-setup; with a wrong one, pair-verify fails and you
 // debug crypto that is fine. `carplayd` uses DiskPeers for exactly this reason.
 // ---------------------------------------------------------------------------------------------
+/// F141: hard cap on stored pairings. Pair-setup runs with the fixed "3939" setup code, so any
+/// hotspot client can complete it and append a peer; uncapped, that grows the in-memory Vec and the
+/// on-disk store without bound. Eviction is oldest-SAVED first (save_peer's retain+push keeps the Vec
+/// in save order). Known cost: 16 hostile pairings evict the real phone, which must then re-pair.
+const MAX_PEERS: usize = 16;
+
 struct AppPeers {
     path: std::path::PathBuf,
     peers: Vec<(Vec<u8>, [u8; 32])>,
@@ -173,11 +212,11 @@ impl AppPeers {
         // is atomic on the same filesystem.
         let tmp = self.path.with_extension("bin.tmp");
         if let Err(e) = std::fs::write(&tmp, &out) {
-            eprintln!("[jni] peer store write failed: {e}");
+            jni_log('E', format_args!("peer store write failed: {e}"));
             return;
         }
         if let Err(e) = std::fs::rename(&tmp, &self.path) {
-            eprintln!("[jni] peer store rename failed: {e}");
+            jni_log('E', format_args!("peer store rename failed: {e}"));
         }
     }
 }
@@ -191,6 +230,11 @@ impl PeerStore for AppPeers {
 impl PeerSaver for AppPeers {
     fn save_peer(&mut self, id: &[u8], ltpk: [u8; 32]) {
         self.peers.retain(|(k, _)| k != id);
+        // `while`, not `if`: a store loaded from a pre-cap file may hold more than MAX_PEERS.
+        while self.peers.len() >= MAX_PEERS {
+            let (old, _) = self.peers.remove(0);
+            println!("[jni] peer store full ({MAX_PEERS}) — evicted oldest pairing ({}-byte controller id)", old.len());
+        }
         self.peers.push((id.to_vec(), ltpk));
         println!("[jni] pairing saved ({}-byte controller id) — pair-verify can now fast-path", id.len());
         self.persist();
@@ -309,11 +353,11 @@ fn identity(pi: &str, ed_seed: [u8; 32]) -> &'static Identity {
     // Surface it loudly instead of failing mysteriously.
     let first = IDENTITY_PARAMS.get_or_init(|| (pi.to_string(), ed_seed));
     if first.0 != pi || first.1 != ed_seed {
-        eprintln!(
-            "[jni] WARNING: nativeInit identity (pi/seed) differs from the first init; the ORIGINAL \
+        jni_log('W', format_args!(
+            "nativeInit identity (pi/seed) differs from the first init; the ORIGINAL \
              is reused for the process lifetime, so pair-verify will fail against the new pi. Restart \
              the app to change identity."
-        );
+        ));
     }
     IDENTITY.get_or_init(|| Identity::new(pi.as_bytes().to_vec(), ed_seed))
 }
@@ -436,8 +480,19 @@ pub extern "system" fn JNI_OnLoad(vm: JavaVM, _reserved: *mut libc::c_void) -> j
 
     // Mic uplink ingest. /info advertises audioInputFormats on type 100 (default / telephony /
     // speechRecognition), so the capability is declared — this is what backs it.
-    receiver::uplink::start_control_listener("127.0.0.1:9112".to_string());
-    println!("[jni] levers set (hevc=true, everything else off); mic uplink ingest on 127.0.0.1:9112");
+    //
+    // F136 (2026-10-07): the port is loopback, and on this head unit every app holding INTERNET
+    // shares that loopback. A per-process 128-bit token from getrandom gates it: the receiver closes
+    // any connection whose first line is not `auth <hex>` in time, and only our own MicUplink learns
+    // the token (`nativeMicAuth`). No token, no listener — fail closed, never open. And no listener,
+    // no token (fix round 1): if another process already holds :9112, the bind fails here and the
+    // token is never published, so MicUplink never sends it — or the driver's mic — to a squatter.
+    match start_mic_ingest(&MIC_SEAM, "127.0.0.1:9112") {
+        Ok(addr) => println!(
+            "[jni] levers set (hevc=true, everything else off); mic uplink ingest on {addr} (auth token required)"
+        ),
+        Err(why) => eprintln!("[jni] mic uplink ingest NOT started: {why} — no Siri/call mic this process"),
+    }
     // (The block that used to sit here argued CARPLAY_SESSION_MGMT must NOT be set. That was a
     // superseded single-variable experiment and it was WRONG — see the set_var above. Setting it is
     // what fixed the -16720 teardown, and with `sessionManagementInfo` baked into the shipped
@@ -449,7 +504,7 @@ pub extern "system" fn JNI_OnLoad(vm: JavaVM, _reserved: *mut libc::c_void) -> j
     jni::sys::JNI_VERSION_1_6
     }))
     .unwrap_or_else(|_| {
-        eprintln!("[jni] PANIC in JNI_OnLoad — library load continues, core may be unusable");
+        jni_log('E', format_args!("PANIC in JNI_OnLoad — library load continues, core may be unusable"));
         jni::sys::JNI_VERSION_1_6
     })
 }
@@ -522,10 +577,13 @@ pub extern "system" fn Java_zeno_gmccpa_pair_NativeCore_nativeInit<'l>(
         // entirely (gm_ccpa docs/12 Failure Point 6, docs/11 T5.3).
         // Installed once the CORE slot above is HELD, and deliberately not generation-gated —
         // `REMOTE_SIGNER` is a bare process-global in the receiver crate with no notion of our
-        // generation token. That is safe ONLY because every generation's signer wraps the SAME
-        // Kotlin relay object: `MainActivity` holds one process-lifetime `OcbmProbe`, and
-        // `mfiRelay()` returns a singleton bound to its mutable `client` field, so a superseded
-        // generation's GlobalRef and the current one point at the same live relay.
+        // generation token. That is safe ONLY because every generation's signer reaches the SAME
+        // live relay: the GlobalRef is a per-connection `CarPlayRx.TracedRelay` (and
+        // `OcbmProbe.mfiRelay()` allocates a fresh object per call), but both are thin wrappers that
+        // delegate every chip op to the one process-scoped `ProcessMfiRelay`
+        // (SessionCoreParts.kt), which resolves the CURRENT probe's client per call — so a superseded
+        // generation's wrapper and the current one still sign through the same object. (Corrected
+        // 2026-10-08, A-F3: this used to claim `mfiRelay()` itself returned a singleton.)
         //
         // IF THAT EVER CHANGES — a per-Activity or per-connection relay — this becomes a real
         // cross-wiring bug with nothing here to catch it: a hijacking reconnect would install a new
@@ -557,6 +615,14 @@ pub extern "system" fn Java_zeno_gmccpa_pair_NativeCore_nativeInit<'l>(
         //   :9001 video  Annex-B      :9002 media audio  ADTS      :9003 voice audio  tagged AUs
         // which is exactly what MediaCodec consumes, so the decode path needs no JNI at all.
         let mut av = receiver::session::AvSession::new();
+        // Log-only (4.5, 2026-10-08): the "SETUP negotiated" line prints `self.resolution`, which
+        // carplayd sets from its DeviceConfig and nothing set here, so it read 0x0@0. These are the
+        // panel and the maxFPS the static assets/info.bplist advertises (the same DeviceConfig
+        // JNI_OnLoad primes above); nothing in the receiver reads them back except that line.
+        {
+            use receiver::session::SessionDelegate;
+            av.set_resolution(2400, 960, 60);
+        }
         match peer.parse::<std::net::SocketAddr>() {
             Ok(a) => { av.set_peer_addr(a); println!("[jni] session peer {a}"); }
             Err(e) => println!("[jni] peer addr {peer:?} unparsed ({e}) — session will use defaults"),
@@ -575,11 +641,11 @@ pub extern "system" fn Java_zeno_gmccpa_pair_NativeCore_nativeInit<'l>(
     match result {
         Ok(Ok(h)) => h,
         Ok(Err(e)) => {
-            eprintln!("[jni] init failed: {e}");
+            jni_log('E', format_args!("init failed: {e}"));
             0
         }
         Err(_) => {
-            eprintln!("[jni] init panicked");
+            jni_log('E', format_args!("init panicked"));
             0
         }
     }
@@ -609,7 +675,9 @@ pub extern "system" fn Java_zeno_gmccpa_pair_NativeCore_nativeFeed<'l>(
             Some((gen, native)) if *gen == handle as u64 => match native.server.feed(&inb) {
                 Ok(out) => Some(out),
                 Err(e) => {
-                    eprintln!("[jni] feed error: {e:?}");
+                    // W, not E: the core rejecting a connection's bytes ends that connection, and
+                    // Kotlin reports the end; a hostile or confused peer is not an app fault.
+                    jni_log('W', format_args!("feed error: {e:?}"));
                     None
                 }
             },
@@ -623,7 +691,7 @@ pub extern "system" fn Java_zeno_gmccpa_pair_NativeCore_nativeFeed<'l>(
         Ok(Some(o)) => o,
         Ok(None) => return null, // stale handle or feed error — signal close
         Err(_) => {
-            eprintln!("[jni] feed panicked — connection will be torn down");
+            jni_log('E', format_args!("feed panicked — connection will be torn down"));
             return null;
         }
     };
@@ -648,6 +716,42 @@ pub extern "system" fn Java_zeno_gmccpa_pair_NativeCore_nativeIsEncrypted(
         }
     })
     .unwrap_or(0)
+}
+
+/// Milliseconds since this generation's session last RECEIVED screen/audio data or a keepAlive
+/// beacon (`ControlServer::av_idle_ms`): -1 = none ever (`None`), -2 = unknown (CORE contended,
+/// generation mismatch, or a panic).
+///
+/// Gates the Kotlin pump's 30 s control-silence backstop exactly as the reference `serve_connection`
+/// does (receiver net.rs, AV_IDLE_TEARDOWN_MS). `try_lock`, NOT [`core`]: CORE is the global mutex
+/// `feed` holds — including the multi-second MFi step (see `nativeInit`'s BUSY rationale) — and a
+/// blocking getter would stall this pump behind another generation. Only `WouldBlock` is -2; a
+/// poisoned lock is recovered with `into_inner()` as [`core`] does, or one feed panic would make this
+/// -2 forever and the backstop would silently fall back to the unconditional 30 s break. 2026-10-06.
+#[no_mangle]
+pub extern "system" fn Java_zeno_gmccpa_pair_NativeCore_nativeAvIdleMs(
+    _env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) -> jlong {
+    if handle <= 0 {
+        return -2;
+    }
+    std::panic::catch_unwind(|| {
+        let slot = match CORE.try_lock() {
+            Ok(g) => g,
+            Err(TryLockError::Poisoned(e)) => e.into_inner(),
+            Err(TryLockError::WouldBlock) => return -2,
+        };
+        match slot.as_ref() {
+            Some((gen, native)) if *gen == handle as u64 => match native.server.av_idle_ms() {
+                Some(ms) => ms.min(i64::MAX as u64) as jlong,
+                None => -1,
+            },
+            _ => -2,
+        }
+    })
+    .unwrap_or(-2)
 }
 
 /// Send a single-touch HID report to the iPhone.
@@ -787,6 +891,36 @@ pub extern "system" fn Java_zeno_gmccpa_pair_NativeCore_nativeSetNightMode(
         .unwrap_or(0)
 }
 
+/// Plan v5.9 MED M5 / OD-9C (owner: stock-style) — take MainAudio from the phone after the head unit's
+/// media focus was lost for good, so the phone pauses instead of playing into a car that switched
+/// source. Wraps [`receiver::events::send_take_main_audio`] (stock's media-loss `changeModes`, see its
+/// doc). Returns false when a take is already outstanding, or between sessions.
+///
+/// BLOCKING on the global event mutex — call it off the binder/UI thread (`CarPlayEventTx`).
+#[no_mangle]
+pub extern "system" fn Java_zeno_gmccpa_pair_NativeCore_nativeTakeMainAudio(
+    _env: JNIEnv,
+    _class: JClass,
+) -> jni::sys::jboolean {
+    std::panic::catch_unwind(|| u8::from(receiver::events::send_take_main_audio())).unwrap_or(0)
+}
+
+/// Give MainAudio back after an OD-9C take ([`receiver::events::release_main_audio`]). Returns
+/// 0 = nothing owed (no take outstanding — the normal case), 1 = Untake sent, -1 = owed but the write
+/// failed. BLOCKING on the global event mutex — call it off the binder/UI thread (`CarPlayEventTx`).
+#[no_mangle]
+pub extern "system" fn Java_zeno_gmccpa_pair_NativeCore_nativeReleaseMainAudio(
+    _env: JNIEnv,
+    _class: JClass,
+) -> jni::sys::jint {
+    std::panic::catch_unwind(|| match receiver::events::release_main_audio() {
+        None => 0,
+        Some(true) => 1,
+        Some(false) => -1,
+    })
+    .unwrap_or(-1)
+}
+
 /// Ask iOS for a fresh IDR. The receiver already does this when a seam consumer attaches; this is the
 /// decoder-driven path (drop, reset, stall) so a corrupt picture recovers in ~500 ms instead of waiting
 /// for the next natural IRAP, which CarPlay may not send for a minute.
@@ -798,6 +932,92 @@ pub extern "system" fn Java_zeno_gmccpa_pair_NativeCore_nativeForceKeyFrame(
     u8::from(
         std::panic::catch_unwind(receiver::events::send_force_key_frame).unwrap_or(false),
     )
+}
+
+/// Draw the per-process token, bind `addr` SYNCHRONOUSLY, and publish the listener (with its
+/// token) into `cell` only on success. `Err` = nothing published: `mic_auth_hex` then yields `None`
+/// forever, so the app never hands the token to whatever holds the port.
+fn start_mic_ingest(
+    cell: &OnceLock<receiver::uplink::ControlListener>,
+    addr: &str,
+) -> Result<std::net::SocketAddr, String> {
+    if cell.get().is_some() {
+        return Err("already started (JNI_OnLoad ran twice) — listener not restarted".into());
+    }
+    let mut token = [0u8; receiver::uplink::MIC_TOKEN_LEN];
+    getrandom::getrandom(&mut token).map_err(|e| format!("getrandom failed ({e})"))?;
+    let l = receiver::uplink::start_control_listener(addr, Some(token))
+        .map_err(|e| format!("bind {addr} failed ({e}) — another process may hold it"))?;
+    let local = l.local_addr();
+    // A racing second caller lost the bind already (the port is ours), so this set cannot lose.
+    cell.set(l).map_err(|_| "already started".to_string())?;
+    Ok(local)
+}
+
+/// Reserve `local_port` on the published listener and return its token as 32 lowercase hex chars.
+/// `None` when no listener was published, it stopped serving, or the port is out of range.
+fn mic_auth_hex(cell: &OnceLock<receiver::uplink::ControlListener>, local_port: i32) -> Option<String> {
+    let port = u16::try_from(local_port).ok()?;
+    let token = cell.get()?.admit(port)?;
+    Some(token.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Withdraw the reservation for `local_port` (see `mic_auth_hex`); a no-op when the accept already
+/// consumed it, no listener was published, or the port is out of range.
+fn mic_release(cell: &OnceLock<receiver::uplink::ControlListener>, local_port: i32) {
+    if let (Ok(port), Some(l)) = (u16::try_from(local_port), cell.get()) {
+        l.release(port);
+    }
+}
+
+/// `nativeMicRelease(localPort: Int)` (F136 fix round 2) — `MicUplink` calls this on every attempt's
+/// teardown, BEFORE closing the socket bound to `localPort`: after a failed connect the reservation
+/// would otherwise stay claimable (up to the receiver's 5 s TTL) by whatever socket the OS next hands
+/// that port to. While our socket still holds the port nothing else can match it, so release-then-
+/// close leaves no window. Panics are caught; nothing is returned.
+#[no_mangle]
+pub extern "system" fn Java_zeno_gmccpa_pair_NativeCore_nativeMicRelease(
+    _env: JNIEnv,
+    _class: JClass,
+    local_port: jni::sys::jint,
+) {
+    let _ = std::panic::catch_unwind(|| mic_release(&MIC_SEAM, local_port));
+}
+
+/// `nativeMicAuth(localPort: Int) -> String?` (F136) — for the app's own `MicUplink`, which has
+/// already BOUND its socket to `localPort` and is about to connect from it to `:9112`. Reserves that
+/// source port (its connection then gets a pre-auth slot no flood can take) and returns the token to
+/// send as `auth <hex>`. JNI null when the listener never bound (port held by another process,
+/// getrandom failed) or stopped serving, for a bad port, on a JNI string error, or on a panic.
+#[no_mangle]
+pub extern "system" fn Java_zeno_gmccpa_pair_NativeCore_nativeMicAuth<'l>(
+    env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    local_port: jni::sys::jint,
+) -> jni::sys::jstring {
+    let null: jni::sys::jstring = std::ptr::null_mut();
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let hex = mic_auth_hex(&MIC_SEAM, local_port)?;
+        env.new_string(hex).ok().map(|s| s.into_raw())
+    }))
+    .ok()
+    .flatten()
+    .unwrap_or(null)
+}
+
+/// `nativeVoiceClockUs() -> Long` (plan v5.8 V1a) — `receiver::session::voice_clock_us()`: the
+/// process-wide monotonic microsecond clock the receiver stamps every voice AU (`rx_us`) and every
+/// BEGIN/END (`write_us`) with, and logs SETUP/TEARDOWN handling on. The app stamps its own reads
+/// and writes with this, in-process, so every voice age it reports is on rust's clock — never
+/// `System.nanoTime` against a relay timestamp. No lock, no allocation; a panic (none is possible
+/// past the first-call `OnceLock` init) reads as -1.
+#[no_mangle]
+pub extern "system" fn Java_zeno_gmccpa_pair_NativeCore_nativeVoiceClockUs(
+    _env: JNIEnv,
+    _class: JClass,
+) -> jlong {
+    std::panic::catch_unwind(|| receiver::session::voice_clock_us().min(i64::MAX as u64) as jlong)
+        .unwrap_or(-1)
 }
 
 #[no_mangle]
@@ -825,4 +1045,304 @@ pub extern "system" fn Java_zeno_gmccpa_pair_NativeCore_nativeDestroy(
             None => {}
         }
     });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Host tests (F141). Run: `cargo test --no-default-features` (default features need a cross-built
+// libfdk-aac via eld-codec, which the host does not have).
+// ---------------------------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    fn tmp_store() -> std::path::PathBuf {
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "carplayjni_peers_{}_{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("peers.bin")
+    }
+
+    fn id(n: usize) -> Vec<u8> {
+        format!("controller-{n:04}").into_bytes()
+    }
+
+    // A-F2: the marker -> logcat priority map the pipe reader applies. Receiver-side lines, including
+    // its stderr SUCCESS lines, stay INFO; only this crate's marked failures are W/E.
+    #[test]
+    fn log_prio_maps_markers_only() {
+        assert_eq!(log_prio(b"[jni] E: peer store write failed: boom"), 6);
+        assert_eq!(log_prio(b"[jni] W: feed error: Bad"), 5);
+        assert_eq!(log_prio(b"[jni] loaded - receiver core ready"), 4);
+        assert_eq!(log_prio(b"[receiver] pair-verify OK"), 4);
+        assert_eq!(log_prio(b"[jni] E:missing space"), 4);
+        assert_eq!(log_prio(b""), 4);
+        assert_eq!(log_prio(b"E: not ours"), 4);
+    }
+
+    fn key(n: usize) -> [u8; 32] {
+        [n as u8; 32]
+    }
+
+    #[test]
+    fn cap_evicts_oldest_saved() {
+        let path = tmp_store();
+        let mut p = AppPeers::load(path.clone());
+        for n in 0..MAX_PEERS + 4 {
+            p.save_peer(&id(n), key(n));
+            assert!(p.peers.len() <= MAX_PEERS);
+        }
+        assert_eq!(p.peers.len(), MAX_PEERS);
+        for n in 0..4 {
+            assert_eq!(p.find_peer(&id(n)), None, "peer {n} should have been evicted");
+        }
+        for n in 4..MAX_PEERS + 4 {
+            assert_eq!(p.find_peer(&id(n)), Some(key(n)));
+        }
+        // On disk too.
+        assert_eq!(AppPeers::load(path).peers.len(), MAX_PEERS);
+    }
+
+    #[test]
+    fn resave_refreshes_position() {
+        let mut p = AppPeers::load(tmp_store());
+        for n in 0..MAX_PEERS {
+            p.save_peer(&id(n), key(n));
+        }
+        // Re-pair peer 0 with a new key: it moves to newest and is not duplicated.
+        p.save_peer(&id(0), key(200));
+        assert_eq!(p.peers.len(), MAX_PEERS);
+        assert_eq!(p.find_peer(&id(0)), Some(key(200)));
+        // The next new peer evicts peer 1 (now oldest), not peer 0.
+        p.save_peer(&id(99), key(99));
+        assert_eq!(p.find_peer(&id(0)), Some(key(200)));
+        assert_eq!(p.find_peer(&id(1)), None);
+        assert_eq!(p.peers.len(), MAX_PEERS);
+    }
+
+    #[test]
+    fn load_persist_round_trip() {
+        let path = tmp_store();
+        let mut p = AppPeers::load(path.clone());
+        assert!(p.peers.is_empty());
+        let long_id = vec![0xAB; 255];
+        p.save_peer(&id(1), key(1));
+        p.save_peer(&long_id, key(2));
+        p.save_peer(b"", key(3));
+        let q = AppPeers::load(path.clone());
+        assert_eq!(q.peers, p.peers);
+        assert!(!path.with_extension("bin.tmp").exists());
+    }
+
+    #[test]
+    fn oversized_legacy_store_trims_on_next_save() {
+        // A store written before the cap may hold more than MAX_PEERS: load keeps all of them
+        // (no pairing is dropped silently at startup); the next save trims to MAX_PEERS, newest kept.
+        let path = tmp_store();
+        let mut raw = Vec::new();
+        for n in 0..40 {
+            let i = id(n);
+            raw.push(i.len() as u8);
+            raw.extend_from_slice(&i);
+            raw.extend_from_slice(&key(n));
+        }
+        std::fs::write(&path, &raw).unwrap();
+        let mut p = AppPeers::load(path.clone());
+        assert_eq!(p.peers.len(), 40);
+        p.save_peer(&id(100), key(100));
+        assert_eq!(p.peers.len(), MAX_PEERS);
+        assert_eq!(p.find_peer(&id(100)), Some(key(100)));
+        assert_eq!(p.find_peer(&id(39)), Some(key(39)));
+        assert_eq!(p.find_peer(&id(24)), None);
+        assert_eq!(p.find_peer(&id(25)), Some(key(25)));
+        assert_eq!(AppPeers::load(path).peers.len(), MAX_PEERS);
+    }
+
+    #[test]
+    fn truncated_store_loads_complete_records_only() {
+        let path = tmp_store();
+        let mut p = AppPeers::load(path.clone());
+        p.save_peer(&id(1), key(1));
+        p.save_peer(&id(2), key(2));
+        let mut raw = std::fs::read(&path).unwrap();
+        raw.truncate(raw.len() - 5);
+        std::fs::write(&path, &raw).unwrap();
+        let q = AppPeers::load(path);
+        assert_eq!(q.peers.len(), 1);
+        assert_eq!(q.find_peer(&id(1)), Some(key(1)));
+    }
+
+    // ---- F136 fix round 1: the :9112 mic seam's JNI glue, and the flood test ----------------------
+
+    /// Fix 1: a held port means `Err` and NOTHING published — no token for anyone.
+    #[test]
+    fn mic_ingest_on_a_held_port_publishes_no_token() {
+        let squatter = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let taken = squatter.local_addr().unwrap().to_string();
+        let cell = OnceLock::new();
+        let err = start_mic_ingest(&cell, &taken).unwrap_err();
+        assert!(err.contains("bind"), "unexpected error: {err}");
+        assert!(cell.get().is_none(), "a listener was published although the bind failed");
+        assert_eq!(mic_auth_hex(&cell, 40200), None, "a token was handed out for a squatted port");
+        // The happy path, and the guards on the port argument.
+        let ok = OnceLock::new();
+        start_mic_ingest(&ok, "127.0.0.1:0").unwrap();
+        assert_eq!(mic_auth_hex(&ok, 40201).map(|h| h.len()), Some(32));
+        assert_eq!(mic_auth_hex(&ok, 0), None);
+        assert_eq!(mic_auth_hex(&ok, -1), None);
+        assert_eq!(mic_auth_hex(&ok, 65536), None);
+        assert!(start_mic_ingest(&ok, "127.0.0.1:0").is_err(), "started twice");
+        // Fix round 2: release is safe on any input, including an empty cell.
+        mic_release(&ok, 40202);
+        mic_release(&ok, -1);
+        mic_release(&cell, 40203);
+    }
+
+    /// What MicUplink does: bind 127.0.0.1:0, ask the core for the token (which reserves the bound
+    /// port), connect from that port, send `auth`, wait for the ack.
+    fn reserved_attempt(
+        cell: &OnceLock<receiver::uplink::ControlListener>,
+        server: std::net::SocketAddr,
+    ) -> Result<Duration, String> {
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+        let sin = |ip: [u8; 4], port: u16| {
+            // SAFETY: sockaddr_in is plain old data; all-zero is a valid value.
+            let mut sa: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
+            {
+                sa.sin_len = std::mem::size_of::<libc::sockaddr_in>() as u8;
+            }
+            sa.sin_family = libc::AF_INET as _;
+            sa.sin_port = port.to_be();
+            sa.sin_addr.s_addr = u32::from_ne_bytes(ip);
+            sa
+        };
+        let len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+        // SAFETY: a fresh socket fd, owned immediately; the sockaddr pointers are valid for `len`.
+        let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
+        if fd < 0 {
+            return Err(format!("socket: {}", io::Error::last_os_error()));
+        }
+        let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+        let mut local = sin([127, 0, 0, 1], 0);
+        if unsafe { libc::bind(owned.as_raw_fd(), (&local as *const libc::sockaddr_in).cast(), len) } != 0 {
+            return Err(format!("bind: {}", io::Error::last_os_error()));
+        }
+        let mut l = len;
+        if unsafe { libc::getsockname(owned.as_raw_fd(), (&mut local as *mut libc::sockaddr_in).cast(), &mut l) } != 0 {
+            return Err(format!("getsockname: {}", io::Error::last_os_error()));
+        }
+        let port = u16::from_be(local.sin_port);
+        let hex = mic_auth_hex(cell, i32::from(port)).ok_or("no token")?;
+        let t0 = Instant::now();
+        let dst = sin([127, 0, 0, 1], server.port());
+        if unsafe { libc::connect(owned.as_raw_fd(), (&dst as *const libc::sockaddr_in).cast(), len) } != 0 {
+            return Err(format!("connect: {}", io::Error::last_os_error()));
+        }
+        let mut c = std::net::TcpStream::from(owned);
+        auth_and_ack(&mut c, &hex).map(|()| t0.elapsed())
+    }
+
+    fn auth_and_ack(c: &mut std::net::TcpStream, hex: &str) -> Result<(), String> {
+        use std::io::{BufRead as _, Write as _};
+        c.write_all(format!("auth {hex}\n").as_bytes()).map_err(|e| format!("write: {e}"))?;
+        c.set_read_timeout(Some(Duration::from_millis(1500))).unwrap();
+        let mut line = String::new();
+        let _ = io::BufReader::new(c.try_clone().unwrap()).read_line(&mut line);
+        if line == receiver::uplink::AUTH_ACK {
+            Ok(())
+        } else {
+            Err(format!("no ack (got {line:?})"))
+        }
+    }
+
+    /// Fix 2: N attacker threads hammer the seam — silent connects held until the server closes
+    /// them, garbage lines, and connect-and-drop churn — while the real client (bind, reserve,
+    /// connect, auth) connects and authenticates repeatedly. Every reserved attempt must be acked.
+    /// An UNRESERVED client making the same attempts is measured and printed, not asserted: the
+    /// anonymous pool is exactly what the flood is allowed to fill.
+    #[test]
+    fn mic_seam_flood_never_blocks_the_reserved_client() {
+        use std::io::{Read as _, Write as _};
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+        let cell = OnceLock::new();
+        let server = start_mic_ingest(&cell, "127.0.0.1:0").unwrap();
+        let env_n = |k: &str, d: usize| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+        let (silent, garbage, churn) =
+            (env_n("F136_FLOOD_SILENT", 48), env_n("F136_FLOOD_GARBAGE", 8), env_n("F136_FLOOD_CHURN", 8));
+        let stop = Arc::new(AtomicBool::new(false));
+        let connects = Arc::new(AtomicU64::new(0));
+        let mut hs = vec![];
+        for kind in std::iter::repeat_n(0u8, silent).chain(std::iter::repeat_n(1, garbage)).chain(std::iter::repeat_n(2, churn)) {
+            let (stop, connects) = (Arc::clone(&stop), Arc::clone(&connects));
+            hs.push(std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let Ok(mut c) = std::net::TcpStream::connect(server) else { continue };
+                    connects.fetch_add(1, Ordering::Relaxed);
+                    match kind {
+                        0 => {}
+                        1 => {
+                            let _ = c.write_all(b"GET / HTTP/1.0\r\nmic 4\nauth 00\n");
+                        }
+                        _ => {
+                            // Connect-and-drop with an RST (SO_LINGER 0): no TIME_WAIT, so the churn
+                            // stresses the listener's accept queue, not the host's ephemeral ports.
+                            use std::os::fd::AsRawFd;
+                            let lg = libc::linger { l_onoff: 1, l_linger: 0 };
+                            // SAFETY: valid fd and a correctly sized linger struct.
+                            unsafe {
+                                libc::setsockopt(
+                                    c.as_raw_fd(),
+                                    libc::SOL_SOCKET,
+                                    libc::SO_LINGER,
+                                    (&lg as *const libc::linger).cast(),
+                                    std::mem::size_of::<libc::linger>() as libc::socklen_t,
+                                );
+                            }
+                            continue;
+                        }
+                    }
+                    let _ = c.set_read_timeout(Some(Duration::from_secs(3)));
+                    let mut b = [0u8; 64];
+                    while matches!(c.read(&mut b), Ok(n) if n > 0) {}
+                }
+            }));
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        let attempts = env_n("F136_FLOOD_ATTEMPTS", 40);
+        let (mut ok, mut anon_ok, mut worst) = (0usize, 0usize, Duration::ZERO);
+        let mut failures = vec![];
+        for _ in 0..attempts {
+            match reserved_attempt(&cell, server) {
+                Ok(d) => {
+                    ok += 1;
+                    worst = worst.max(d);
+                }
+                Err(e) => failures.push(e),
+            }
+            if let Ok(mut c) = std::net::TcpStream::connect(server) {
+                let hex = mic_auth_hex(&cell, 1).unwrap(); // token only; port 1 is never a peer
+                anon_ok += usize::from(auth_and_ack(&mut c, &hex).is_ok());
+            }
+            // MicUplink's real cadence is 2 s; 50 ms lets the server see the previous close.
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        stop.store(true, Ordering::Relaxed);
+        for h in hs {
+            let _ = h.join();
+        }
+        eprintln!(
+            "F136 FLOOD ({silent} silent + {garbage} garbage + {churn} churn threads, {} attacker connects): \
+             reserved client acked {ok}/{attempts} (worst connect->ack {worst:?}); unreserved client \
+             acked {anon_ok}/{attempts}; failures: {failures:?}",
+            connects.load(Ordering::Relaxed)
+        );
+        assert_eq!(ok, attempts, "the reserved client was refused under the flood: {failures:?}");
+    }
 }

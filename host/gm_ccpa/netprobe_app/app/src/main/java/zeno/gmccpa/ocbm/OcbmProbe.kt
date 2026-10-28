@@ -45,13 +45,32 @@ class OcbmProbe(context: Context) {
         SessionTrace.Board.failed(OcbmBoard.LINK, "bring-up aborted: $why")
     }
 
-    var client: OcbmClient? = null
+    // @Volatile: written on the `ops` thread, read by [hasLink] from NsdManager's callback thread
+    // (the receiver's dial gate) and by the restart progress timer on the UI thread.
+    @Volatile var client: OcbmClient? = null
         private set
     private var usb: UsbBulkTransport? = null
 
     /**
+     * Is there an OCBM link the CH_MFI relay can answer on — i.e. has THIS client's CT_HELLO been
+     * ACKed? `client != null` is not enough (it is set before HELLO, OcbmProbe.runAllLocked) and
+     * `subscribed` is too much (the mid-session relink deliberately never subscribes, yet its relay
+     * must serve /auth-setup). Read by the receiver before every self-provoked connect-out.
+     */
+    fun hasLink(): Boolean = client?.helloAcked == true
+
+    /**
+     * The OCBM accessory is on the bus right now (VID/PID, as [awaitClaimable] polls it). No logging,
+     * no permission check. The box relink reads it after a claimed-but-no-HELLO run: still
+     * enumerated = a box that is not answering (re-arm with backoff, v5.6 H1-4); gone = unplugged
+     * (today's "press Start"). The current transport when there is one; a throwaway otherwise.
+     */
+    fun adapterEnumerated(): Boolean =
+        runCatching { (usb ?: UsbBulkTransport(ctx, zeno.gmccpa.ProbeLog.silent())).findQuiet() != null }.getOrDefault(false)
+
+    /**
      * The CT_HELLO nonce every client this probe builds identifies itself with. Minted ONCE per
-     * probe: a USB re-attach reuses the probe (`MainActivity.ocbm()`), so the box sees the same host
+     * probe: a USB re-attach reuses the probe (`SessionCore.ocbm()`), so the box sees the same host
      * come back — the "USB blip, warm reuse" contract — while Restart Session and Stop->Start drop
      * the probe and the next one presents a new nonce, which is what makes a lost CT_STOP
      * recoverable. See [OcbmClient.hello] for the box-side consequences of getting this wrong.
@@ -82,9 +101,9 @@ class OcbmProbe(context: Context) {
      * Cancels an in-flight [awaitClaimable] from OFF the `ops` thread.
      *
      * [runAll] is a blocking `ops.submit{}.get()`, and `awaitClaimable` inside it waits up to
-     * [CLAIM_WAIT_MS] (ten minutes). Every UI command in MainActivity shares ONE command executor,
+     * [CLAIM_WAIT_MS] (ten minutes). Every UI command shares ONE command executor (SessionCore's `netprobe-cmd`),
      * and [stop] itself was `ops.submit { stopLocked() }.get()` -- i.e. it queued behind the very
-     * task it needed to cancel. Start with no adapter attached and Start, Stop, Recover, the
+     * task it needed to cancel. Start with no adapter attached and Start, Stop, the then-Recover button, the
      * credentials screen and every `--es run` verb were dead for ten minutes with the UI still
      * saying "looking for the adapter...". Nothing interrupted the wait either: `stop()` used
      * `shutdown()`, not `shutdownNow()`, and only after the `.get()` returned.
@@ -96,6 +115,90 @@ class OcbmProbe(context: Context) {
 
     /** The last state [awaitClaimable] observed, so a ten-minute give-up can say what it was waiting on. */
     @Volatile private var lastClaimState = ""
+
+    /**
+     * Sticky Stop (2026-10-06): set by [stop] next to [claimAbort] and never cleared — a stopped
+     * probe is discarded. [awaitClaimable] clears [claimAbort] on entry, so a relink queued on [ops]
+     * behind a busy verb when Stop ran would otherwise reset the abort, wait up to ten minutes while
+     * Stop's own `ops.submit{}.get()` hung behind it, or claim + SUBSCRIBE and then get CT_STOP.
+     * [runAllLocked] returns at once and the wait loop exits when this is set.
+     */
+    @Volatile var stopped = false; private set
+
+    /** True for the whole of [awaitClaimable] — the "claim wait active" of the adapter-state text. */
+    @Volatile var claimWaitActive = false; private set
+    /**
+     * The caller's `mayRequest` policy refused the permission dialog this interval (logged once per
+     * deferral). Cleared when a request goes out, and at the entry and the exit of [awaitClaimable].
+     */
+    @Volatile var requestDeferred = false; private set
+    /**
+     * The last [awaitClaimable] ended at its [CLAIM_WAIT_MS] deadline — not by Stop, an abort or an
+     * interrupt. Read by the box relink, which re-arms once per expiry only while CarPlay is live.
+     */
+    @Volatile var waitExpired = false; private set
+
+    /**
+     * Permission requests made for the CURRENT device instance (the adapter's `deviceId`), across
+     * waits: a replug is a new instance with a fresh count. `mayRequest(n)` receives this. A per-wait
+     * local would hand instance B the n=1 of instance A and defer it for the whole session. The log's
+     * `#n` and the [OcbmExpect.USB_PERMISSION] arm count per WAIT instead (a local in
+     * [awaitClaimableLoop]): counted per instance, a Start after an expired wait logged "#2 after 0s"
+     * and never armed the expectation (2026-10-06).
+     */
+    @Volatile private var requestsThisInstance = 0
+    @Volatile private var requestDeviceId = -1
+    /** When the dialog was last requested; [rerequestNow] may reset it. */
+    @Volatile private var lastRequestAt = 0L
+    /** The last request went out while no gm_ccpa activity was resumed — see [rerequestNow]. */
+    @Volatile private var requestSentWhileBackground = false
+
+    /**
+     * Incremented on every HELLO-ACKed claim in [runAllLocked]. [runAll] captures it at submit, so a
+     * call that was QUEUED behind a bring-up (the box relink holding [ops] in [awaitClaimable] while
+     * the driver replugs and launches) can see that a link came up meanwhile and leave it alone
+     * instead of CT_STOP + re-SUBSCRIBE — a host_present flap seconds after a good link.
+     */
+    @Volatile private var linkEpoch = 0
+    /** What the link that bumped [linkEpoch] achieved, returned by a queued call that leaves it up. */
+    @Volatile private var lastLink = LinkResult()
+
+    /**
+     * Fired from the transport-death path ([UsbBulkTransport.onTransportDead]) with the client whose
+     * transport died and the reason it was ended, on the `ocbm-read` thread. Two causes: the read
+     * loop ended on its own (ENODEV, read errors; reason null), or — since v5.6 H1-1 — the
+     * heartbeat declared the link dead after 5 failed OUT writes with reads still timing out
+     * normally ([UsbBulkTransport.declareDead]; reason non-null). That second case was the known gap
+     * before 2026-10-06: a half-dead gadget never ended the read loop, so this never fired.
+     * SessionCore binds it in `ocbm()`'s rebind block (`SessionCore.onBoxTransportDead`) to deliver
+     * the box-lost edge and arm the box relink; the reason decides whether that relink counts toward
+     * its dead-run cap.
+     */
+    var onLinkDead: ((OcbmClient, String?) -> Unit)? = null
+
+    /**
+     * The app's resumed-activity count says gm_ccpa is in front, for [rerequestNow]. Set by
+     * SessionCore.ocbm() (`AppForeground.any()`); true when unknown.
+     */
+    var appInForeground: () -> Boolean = { true }
+
+    /**
+     * Re-raise the permission dialog on the next poll, because a gm_ccpa activity just came to the
+     * foreground (onResume) and a dialog requested from the background may never have been shown
+     * (unknown on this unit). No dialog storm: dismissing the dialog resumes the activity under it,
+     * so this resets only when the last request is at least [REQUEST_INTERVAL_MS] old or was sent
+     * while no gm_ccpa activity was resumed. Still subject to the caller's `mayRequest`. No-op when
+     * no claim wait is running.
+     */
+    fun rerequestNow() {
+        if (!claimWaitActive) return
+        val age = android.os.SystemClock.elapsedRealtime() - lastRequestAt
+        if (lastRequestAt != 0L && (age >= REQUEST_INTERVAL_MS || requestSentWhileBackground)) {
+            requestSentWhileBackground = false
+            lastRequestAt = 0L
+            sink("  app in front — the USB permission dialog will be re-raised on the next poll")
+        }
+    }
 
     /**
      * UI observers, held on the probe rather than the client because the client is destroyed and
@@ -110,6 +213,14 @@ class OcbmProbe(context: Context) {
     var onBoxHealth: ((Int) -> Unit)? = null
     var onPhoneIdent: ((String) -> Unit)? = null
     var onProjMode: ((Byte) -> Unit)? = null
+    /**
+     * The MGMT_INFO JSON taken right after each link's HELLO (the bring-up snapshot below), or null
+     * when the box did not answer — called either way, once per link-up, so the screen never keeps a
+     * previous adapter's Bluetooth name for a new link. Carries the client the reply came from, so
+     * the receiver can drop a reply from a link that died or was stopped meanwhile. Invoked on the
+     * probe's `ops` thread — never `ocbm-read`, which mgmtGetInfo itself depends on.
+     */
+    var onMgmtInfo: ((OcbmClient, String?) -> Unit)? = null
 
     /**
      * The vehicle hotspot the iPhone should be sent to by the 0x5703 handoff. The passphrase cannot
@@ -118,7 +229,6 @@ class OcbmProbe(context: Context) {
      */
     var wifiSsid: String? = null
     var wifiPass: String? = null
-    var wifiChannel: String? = null
 
     /**
      * The CT_SUBSCRIBE config blob.
@@ -127,19 +237,7 @@ class OcbmProbe(context: Context) {
      * `accessoryConfig` would be read by carplayd's serde. Unknown keys are silently ignored by
      * both, so sending a key the deployed box doesn't understand yet is always safe.
      */
-    fun btOnlyConfig(): ByteArray {
-        val sb = StringBuilder()
-        sb.append("name: gm_ccpa netprobe\n")
-        sb.append("version: 1\n")
-        sb.append("wireless: true\n")
-        sb.append("pairing: just_works\n")
-        // The box is the Bluetooth radio and the MFi coprocessor only — it raises no AP of its own.
-        sb.append("wifi_ap: false\n")
-        wifiSsid?.takeIf { it.isNotBlank() }?.let { sb.append("wifi_ssid: ").append(it).append('\n') }
-        wifiPass?.takeIf { it.isNotBlank() }?.let { sb.append("wifi_pass: ").append(it).append('\n') }
-        wifiChannel?.takeIf { it.isNotBlank() }?.let { sb.append("wifi_channel: ").append(it).append('\n') }
-        return sb.toString().toByteArray(Charsets.UTF_8)
-    }
+    fun btOnlyConfig(): ByteArray = SubscribeConfig.build(wifiSsid, wifiPass)
 
     // ---- headless self-test ---------------------------------------------------------------------
 
@@ -276,7 +374,7 @@ class OcbmProbe(context: Context) {
      * [abort] (ERROR + Board FAILED; until 2026-09-10 an INFO `sink("ABORT: ...")`) and a bare
      * `return` -- it throws only for a credential-less subscribe. So
      * "no adapter attached", "claim failed" and "no CT_HELLO_ACK" all returned NORMALLY, the caller's
-     * `catch (t: Throwable)` never fired, and `MainActivity` went straight on to
+     * `catch (t: Throwable)` never fired, and the caller (then `MainActivity`, now `SessionCore.autoStart`) went straight on to
      * `supervisor.onBoxLinked()`. The app announced "box claimed, MFi proven" with no box on the bus
      * at all -- device-observed 2026-08-28. A status word that lies about the thing it exists to
      * report is worse than no status word, so the outcome is now a RETURN VALUE, not an exception,
@@ -291,9 +389,20 @@ class OcbmProbe(context: Context) {
         val mfiProven: Boolean = false,
         /** CT_SUBSCRIBE was sent (the radio-wake edge) and the heartbeat is running. */
         val subscribed: Boolean = false,
+        /**
+         * Monotonic (System.nanoTime) ms at CT_HELLO_ACK; 0 without one. The box relink measures
+         * "a heartbeat death < 60 s after the previous relink's HELLO" from it (v5.6 H1-4).
+         */
+        val helloAtMs: Long = 0L,
+        /**
+         * v5.8 V7 / Q018: the bring-up THREW (`ExceptionName: message`), so none of the flags above
+         * describe what happened. Set only by the box relink's synthetic result ([zeno.gmccpa.RelinkChain.Env.failed]).
+         */
+        val error: String? = null,
     ) {
         /** One line for the status word, naming what actually happened rather than what was hoped. */
         fun failureDetail(): String = when {
+            error != null -> "the relink threw: $error"
             !claimed -> "no adapter claimed — is it plugged into this head unit?"
             !helloOk -> "adapter claimed but no CT_HELLO_ACK — is ocbmd running on the box?"
             else -> "linked"
@@ -311,8 +420,71 @@ class OcbmProbe(context: Context) {
      * /auth-setup is per control connection, not per pairing, so the next reconnect or hijack needs
      * the MFi coprocessor or it fails to authenticate.
      */
-    fun runAll(subscribe: Boolean = true): LinkResult =
-        ops.submit<LinkResult> { runAllLocked(subscribe) }.get()
+    fun runAll(subscribe: Boolean = true): LinkResult = runAll({ subscribe })
+
+    /**
+     * The box relink's form (2026-10-06). [subscribe] is evaluated at the subscribe decision, AFTER
+     * the claim, HELLO and MFi — so a grant that lands after the session ended still subscribes.
+     * [mayRequest] is evaluated each time the dialog's request interval elapses, with the requests
+     * made for this device instance; false defers the dialog (logged once, with [deferredWhy]) and
+     * re-asks on every poll. [quietExpiry] is evaluated at the ten-minute deadline: true logs it at
+     * I instead of an ABORT — for the box relink, an automatic background wait that re-arms while
+     * CarPlay is live, where an E every 10 min would be false. The epoch is captured HERE, at submit
+     * — see [linkEpoch]. [deferredWhy] is read when a deferral is logged, right after the refusing
+     * `mayRequest`, so the logged reason is the one for that refusal. [cancelled] is polled by the
+     * claim wait next to [claimAbort]: the relink's own Stop/Restart signal, because a Stop that
+     * lands before the wait starts has its [abortClaimWait] cleared at the wait's entry and its
+     * sticky [stopped] may still be queued behind a busy verb (2026-10-06).
+     */
+    fun runAll(
+        subscribe: () -> Boolean,
+        mayRequest: ((Int) -> Boolean)? = null,
+        deferredWhy: () -> String = { "" },
+        quietExpiry: () -> Boolean = { false },
+        cancelled: () -> Boolean = { false },
+    ): LinkResult {
+        val e = linkEpoch
+        return ops.submit<LinkResult> { runAllLocked(subscribe, mayRequest, deferredWhy, quietExpiry, cancelled, e) }.get()
+    }
+
+    /**
+     * A CT_SUBSCRIBE on the link that is already up — no stopLocked, no re-claim (2026-10-06). The
+     * ladder's rung 1 uses it for a link restored under the last session WITHOUT a subscribe:
+     * [runAll] would stopLocked first, which pulls box logs over the live link and drops the claim
+     * and the MFi relay exactly when a returning phone needs /auth-setup. A SUBSCRIBE on an
+     * established HELLO'd link is the heartbeat's own recovery path, so this is not a new protocol
+     * state. Refuses unless the link is up, unsubscribed AND never subscribed: a link that did
+     * subscribe and took a box HOST_GONE is in the heartbeat's re-SUBSCRIBE backoff, which an extra
+     * immediate SUBSCRIBE would defeat. [stillWanted] is re-checked when this finally runs on
+     * [ops] (a box-log pull can hold it for 24 s): CarPlay going live meanwhile cancels it.
+     */
+    fun subscribeExisting(stillWanted: () -> Boolean): Boolean = try { ops.submit<Boolean> {
+        if (stopped) return@submit false
+        val c = client
+        when {
+            c == null || !c.helloAcked -> { log.i("subscribe skipped — no OCBM link (it went away while queued)"); false }
+            c.subscribed -> { log.i("subscribe skipped — the link is already subscribed"); false }
+            c.everSubscribed -> { log.i("subscribe skipped — this link subscribed before and is in HOST_GONE recovery; its heartbeat re-subscribes with backoff"); false }
+            !stillWanted() -> { log.i("subscribe skipped — CarPlay went live while queued"); false }
+            wifiSsid.isNullOrBlank() || wifiPass.isNullOrBlank() -> {
+                val missing = if (wifiSsid.isNullOrBlank()) "SSID" else "passphrase"
+                // The same refusal as runAllLocked, and for the same reason: the box applies 0x5703
+                // credentials only at the host_present edge this subscribe takes.
+                log.e("REFUSING to subscribe: no hotspot $missing supplied — the deferred CT_SUBSCRIBE is not sent")
+                SessionTrace.Board.failed(OcbmBoard.LINK, "CT_SUBSCRIBE refused: no hotspot $missing — supply --es ssid/--es pass or fill the hotspot fields")
+                false
+            }
+            else -> {
+                sink(">> deferred CT_SUBSCRIBE on the existing link (no re-claim, MFi relay kept)")
+                c.subscribe(btOnlyConfig())
+                c.startHeartbeat()
+                startBoxLogStream()
+                true
+            }
+        }
+    }.get() } catch (_: java.util.concurrent.RejectedExecutionException) {
+        log.i("subscribe skipped — this probe was stopped"); false
+    }
 
     private companion object {
         /** Poll cadence. hasPermission() is a cheap binder call; 2 s is responsive without churn. */
@@ -373,9 +545,12 @@ class OcbmProbe(context: Context) {
      *
      * The loop polls [UsbBulkTransport.hasPermission], which is authoritative whether or not any
      * broadcast arrives, and only re-raises the dialog every [REQUEST_INTERVAL_MS] so it cannot
-     * become a dialog storm. The reliable grant path remains an ACTION_USB_DEVICE_ATTACHED launch,
-     * which grants implicitly with no dialog — this loop is what lets the app pick that up whenever
-     * it happens, including a replug minutes later, instead of having to be restarted for it.
+     * become a dialog storm. (Corrected 2026-10-06: this said the reliable grant path was an
+     * ACTION_USB_DEVICE_ATTACHED launch granting implicitly with no dialog. On this unit the attach
+     * route never runs — GM routes attach to an absent fixed handler — permission is per device
+     * instance, and every replug needed the dialog plus a user tap. This loop finding the replugged
+     * adapter by polling, then raising the dialog, IS the path; the box relink re-arms it on
+     * transport death so it also runs with no launch.)
      *
      * Logging is edge-triggered: one line per state change, not per poll, so a long wait cannot
      * flood a 16 MiB ring buffer. Two additions (2026-09-10) keep the wait from LOOKING dead
@@ -389,17 +564,46 @@ class OcbmProbe(context: Context) {
      *  - the waiting states are written under [OcbmBoard.USB_CLAIM] so a status block says
      *    "adapter present, USB permission not held" rather than nothing.
      */
-    private fun awaitClaimable(t: UsbBulkTransport): android.hardware.usb.UsbDevice? {
+    private fun awaitClaimable(
+        t: UsbBulkTransport,
+        mayRequest: ((Int) -> Boolean)?,
+        deferredWhy: () -> String,
+        cancelled: () -> Boolean,
+    ): android.hardware.usb.UsbDevice? {
+        claimWaitActive = true
+        requestDeferred = false
+        waitExpired = false
+        try {
+            val dev = awaitClaimableLoop(t, mayRequest, deferredWhy, cancelled)
+            if (dev == null && !claimAbort && !stopped && !Thread.currentThread().isInterrupted) waitExpired = true
+            return dev
+        } finally {
+            requestDeferred = false
+            claimWaitActive = false
+        }
+    }
+
+    private fun awaitClaimableLoop(
+        t: UsbBulkTransport,
+        mayRequest: ((Int) -> Boolean)?,
+        deferredWhy: () -> String,
+        cancelled: () -> Boolean,
+    ): android.hardware.usb.UsbDevice? {
         val deadline = android.os.SystemClock.elapsedRealtime() + CLAIM_WAIT_MS
         val startedAt = android.os.SystemClock.elapsedRealtime()
         claimAbort = false
-        var lastRequestAt = 0L
+        lastRequestAt = 0L
         var lastState = ""
         var polls = 0
-        var requests = 0
+        // Per wait: the `#n` in the log and the expectation arm (see [requestsThisInstance]).
+        var requestsThisWait = 0
+        var deferredLogged: String? = null
         lastClaimState = "not started"
         while (android.os.SystemClock.elapsedRealtime() < deadline) {
-            if (claimAbort || Thread.currentThread().isInterrupted) {
+            // The caller's cancel becomes claimAbort, so every "was it cancelled" check after the
+            // wait (waitExpired, runAllLocked's narration) reads it as the Stop it is.
+            if (!claimAbort && cancelled()) claimAbort = true
+            if (claimAbort || stopped || Thread.currentThread().isInterrupted) {
                 sink("giving up the wait for the adapter (stop requested)")
                 SessionTrace.cancel(OcbmExpect.USB_PERMISSION, "stop requested while waiting for the adapter")
                 return null
@@ -432,15 +636,39 @@ class OcbmProbe(context: Context) {
             }
             if (dev != null) {
                 val now = android.os.SystemClock.elapsedRealtime()
-                if (now - lastRequestAt >= REQUEST_INTERVAL_MS) {
+                // Per device instance: a replug is a new instance, and every new instance needs its
+                // own dialog plus a tap on this unit (2026-10-06).
+                if (dev.deviceId != requestDeviceId) { requestDeviceId = dev.deviceId; requestsThisInstance = 0 }
+                if (now - lastRequestAt >= REQUEST_INTERVAL_MS && mayRequest != null && !mayRequest(requestsThisInstance)) {
+                    // Deferred, not skipped: lastRequestAt is NOT advanced, so the request goes out
+                    // on the first poll (<= POLL_MS) where the policy turns true. Logged once per
+                    // deferral, and again only if its reason changes (e.g. the gear reaches Park on
+                    // an instance already asked).
+                    val why = deferredWhy()
+                    if (!requestDeferred || why != deferredLogged) {
+                        requestDeferred = true
+                        deferredLogged = why
+                        sink("  USB permission needed — request deferred ($why)")
+                        SessionTrace.Board.down(OcbmBoard.USB_CLAIM, "adapter ${dev.deviceName} present — USB permission NOT held; request deferred ($why)")
+                    }
+                } else if (now - lastRequestAt >= REQUEST_INTERVAL_MS) {
+                    requestDeferred = false
+                    deferredLogged = null
                     lastRequestAt = now
-                    requests++
+                    requestsThisInstance++
+                    val requests = ++requestsThisWait
+                    // Fallback for a dialog requested from the background, which may never have been
+                    // shown (unknown on this unit): onResume re-raises it via rerequestNow().
+                    requestSentWhileBackground = !appInForeground()
                     if (requests == 1) {
-                        sink("  requesting USB permission (accept on the head unit; a replug also grants it)")
+                        sink("  requesting USB permission (accept on the head unit)")
                         SessionTrace.expect(OcbmExpect.USB_PERMISSION, REQUEST_INTERVAL_MS,
-                            "adapter 0x1314:0x2d00 is on the bus with no grant held and the permission dialog was requested — until it is accepted (or a replug grants it) nothing in the app can proceed")
+                            "adapter 0x1314:0x2d00 is on the bus with no grant held and the permission dialog was requested — until it is accepted nothing in the app can proceed")
                     } else {
-                        log.w("still no USB permission after ${(now - startedAt) / 1000}s — re-raising the dialog (#$requests); the app is idle until it is accepted or the adapter is replugged")
+                        log.w("still no USB permission after ${(now - startedAt) / 1000}s — re-raising the dialog (#$requests); the app is idle until it is accepted")
+                        SessionTrace.Board.down(OcbmBoard.USB_CLAIM,
+                            if (requestSentWhileBackground) "USB access needed — open gm_ccpa to see the prompt"
+                            else "adapter ${dev.deviceName} present — USB permission NOT held; dialog re-raised (#$requests) — accept it on screen")
                     }
                     // We only reach here because no grant is held — neither the attach-time grant
                     // the ordinary resolver gives a launched handler nor a remembered "always open"
@@ -458,7 +686,7 @@ class OcbmProbe(context: Context) {
             polls++
             // Sliced, so [stop] is observed within ABORT_SLICE_MS rather than up to a full POLL_MS.
             var slept = 0L
-            while (slept < POLL_MS && !claimAbort) {
+            while (slept < POLL_MS && !claimAbort && !stopped && !cancelled()) {
                 try { Thread.sleep(ABORT_SLICE_MS) }
                 catch (_: InterruptedException) { Thread.currentThread().interrupt(); return null }
                 slept += ABORT_SLICE_MS
@@ -467,8 +695,48 @@ class OcbmProbe(context: Context) {
         return null
     }
 
-    private fun runAllLocked(subscribe: Boolean = true): LinkResult {
+    private fun runAllLocked(
+        subscribe: () -> Boolean,
+        mayRequest: ((Int) -> Boolean)?,
+        deferredWhy: () -> String,
+        quietExpiry: () -> Boolean,
+        cancelled: () -> Boolean,
+        epochAtSubmit: Int,
+    ): LinkResult {
         var r = LinkResult()
+        // Sticky Stop: a call queued behind a busy verb when Stop ran must not claim anything.
+        if (stopped) { sink("link attempt skipped — this OCBM probe was stopped"); return r }
+        // A link came up while this call sat in the queue (2026-10-06): leave it up rather than
+        // CT_STOP + re-claim + re-SUBSCRIBE it — that presence flap is what this check exists for.
+        if (linkEpoch != epochAtSubmit && hasLink()) {
+            val c = client
+            val cur = lastLink
+            return when {
+                c?.subscribed == true -> {
+                    log.i("link came up while this call was queued (epoch $epochAtSubmit→$linkEpoch) — leaving it up")
+                    cur
+                }
+                c != null && !c.everSubscribed && subscribe() -> {
+                    log.i("link came up unsubscribed while this call was queued (epoch $epochAtSubmit→$linkEpoch) — subscribing it in place")
+                    if (!c.subscribed && (wifiSsid.isNullOrBlank() || wifiPass.isNullOrBlank())) {
+                        val missing = if (wifiSsid.isNullOrBlank()) "SSID" else "passphrase"
+                        log.e("REFUSING to subscribe: no hotspot $missing supplied — bring-up stops before the radio-wake edge")
+                        SessionTrace.Board.failed(OcbmBoard.LINK, "CT_SUBSCRIBE refused: no hotspot $missing — supply --es ssid/--es pass or fill the hotspot fields")
+                        throw IllegalStateException("refusing credential-less CT_SUBSCRIBE ($missing missing) " +
+                            "— would pin 0x5703 to the box's stock credentials for the whole session")
+                    }
+                    c.subscribe(btOnlyConfig())
+                    c.startHeartbeat()
+                    startBoxLogStream()
+                    sink("STEP 3 — subscribed the link that came up while this call was queued.")
+                    cur.copy(subscribed = true).also { lastLink = it }
+                }
+                else -> {
+                    log.i("link came up while this call was queued (epoch $epochAtSubmit→$linkEpoch) — leaving it as it is")
+                    cur
+                }
+            }
+        }
         sink("")
         sink("==================== OCBM LINK (real adapter) ====================")
         // Armed by UsbAttachActivity when it forwards an attach; a launcher-tap or scripted run
@@ -480,15 +748,12 @@ class OcbmProbe(context: Context) {
         // OUT. The box sees a corrupt stream, and on this gadget that can mean a power cycle.
         if (client != null || usb != null) {
             log.w("a session is already live — stopping it before re-claiming the device")
-            stopLocked()
+            // Quick on a dead link (transport gone, or no HELLO): there is nothing to pull box logs
+            // over, and the full pull is 4 x 6 s of timeouts (2026-10-06, the box relink).
+            stopLocked(quick = !hasLink())
         }
         val t = UsbBulkTransport(ctx, zeno.gmccpa.ProbeLog.sub("usb"))
         usb = t
-        // If the read loop dies while we still think we are running, the device is gone.
-        t.onTransportDead = {
-            log.e("!! transport died — the adapter is gone or the gadget stalled")
-            SessionTrace.Board.failed(OcbmBoard.LINK, "transport died — adapter gone or gadget stalled; the heartbeat will declare the link dead within 5 s")
-        }
 
         // A session with no attach behind it begins HERE. The trampoline (UsbAttachActivity) owns
         // begin() for a real attach; a launcher tap, `am start` or a task switch with the adapter
@@ -509,13 +774,18 @@ class OcbmProbe(context: Context) {
             }
         }
 
-        val dev = awaitClaimable(t)
+        val dev = awaitClaimable(t, mayRequest, deferredWhy, cancelled)
         if (dev == null) {
             // awaitClaimable re-sets the interrupt flag on its own InterruptedException path, so
             // both ways of cancelling the wait are visible here; only the deadline is a fault.
-            if (claimAbort || Thread.currentThread().isInterrupted) {
+            if (claimAbort || stopped || Thread.currentThread().isInterrupted) {
                 // Deliberate: the operator stopped the wait. Narration, not a fault.
                 sink("link attempt ended: wait for the adapter cancelled")
+            } else if (quietExpiry()) {
+                // The box relink: an automatic wait, re-armed once per expiry while CarPlay is live,
+                // so an ABORT here would be a false E every ten minutes.
+                log.i("no claimable adapter in ${CLAIM_WAIT_MS / 60_000} min (last state: $lastClaimState) — the relink decides whether to wait again")
+                SessionTrace.Board.down(OcbmBoard.USB_CLAIM, "no claimable adapter in ${CLAIM_WAIT_MS / 60_000} min — last state: $lastClaimState")
             } else {
                 abort("gave up waiting for a claimable OCBM accessory after ${CLAIM_WAIT_MS / 60_000} min (last state: $lastClaimState)")
                 SessionTrace.Board.failed(OcbmBoard.USB_CLAIM, "no claimable adapter in ${CLAIM_WAIT_MS / 60_000} min — last state: $lastClaimState")
@@ -543,6 +813,24 @@ class OcbmProbe(context: Context) {
         c.boxLogger = boxLog
         c.onBoxLogDropped = { src, n -> log.w("box dropped $n log lines from ${logSourceName(src)}") }
         client = c
+        // If the read loop dies while we still think we are running, the device is gone. Bound to
+        // this client: the loop only starts in c.start() below and the transport fires the callback
+        // only while running, so no cross-generation check is needed. The HELLO latch is cleared
+        // here because nothing else does — the heartbeat's own death path clears it, but a dead
+        // transport that never reaches five write failures left hasLink() true (2026-10-06).
+        t.onTransportDead = {
+            // Null: the read loop ended on its own. Non-null: the heartbeat ended it (v5.6 H1-1).
+            val why = t.deadReason
+            log.e(if (why == null) "!! transport died — the read loop ended (adapter gone, or the gadget stalled)"
+                  else "!! transport declared dead — $why")
+            c.markLinkDead()
+            SessionTrace.Board.failed(OcbmBoard.LINK,
+                if (why == null) "transport died — read loop ended (adapter gone or gadget stalled); handed to the box relink"
+                else "transport declared dead — $why; handed to the box relink")
+            // The box-lost edge and the relink (SessionCore.onBoxTransportDead), with the dying client. Guarded: this
+            // runs at the end of the read thread, and an escaping throw there kills the process.
+            onLinkDead?.let { cb -> runCatching { cb(c, why) }.onFailure { log.e("onLinkDead threw: ${it.javaClass.simpleName}: ${it.message}") } }
+        }
         c.start()
 
         if (!c.hello()) {
@@ -550,15 +838,20 @@ class OcbmProbe(context: Context) {
                 "Check the box's own log: it is pullable over OCBM (captureBoxLogsNow) once a link exists, or over the console.")
             return r
         }
-        r = r.copy(helloOk = true)
+        r = r.copy(helloOk = true, helloAtMs = System.nanoTime() / 1_000_000L)
+        linkEpoch++
+        lastLink = r
         sink("STEP 1 OK — claimed the accessory and completed the OCBM handshake.")
 
         // Bonded-device snapshot at the top of the session. Taken HERE rather than at any of the
         // four runAll() call sites so every path that brings a link up gets one — the start-vs-end
         // diff is the whole point, and a session missing its start snapshot cannot be diffed at all.
-        zeno.gmccpa.logging.SessionSummary.current()?.let { sess ->
-            runCatching { c.mgmtGetInfo() }.getOrNull()?.let { sess.onMgmtInfoStart(it) }
-        }
+        // The same reply carries the adapter's Bluetooth name for the launcher screen (wave 3), so it
+        // is now read even when no session summary is open — one MGMT_GET_INFO, both consumers.
+        val startSess = zeno.gmccpa.logging.SessionSummary.current()
+        val startInfo = runCatching { c.mgmtGetInfo() }.getOrNull()
+        startInfo?.let { startSess?.onMgmtInfoStart(it) }
+        onMgmtInfo?.let { cb -> runCatching { cb(c, startInfo) } }
 
         c.setTime()
 
@@ -663,7 +956,9 @@ class OcbmProbe(context: Context) {
         }
 
         val info = c.mgmtGetInfo()
-        if (info != null) { sink("  MGMT_INFO:"); info.chunked(110).forEach { sink("     $it") } }
+        // Chunked on JSON element boundaries, never mid-value (E-F2): a MAC split across two lines
+        // escapes the line-wise export redactor. Logcat itself stays unredacted by policy (docs/06 §8.2).
+        if (info != null) { sink("  MGMT_INFO:"); MgmtInfo.logChunks(info).forEach { sink("     $it") } }
         // Degraded, not fatal: bring-up continues, but the session summary loses its bonded-device
         // diff and the box was slow on CH_MGMT for 5 s — worth a WARN, not a silent INFO.
         else log.w("MGMT_INFO: no response within 5 s — box busy on its dispatch loop? continuing without the bonded-device snapshot")
@@ -680,14 +975,20 @@ class OcbmProbe(context: Context) {
         // network poisons the next attempt until it is forgotten on the phone. The only recovery is a
         // full host_present cycle. Device-observed 2026-08-12 — one credential-less click cost the
         // whole session. Failing here is cheap and obvious; succeeding into that state is neither.
-        if (!subscribe) {
+        if (!subscribe()) {
             // CT_LOG_CTL does not require a subscription, so the box narrates its side of a
             // mid-session recovery even though we deliberately hold no presence latch.
             startBoxLogStream()
             sink("STEP 3 SKIPPED — link and CH_MFI relay restored WITHOUT CT_SUBSCRIBE.")
             sink("   A CarPlay session is live. Subscribing would take the radio-wake edge and bring")
             sink("   the box's BT stack up mid-session; CarPlay does not need BT once it is streaming.")
-            sink("   No heartbeat either: we are not subscribed, so the box has nothing to time out.")
+            sink("   Heartbeat runs as a liveness probe only (no CT_SUBSCRIBE); the box answers it with a")
+            sink("   HOST_GONE nudge at most every 30 s, which this client ignores.")
+            // v5.6 H1-3: until 2026-10-06 this path started no heartbeat, so nothing wrote OUT after
+            // it and a second box stall went undetected. The probe never subscribes; a later
+            // subscribeExisting (rung 1) finds it already running.
+            c.startHeartbeat()
+            lastLink = r
             return r
         }
         if (wifiSsid.isNullOrBlank() || wifiPass.isNullOrBlank()) {
@@ -707,6 +1008,7 @@ class OcbmProbe(context: Context) {
         c.subscribe(btOnlyConfig())
         c.startHeartbeat()
         r = r.copy(subscribed = true)
+        lastLink = r
         // From here the box narrates its own bring-up. Follow it, so both halves of any failure land
         // in the same logcat (and therefore the same capture bundle) instead of on separate machines.
         startBoxLogStream()
@@ -791,7 +1093,8 @@ class OcbmProbe(context: Context) {
             log.i(">> MGMT_FORGET_ALL")
             c.mgmtAction(Ocbm.MGMT_FORGET_ALL)
         } else {
-            log.i(">> MGMT_FORGET_DEVICE $mac")
+            // The phone's BR/EDR MAC is never written to the log (plan v5.9 D020): its length only.
+            log.i(">> MGMT_FORGET_DEVICE <mac ${mac.length} chars>")
             c.mgmtAction(Ocbm.MGMT_FORGET_DEVICE, mac.toByteArray(Charsets.US_ASCII))
         }
         return when (st) {
@@ -834,6 +1137,12 @@ class OcbmProbe(context: Context) {
         }
         override fun copyCertificate(): ByteArray {
             val c = client ?: run { mfiLog.e("relay cert requested with no OCBM link"); throw java.io.IOException("no OCBM link") }
+            // The certificate is a constant of the chip. Serve the copy this client already read
+            // (bring-up or an earlier relay call) instead of asking the box again: the re-read is
+            // where the fast FAILED-in-2-ms verdict landed (2026-10-05, each time right after a slow
+            // read had succeeded), and the phone then waited out the whole 120 s tunnel budget.
+            // The relay is the ONLY consumer of the cache; bring-up and self-test always read the chip.
+            c.cachedCertificate()?.let { mfiLog.i("relay cert: served from this link's cache (${it.size} B)"); return it }
             val r = c.mfiCertificate() ?: run {
                 zeno.gmccpa.logging.SessionSummary.current()?.onMfiFailure("relay cert: timeout")
                 relayFail("cert timeout (${OcbmClient.MFI_CERT_TIMEOUT_MS}ms)")
@@ -862,13 +1171,19 @@ class OcbmProbe(context: Context) {
         // sourced figure is CarKit's disassembly-confirmed 30 s — see audit 4.8 verdict).
         override fun copyCertificateFast(): ByteArray {
             val c = client ?: run { mfiLog.e("relay cert (fast) requested with no OCBM link"); throw java.io.IOException("no OCBM link") }
+            // Same cache as copyCertificate(); see there. This is the path the iAP2 tunnel takes.
+            c.cachedCertificate()?.let { mfiLog.i("relay cert (fast): served from this link's cache (${it.size} B)"); return it }
             val r = c.mfiCertificate(4_000) ?: run {
                 zeno.gmccpa.logging.SessionSummary.current()?.onMfiFailure("relay cert (fast): timeout")
                 relayFail("cert timeout (fast, 4000ms)")
             }
             if (!r.ok) {
                 zeno.gmccpa.logging.SessionSummary.current()?.onMfiFailure("relay cert (fast): ${r.statusName()}")
-                relayFail("cert (fast): ${r.statusName()}")
+                // W, not relayFail's E: a refused fast read is ONE tunnel handshake attempt, and the
+                // tunnel retries it — the E-level "auth will fail on this" wording overstated a
+                // single refusal. The summary line above still records it.
+                mfiLog.w("relay cert (fast): ${r.statusName()} — tunnel handshake attempt failed; the tunnel retries")
+                throw java.io.IOException("CH_MFI cert (fast): ${r.statusName()}")
             }
             return r.payload
         }
@@ -890,7 +1205,7 @@ class OcbmProbe(context: Context) {
 
     /**
      * Terminal for this instance: `ops` is shut down, so no box command may be submitted afterwards.
-     * Both callers (`MainActivity.stopEverything`, the `ocbm_stop` command) drop the probe and the
+     * Both callers (`SessionCore.stopEverything`, the `ocbm_stop` command) drop the probe and the
      * next `ocbm()` builds a fresh one; without the shutdown the `ocbm-session` thread survives every
      * Stop -> Start cycle. Shut down HERE and not in `stopLocked()`: that runs on `ops` and is also
      * reached from `runAllLocked` mid-run, which would then find the executor closed under it.
@@ -900,7 +1215,9 @@ class OcbmProbe(context: Context) {
         if (ops.isShutdown) return
         // Set the abort FIRST, from this thread. See [claimAbort]: the submit below queues behind
         // whatever `ops` is running, so if that is a ten-minute `awaitClaimable` this call has to be
-        // what ends it -- it cannot wait its turn to ask.
+        // what ends it -- it cannot wait its turn to ask. [stopped] is the sticky half: a wait that
+        // only STARTS after this (queued behind a busy verb) clears claimAbort on entry.
+        stopped = true
         claimAbort = true
         ops.submit { stopLocked(quick) }.get()
         ops.shutdown()

@@ -10,73 +10,12 @@ pointer to the doc that now owns the result — do not leave a stale plan beside
 
 ## T1. Settings redesign — projection-aware, vehicle-centric (raised 2026-09-04; IMPLEMENTED 2026-09-04)
 
-> **State (2026-09-04):** built the same day under the design contract
-> `host/MacHost/carlink_macOS/App/Settings/DESIGN.md`; the result is described in
-> `../host/00_MACOS_HOST_APP.md` §"Settings window" and the AA side in
-> `../androidauto/00_ARCHITECTURE.md` §4. The shape that landed differs from the plan below in two
-> ways worth knowing: (1) the tabs are **Vehicle / Adapter / Diagnostics**, not Vehicle / CarPlay /
-> Android Auto / Transport — protocol-exclusive settings are badged sub-groups INSIDE the feature they
-> belong to, never a protocol tab; (2) the AA engine no longer snapshots the CarPlay model
-> (`AACapability.init(config:)` is retired) — it renders the neutral `VehicleProfile` through
-> `AACapability(profile:adapter:warn:)`, exactly as the CarPlay YAML is rendered from the same profile.
-> Kept below for the record of what was asked; the plan text is no longer the spec.
-
-**Why.** The app supports two projection protocols, Apple CarPlay and Android Auto, each wired and
-wireless. The Settings window does not reflect that: its Configuration tab is one long list built
-around the CarPlay `VehicleConfig` YAML (`host/MacHost/carlink_macOS/App/SettingsWindow.swift`,
-three tabs: Configuration, CCPA, Diagnostics), and everything Android Auto specific is an
-environment lever read at launch (`AA_FORCE_RES`, `AA_NO_TOUCH`, `AA_DRIVER_POSITION`,
-`AA_TELEPHONY_SINK`, `AA_LEGACY_VIDEO`, `AA_SKIP_AUDIO_ACK`, `AA_TRACE_UNHANDLED`, `AA_P12`,
-`AA_P12_PASS`, …) with no UI at all. Some vehicle facts are shared but only half-wired: driver side
-reaches Android Auto's `driver_position`, and its CarPlay consumer — the `/info rightHandDrive`
-boolean, R14G17 `AirPlayCommon.h:1103` — is landing 2026-09-05, unverified on a device (until then this
-sentence said it "has no CarPlay consumer", which conflated no-consumer-on-the-box with no-key;
-`docs/carplay/04_CAPABILITIES_AND_CONFIG.md` §rightHandDrive); night mode is a CarPlay runtime command and
-an AA sensor but its config-field form is stored and not pushed. (Corrected 2026-09-04: this sentence said "the `rightHandDrive` toggle
-drives `driver_position`". After the reorganisation the source is the neutral `driverPosition`
-ternary — `left` / `right` / `center` → wire 2 / 1 / 3 — and `rightHandDrive` / `nightMode` survive
-only as write-only UserDefaults values derived from `driverPosition` / `theme` for an app downgrade;
-neither is in the pushed YAML since 2026-09-02.)
-
-**Target shape.**
-
-1. **Vehicle** — facts about the car that apply to both protocols, each a real control (toggle,
-   segmented picker, stepper), never a free-text field where a bounded choice exists:
-   name; drive side (Left / Right, and Center for AA); display geometry (resolution, fps, density)
-   with the per-protocol consequence shown inline (CarPlay takes any size, AA snaps to 800×480 /
-   1280×720 / 1920×1080 — `AACapability.Resolution.nearest`); night mode source; driving-restriction
-   policy; microphone and telephony (HFP for AA, in-band for CarPlay); instrument-cluster / second
-   display when it exists.
-2. **CarPlay** — what only iOS consumes: the iAP2 feature tier (`proven`/`extended`/`all` and skips),
-   audio format matrix, enhancedSiri, ETC, EV fields, wireless (BT/Wi-Fi) options, the SSP pairing
-   answer lever.
-3. **Android Auto** — what only gearhead consumes: touchscreen vs controller (`AA_NO_TOUCH`),
-   declared keycodes, video/legacy-video experiments, the metadata services once T2 lands, the
-   head-unit certificate source. Every current `AA_*` lever that is a real setting becomes a
-   control here; every one that is a bench-only experiment moves to a clearly labelled Experiments
-   group, off by default, with the guard-rail text from `03_WIRELESS.md` §6.
-4. **Transport** — wired / wireless per protocol, shown as state, with the box-side actions the
-   CCPA tab already has (restart wireless stack, forget bonds, enter NCM).
-
-**Rules that bind the redesign.**
-
-- App-driven doctrine stays: the app is the single source of truth and pushes; the box presents
-  (`docs/carplay/04_CAPABILITIES_AND_CONFIG.md`). Nothing here adds a box-side default.
-- A setting the box or the phone does not consume must say so where it is shown (the existing ⚠️
-  inline convention), or not be shown. Settings that take effect only on the next session say so.
-- Apple HIG for macOS: switches for booleans, segmented controls for small enumerations, steppers
-  or pickers for numbers, sentence-case labels, help text in the inspector style already used.
-- The generated YAML preview and the "unsaved changes" flow are kept; the YAML schema may grow but
-  must not break `tools/proto_check.py` or the existing config push.
-- Model split follows the UI: a shared vehicle model, plus a per-protocol model, so the AA engine
-  keeps taking a `Sendable` snapshot and never reads the observable model from the session thread.
-  (As landed: the snapshot is `AACapability(profile:adapter:warn:)` over the neutral `VehicleProfile`;
-  `init(config:)` over the CarPlay model is gone.)
-
-**Done means.** No `AA_*` environment variable is required for a normal session; the drive-side
-toggle changes both protocols (CarPlay half needs the box consumer wired — see the open item); the
-Configuration tab is three groups the owner can scan in one screen each; `docs/host/00_MACOS_HOST_APP.md`
-and `docs/carplay/04_CAPABILITIES_AND_CONFIG.md` describe the new layout in place.
+LANDED. The Settings window is now three tabs, Vehicle / Adapter / Diagnostics, built under the design contract
+`host/MacHost/carlink_macOS/App/Settings/DESIGN.md`. The result is described in `../host/00_MACOS_HOST_APP.md`
+"Settings window" and the Android Auto side in `../androidauto/00_ARCHITECTURE.md` section 4. Protocol-exclusive
+settings are badged sub-groups inside the feature they belong to, not protocol tabs, and the AA engine renders
+the neutral `VehicleProfile` through `AACapability(profile:adapter:warn:)`. The `rightHandDrive` CarPlay consumer
+was device-verified 2026-09-05 (`../carplay/04_CAPABILITIES_AND_CONFIG.md` rightHandDrive). The original plan is in git history.
 
 ## T2. Android Auto metadata services — LANDED 2026-09-04
 

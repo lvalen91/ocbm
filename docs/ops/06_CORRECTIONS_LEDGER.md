@@ -5,7 +5,10 @@
 > `host/` and `ops/`; those originals live in git history and in the 2026-08-31 backup. This ledger
 > is kept for provenance — *new* corrections are made in place in the owning document, not appended
 > here, and the split-signal scheme it describes below is retired. `tools/docs_status_check.py`, which
-> enforced that scheme, is replaced by `tools/docs_check.py` (per-category cap, STATUS lines, links).
+> enforced that scheme, no longer exists; `tools/docs_check.py` (per-category cap, STATUS lines, links)
+> replaced it and does NOT check that backticked SHAs or `R-` ids resolve. *(Corrected 2026-10-28: entries
+> `R-49-9` to `R-49-13` were appended on 2026-10-19, after this header said appending had stopped, and
+> sit after `R-57-1`, out of document order.)*
 
 This file holds the **reasoning** behind every correction, retraction and supersession applied
 to a document in `docs/`. The documents themselves keep only a short signal that points here.
@@ -52,9 +55,8 @@ document cites. Grep the ID to jump between the two.
 Two cases exist: `docs/20` is a **filename collision** — two unrelated documents share the
 number — so they key as `R-20M-n` (`../carplay/05_METADATA_AND_CONTROLS.md`) and `R-20W-n`
 (`../wireless/00_WIRELESS_CARPLAY.md`); and two documents have no number at all, keying as
-`R-PLAN-n` and `R-HANDOFF-n`. Renumbering the docs/20 collision is Phase 3.2 of
-`../ops/04_OPEN_ITEMS.md`; until that lands, the `M`/`W` suffixes are what
-disambiguates, and they stay valid afterwards.
+`R-PLAN-n` and `R-HANDOFF-n`. The `M`/`W` suffixes are what disambiguates the docs/20 collision
+(the renumbering once planned for it was never scheduled).
 
 A citation may name a range — `` `R-49-2` ``–`` `R-49-6` ``. The checker expands ranges and
 requires every interior ID to exist, so a range cannot silently exempt its middle.
@@ -67,7 +69,7 @@ a SHA below does not resolve, search by subject:
 
     git log --all --format='%h %s' | grep -F '<subject>'
 
-A SHA in backticks MUST resolve — `tools/docs_status_check.py` fails the run otherwise. A SHA
+A SHA in backticks MUST resolve (no tool enforces this since `tools/docs_status_check.py` was retired; check by hand with `git cat-file -t`). A SHA
 known to be dead (squashed away, or rewritten out) is written bare, without backticks, together
 with whatever replaced it. That way the checker stays strict without forcing the record to
 pretend a lost commit never existed.
@@ -319,6 +321,10 @@ Siri (AuxIn/AuxOut), MainBuffered audio, the HID knob/telephony descriptors, `la
 param 30, `displayPanels[]`, and two DataStream stubs. Tracked in the session task list and
 `../ops/04_OPEN_ITEMS.md` §4 (the 08-10 handoff it originally cited was superseded).
 
+**Re-checked 2026-10-19:** of that remainder, `lane_guidance` is no longer merely declared — it is parsed and rendered
+(see the 2026-10-19 note under `R-49-8`); param 30 is declared on every transport arm with subs 0/1 only
+(`message.rs:772-809`), so the "param 30" half of the remainder is the unsent subs 2-8, not an absent component.
+
 ## docs/carplay/07_PHONE_SIDE.md — Phone-side CarPlay bring-up (box ⇄ iPhone)
 
 ### R-07-1 · "This setup has no NCM" no longer holds repo-wide — an opt-in MFi-over-NCM bridge exists
@@ -334,7 +340,7 @@ local chip nor `CH_MFI`: `ccpa/mfid` (box-side service, default bind `0.0.0.0:77
 (the `MFI1` framing), `host/mfi-probe` (the client), the remote backend in
 `crates/vendor/wireless/src/mfi_local.rs`, and a client hook in `carplayd` itself
 (`ccpa/carplayd/src/main.rs`, `mfi_wire::client::{cert,sign}`). All of it is opt-in behind
-`CARPLAY_MFI_ADDR` (e.g. `192.168.50.2:7789`) — unset, which is the CCPA's own case, leaves the local
+`CARPLAY_MFI_ADDR` (e.g. `<ADAPTER_IP>:7789`) — unset, which is the CCPA's own case, leaves the local
 i2c path byte-for-byte unchanged. It is a bring-up instrument, not a production path, and no key
 material crosses it: the genuine coprocessor signs, the socket only relays request/response frames.
 
@@ -641,6 +647,13 @@ through `metadata::dispatch(msg_id, body)` onto the `:9004` seam, and album artw
 old `main.rs:174,212` anchors are dead), but that flag only adds the wired-CarPlay ids `0x4301`/`0x4300`;
 it never gated the metadata plane. docs/carplay/02_SESSION_LIFECYCLE.md:41-42 carries the same correction. Historical text follows.
 
+**Re-checked 2026-10-19:** the pointer "docs/carplay/02_SESSION_LIFECYCLE.md:41-42 carries the same correction" does not
+hold — those lines are now rows of the §1 source table, and that document carries no `arm_metadata_policy` text (it
+predates the consolidation numbering). The code claims in this entry DO hold: `arm_metadata_policy()` runs at startup
+(`ccpa/iap2d/src/main.rs:597`) and in the `Action::SendIdentify` arm (`:373`, directly above the
+`build_ident_info_with(..., false /* declare_wired */)` call at `:377`); carplayd arms it per control connection
+(`ccpa/carplayd/src/main.rs:778`); `features::arm_pushed_policy` is `crates/vendor/iap2-core/src/features.rs:133`.
+
 ### R-20M-2 · §2.7.4's conclusion is wrong — display features bit `0x10` is Touchpad, and `dPadSupport` contributes nothing to `displays[].features`
 
 - **Verdict:** REFUTED
@@ -918,6 +931,16 @@ maps:/car/instrumentcluster/map`**, so iOS registers the cluster panel; `altDisp
 `vehicle_config.rs` but is still not emitted as a separate panel array.
 Cluster Show-flags, lane guidance and the full maneuver list remain open.
 
+**Re-checked 2026-10-19:** two of those three have since landed (history above kept). *Cluster Show-flags:* the
+`CMD_NAV_APPEARANCE` input command (`crates/ocbm-proto/src/lib.rs:467`, `0x0B`, flags `NAV_APPEARANCE_SPEED_LIMIT/COMPASS/ETA`)
+is held in `NAV_APPEARANCE` and rebuilt into the `showUI` query (`showSpeedLimit`/`showCompass`/`showETA`) by `cluster_url()`
+(`ccpa/carplayd/src/main.rs:43-72`); the host sends it as `cmdNavAppearance`
+(`host/MacHost/carlink_macOS/OCBM/OCBMFraming.swift:263`, `OCBMClient.swift:531-542`). *Lane guidance:* `0x5204` is parsed
+(`crates/vendor/iap2-core/src/metadata.rs:1172`; was `:1104` before the 2026-10-19 edit) and rendered as a "Lanes" card in the macOS Metadata window
+(`host/MacHost/carlink_macOS/App/MetadataWindow.swift:1066`; was `~1051`). Landed means code exists end to end; live delivery of
+`0x5204` is not evidenced by any archived capture (see `R-49-8` 2026-10-19 note). (Live-observed 2026-10-19, still not archived: `R-49-10`.) The "full maneuver list" half was not
+re-audited here and stays as written.
+
 ---
 
 ## docs/carplay/06_AV_PIPELINE.md — Audio formats capability
@@ -1166,7 +1189,7 @@ the unanswered stream-130 SETUP. Use the phone's own `accessoryd` iAP2 packet tr
 - **Scope:** §Artifacts — and, through it, the evidence base for §5–§7
 
 **GONE, verified 2026-08-16.** The nine decompilation dumps below were written to per-session
-scratchpad space (`/private/tmp/claude-501/-Users-zeno/<session-uuid>/scratchpad/`), which is not
+temporary per-session scratchpad space, which is not
 preserved; the session directory no longer exists. **They are the entire primary evidence base for
 §5-§7** — the `accessoryd` `processIncomingData` chain, the two silent-drop dictionary lookups, and the
 hard-coded `type=5`/`transportType=4` literals rest on them and cannot now be re-read. The conclusions
@@ -2012,6 +2035,35 @@ this entry exists rather than a silent edit: the document and the code asserted 
 words, and the capture refuting it had been sitting in docs/ops/05_AUDITS.md since the day after it was written.
 
 
+**Re-checked 2026-10-19 — the REFUTED verdict stands as a code-structure verdict; its "capture" half is UNVERIFIED provenance.**
+
+- *Code-verified:* `lane_guidance` is `Trigger::RidesOn("route_guidance")` with `updates: &[0x5204]`
+  at the Extended tier (`crates/vendor/iap2-core/src/features.rs:496-499`; re-anchored 2026-10-19), so it has no `Start*` of its own and rides
+  `0x5200`. A `0x5204` is parsed to `laneGuidance` JSON (`crates/vendor/iap2-core/src/metadata.rs:1172`, dispatched at
+  `:1010`; these were `:1104`/`:942` before the 2026-10-19 edit shifted the file) and consumed by the macOS Metadata window (`host/MacHost/carlink_macOS/App/MetadataWindow.swift:812`; was `:800`).
+- *UNVERIFIED:* the "×12 / ×574" delivery figures. No file under `docs/ops/captures/` contains `0x5204`, `LaneGuidance`
+  or a 574 count (`rg 5204 docs/ops/captures` returns nothing); the only 2026-07-29 capture archived is
+  `2026-07-29_iphone_0x4171_listupdate.txt` (0x4171, not 0x5204). The figures first appear as prose in
+  docs/ops/05_AUDITS.md ("`0x5204` confirmed via `RidesOn`"), present in that file since `2677a46` (2026-08-31 consolidation; earlier origin not traced).
+  The archived `2026-07-25_SUCCESS_metadata_declaration_accepted.txt` shows `lane_guidance` declared and the `0x5200`
+  subscribe sent (30 B) but its inbound table holds no `0x5201`/`0x5202`/`0x5204` (no route was active). So "can never
+  arrive" is not demonstrated by anything in the repo, and neither is "does arrive" — read the verdict as
+  REFUTED-ON-UNARCHIVED-EVIDENCE until a capture with a live route is filed.
+- *What the `0x5200` subscribe selects today:* `start_route_guidance()` (`metadata.rs:350-365` after the 2026-10-19 edit; was `:348-355`) sends component id 42 plus
+  selectors 1 (SourceName) and 2 (SourceSupportsRouteGuidance) only. Apple's table
+  (`tools/i2mspec_dump.py --message 0x5200 --text`) names selector 3 **SupportsExitInfo** — "Must be included to receive
+  ExitInfo in RouteGuidanceManeuverInformation" — 4 DestinationTimeZoneOffsetMinutes, 5 EVChargeInfo. `0x5202` id 13
+  (ExitInfo) is parsed (`metadata.rs:732` now; was `:664`) but gated by a selector we do not send.
+  **Superseded 2026-10-19 by `R-49-9`:** selector 3 has since been sent (test build, committed in `bbf3325`) and ExitInfo arrived live; the
+  parse is now `metadata.rs:732`. Lane delivery is now live-observed, see `R-49-10`. The text above is kept as history.
+- *Identify param 30 today:* sub 0 Identifier (42) and sub 1 Name only (`message.rs:802-803`); subs 2-8, including
+  sub 8 `MaxLaneGuidanceStorageCapacity`, are still not declared, as the entry says.
+- *Parsers drop fields Apple defines:* `iap2-core` `route_guidance()` reads `0x5201` ids 1-14, 21, 24 (drops 15
+  RouteGuidanceVisibleInApp, 16/17/18 LaneGuidanceCurrentIndex/TotalCount/PresentLaneGuidance, 19, 20, 22, 23, 25, 26);
+  `maneuver()` reads `0x5202` ids 1-9 and 13 (drops 10, 11, 12 LinkedLaneGuidanceInformation); `lane_guidance()` drops
+  `0x5204` id 0 (component) and id 3 LaneGuidanceDescription. The `crates/vendor/metadata` typed parser is narrower still
+  (`tlv.rs`: `0x5201` ids 1-12 and 19; `0x5202` ids 1-7 and 13).
+
 ## docs/ops/05_AUDITS.md — Full-Codebase Audit & Remediation — 2026-07-31
 
 ### R-50-1 · Finding A's box-autoconnect fix conflicts with the app-driven doctrine — and was never landed anyway
@@ -2333,3 +2385,139 @@ already has a regression capture (`docs/ops/captures/2026-08-10_REGRESSION_datas
 It also predates the current mandatory opening: per `README.md` and `../ops/04_OPEN_ITEMS.md`,
 the FIRST ACTION is the handoff + CLAUDE.md + docs/carplay/04_CAPABILITIES_AND_CONFIG.md, not this file. Everything this section *cites*
 still resolves — it is the framing that is out of date.
+
+## docs fact-check pass — 2026-10-19 (README.md, docs/README.md, carplay/01, carplay/02, ops/03, ops/06)
+
+### R-DOCS-1 · README.md's `crates/vendor/` row still counted `rx-connect` as a vendored crate and a workspace member
+
+- **Verdict:** STALE
+- **Landed:** uncommitted, same session (2026-10-19); the code change it trails is `Finish the 2026-09-08 daemon rename: repair the workspace, keep captures verbatim` (`33126bf`)
+- **Scope:** README.md "Ten crates vendored" row and the `tools/` row's `rx-connect` install lists; docs/carplay/02_SESSION_LIFECYCLE.md's present-tense `rx-connect` lines
+
+`crates/vendor/` holds nine crates, not ten: the `rx-connect` binary was merged into carplayd as
+`ccpa/carplayd/src/discovery.rs` on 2026-09-08 (`ccpa/carplayd/Cargo.toml` "Merged in from the retired `rx-connect`
+binary"; `build.sh:57`; `tools/session_supervisor.sh:8,1359`). The workspace's only vendored member is `wireless`
+(`btd`). The README row and the install-script lists were corrected in place, as were the lifecycle document's ARMED /
+TEARDOWN / L2-restart / health-check lines. Historical `rx-connect` mentions in captures and dated findings are left as
+written.
+
+### R-DOCS-2 · External reference paths in the index, the lifecycle doc and README.md no longer exist
+
+- **Verdict:** STALE
+- **Landed:** uncommitted, same session (2026-10-19)
+- **Scope:** docs/ops/03_REFERENCE_INDEX.md §A/§B/§C/§D/§E/§F; docs/carplay/02_SESSION_LIFECYCLE.md §1 and the `local_carplay_sdk/conformance` citation; README.md `ccpa_backups`
+
+`~/carlink/local_carplay_sdk/` is now `~/Documents/carlink/old/carplay_RE/carplay_sdk/` (the R14G17 tree, `tbox_speedplay`,
+`cinemo_*` and `conformance/` all resolve there; CLAUDE.md already used the new path). `~/Downloads/Carplay WWDC/` does not
+exist — the surviving Simulator copy is `~/Documents/carlink/carplay_simulator/CarPlay Simulator.app`, and the WWDC
+transcripts are the five files in `reference/wwdc_transcripts/`. `~/Downloads/ios27_extract_24A5390f/` (raw dyld dumps) was
+not found (marked UNVERIFIED in the index). `~/Downloads/ccpa_backups` is now `~/Documents/carlink/carlinkit_misc/ccpa_backups`.
+`/Volumes/stuff` IS mounted and holds `rpi/aaos/docs/os-corrections-2026-08-16.md`. The index's `analysis/aa_full_session_emulator_*.txt`
+could not be located anywhere (marked UNVERIFIED). Other documents that repeat the dead paths are listed in the final report
+of this pass, not edited here.
+
+### R-DOCS-3 · docs/carplay/02_SESSION_LIFECYCLE.md: an answered open question, a loose byte-pin statement, and three drifted anchors
+
+- **Verdict:** CORRECTED
+- **Landed:** uncommitted, same session (2026-10-19)
+- **Scope:** §"open questions" item 4; the "Important scope note" under the conformance table; the `events.rs:295-303` and `carplayd/src/main.rs:409-440` anchors
+
+(1) Open question 4 ("does iOS honour a subscribe for an id the tunnel Identify declared but the BT Identify did not") is
+answered YES by `docs/ops/captures/2026-07-25_SUCCESS_metadata_declaration_accepted.txt`: the BT-time arm declares
+`sent={0x5703}` and a five-id receive list (`message.rs:475-486`) yet the tunnel's `extended` subscribes for now_playing, call_state, communications, power and app_discovery all drew replies (route_guidance/destination drew none: no route active).
+(2) "The Bluetooth Identify is byte-pinned" is true of params 6/7 only: the same `Wireless` Identify has declared param 30
+since the 2026-07-24 Phase 5.0 experiment (`message.rs:772-809`) alongside params 17/24. (3) `events.rs:295-303` is now
+`events::setup()`'s `iap_tunnel::reset()` at `crates/vendor/receiver/src/events.rs:488`; `arm_keepalive` is `ccpa/carplayd/src/main.rs:488-513` with its
+doc comment at `:482-487`.
+
+### R-DOCS-4 · docs/carplay/01_OCBM_PROTOCOL.md's BT-phase table stopped at `0x06`
+
+- **Verdict:** CORRECTED
+- **Landed:** uncommitted, same session (2026-10-19)
+- **Scope:** the `CT_BT_PHASE` `BTP_*` table
+
+`BTP_PAIR_REJECTED = 0x07` exists in `crates/ocbm-proto/src/lib.rs:179` and is published from
+`crates/vendor/wireless/src/main.rs:332`; the row was added. `python3 -I tools/proto_check.py` reports
+`OK — every client agrees with crates/ocbm-proto (34 non-core gaps)` on 2026-10-19.
+
+## live iAP2 route-guidance session — 2026-10-19 (ops/05, README.md, CPC200 nav docs)
+
+Evidence class for every entry below except `R-49-13` (a different unit, stock CPC200 firmware): one live session, OCBM Rust daemons (`carplayd`) on a Carlinkit i.MX6UL box, AirPlay-tunnel
+arm, metadata tier `extended`, one highway route. iPhone-side evidence = accessoryd `LOG;` frames (payload hex) and the carkitd
+pre-wire dictionary; box-side evidence = parser JSON and the macOS Metadata window. **Logs and screenshots contain route data
+and are NOT archived** — everything here is live-observed and not independently re-checkable from the repo.
+
+### R-49-9 · `0x5202` id 13 ExitInfo is gated by `0x5200` selector 3 — VERIFIED live (supersedes the "gated by a selector we do not send" caveat in `R-49-8`)
+
+- **Verdict:** VERIFIED (one route, one exit; scope below)
+- **Landed:** uncommitted test build (2026-10-19); doc entry only
+- **Scope:** `R-49-8` 2026-10-19 re-check bullet "What the `0x5200` subscribe selects today"; docs/ops/05_AUDITS.md ExitInfo note
+
+Control, selectors 1+2 only (`0x5200` body 14 B, tunnel frame 30 B): a 13-maneuver `0x5202` burst carried param ids 0..11 only —
+no id 12, no id 13. Treatment, selector 3 added (body 14 -> 18 B, tunnel frame 30 -> 34 B; the iPhone-side accessoryd LOG showed the
+accessory `0x5200` with param ids 0,1,2,3): iOS delivered ExitInfo — the macOS app's "Exit Info (raw)" card showed `exitInfo: Exit 9`
+on maneuver idx 6 (maneuverType 53, Change Highway Right) of an 18-maneuver route, in two successive bursts; the box logged 36x
+`0x5202` and 16x `0x5204`. So Apple's "Must be included to receive ExitInfo" is a real gate, selector 3 is sufficient, and the Rust
+path (`start_route_guidance()` `metadata.rs:350-365`, parse `"exitInfo"` at `metadata.rs:732`, card `MetadataWindow.swift:1109`) works end to end.
+The gate is on the iPhone, so it should apply to other accessories (confirmed only for the two tested; relevant to the CPC200 binary, see the CPC200 `02_nav_patch.md` P1 note — *built and device-verified the same day, `R-49-13`*).
+
+**UNVERIFIED (no archived evidence):** (a) id 13 as raw wire bytes *on this OCBM box* — the iPhone-side capture dropped the burst frames, so the id-13
+evidence is the box parser's JSON, not wire hex (*2026-10-19 follow-up: raw wire bytes were seen on a stock CPC200, `R-49-13`*) (the raw-hex lever, `/tmp/carplay_rg_hex` / env `CARPLAY_RG_HEX`, `metadata.rs:367-423`,
+is built and OFF); (b) any exit type other than a numbered highway exit, any second route; (c) the NEXT MANEUVER card rendering.
+Code state: selector 3 is sent UNCONDITIONALLY by the test build (committed in `bbf3325`; "uncommitted" corrected 2026-10-19); selectors 4/5 are unsent. The app-driven doctrine
+(docs/carplay/04_CAPABILITIES_AND_CONFIG.md) says selectors 3/4/5 should be app-pushed — not done.
+
+### R-49-10 · `0x5204` lane guidance is now LIVE-OBSERVED at tier `extended` without Identify param 30 sub 8 (updates `R-49-8` provenance; history above kept)
+
+- **Verdict:** CORRECTED — provenance (the REFUTED verdict of `R-49-8` is unchanged)
+- **Landed:** uncommitted (2026-10-19)
+- **Scope:** `R-49-8` "REFUTED-ON-UNARCHIVED-EVIDENCE" reading; docs/ops/05_AUDITS.md "`0x5204` confirmed via `RidesOn`"
+
+The 2026-10-19 session delivered `0x5204` on the tunnel arm at tier `extended` with Identify param 30 still sub 0/1 only (no sub 8):
+9 and 16 messages in two bursts, and the macOS "Lanes" card populated. This is a fresh, independent observation, so "sub 8 is
+not the gate it was read as" now rests on something seen rather than on the unarchived 2026-07-29 prose. It is **live-observed, not
+archived** (no raw capture filed), and the old x12 / x574 figures stay UNVERIFIED (no archived evidence). Also observed: the
+pre-change `0x5202` burst had **no id 12** (LinkedLaneGuidanceInformation) although 5 lane records arrived — on the wire, maneuvers
+were not linked to lane records. (`R-49-8`'s bullet that the parser drops id 12 is therefore not currently losing data.)
+
+### R-49-11 · "The iPhone sends ALL fields / 21 fields, subscription is not the issue" is true only for the selector set sent
+
+- **Verdict:** CORRECTED — bounded
+- **Landed:** uncommitted (2026-10-19)
+- **Scope:** the claim as repeated in the CPC200 `iap2_binary_analysis.md` and `02_nav_patch.md` (already bounded there by the 2026-10-19 disassembly; this entry adds the live measurement)
+
+With selectors 1,2 only, 25 wire `0x5201` frames carried ids 0..20 only (21 fields — the origin of "21 fields"), while carkitd's
+pre-wire dictionary for the same updates also held ids 21 and 23. So ids 21+ are withheld on the wire, consistent with Apple's
+note that selectors 4 (timezone) / 5 (EVChargeInfo) gate them; **that gating is inferred, not tested — nothing sent selector 4/5**.
+"All fields" therefore does not hold for ExitInfo (id 13 of `0x5202`), timezone or EV data, and any 21-field claim that
+names timezone/charging fields (taken from the dictionary, not the wire) is UNVERIFIED (no archived evidence) as a wire fact.
+
+*Follow-up 2026-10-19 (`R-49-13`):* on the stock CPC200 the "not tested on ARMiPhoneIAP2" wording is stale: with patch v6 sending selector 3, id 13 arrived there too. Selectors 4/5 remain unsent everywhere.
+
+### R-49-12 · `0x5202` id 12 (LinkedLaneGuidanceInformation) was absent on the wire in the control burst
+
+- **Verdict:** NOTED (live observation, not archived)
+- **Landed:** uncommitted (2026-10-19)
+- **Scope:** any text implying `0x5202` id 12 links maneuvers to lanes in our sessions
+
+In the selectors-1,2 control burst (13 maneuvers, ids 0..11 only) no id 12 was seen although 5 `0x5204` lane records arrived. Whether id 12 appears for lane-bearing maneuvers under other conditions
+(selector set, sub 8 capacity, a lane-dense route) is UNVERIFIED (no archived evidence); it is not claimed to be unobtainable.
+
+### R-49-13 · ExitInfo via selector 3 verified on stock CPC200 firmware with patched ARMiPhoneIAP2 v6
+
+- **Verdict:** VERIFIED (one route, one numbered highway exit; scope below). Extends `R-49-9` to a second accessory type; the CPC200 "P1 built/untested / not tried on this binary" wording elsewhere is stale.
+- **Landed:** doc entry only; CPC200 `ARMiPhoneIAP2_patches/02_nav_patch.md` §6c holds the full record (2026-10-19)
+- **Scope:** CPC200 docs saying the stock box cannot receive ExitInfo or that P1 is unbuilt/untested; `R-49-9` UNVERIFIED (a); `docs/ops/04_OPEN_ITEMS.md` selector items
+
+Unit: stock Carlinkit CPC200, board A15W, factory firmware `2025.12.29.1746CAY` (physically a different unit from the R-49-9 OCBM box).
+Patch "P1 v6" = NAV v5 + one hook at VMA `0x2f914` that appends the empty selector TLV `00 04 00 03` to the outgoing `0x5200`
+(msglen +4, linklen +4; the firmware recomputes checksums). Pushed to the box `/tmp/bin` by carlink_macOS (`iap2PushEnabled` now true), packed
+with the Linux/ARM `modified_upx_arm` run on the box (233,996 B). Nothing written to flash; reboot restores the factory binary.
+Result on the FIRST CarPlay session after a box reboot into default protocol mode: iPhone-side accessory `0x5200` showed param ids
+[0,1,2,3]; after a highway route started the `0x5202` burst had 20 maneuvers, ids 0..11 plus id 13 on exactly one maneuver, decoded from the
+raw wire bytes as the text "Exit 9"; host `[EXITINFO_PROBE]` agreed (`ExitInfo(0x000d)=PRESENT(x1)`). No `0x1D03` reject, no crash, session streamed.
+No `0x5204` (the stock binary does not declare or handle it). This time the iPhone-side capture caught the `0x5202` frames, so id 13 is now
+proven as raw wire bytes (R-49-9 (a) only had box-parser JSON). The push taking effect in session 1 differs from the older "session 2+" model (mechanism UNVERIFIED).
+
+**UNVERIFIED (no archived evidence):** raw-hex frames are not archived (the logs contain route data); persistence beyond `/tmp`; off-ramp types 8/22/23;
+lane guidance `0x5204` on stock; other iOS versions; selectors 4/5 (still unsent). Not recorded here by design: route, destination, road, phone model/OS, addresses.

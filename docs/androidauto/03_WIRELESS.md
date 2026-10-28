@@ -41,8 +41,7 @@ Decision, 2026-09-01 (corrected in place 2026-09-01 after step 1 landed): **`ccp
 LIBRARY, not a daemon** — it has no `main.rs` and no `[[bin]]`, and is served by the existing
 `btd` daemon. It could not be its own process: `sdp_server` binds L2CAP PSM 1 with no
 `SO_REUSEADDR`, so a second SDP-serving daemon gets `EADDRINUSE` and is never advertised (§6b).
-`aa-bridge` stays a wired AOAP pump and is not refactored. The wired path ships and works; this one
-does not yet, and the two only need to agree about who owns the box. They meet at
+*(Superseded 2026-09-04: `aa-bridge` grew a `--wireless` arm instead of staying wired-only; see §5 "One bridge or two" and §6c. Wireless AA is device-run end to end, see the baseline above.)* The wired and wireless paths only need to agree about who owns the box. They meet at
 `box_common::flags` and nowhere else.
 
 | Piece | Where | State |
@@ -54,7 +53,7 @@ does not yet, and the two only need to agree about who owns the box. They meet a
 | Shared BT primitives | `crates/bt-common` | **extracted 2026-09-01** from btd; 29 tests |
 | AA SDP record + RFCOMM accept (channel 4) | `crates/bt-common/src/sdp_server.rs`, `crates/vendor/wireless/src/main.rs` | **built** (steps 3-4 below) — and §2f confirms this IS the direction: the phone dials us |
 | Headset gate: HFP-HF + HSP-HS records, AG search, AT SLC client | `crates/bt-common/src/sdp_record.rs` (`HandsFreeRecord`/`HeadsetRecord`), `sdp_server.rs`, `crates/vendor/wireless/src/hfp_hf.rs`, `sdp_client.rs`, `reconnect.rs` (`attempt_headset`) | **built 2026-09-04**, 30 host tests; the precondition the phone waits on (§6b, §6d) |
-| AP bring-up | — | not started (mechanism exists for CarPlay) |
+| AP bring-up | `radio_ap_up.sh` / `wifi_handoff::read_hostapd_ap_config` | **built** (reused from CarPlay; 5 GHz AP in the §1 baseline) |
 | OCBM `CH_IP` pump | `ccpa/aa-bridge/src/wireless.rs` + `pump.rs` + `appport.rs`, armed by `aa-bridge --wireless` | **built 2026-09-04**, 13 host tests; see §6c |
 
 There are no `--selftest` / `--listen` flags: those belonged to the standalone binary that step 1
@@ -64,17 +63,14 @@ framing path under test is the one that ships. `run_bootstrap` returns an `Outco
 (`Established` / `Failed` / `PeerClosed` / `FramingLost`); the caller keeps the projection-owner
 claim only on `Established`.
 
-### Footprint — measured, not estimated
+### Footprint
 
-`aa-wireless` armv7-musl release: **366,880 B** static, unpacked (rustc 1.98.0). At the measured UPX ratio
-(`tools/upx_pack.sh`, ~50%) that is **~180 KB**, against **3.4 MB free** on the box's jffs2 rootfs
-(`df` on the live unit, 2026-09-01: 12800K total / 9280K used / 3520K available).
-
-**Space is not a constraint on this workstream**, and the footprint open item in
-[`01_SESSION_AND_AV.md`](01_SESSION_AND_AV.md) §3 is answered. For reference if it ever tightens:
-`carplayd` (1,793,056 B) and `btd` (495,976 B) are both shipped **unpacked**, and
-`ocbmd.orig` (450,888 B) is a backup git already holds — roughly 1.6 MB reclaimable without losing
-any function.
+`aa-wireless` is a library linked into `btd`; there is no separate binary, so the earlier standalone
+size measurement was removed (2026-10-28). The cost is the `btd` growth recorded where each step
+landed (steps 3 to 5 below: 575,448 to 599,264 B, measured 2026-09-01; not re-measured since). Free space
+on one stock unit's jffs2 rootfs was 3.4 MB (`df`, 2026-09-01: 12800K total / 9280K used / 3520K
+available), so space is not a constraint on this workstream and the footprint open item in
+[`01_SESSION_AND_AV.md`](01_SESSION_AND_AV.md) §3 is answered for that unit.
 
 ### Build-host trap — resolved 2026-09-01
 
@@ -126,6 +122,14 @@ advertising separately would only get `EADDRINUSE`):
 | Wireless Android Auto Protocol | `4de17a00-52cb-11e6-bdf4-0800200c9a66` | 4 | `ServiceRecord` |
 | Hands-Free | `0x111E` Handsfree + `0x1203` GenericAudio, profile `0x111E` v1.7, `0x0311` SupportedFeatures = `0x003F` | 5 | `HandsFreeRecord` |
 | Headset | `0x1108` Headset + `0x1203` GenericAudio, profile `0x1108` v1.2, `0x0302` RemoteAudioVolumeControl = false | 6 | `HeadsetRecord` |
+
+**The Android Auto record is conditional (2026-10-19, owner decision D1):** btd builds it only when
+`wifi_ap_enabled() && cfg::aa_requested()` (the pushed config carries an explicit `android_auto: true`;
+`SDP_RECORD_GATE` in `crates/vendor/wireless/src/main.rs`), and the channel-4 accept drops the socket
+per connect when AA is not requested (`CH4_ACCEPT_GATE`). The record is decided when the SDP server
+starts, so turning AA on while the radios are up needs a wireless restart before phones can find it;
+the channel-4 accept re-checks on every connect regardless. Log: `SDP: Android Auto record
+ADVERTISED|omitted (wifi_ap=… android_auto requested=…)`. See `docs/androidauto/02_ARBITRATION.md` §1.
 
 The first two are the projection records; the phone reads the AA channel out of its record and
 dials it. **The last two are the gate** (§6b): gearhead will not begin wireless setup until the
@@ -203,7 +207,7 @@ message WifiConnectionStatus { required Status status = 1; optional string error
 `WPA_WPA2_PERSONAL 12`, `WPA_ENTERPRISE 20`, `WPA2_ENTERPRISE 24`, `WPA_WPA2_ENTERPRISE 28`.
 `AccessPointType`: `STATIC 0`, `DYNAMIC 1`.
 
-> **Quirk worth knowing.** The C++ reference sends `security_mode = WPA2_ENTERPRISE (24)` for what is
+> **Quirk worth knowing (resolved: this box sends 8 = WPA2_PERSONAL, field-proven; see §5).** The C++ reference sends `security_mode = WPA2_ENTERPRISE (24)` for what is
 > an ordinary WPA2-PSK AP, with a source comment that AAP uses different values here than the
 > in-session WifiProjection channel does. Do not assume the obvious value is the accepted one; if the
 > phone rejects the credentials, this field is the first thing to vary.
@@ -341,13 +345,9 @@ session, not for §2.
 
 ### Arbitration
 
-Wireless AA is a *fourth* owner. §2 row 8 of [`02_ARBITRATION.md`](02_ARBITRATION.md) called it
-non-existent; that row is the one this workstream closes. Wireless CarPlay and wireless AA contend
-for the same radios — and now, since the 2026-09-01 extraction, for the same code in
-`crates/bt-common`. The owner flag has to mediate them the way it already mediates the wired pair.
-Design it before the first packet flows: this is the part most likely to produce a subtle bug, and
-`ProjectionOwner::WirelessAa` existing is not the same as the two arms actually standing down for
-each other.
+Wireless AA is a *fourth* owner. Wireless CarPlay and wireless AA contend for the same radios and,
+since the 2026-09-01 extraction, the same code in `crates/bt-common`. The owner flag mediates them
+the way it mediates the wired pair; the shipped design is in [`02_ARBITRATION.md`](02_ARBITRATION.md) §4.
 
 ## 5. Open questions
 
@@ -411,8 +411,7 @@ Still genuinely unknown, in the order they will bite:
 
 ## 6. Future test point — telephony as its own stream (NOT in this milestone)
 
-**Scope guard: telephony is explicitly out of the wireless AA milestone.** Wireless is done when the
-existing wired session runs over the BT-bootstrapped TCP socket. Do not let this section grow into it.
+**Scope note (historical):** this section is only the type-4 telephony-sink experiment. HFP telephony itself was later implemented (see [`01_SESSION_AND_AV.md`](01_SESSION_AND_AV.md) "Telephony and the Assistant").
 
 Recorded here because wireless brings up the BT stack anyway, so the experiment becomes cheap for the
 first time — the radio, the pairing agent and the SDP server will all be running.
@@ -568,7 +567,7 @@ Kernel RFCOMM multiplexes DLCs over one L2CAP session itself. Channel 4 must dro
 failure exactly as channel 1 does.
 
 **Kernel backend only.** `rfcomm_uspace` (opt-in via `BT_RFCOMM_BACKEND=userspace`, used on the
-Pi) cannot serve two channels: `open_dlc` returns on the first matching SABM and sends `DM` to any
+Pi; Android Auto on the Pi is out of scope for now, owner 2026-10-28) cannot serve two channels: `open_dlc` returns on the first matching SABM and sends `DM` to any
 other channel's, so an AA thread would actively reject CarPlay's DLC on a shared session, roughly
 half the time. AA stays excluded from that backend until it becomes a real multi-DLC multiplexer.
 
@@ -874,9 +873,7 @@ until someone killed the process by hand. `SO_KEEPALIVE` with `TCP_KEEPIDLE=10 /
 KEEPCNT=3` bounds it at ~25 s. The wired arm's device-node watchdog has no analogue over Wi-Fi;
 the kernel default (2 h idle) is not one.
 
-**Not yet run against a phone** — the pump specifically. The BOOTSTRAP in front of it is now
-device-proven (§2f, §6d), so the untested part is no longer "will a phone ever start"; it is whether
-the phone that has the credentials associates, dials `AP_IP:5288`, and streams.
+**Device-run (2026-09-04):** the pump carried the full baseline session in §1 (phone TCP to `AP_IP:5288`, TLS, video, audio). The bootstrap in front of it is device-proven too (§2f, §6d).
 
 ## 6d. The headset gate, as built (2026-09-04)
 
@@ -991,7 +988,7 @@ session only returns once the HEADSET state changes again (a Bluetooth off/on on
 
 ## 7. Sources
 
-- `aasdk` (CubeOne fork) — `protobuf/aap_protobuf/aaw/*.proto`, `src/Channel/WifiProjection/`,
+- `aasdk` (fork used for reading; `NOTICE.md` names `f1xpl/aasdk` as the referenced upstream) — `protobuf/aap_protobuf/aaw/*.proto`, `src/Channel/WifiProjection/`,
   extracted locally under `aa_rebuild/aasdk-main-extracted/`. GPLv3: **read for protocol facts,
   do not copy code.** Note `WifiSecurityRequestMessage.proto` in that extraction is corrupt (it
   contains a boost test file); the `aaw/` copies are intact.

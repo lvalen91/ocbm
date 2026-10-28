@@ -222,7 +222,7 @@ enum FieldInfo {
         // by the badges. They exist because the ten-word rule evicted their text from inline footnotes
         // and it had to land somewhere; every one of them is a fact that does not survive a ten-word cut.
         "wirelessRadios": "One radio gate for every wireless projection: the radios come up when this app connects and idle when it disconnects. Wired USB projection is unaffected either way — the box takes whichever transport connects first.",
-        "wifiAccessPoint": "On is the default and adds nothing to the pushed document; off is written as wifi_ap: false. Off leaves wireless projection without a Wi-Fi leg unless the vehicle's own hotspot provides one.",
+        "wifiAccessPoint": "On is the default; every push states it, as wifi_ap: true or wifi_ap: false. Off leaves wireless projection without a Wi-Fi leg unless the vehicle's own hotspot provides one.",
         "adapterControls": "Restart adapter reboots the CCPA — the reliable recovery if Bluetooth wedges. It interrupts any live session. NCM mode reboots the box as a USB network device for ssh maintenance; projection stays off until it is returned with `rm /script/ncm_only; reboot` over ssh.",
         "boxLogStream": "Streams the box's universal log (/tmp/box.log) over OCBM CH_LOG into Window ▸ Box Log, and into this app's own combined session log. Re-armed automatically after every SUBSCRIBE.",
         "audioFormatRow": "One advertised capability: stream type (100 mic, 102 media), audioType, input/output codec.",
