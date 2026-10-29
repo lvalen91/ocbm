@@ -106,6 +106,37 @@ internal class BrowseSlot<L : Any>(private val live: () -> Boolean) {
 }
 
 /**
+ * The self-hosted advert's bridge watch, one decision per tick (C2, 2026-10-29). Pure so the host
+ * JUnit table runs exactly this code; `CarPlayRx.bridgeWatch` is the loop around it.
+ *
+ * [now] is br0 as seen this tick (null: absent, down, or without an IPv4 — nothing to advertise on;
+ * a responder that is up keeps its last-known set). [bound]: a responder is up and joined on exactly
+ * [now]'s interface (by ifindex). [lastTried]: the br0 a start was last attempted on — a start that
+ * failed is not retried until br0 itself changes or [retryDue] (the caller's re-arm timer, see
+ * [retryDue]) says the last attempt is old enough; so a stable but unbindable bridge costs one
+ * attempt per retry period, never one per tick. A bound responder is REFRESHed before either is
+ * consulted, so the timer can never restart a healthy one.
+ */
+internal object BridgeWatch {
+    enum class Action { NONE, REFRESH, START }
+
+    fun decide(now: MdnsResponder.Bridge?, bound: Boolean, lastTried: MdnsResponder.Bridge?, retryDue: Boolean = false): Action = when {
+        now == null -> Action.NONE
+        bound -> Action.REFRESH
+        now == lastTried && !retryDue -> Action.NONE
+        else -> Action.START
+    }
+
+    /**
+     * The re-arm timer for [decide]'s `retryDue`: the last start attempt was at [triedAtMs] (0 = none
+     * yet) on the same monotonic clock as [nowMs], and [retryMs] has passed since. With no attempt yet
+     * this reads true once the clock itself passes [retryMs] — harmless, because `lastTried == null`
+     * already lets the first START through; the first attempt is never delayed by the timer.
+     */
+    fun retryDue(nowMs: Long, triedAtMs: Long, retryMs: Long): Boolean = nowMs - triedAtMs >= retryMs
+}
+
+/**
  * Who may open a control connection (B1-4 F038, owner decision OD-7F, 2026-10-07):
  * "no new connections are allowed if an active CarPlay session is active."
  *

@@ -186,7 +186,15 @@ class CarPlayRx(
     private var nsd: NsdManager? = null
     private var regListener: NsdManager.RegistrationListener? = null
     /** Our own mDNS responder, publishing a hostname NsdManager will not let us set. See [advertise]. */
-    private var selfMdns: MdnsResponder? = null
+    @Volatile private var selfMdns: MdnsResponder? = null
+    /**
+     * Guards every start/stop of [selfMdns]: [bridgeWatch] (a pool thread) may (re)start it while
+     * [stop] (the command thread) tears the receiver down. The [BrowseSlot] shape (F039): running=false
+     * is set before [stop] takes this lock, so a start either completes first and is stopped there,
+     * or sees !running under the lock and starts nothing. Held across a responder's own start/stop
+     * (ms / ≤1.5 s), never across an announce.
+     */
+    private val selfMdnsLock = Any()
     /** The browse listener. Started and stopped only under the slot's lock, gated on [running] (F039). */
     private val browse = BrowseSlot<NsdManager.DiscoveryListener> { running.get() }
     private val pool = Executors.newCachedThreadPool()
@@ -407,6 +415,18 @@ class CarPlayRx(
         /** Consecutive empty cycles (no resolve) before the cadence starts to lengthen — only while the supervisor says it may. */
         private const val REDISCOVER_EMPTY_CYCLES = 5
         /**
+         * How often [bridgeWatch] re-reads br0 (one getifaddrs; nothing is sent unless it changed).
+         * Short against the connect-out → dial-back window (~15 s): an address that lands after the
+         * receiver started must be in the advert before iOS is asked to resolve it.
+         */
+        private const val BRIDGE_POLL_MS = 3_000L
+        /**
+         * A start that failed on an UNCHANGED br0 is re-attempted after this long (was: never). Ten
+         * polls: a bridge that is up but momentarily unbindable (EADDRINUSE from a dying responder,
+         * a multicast join refused while the interface settles) no longer costs a Restart session.
+         */
+        private const val BRIDGE_RETRY_MS = 30_000L
+        /**
          * Accepted-but-unanswered dials before we call it stalled. Six is ~75 s at the rediscover
          * cadence — long enough that a phone merely being slow is not misreported, short enough that
          * the driver is told something before they give up.
@@ -575,6 +595,7 @@ class CarPlayRx(
         advertise()
         browseForPhone()
         pool.execute { rediscoverLoop() }
+        pool.execute { bridgeWatch() }
 
         log.i("CarPlay RX up on :$port deviceid=$deviceId features=$FEATURES")
         log.i("=> advertising _airplay._tcp AND browsing _carplay-ctrl._tcp (discovery is bidirectional)")
@@ -602,8 +623,12 @@ class CarPlayRx(
         incumbent.clear()?.let { try { it.sock.close() } catch (_: Throwable) {} }
         regListener?.let { try { nsd?.unregisterService(it) } catch (_: Throwable) {} }
         regListener = null
-        selfMdns?.let { runCatching { it.stop() }.onFailure { t -> log.w("self-mdns stop: ${t.message}") } }
-        selfMdns = null
+        // Under [selfMdnsLock], after running=false above: a bridge-watch start that is mid-flight
+        // either finished first (stopped here) or now sees !running and starts nothing.
+        synchronized(selfMdnsLock) {
+            selfMdns?.let { runCatching { it.stop() }.onFailure { t -> log.w("self-mdns stop: ${t.message}") } }
+            selfMdns = null
+        }
         // Under the browse lock, after running=false above: a rediscover restart that is mid-flight
         // either finished first (stopped here) or now sees !running and starts nothing (F039).
         browse.stop { try { nsd?.stopServiceDiscovery(it) } catch (_: Throwable) {} }
@@ -733,30 +758,94 @@ class CarPlayRx(
         // not the advert; the responder now publishes AAAA (br0 link-local) + A. That is a fix in
         // code only — acceptance is pending on-device: the phone must resolve `gmccpa-rx.local` to
         // `fe80::…%en0` and connect `[fe80::…]:7011`, and never dial `192.168.5.1`.
-        // Stop any previous responder before replacing it. Overwriting the field leaks the old one,
-        // which keeps its 5353 socket and answers every query a second time — visible in logcat as
-        // paired "query -> answering" lines from two threads.
-        selfMdns?.let { runCatching { it.stop() } }
-        selfMdns = null
-        runCatching {
-            val r = MdnsResponder(SELF_HOSTED_NAME, "_airplay._tcp", listenPort, txtRecord(), log)
-            if (r.start()) {
-                selfMdns = r
-                // A-only is the record set the phone could not dial (see the rationale above); the
-                // Board line says which one is up so that state is visible without logcat.
-                val fam = if (r.hasAaaa) "AAAA+A" else "A only — no IPv6 link-local on br0"
-                log.i("self-hosted advert up: $SELF_HOSTED_NAME.local -> br0:$listenPort ($fam)")
-                SessionTrace.Board.up(B_ADVERT_SELF, "$SELF_HOSTED_NAME.local -> br0:$listenPort ($fam)")
-            } else {
-                // Failed, not degraded: 2026-10-06 iPhone logs show no <ACCESSORY_DEVICE_ID>
-                // endpoint without gmccpa-rx — the NsdManager advert alone gets "No matching
-                // endpoint found".
-                log.e("self-hosted advert did not start — no '$SELF_HOSTED_NAME' endpoint expected; autoconnect will find no match")
-                SessionTrace.Board.down(B_ADVERT_SELF, "did not start — no '$SELF_HOSTED_NAME' endpoint for iOS")
+        startSelfHosted()
+    }
+
+    /**
+     * Start (or replace) the self-hosted responder. Under [selfMdnsLock] with the [running] check
+     * inside it, because [bridgeWatch] calls this from a pool thread while [stop] may be tearing the
+     * receiver down — see the lock's KDoc.
+     */
+    private fun startSelfHosted() {
+        synchronized(selfMdnsLock) {
+            // Stop any previous responder before replacing it. Overwriting the field leaks the old one,
+            // which keeps its 5353 socket and answers every query a second time — visible in logcat as
+            // paired "query -> answering" lines from two threads.
+            selfMdns?.let { runCatching { it.stop() } }
+            selfMdns = null
+            if (!running.get()) return   // lost the race to stop(): nothing may outlive the receiver
+            runCatching {
+                val r = MdnsResponder(SELF_HOSTED_NAME, "_airplay._tcp", port, txtRecord(), log)
+                if (r.start()) {
+                    selfMdns = r
+                    // A-only is the record set the phone could not dial (see the rationale above); the
+                    // Board line says which one is up so that state is visible without logcat.
+                    val fam = family(r)
+                    log.i("self-hosted advert up: $SELF_HOSTED_NAME.local -> br0:$port ($fam)")
+                    SessionTrace.Board.up(B_ADVERT_SELF, "$SELF_HOSTED_NAME.local -> br0:$port ($fam)")
+                } else {
+                    // Failed, not degraded: 2026-10-06 iPhone logs show no <ACCESSORY_DEVICE_ID>
+                    // endpoint without gmccpa-rx — the NsdManager advert alone gets "No matching
+                    // endpoint found".
+                    log.e("self-hosted advert did not start — no '$SELF_HOSTED_NAME' endpoint expected; autoconnect will find no match")
+                    SessionTrace.Board.down(B_ADVERT_SELF, "did not start — no '$SELF_HOSTED_NAME' endpoint for iOS")
+                }
+            }.onFailure {
+                log.w("self-hosted advert threw: ${it.javaClass.simpleName}: ${it.message}")
+                SessionTrace.Board.down(B_ADVERT_SELF, "threw ${it.javaClass.simpleName}")
             }
-        }.onFailure {
-            log.w("self-hosted advert threw: ${it.javaClass.simpleName}: ${it.message}")
-            SessionTrace.Board.down(B_ADVERT_SELF, "threw ${it.javaClass.simpleName}")
+        }
+    }
+
+    /** The Board/log word for the record set that is up: A-only is the set the phone could not dial. */
+    private fun family(r: MdnsResponder) = if (r.hasAaaa) "AAAA+A" else "A only — no IPv6 link-local on br0"
+
+    /**
+     * C2 (2026-10-29): the self-hosted advert's addresses were a start-time snapshot of br0. The
+     * receiver starts at boot ~+7 s (AutoClaim's media-browser bind), before GM's hotspot bridge
+     * need exist or hold its IPv6 link-local, and nothing re-read br0 short of rung 0 (≥45 s) or
+     * Restart session — so `gmccpa-rx` was A-only (the set the phone cannot dial) or absent for as
+     * long as that receiver lived. This makes the advert follow br0: every [BRIDGE_POLL_MS] it reads
+     * what the responder itself reads (br0 is a tether bridge, not a ConnectivityManager Network, so
+     * there is no callback to register and no permission to add) and acts only on a change:
+     *   same interface, A/AAAA changed  → in-place re-announce with cache-flush, no downtime;
+     *   no responder and br0 is up now  → start one (br0 was absent or unbindable at [start]);
+     *   br0 re-created (new ifindex)    → a new responder: the old socket's membership and egress
+     *                                     died with the old index, so it was already unreachable;
+     *   br0 absent/down, or unchanged   → nothing; a start that failed is not retried until br0
+     *                                     itself changes or [BRIDGE_RETRY_MS] has passed since the
+     *                                     attempt (at most one attempt per period; a bound responder
+     *                                     is refreshed, never restarted, by the timer).
+     * One decision per tick is the debounce: a flap shorter than a tick is never seen, a longer one
+     * costs one re-announce or restart per tick. Starts go through [startSelfHosted] under
+     * [selfMdnsLock], gated on [running], so a tick that loses the race to [stop] starts nothing.
+     */
+    private fun bridgeWatch() {
+        var lastTried: MdnsResponder.Bridge? = null
+        var triedAt = 0L   // elapsedRealtime of the last START; 0 = none yet (the first START is never held)
+        while (running.get()) {
+            try { Thread.sleep(BRIDGE_POLL_MS) } catch (_: InterruptedException) { return }
+            val now = MdnsResponder.bridge()
+            val r = selfMdns
+            val retryDue = BridgeWatch.retryDue(android.os.SystemClock.elapsedRealtime(), triedAt, BRIDGE_RETRY_MS)
+            when (BridgeWatch.decide(now, r != null && r.boundTo(now), lastTried, retryDue)) {
+                BridgeWatch.Action.NONE -> {}
+                BridgeWatch.Action.REFRESH -> if (r != null && r.refreshIfChanged()) {
+                    log.i("self-hosted advert re-announced: br0 addresses changed (${family(r)})")
+                    SessionTrace.Board.up(B_ADVERT_SELF, "$SELF_HOSTED_NAME.local -> br0:$port (${family(r)})")
+                }
+                BridgeWatch.Action.START -> {
+                    val retry = now == lastTried   // unchanged br0: only the timer can get here
+                    lastTried = now
+                    triedAt = android.os.SystemClock.elapsedRealtime()
+                    log.i(when {
+                        retry -> "self-hosted advert still not up on an unchanged br0 ${BRIDGE_RETRY_MS / 1000} s after the last attempt — retrying"
+                        r == null -> "br0 is up and the self-hosted advert is not — starting it"
+                        else -> "br0 was re-created (ifindex ${now?.index}) under the self-hosted advert — replacing it"
+                    })
+                    startSelfHosted()
+                }
+            }
         }
     }
 

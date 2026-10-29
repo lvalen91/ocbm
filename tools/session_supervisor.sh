@@ -1093,6 +1093,7 @@ wireless_down() {
       # controller; it also hardcoded hci0 instead of the discovered device.
       sh /script/radio_hal.sh bt_off >/tmp/bt_off.log 2>&1
     ' </dev/null >/dev/null 2>&1 &
+    wl_down_pids="$wl_down_pids $!"   # ordering barrier for the next bring-up (see wl_prune_teardowns)
     # docs/wireless/00_WIRELESS_CARPLAY.md #1.2/#1.3: this is OUR session ending — clear the health state we own and the transport
     # flag ourselves (value-scoped, so it never fires against a wired session's "wired"/absent value),
     # rather than relying on the (possibly already-dying) child processes to clean up after themselves.
@@ -1118,6 +1119,37 @@ wireless_down() {
       # verb (see the COMPLETE-teardown branch rationale).
       sh /script/radio_hal.sh bt_off >/tmp/bt_off.log 2>&1
     ' </dev/null >/dev/null 2>&1 &
+    wl_down_pids="$wl_down_pids $!"   # ordering barrier for the next bring-up (see wl_prune_teardowns)
+  fi
+}
+
+# Ordering barrier between a teardown and the next bring-up. Each detached teardown shell above ends
+# with the LOCKED `radio_hal.sh bt_off`. A bring-up whose bt_on takes the radio lock FIRST — the
+# teardown's bt_off is still behind its `sleep 1`/wifi_ap_off, or queued on the lock behind the
+# ~8-10 s probe of a warm bt_on it interrupted — gets hci0 powered DOWN underneath the fresh btd, and
+# btd never re-runs bring_up (nothing in btd or the SSP agent watches for a power-off): the box sits
+# silently non-connectable until the next down/up cycle. This drops the finished shells from
+# wl_down_pids; the deferred bring-up in the main loop waits while any are left (bounded by
+# WL_DOWN_WAIT_MAX_S). `$!` IS that shell: busybox setsid only forks when its caller is already a
+# group leader, which a background job of this job-control-less script is not. A wrong pid would read
+# as "finished" and simply fall back to the old unordered behaviour.
+wl_prune_teardowns() {
+  _alive=""
+  for _pid in $wl_down_pids; do kill -0 "$_pid" 2>/dev/null && _alive="$_alive $_pid"; done
+  wl_down_pids="${_alive# }"
+}
+# Bring wireless up now, or — while a teardown shell from wl_down_pids is still alive — ride the
+# deferred handler in the main loop instead (it waits for that shell, capped at WL_DOWN_WAIT_MAX_S).
+# Every edge that brings up with a teardown possibly still in flight goes through here; a bare
+# wireless_up is only safe where no teardown can precede it. $1 = why, for the log. An
+# already-pending deferral keeps its own deadline.
+wl_up_or_defer() {
+  wl_prune_teardowns
+  if [ -n "$wl_down_pids" ]; then
+    echo "[sup] $1 while the last wireless teardown is still running -> deferring wireless_up behind it"
+    [ -n "$wireless_rebring_at" ] || wireless_rebring_at=$(now)
+  else
+    wireless_up
   fi
 }
 
@@ -1144,6 +1176,13 @@ WL_AA_RETRY_TICKS=$((AA_ACCESSORY_WAIT_S + 3))
 _wl_held_for_aa=0       # set by wireless_up when it SUPPRESSED for wired Android Auto; cleared on any real pass
 _wl_aa_clear_ticks=0
 wireless_rebring_at=""                         # epoch(uptime) to re-bring-up after a requested restart
+wl_down_pids=""         # detached wireless_down shells still running (ordering barrier, wl_prune_teardowns)
+WL_DOWN_WAIT_MAX_S=10   # cap on holding a due bring-up behind them: covers a bt_off queued behind a warm
+                        # bt_on's ~8-10 s probe (radio_hal.sh do_bt_on). Budget against the app's rung-1
+                        # recheck (RUNG1_RECHECK_MS = 35 s, host/gm_ccpa/.../SessionSupervisor.kt): worst
+                        # case is rung-1 CT_RADIO off -> 2 s -> on -> +4 s deferral -> +10 s cap -> ~20 s
+                        # warm bring-up = ~36 s, i.e. ~1 s OVER the 35 s when every term hits its
+                        # maximum at once. Only the cap and the 4 s are ours; do not grow either.
 wireless_was_owner=0    # tracks wireless_owns_session across ticks (see the reset check below)
 last_r=0                # tracks the CT_RADIO inhibit flag across ticks (docs/carplay/04_CAPABILITIES_AND_CONFIG.md radio gating)
 
@@ -1209,9 +1248,15 @@ while :; do
     wireless_down
     wireless_rebring_at=$(( $(now) + 4 ))
   fi
+  wl_prune_teardowns   # every tick, so a long-finished shell's pid can never be mistaken for a recycled one
   if [ -n "$wireless_rebring_at" ] && [ "$(now)" -ge "$wireless_rebring_at" ]; then
-    wireless_rebring_at=""
-    [ "${last_p:-0}" = 1 ] && wireless_up
+    # Hold while a teardown shell is still running (its bt_off has not finished) —
+    # unless it has overrun the cap, then say so and go anyway rather than never bringing up.
+    if [ -z "$wl_down_pids" ] || [ "$(now)" -ge $(( wireless_rebring_at + WL_DOWN_WAIT_MAX_S )) ]; then
+      [ -n "$wl_down_pids" ] && echo "[sup] wireless teardown still running ${WL_DOWN_WAIT_MAX_S}s past the deferred bring-up -> not waiting any longer"
+      wireless_rebring_at=""
+      [ "${last_p:-0}" = 1 ] && wireless_up
+    fi
   fi
 
   # App-commanded radio inhibit edges (CT_RADIO -> /tmp/radio_off, docs/carplay/04_CAPABILITIES_AND_CONFIG.md radio gating). Flag
@@ -1237,7 +1282,11 @@ while :; do
     0|1)
       if [ "$p" = 1 ] && [ "$last_p" != 1 ]; then
         edge_ts="$edge_ts $(now)"
-        wireless_up      # host appeared: bring wireless up alongside the always-on wired path (gated)
+        # host appeared: bring wireless up alongside the always-on wired path (gated). If the teardown
+        # from the last 1->0 is still running (ocbmd's REARM_HOLD and the app's heartbeat re-SUBSCRIBE
+        # put this edge ~2 s behind it), ride the deferred handler above instead, which waits for that
+        # shell — otherwise this bt_on can beat its bt_off to the radio lock (wl_prune_teardowns).
+        wl_up_or_defer "host PRESENT"
       fi
       if [ "$p" = 0 ] && [ "$last_p" = 1 ]; then
         wireless_down    # host went away: idle the wireless radios (wired baseline stays ready)
@@ -1331,7 +1380,12 @@ while :; do
           if wireless_enabled; then
             radios_yielded_to_wired=0
             echo "[sup] wired session ended -> restoring the wireless stack"
-            wireless_up
+            # Through the teardown barrier: the rising edge's wireless_down is a detached shell, and a
+            # cable that appears and vanishes inside its ~2-3 s puts this restore inside it — the
+            # same bt_on-beats-bt_off race the presence edge defers around. The deferred handler
+            # re-checks last_p (=1 here, set before this case) and wireless_up re-runs every choke
+            # point at fire time, so a host that leaves first drops the deferral cleanly.
+            wl_up_or_defer "wired session ended"
           fi
         fi
         _a2_state="$_a2_want"

@@ -84,3 +84,6 @@ zeno.gmccpa.av.VehicleStateWatcherConstructionTest # D-F3 lazy Car callbacks
 zeno.gmccpa.av.NalScanTest                         # F-C2 bounded NAL scan (buffer reuse)
 zeno.gmccpa.av.ModesChangedTest                    # A11 decode over the stored capture
 zeno.gmccpa.InfoTxtEqualityTest                    # docs/11 5.12: TXT <-> /info identity
+
+# --- 2026-10-29 C2 bridge watch (Fable, single implementer) ---
+zeno.gmccpa.MdnsResponderBridgeTest               # self-hosted advert follows br0: BridgeWatch.decide, refreshIfChanged, boundTo

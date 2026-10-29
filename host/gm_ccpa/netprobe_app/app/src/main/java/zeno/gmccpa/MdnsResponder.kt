@@ -65,6 +65,8 @@ class MdnsResponder(
 
     /** The bridge we bound to; [reannounce] re-reads its addresses by this name. */
     private var nifName: String? = null
+    /** …and its ifindex, which [boundTo] compares: the name survives a re-created bridge, the socket's join does not. */
+    private var nifIndex = -1
 
     /** The addresses we advertise: the hotspot bridge the phone is actually on. */
     @Volatile
@@ -76,18 +78,45 @@ class MdnsResponder(
     /** True when the AAAA is being published. Read for the Board line; see [advertised6]. */
     val hasAaaa: Boolean get() = advertised6 != null
 
-    private companion object {
-        const val PORT = 5353
-        const val GROUP = "224.0.0.251"
-        const val TTL_HOST = 120
-        const val TTL_PTR = 4500
+    /**
+     * One look at br0 (C2, 2026-10-29): the interface — by ifindex, because a re-created bridge keeps
+     * its name while the old socket's membership and `IP_MULTICAST_IF` die with the old index — and
+     * the A/AAAA pair it would be advertised at. A value, so the receiver's bridge watch can compare
+     * two looks and act only on a change.
+     */
+    data class Bridge(val name: String, val index: Int, val v4: Inet4Address, val v6: Inet6Address?)
+
+    companion object {
+        private const val PORT = 5353
+        private const val GROUP = "224.0.0.251"
+        private const val TTL_HOST = 120
+        private const val TTL_PTR = 4500
         /** Class IN with the cache-flush bit — correct for records we are authoritative for. */
-        const val CLASS_FLUSH = 0x8001
-        const val CLASS_IN = 0x0001
-        const val T_A = 1; const val T_PTR = 12; const val T_TXT = 16; const val T_SRV = 33
-        const val T_AAAA = 28
-        const val T_NSEC = 47
-        const val T_ANY = 255
+        private const val CLASS_FLUSH = 0x8001
+        private const val CLASS_IN = 0x0001
+        private const val T_A = 1; private const val T_PTR = 12; private const val T_TXT = 16; private const val T_SRV = 33
+        private const val T_AAAA = 28
+        private const val T_NSEC = 47
+        private const val T_ANY = 255
+
+        /** br0 as it is right now, or null when no usable bridge is up — the same test [start] applies. */
+        fun bridge(): Bridge? {
+            val nif = br0() ?: return null
+            val v4 = nif.inetAddresses.toList().filterIsInstance<Inet4Address>().firstOrNull() ?: return null
+            return Bridge(nif.name, nif.index, v4, linkLocal6(nif))
+        }
+
+        /** br0's IPv6 link-local — the address every formed session was dialled on. Null if it has none. */
+        private fun linkLocal6(nif: NetworkInterface): Inet6Address? = runCatching {
+            nif.inetAddresses.toList().filterIsInstance<Inet6Address>().firstOrNull { it.isLinkLocalAddress }
+        }.getOrNull()
+
+        private fun br0(): NetworkInterface? = try {
+            NetworkInterface.getNetworkInterfaces()?.toList()?.firstOrNull {
+                it.isUp && it.name.startsWith("br") && it.supportsMulticast() &&
+                    it.inetAddresses.toList().any { a -> a is Inet4Address }
+            }
+        } catch (t: Throwable) { null }
     }
 
     fun start(): Boolean {
@@ -95,7 +124,7 @@ class MdnsResponder(
         val nif = br0() ?: run { log.e("no br0 interface — cannot advertise where the phone is"); running.set(false); return false }
         advertised = nif.inetAddresses.toList().filterIsInstance<Inet4Address>().firstOrNull()
         if (advertised == null) { log.e("br0 has no IPv4 address yet"); running.set(false); return false }
-        nifName = nif.name
+        nifName = nif.name; nifIndex = nif.index
         advertised6 = linkLocal6(nif)
         if (advertised6 == null) log.w("${nif.name} has no IPv6 link-local — advertising A only; the phone's IPv4 dial to :$port is known to time out")
 
@@ -158,6 +187,28 @@ class MdnsResponder(
         refreshAddresses()
         log.i("re-announcing (recovery)")
         announceAsync("reannounce")
+    }
+
+    /**
+     * True while [b] is the interface this responder is joined on. By ifindex, not name: a re-created
+     * br0 keeps its name, but the socket's membership and `IP_MULTICAST_IF` died with the old index,
+     * so only a new responder (a fresh [start]) can serve it.
+     */
+    fun boundTo(b: Bridge?): Boolean = b != null && running.get() && b.index == nifIndex
+
+    /**
+     * The bridge watch's step (C2, 2026-10-29): re-read br0 and, only if its A/AAAA pair differs from
+     * what we advertise, re-announce with cache-flush — the IPv6 link-local that landed after [start]
+     * replaces an A-only set in the phone's cache. Unchanged: nothing is sent. Same path as
+     * [reannounce]; a rung 0 racing this repeats packets, nothing more.
+     */
+    fun refreshIfChanged(): Boolean {
+        if (!running.get()) return false
+        val before = advertised to advertised6
+        refreshAddresses()
+        if (before == (advertised to advertised6)) return false
+        announceAsync("addr-change")
+        return true
     }
 
     /**
@@ -390,18 +441,6 @@ class MdnsResponder(
         b.write(0)
         return b.toByteArray()
     }
-
-    /** br0's IPv6 link-local — the address every formed session was dialled on. Null if it has none. */
-    private fun linkLocal6(nif: NetworkInterface): Inet6Address? = runCatching {
-        nif.inetAddresses.toList().filterIsInstance<Inet6Address>().firstOrNull { it.isLinkLocalAddress }
-    }.getOrNull()
-
-    private fun br0(): NetworkInterface? = try {
-        NetworkInterface.getNetworkInterfaces()?.toList()?.firstOrNull {
-            it.isUp && it.name.startsWith("br") && it.supportsMulticast() &&
-                it.inetAddresses.toList().any { a -> a is Inet4Address }
-        }
-    } catch (t: Throwable) { null }
 }
 
 /**
