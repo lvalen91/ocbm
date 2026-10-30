@@ -898,6 +898,17 @@ wireless_up() {
   # reads false — and then a bring-up put hostapd, wlan0 and hci0 straight back.
   if ! hot_handover_enabled && phone_on_bus && ! wireless_owns_session; then
     echo "[sup] wireless_up SUPPRESSED — a WIRED session owns the box (Hot-Handover off)"
+    # RECORD the restore obligation, but ONLY when this is the deferred handler firing a bring-up
+    # that wl_up_or_defer parked behind a teardown shell (presence edge / A2 restore) and that was
+    # NOT already wired-suppressed when it was parked (2026-10-29). Without this a cable that
+    # flickers inside the A2 teardown's life lost the restore for good: the falling edge cleared
+    # radios_yielded_to_wired and deferred the restore, the re-plug found the stack already down
+    # (nothing to yield again), and this branch then swallowed the deferred restore with no
+    # record — wireless CarPlay stayed down until a CT_RADIO cycle. Deliberately NOT unconditional:
+    # a cable already plugged when the presence edge fires is suppressed directly and records
+    # nothing, exactly as before (see the A2 rising edge: claiming the restore for a stack A2 never
+    # touched fought the host-presence edge that owns bring-up).
+    [ "${_wl_up_deferred:-0}" = 1 ] && radios_yielded_to_wired=1
     return
   fi
   # Same choke point for Android Auto. TWO conditions, because there is a race: wireless_up() fires on
@@ -1146,9 +1157,22 @@ wl_prune_teardowns() {
 wl_up_or_defer() {
   wl_prune_teardowns
   if [ -n "$wl_down_pids" ]; then
-    echo "[sup] $1 while the last wireless teardown is still running -> deferring wireless_up behind it"
+    echo "[sup] ${1:-bring-up} while the last wireless teardown is still running -> deferring wireless_up behind it"
     [ -n "$wireless_rebring_at" ] || wireless_rebring_at=$(now)
+    # Does the parked bring-up owe an A2 restore if it is wired-suppressed when it fires? Only if
+    # it would NOT be suppressed had it run right now (wireless_up's first choke point): then a
+    # cable that arrives before it fires is one that an immediate bring-up would have yielded to,
+    # and the fire-time suppression must record what A2's rising edge no longer can (the stack is
+    # already down). Already suppressed now = the "cable plugged before the presence edge" case,
+    # which stays unrecorded exactly like the direct call below. The LATEST edge owns the
+    # bring-up, so this overwrites; the deferred handler consumes it when it fires or drops.
+    if ! hot_handover_enabled && phone_on_bus && ! wireless_owns_session; then
+      _wl_defer_restore=0
+    else
+      _wl_defer_restore=1
+    fi
   else
+    _wl_defer_restore=0
     wireless_up
   fi
 }
@@ -1177,12 +1201,18 @@ _wl_held_for_aa=0       # set by wireless_up when it SUPPRESSED for wired Androi
 _wl_aa_clear_ticks=0
 wireless_rebring_at=""                         # epoch(uptime) to re-bring-up after a requested restart
 wl_down_pids=""         # detached wireless_down shells still running (ordering barrier, wl_prune_teardowns)
+_wl_defer_restore=0     # the pending wireless_rebring_at deferral owes an A2 restore if it is wired-suppressed
+                        # when it fires (set by wl_up_or_defer, consumed by the deferred handler)
+_wl_up_deferred=0       # 1 only around the deferred handler's wireless_up call (read by its wired choke point)
 WL_DOWN_WAIT_MAX_S=10   # cap on holding a due bring-up behind them: covers a bt_off queued behind a warm
                         # bt_on's ~8-10 s probe (radio_hal.sh do_bt_on). Budget against the app's rung-1
-                        # recheck (RUNG1_RECHECK_MS = 35 s, host/gm_ccpa/.../SessionSupervisor.kt): worst
-                        # case is rung-1 CT_RADIO off -> 2 s -> on -> +4 s deferral -> +10 s cap -> ~20 s
-                        # warm bring-up = ~36 s, i.e. ~1 s OVER the 35 s when every term hits its
-                        # maximum at once. Only the cap and the 4 s are ours; do not grow either.
+                        # recheck (RUNG1_RECHECK_MS = 35 s, host/gm_ccpa/.../SessionSupervisor.kt): the
+                        # measured rung-1 -> iPhone-BT span there is 19.6 s and ALREADY contains the app's
+                        # 2 s off->on gap, the on-edge tick and the 4 s deferral, so the bring-up proper is
+                        # ~13 s. Worst case with this cap: 2 s + <=1 s edge tick + 4 s deferral + 10 s cap
+                        # + <=1 s handler tick + ~13 s = ~31 s, ~4 s under the 35 s (and any BT_PHASE
+                        # progress stands the ladder down earlier). Only the cap and the 4 s are ours; do
+                        # not grow either.
 wireless_was_owner=0    # tracks wireless_owns_session across ticks (see the reset check below)
 last_r=0                # tracks the CT_RADIO inhibit flag across ticks (docs/carplay/04_CAPABILITIES_AND_CONFIG.md radio gating)
 
@@ -1255,7 +1285,11 @@ while :; do
     if [ -z "$wl_down_pids" ] || [ "$(now)" -ge $(( wireless_rebring_at + WL_DOWN_WAIT_MAX_S )) ]; then
       [ -n "$wl_down_pids" ] && echo "[sup] wireless teardown still running ${WL_DOWN_WAIT_MAX_S}s past the deferred bring-up -> not waiting any longer"
       wireless_rebring_at=""
+      # Hand wireless_up the parked bring-up's restore obligation (wl_up_or_defer); consumed here
+      # whether it fires or is dropped for a host that left, so it can never leak to another caller.
+      _wl_up_deferred="$_wl_defer_restore"; _wl_defer_restore=0
       [ "${last_p:-0}" = 1 ] && wireless_up
+      _wl_up_deferred=0
     fi
   fi
 
@@ -1291,6 +1325,10 @@ while :; do
       if [ "$p" = 0 ] && [ "$last_p" = 1 ]; then
         wireless_down    # host went away: idle the wireless radios (wired baseline stays ready)
         _wl_held_for_aa=0; _wl_aa_clear_ticks=0   # the next 0->1 edge owns bring-up again
+        # A2 forgets its wired/yielded view too: the returning 0->1 edge owns the bring-up, so an A2
+        # falling edge firing on that same return (cable pulled while the app was away) must not
+        # run a second, concurrent restore of a stack that edge is already bringing up.
+        _a2_state=0
       fi
       last_p="$p"
       ;;
