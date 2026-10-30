@@ -191,7 +191,7 @@ gate() {
 # this unit has NO root password set, so forcing password auth turns a working box into a confusing
 # "Permission denied (publickey,password)".
 [ -f "$HOME/.ssh/id_ccpa_ncm" ] && SSH_KEY_OPTS=(-o IdentityFile="$HOME/.ssh/id_ccpa_ncm") || SSH_KEY_OPTS=()
-SSH_OPTS=("${SSH_KEY_OPTS[@]}"
+SSH_OPTS=(${SSH_KEY_OPTS[@]+"${SSH_KEY_OPTS[@]}"}
           -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR
           -o ConnectTimeout=8 -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa
           -o KexAlgorithms=+diffie-hellman-group14-sha1 -o Ciphers=+aes128-ctr)
@@ -206,7 +206,7 @@ box_slow() { BOX_TIMEOUT=600 box "$1"; }   # 528 MHz ARM: whole-rootfs scans nee
 boxq() { box "$1" >/dev/null 2>&1; }
 push() {  # $1 local  $2 remote  [$3 mode]
   if [ "$VIA" = telnet ]; then python3 "$BOXSH" --host "$BOX" --mode "${3:-755}" put "$1" "$2" >/dev/null
-  else scp "${SSH_OPTS[@]}" -O "$1" "root@$BOX:$2" >/dev/null && ssh "${SSH_OPTS[@]}" "root@$BOX" "chmod ${3:-755} $2"; fi
+  else scp "${SSH_OPTS[@]}" "$1" "root@$BOX:$2" >/dev/null && ssh "${SSH_OPTS[@]}" "root@$BOX" "chmod ${3:-755} $2"; fi
 }
 pull() {  # $1 remote  $2 local
   # Under ssh just use scp: it is faster than the nc trick AND reliable. The nc path below stays for
@@ -216,7 +216,7 @@ pull() {  # $1 remote  $2 local
   # backgrounded listener dying with the shell session, not the link); `scp -O` moved the same file
   # in ~0.6 s, md5-identical. The md5 check below is what caught that, which is why it stays.
   if [ "$VIA" != telnet ]; then
-    scp "${SSH_OPTS[@]}" -O "root@$BOX:$1" "$2" >/dev/null && [ -s "$2" ] && return 0
+    scp "${SSH_OPTS[@]}" "root@$BOX:$1" "$2" >/dev/null && [ -s "$2" ] && return 0
     warn "scp pull of $1 failed; falling back to base64"
     python3 "$BOXSH" --host "$BOX" --timeout 180 get "$1" "$2" >/dev/null
     return
@@ -708,7 +708,7 @@ phase_coldtest() {
   say "=== $tag — prove a cold boot self-arms NCM ==="
   [ "$DRY" = 1 ] && { say "(dry-run) skipping reboot"; return 0; }
   say "rebooting…"
-  boxq 'sync; (sleep 1; reboot) >/dev/null 2>&1 &' || true
+  boxq 'sync; (sleep 1; /sbin/reboot) >/dev/null 2>&1 &' || true
   sleep 10
   if wait_box 220; then
     box '
@@ -1191,7 +1191,7 @@ phase_audit() {
 classify() {
   f=$1; r=$2
   [ -f "$f" ] || { echo "UNREADABLE $f (cannot classify $r)"; return; }
-  u=$(grep -n -- "$r" "$f" 2>/dev/null | grep -v 'test -e' | grep -v '\[ -e' | grep -vE '^[0-9]+:[[:space:]]*#')
+  u=$(grep -n -- "$r" "$f" 2>/dev/null | grep -vE 'test -[efx]' | grep -vE '\[ -[efx]' | grep -vE '^[0-9]+:[[:space:]]*#')
   if [ -n "$u" ]; then echo "UNGUARDED $f -> $r :: $u"; else echo "guarded   $f -> $r"; fi
 }
 EOS

@@ -286,7 +286,7 @@ EOS
 
 phase_reboot() {
   say "=== reboot — confirm the adapter still comes up on NCM with the files in place ==="
-  boxq 'sync; (sleep 1; reboot) >/dev/null 2>&1 &' || true
+  boxq 'sync; (sleep 1; /sbin/reboot) >/dev/null 2>&1 &' || true
   sleep 10
   wait_ncm 260 || die "the adapter did not come back on NCM after placing the files. It has NOT been switched to OCBM, so the boot path is unchanged — check the USB interface on this host first."
   box 'echo "uptime=$(cut -d. -f1 /proc/uptime)s gadget=$(cat /sys/class/android_usb_accessory/android0/functions)/$(cat /sys/class/android_usb_accessory/android0/state)"; ls -la /usr/sbin/ocbmd /script/ocbm_boot.sh' | tee "$RUN_DIR/reboot.txt"
@@ -334,7 +334,7 @@ A=/sys/class/android_usb_accessory/android0
   done
   echo "  gadget: functions=$(cat $A/functions) state=$(cat $A/state) class=$(cat $A/bDeviceClass) pid=$(cat $A/idProduct) node=$([ -e /dev/usb_accessory ] && echo present || echo MISSING)"
   if [ "$(cat $A/state)" != "CONFIGURED" ] || [ ! -e /dev/usb_accessory ]; then
-    echo "FATAL: host never configured the accessory. Rebooting to NCM."; sync; reboot; exit 0
+    echo "FATAL: host never configured the accessory. Rebooting to NCM."; sync; /sbin/reboot; exit 0
   fi
   # Respawn ocbmd the way OCBM mode does via inittab: it exits deliberately when the USB
   # transport drops, and without a respawner one transient ends the trial.
@@ -342,7 +342,7 @@ A=/sys/class/android_usb_accessory/android0
   LOOP=$!
   sleep 3
   pidof ocbmd >/dev/null 2>&1 && echo "  ocbmd running pid=$(pidof ocbmd)" \
-    || { echo "FATAL: ocbmd will not stay up:"; tail -10 /tmp/box.log; sync; reboot; exit 0; }
+    || { echo "FATAL: ocbmd will not stay up:"; tail -10 /tmp/box.log; sync; /sbin/reboot; exit 0; }
   i=0
   while [ $i -lt "$TTL" ]; do
     # S8: HELD branch exits without the reboot below, which otherwise reaps this whole subshell
@@ -353,7 +353,7 @@ A=/sys/class/android_usb_accessory/android0
   done
   echo "  TTL expired with no /tmp/ocbm_keep — rebooting back to NCM"
   kill "$LOOP" 2>/dev/null   # symmetric with the HELD branch; harmless here since reboot follows
-  sync; reboot
+  sync; /sbin/reboot
 } >> "$L" 2>&1
 EOS
   push_file "$payload" /tmp/ocbm_try.sh 755
@@ -484,7 +484,7 @@ echo "flags: ncm_only=$([ -e /script/ncm_only ] && echo yes || echo no) ocbm_tri
 echo FINALIZE_ARMED' | tee "$RUN_DIR/finalize_arm.txt"
   grep -q FINALIZE_ARMED "$RUN_DIR/finalize_arm.txt" \
     || die "arming failed — the box was NOT switched. See $RUN_DIR/finalize_arm.txt; ncm_only is still in place."
-  boxq 'sync; (sleep 1; reboot) >/dev/null 2>&1 &' || true
+  boxq 'sync; (sleep 1; /sbin/reboot) >/dev/null 2>&1 &' || true
   sleep 15
 
   say "waiting for OCBM to come up on this host…"
@@ -511,12 +511,12 @@ phase_revert() {
   say "=== revert — put ncm_only back and reboot ==="
   if boxq 'true'; then
     box 'touch /script/ncm_only; rm -f /script/ocbm_trial; sync; echo reverted'
-    boxq 'sync; (sleep 1; reboot) >/dev/null 2>&1 &' || true
+    boxq 'sync; (sleep 1; /sbin/reboot) >/dev/null 2>&1 &' || true
   else
     say "no NCM shell; trying the OCBM console"
     # Send the command only after the bridge has attached: bytes written before "CONSOLE attached"
     # are dropped, and the box then stays on OCBM while this script waits for an NCM that never comes.
-    ( sleep 5; printf 'touch /script/ncm_only; rm -f /script/ocbm_trial; sync; echo REVERTED; sleep 1; reboot\r'; sleep 6 ) \
+    ( sleep 5; printf 'touch /script/ncm_only; rm -f /script/ocbm_trial; sync; echo REVERTED; sleep 1; /sbin/reboot\r'; sleep 6 ) \
       | "$OCBM_HOST" console 2>&1 | tail -6
   fi
   sleep 12

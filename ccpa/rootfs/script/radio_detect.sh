@@ -146,13 +146,70 @@ for m in $(tar tzf "$KO_TARBALL" 2>/dev/null | sed 's|.*/||' | grep '\.ko$'); do
 done
 WLAN_MODS=${WLAN_MODS# }
 
+# RESOLVE A DISPATCHER VARIABLE FROM THE DISPATCHER ITSELF, SCOPED TO THIS UNIT'S OWN BRANCH.
+# The NXP branches pass the module parameter through a variable:
+#     nxpWiFiConfig=nxp/wifi_mod_para.conf                        (default, in this unit's branch)
+#     if [ "$supportStaMode" -eq 1 ]; then nxpWiFiConfig=...alt   (gated alternative, same branch)
+#     test -e /usr/sbin/wpa_supplicant && supportStaMode=1 || supportStaMode=0   (the gate, file-wide)
+# and safe_cmd rightly refuses `insmod /tmp/moal.ko "mod_para=$nxpWiFiConfig"` as captured. Refusing
+# it dropped moal.ko entirely on IW416/SD8987 units: mlan.ko half-loaded, no interface appeared, and
+# because BT attach waits for WLAN on these parts, Bluetooth died with it (2026-10-18, IW416 unit).
+# This resolves ONLY that closed shape: a literal default assigned in THIS unit's branch (selected by
+# its SDIO id with the same awk as attach_branch below), an optional alternative gated on `-eq 1` of a
+# variable whose own definition is a single `test -e PATH` one-liner, evaluated on this unit. Anything
+# else resolves to nothing and the line still falls to safe_cmd, which still refuses it. No chipset
+# table: every name, path and value comes from the unit's own dispatcher.
+dispatch_branch() {  # $1 file -> the lines of this unit's own sdioCardID branch
+  [ -f "$1" ] && [ -n "$SDIO_DEV" ] || return 0
+  awk -v id="$SDIO_DEV" '
+    !inb {
+      if ($0 ~ /sdioCardID/ && index($0, "\"" id "\"") > 0 && $0 ~ /^[ \t]*(el)?if[ \t]/) { inb=1; depth=0 }
+      next
+    }
+    {
+      if (depth == 0 && $0 ~ /^[ \t]*(elif|else|fi)([ \t]|$)/) exit
+      if ($0 ~ /^[ \t]*if[ \t]/) depth++
+      else if ($0 ~ /^[ \t]*fi([ \t]|$)/) depth--
+      print
+    }' "$1"
+}
+resolve_var() {  # $1 var  $2 file -> literal value, or nothing
+  _v=$1; _f=$2
+  _br=$(dispatch_branch "$_f")
+  [ -n "$_br" ] || return 0
+  # Literal assignments of the variable inside this branch, in order: no $, quotes, spaces or operators.
+  _as=$(echo "$_br" | grep -E "^[[:space:]]*$_v=[A-Za-z0-9_./-]+[[:space:]]*$" | sed "s/^[[:space:]]*$_v=//; s/[[:space:]]*$//")
+  _dflt=$(echo "$_as" | sed -n 1p); [ -n "$_dflt" ] || return 0
+  _alt=$(echo "$_as" | sed -n 2p)
+  [ -z "$(echo "$_as" | sed -n 3p)" ] || return 0          # three or more shapes: not closed-form
+  [ -n "$_alt" ] || { echo "$_dflt"; return 0; }
+  # The alternative must sit behind `if [ "$gate" -eq 1 ]`, and the gate must be a one-line file test.
+  _gate=$(echo "$_br" | grep -oE 'if \[ "\$[A-Za-z_][A-Za-z0-9_]*" -eq 1 \]' | head -1 | sed 's/.*\$//; s/".*//')
+  [ -n "$_gate" ] || return 0
+  _test=$(grep -oE "test -e [^[:space:]]+ && $_gate=1 \|\| $_gate=0" "$_f" | head -1 | awk '{print $3}')
+  [ -n "$_test" ] || return 0
+  if [ -e "$_test" ]; then echo "$_alt"; else echo "$_dflt"; fi
+}
+# Substitute each `$var` in a captured line with its resolved literal. If any variable does not
+# resolve the line is passed through untouched, for safe_cmd to refuse. A double-quoted token that
+# becomes a single space-free word loses its quotes: they only existed to protect the expansion.
+resolve_line() {  # stdin -> stdout
+  _l=$(cat)
+  for _var in $(echo "$_l" | grep -oE '\$[A-Za-z_][A-Za-z0-9_]*' | tr -d '$' | sort -u); do
+    _val=$(resolve_var "$_var" /script/init_bluetooth_wifi.sh)
+    [ -n "$_val" ] || { echo "$_l"; return 0; }
+    _l=$(echo "$_l" | sed "s|\\\$$_var|$_val|g")
+  done
+  echo "$_l" | sed 's/"\([^" ]*\)"/\1/g'
+}
+
 # Anchor on "insmod /tmp/" - the dispatcher's success/failure echo strings also contain the word
 # insmod followed by the module name, and a greedy sed without this anchor picks the echo.
 WLAN_INSMOD=""
 for m in $WLAN_MODS; do
   l=$(grep -h "insmod /tmp/$m" /script/init_bluetooth_wifi.sh 2>/dev/null \
       | grep -v '^[[:space:]]*#' | head -1 \
-      | sed 's|.*\(insmod /tmp/[^&|;}]*\).*|\1|' | sed 's/[[:space:]]*$//' | safe_cmd)
+      | sed 's|.*\(insmod /tmp/[^&|;}]*\).*|\1|' | sed 's/[[:space:]]*$//' | resolve_line | safe_cmd)
   [ -n "$l" ] && WLAN_INSMOD="$WLAN_INSMOD$l
 "
 done
@@ -216,6 +273,19 @@ attach_branch() {
 decomment() { sed 's/[[:space:]]*#.*$//; s/[[:space:]]*$//'; }
 
 _SCO_BRANCH=$(attach_branch)
+# Firmware PRELOAD invocation, extracted exactly like the attach line (this unit's own branch,
+# anchored at line start, decommented, safe_cmd-filtered). The NXP parts push the BT firmware over
+# the UART with fw_loader_linux BEFORE hciattach:
+#     fw_loader_linux /dev/ttymxc2 115200 1 /lib/firmware/nxp/uartiw416_bt_v0.bin 3000000
+# radio_hal.sh has consumed RADIO_BT_PRELOAD_CMD since the seam existed, but nothing ever emitted
+# it, so the preload was silently skipped on every NXP unit. Measured cost on an IW416 (2026-10-19):
+# hciattach at 3 Mbaud against a controller with no firmware never answers, bt_on falls into its
+# reclaim+reset path, and the reset GPIO it toggles belongs to the WLAN/BT COMBO chip -- pulled
+# under a live mlan/moal driver, that wedged the kernel hard (no NCM, no telnet, power cycle only).
+# Units without a preload helper leave this empty and are unaffected.
+BT_PRELOAD_CMD=""
+[ -n "$BT_PRELOAD" ] && BT_PRELOAD_CMD=$(echo "$_SCO_BRANCH" \
+  | grep -E "^[[:space:]]*$BT_PRELOAD " | head -1 | sed 's/^[[:space:]]*//' | decomment | safe_cmd)
 BT_SCO_MTU_CMD=$(echo "$_SCO_BRANCH" \
   | grep -E '^[[:space:]]*hciconfig[[:space:]]+[^[:space:]]+[[:space:]]+scomtu[[:space:]]' \
   | head -1 | sed 's/^[[:space:]]*//' | decomment | safe_cmd)
@@ -270,6 +340,7 @@ BT_MAC=""
   echo "RADIO_WLAN_MODULES=\"$WLAN_MODS\""
   echo "RADIO_BT_LDISC_KO=$BT_LDISC"
   echo "RADIO_BT_ATTACH_CMD=\"$BT_ATTACH_CMD\""
+  echo "RADIO_BT_PRELOAD_CMD=\"$BT_PRELOAD_CMD\""
   echo "RADIO_BT_AFTER_WLAN=$BT_AFTER_WLAN"
   echo "RADIO_BT_SCO_MTU_CMD=\"$BT_SCO_MTU_CMD\""
   echo "RADIO_BT_SCO_ROUTE_CMD=\"$BT_SCO_ROUTE_CMD\""
