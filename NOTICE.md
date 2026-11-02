@@ -23,7 +23,10 @@ tarballs are listed in `baseline/common/versions.env`. Radio firmware the build 
 redistribution terms are its own and have not been assessed here.
 
 The rest of the repository does not link against `baseline/` and is distributed alongside it as
-an aggregate. A built image (kernel, initramfs, rootfs) is GPL-covered: whoever distributes one
+an aggregate. The same holds on the unit: since baseline revision 8 the box daemons travel as a separate
+"OCBM overlay" image (`tools/ocbm_overlay.sh`) written beside the GPL rootfs in the same flash partition and
+loaded by it at boot; the GPL image contains only that loader, a mount point and symlinks naming the
+overlay's programs (`baseline/README.md` §2.8, §8). A built image (kernel, initramfs, rootfs) is GPL-covered: whoever distributes one
 must provide the corresponding source (this tree at the build commit, the pinned tarballs in
 `baseline/common/versions.env`, and the licence texts) or a written offer for it valid for three
 years (GPL-3.0 section 6, GPL-2.0 section 3).

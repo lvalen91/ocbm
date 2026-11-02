@@ -62,7 +62,6 @@ static AV_AIRPLAYD_PID: AtomicU32 = AtomicU32::new(0);
 
 /// Installed daemon paths. Overridable via env for dev (`/tmp` builds) without a rebuild.
 const AIRPLAYD_BIN_DEFAULT: &str = "/usr/sbin/carplayd";
-const WLAN_IFACE: &str = "wlan0";
 /// The AP gateway hostapd/udhcpd serve on `wlan0` — the address the iPhone reaches carplayd at, and
 /// the A record rx-connect advertises. Matches `start_bluetooth_wifi.sh` (WLANIP default).
 ///
@@ -357,12 +356,15 @@ pub fn ensure_av_layer() {
         // Log to a WIRELESS-specific file (not the wired /tmp/carplayd.log the supervisor scans): so the
         // wired supervisor's milestone grep can't latch a wireless session's "RECORD done" and mark the
         // wired projection healthy (per-transport logs, critical-finding cross-attribution fix).
+        let wlan_iface = box_common::net::wlan_iface();
         let mut envs: Vec<(&str, &str)> = vec![
             ("OCBM_FWD_ENC", "1"),
             // Bearer selection for the in-process mDNS thread (was rx-connect's own env, passed to a
             // second spawn until 2026-09-08). LOAD-BEARING for wireless: without these, discovery
             // defaults to ncm0/addr-auto and advertises the wired bearer while the phone is on the AP.
-            ("RX_IFACE", WLAN_IFACE),
+            // The Wi-Fi interface by enumeration (box_common::net::wlan_iface): `wlan0` on the vendor
+            // kernel, `mlan0` on the mainline baseline. Was the constant "wlan0" until 2026-10-30.
+            ("RX_IFACE", wlan_iface.as_str()),
             ("RX_ADDR", AP_IP),
             // Advertise the wireless AAC audioFormats set so iOS negotiates media audio over
             // type-102 AAC-LC (Apple Music etc.); the wired supervisor-spawned carplayd does NOT get

@@ -192,7 +192,10 @@ test -e /tmp/bin/hostapd || cp /usr/sbin/hostapd /tmp/bin/hostapd 2>/dev/null
 # Nothing reads /tmp/radio_ap_hostapd.log back (checked: no tail/cat/grep of it anywhere in the
 # scripts), so it folds straight into the universal log with a source prefix.
 echo "[radio] hostapd starting on $IF" >> /tmp/box.log
-ps | grep -v grep | grep -qw hostapd || hostapd /etc/hostapd.conf -B >>/tmp/box.log 2>&1
+# Options BEFORE the config file: hostapd parses them with getopt, and musl's getopt (the mainline
+# baseline's static hostapd) does not permute, so the old `hostapd /etc/hostapd.conf -B` read "-B" as a
+# second config file and never started (2026-10-30). This order works with every libc.
+ps | grep -v grep | grep -qw hostapd || hostapd -B /etc/hostapd.conf >>/tmp/box.log 2>&1
 
 # The AP's DHCP server, explicitly scoped. The stock script masked this behind a global udhcpd
 # check, so the always-running NCM instance satisfied it and the AP's own server never started -

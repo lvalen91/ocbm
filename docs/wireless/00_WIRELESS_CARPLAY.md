@@ -399,3 +399,11 @@ check never matched, `[av] carplayd failed to start — releasing the transport 
 of re-querying `pgrep` for a fresh snapshot, which removes the race class rather than widening the
 1 s window — bring-up genuinely can need more than a second while BT and WiFi are also coming up.
 
+
+**The same BusyBox, a second `pgrep` trap (2026-10-30, mainline baseline, BusyBox 1.38):** `pgrep -f` / `pkill -f`
+read only the first 1 KiB of a command line. The supervisor's bring-up wrapper (`wireless_up`, a 4,204-byte
+`sh -c` naming `/usr/sbin/btd` near its end) was invisible to its own `pgrep -f /usr/sbin/btd` idempotence guard for
+its whole radio phase, so a second presence or restart edge in that window started a second `btd` (SDP `Address in
+use`). The supervisor now uses `grep -qs '[/]usr/sbin/btd' /proc/[0-9]*/cmdline`, and it restarts a `btd` that died
+or a controller powered off under it while the host app is present, instead of waiting for the next app reconnect:
+[01_BT_AND_RADIO.md](01_BT_AND_RADIO.md) §6e, baseline/README.md §7.0f.

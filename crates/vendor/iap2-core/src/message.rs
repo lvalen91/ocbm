@@ -211,8 +211,9 @@ pub fn accessory_name(base: &str) -> String {
 /// `wlan_on.sh`/`bt_on.sh` use); `/sys/devices/soc0/serial_number` is a last resort (empty on this SoC).
 /// `None` only on a dev host with none of them present (reads bare `base`).
 fn device_suffix() -> Option<String> {
+    let wifi = wlan_mac_path(std::path::Path::new("/sys/class/net"));
     for path in [
-        "/sys/class/net/wlan0/address",
+        wifi.as_str(),
         "/etc/serial_number",
         "/sys/devices/soc0/serial_number",
     ] {
@@ -223,6 +224,26 @@ fn device_suffix() -> Option<String> {
         }
     }
     None
+}
+
+/// `<net>/<iface>/address` of the unit's Wi-Fi interface, whatever its driver named it (`wlan0` on the vendor
+/// kernel, `mlan0` on the mainline baseline): ENUMERATED from `<net>/*/phy80211`, never assumed (CLAUDE.md
+/// radio rules), `wlan0` first among several; `<net>/wlan0/address` when there is none (then the read fails
+/// and the serial fallbacks apply, as before). Was the literal `wlan0` path until 2026-10-30, which on the
+/// baseline named the box after the SoC serial while its SSID used the `mlan0` MAC.
+fn wlan_mac_path(net: &std::path::Path) -> String {
+    let mut names: Vec<String> = std::fs::read_dir(net)
+        .map(|rd| {
+            rd.filter_map(Result::ok)
+                .filter(|e| e.path().join("phy80211").exists())
+                .filter_map(|e| e.file_name().into_string().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names.sort_by_key(|n| n != "wlan0");
+    let name = names.into_iter().next().unwrap_or_else(|| "wlan0".to_string());
+    net.join(name).join("address").to_string_lossy().into_owned()
 }
 
 /// Pure suffix extractor (testable): the last 4 hex digits of `raw`, lowercased. A Wi-Fi MAC
@@ -1098,6 +1119,25 @@ mod tests {
         // accessory_name with a real suffix would be "CarLink-b0df"; on a dev host with no /sys sources
         // device_suffix() returns None so it's the bare brand — assert that fallback shape.
         assert!(accessory_name("CarLink").starts_with("CarLink"));
+    }
+
+    #[test]
+    fn wlan_mac_path_enumerates_the_wifi_interface() {
+        let d = std::env::temp_dir().join(format!("iap2-core-net-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        for (n, w) in [("lo", false), ("usb0", false), ("mlan0", true)] {
+            std::fs::create_dir_all(d.join(n)).unwrap();
+            if w {
+                std::fs::create_dir_all(d.join(n).join("phy80211")).unwrap();
+            }
+        }
+        assert_eq!(wlan_mac_path(&d), d.join("mlan0/address").to_string_lossy());
+        std::fs::create_dir_all(d.join("wlan0/phy80211")).unwrap();
+        assert_eq!(wlan_mac_path(&d), d.join("wlan0/address").to_string_lossy());
+        let none = d.join("empty");
+        std::fs::create_dir_all(&none).unwrap();
+        assert_eq!(wlan_mac_path(&none), none.join("wlan0/address").to_string_lossy());
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

@@ -90,8 +90,15 @@ BT_PRELOAD=""
 #            five of the six variants.
 #   none   - no path. Report it loudly; wireless is unavailable. WIRED projection is unaffected,
 #            it never touches a radio.
+#   baseline - the mainline baseline image (baseline/README.md §2.5, §7.0e; ccpa_custom/baseline): no vendor
+#            dispatcher and no module tarball exist there. Its own `radio up|down` identifies the chip by the
+#            SDIO id and loads that chip's drivers from the rootfs's module tree, so the seam calls it and
+#            names no chip itself. Checked FIRST: on the baseline /script is the OCBM overlay, which never
+#            carries the owned scripts, but a stray copy must not route a mainline kernel to 3.14 modules.
 BACKEND=none
-if [ -f /script/wlan_on.sh ] && [ -f /script/bt_on.sh ]; then
+if [ -f /etc/baseline-release ] && [ -x /usr/sbin/radio ]; then
+  BACKEND=baseline
+elif [ -f /script/wlan_on.sh ] && [ -f /script/bt_on.sh ]; then
   BACKEND=owned
 elif [ -f /script/init_bluetooth_wifi.sh ] && [ -f /script/attach_bluetooth.sh ]; then
   BACKEND=mapped
@@ -102,6 +109,9 @@ fi
 
 WIRELESS=no
 [ "$BACKEND" != none ] && [ -n "$KO_TARBALL" ] && WIRELESS=yes
+# The baseline carries its drivers as kernel modules, not as a tarball: `radio up` decides per SDIO id
+# whether it has a mapping (an unknown chip is reported there and nothing is loaded).
+[ "$BACKEND" = baseline ] && WIRELESS=yes
 
 # ---- 4b. ADOPT THE VENDOR'S MAPPING, NOT THEIR MECHANISM -----------------------------------
 # BACKEND=mapped means: this unit's own dispatcher is the authority for WHAT to run, and we

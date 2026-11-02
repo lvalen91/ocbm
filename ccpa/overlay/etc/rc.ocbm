@@ -1,0 +1,108 @@
+#!/bin/sh
+# rc.ocbm — the OCBM overlay's boot hook on the mainline baseline (baseline/README.md §2.8, §7.0e). Part of the
+# overlay (this repository's Unlicense side, packed by tools/ocbm_overlay.sh); the GPL rootfs calls it through
+# `ocbm-overlay start` (once, before the OCBM accessory comes up, bounded to 30 s) and `ocbm-overlay service`
+# (init ::respawn:). What it adapts, and why:
+#
+#   /etc   The stock OCBM scripts and daemons write /etc: the 0x5703 credentials into /etc/hostapd.conf
+#          (session_supervisor.sh apply_host_wifi_creds), the AP DHCP config, /etc/carplay/ (btd's bond store),
+#          /etc/carplay_peers.bin (carplayd), /etc/carplay_ident. The baseline's /etc is on the read-only
+#          squashfs, so a RAM copy of it is bind-mounted over it (same content; /etc/shadow and friends are links
+#          into /run already). RAM only: the next boot starts from the image's /etc again.
+#   pairing state  The bond store and the AirPlay peer store are what a phone needs to reconnect after a box
+#          reboot. They are restored from, and saved on change into, the baseline's persist archive (the
+#          'customer' MTD, `persist save`), under ocbm/ in /run/persist.
+#   ladder The supervisor's escalation ladder (phone_reset, ocbmd restart, reboot) exists to recover a WIRED
+#          CarPlay session; iap2d cannot run on this kernel (no Android iAP2 gadget), so there is none to
+#          recover, and its L2 would start a second ocbmd beside the relay's. /tmp/no_escalate inhibits it.
+#   radio  The radio seam (/script/radio_hal.sh) resolves the baseline's own `radio up` (backend=baseline).
+#
+#   rc.ocbm start     the above, then the radio descriptor; quick, idempotent
+#   rc.ocbm service   the session supervisor in the foreground (init respawns this), plus the state saver
+#   rc.ocbm stop      stop both
+set -u
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+O=/opt/ocbm
+P=/run/persist/ocbm
+L=/tmp/box.log
+log() { echo "[rc.ocbm] $*" >> "$L"; echo "rc.ocbm: $*"; }
+
+etc_rw() {
+    mountpoint -q /etc && return 0
+    rm -rf /run/ocbm/etc
+    mkdir -p /run/ocbm/etc
+    if cp -a /etc/. /run/ocbm/etc/ && mount --bind /run/ocbm/etc /etc; then
+        log "/etc is a RAM copy now (bind mount of /run/ocbm/etc)"
+    else
+        log "could not make /etc writable: the 0x5703 credentials, bonds and AP config cannot be written"
+        return 1
+    fi
+}
+
+state_restore() {
+    mkdir -p /etc/carplay
+    [ -s "$P/bt_link_keys" ] && cp "$P/bt_link_keys" /etc/carplay/bt_link_keys && log "restored $(($(wc -c < "$P/bt_link_keys") / 25)) Bluetooth bond(s) from the persist archive"
+    [ -s "$P/carplay_peers.bin" ] && cp "$P/carplay_peers.bin" /etc/carplay_peers.bin && log "restored the AirPlay peer store from the persist archive"
+    return 0
+}
+
+# Save the pairing state into the persist archive when it changed (polled; flash is written only on a change).
+# Polled every 3 s (15 s until 2026-10-30: a power cut in the 15 s after a pairing lost the bond); the poll is
+# two cmp of RAM files. Flash (`persist save` = flashcp of a <64 KiB tar onto the 64 KiB 'customer' MTD, one
+# erase block) is written once per CHANGE: btd replaces bt_link_keys atomically and only on a pairing or a
+# forget, so identical content never reaches flash. A writer that kept changing the files would be the only
+# wear risk, so flash writes stay at least SAVE_GAP_S apart (the old poll's rate): a change is on flash
+# within 3 s, a burst of changes coalesces into one write per 15 s.
+SAVE_GAP_S=15
+state_saver() {
+    pending=
+    last=$(($(cut -d. -f1 /proc/uptime) - SAVE_GAP_S))
+    while :; do
+        sleep 3
+        for f in /etc/carplay/bt_link_keys /etc/carplay_peers.bin; do
+            b=$P/${f##*/}
+            if [ -s "$f" ]; then
+                cmp -s "$f" "$b" 2> /dev/null || { mkdir -p "$P" && cp "$f" "$b.new" && mv "$b.new" "$b" && pending=1; }
+            elif [ -e "$b" ] && [ ! -e "$f" ]; then
+                rm -f "$b" && pending=1 # forgotten (MGMT_FORGET_*): forget it on flash too
+            fi
+        done
+        now=$(cut -d. -f1 /proc/uptime)
+        if [ -n "$pending" ] && [ $((now - last)) -ge "$SAVE_GAP_S" ]; then
+            pending=
+            last=$now
+            if persist save > /dev/null 2>&1; then log "pairing state saved to the persist archive"; else log "persist save FAILED: pairing state not kept across a reboot"; fi
+        fi
+    done
+}
+
+case ${1:-} in
+    start)
+        etc_rw
+        [ -e /etc/hostapd.conf ] || cp "$O/etc/hostapd.conf" /etc/hostapd.conf
+        [ -e /etc/udhcpd.conf ] || cp "$O/etc/udhcpd.conf" /etc/udhcpd.conf
+        chmod 600 /etc/hostapd.conf 2> /dev/null
+        state_restore
+        : > /tmp/no_escalate
+        [ -x /script/radio_detect.sh ] && sh /script/radio_detect.sh -q
+        log "start done (overlay $(sed -n 's/^version=//p' /run/ocbm/overlay.state 2> /dev/null))"
+        ;;
+    service)
+        if [ ! -x /script/session_supervisor.sh ]; then
+            # a minimal overlay (ocbmd only): nothing long-running beyond what the relay runs
+            exec sleep 3600
+        fi
+        p=$(cat /run/ocbm/state-saver.pid 2> /dev/null)
+        if [ -z "$p" ] || ! kill -0 "$p" 2> /dev/null; then
+            state_saver < /dev/null > /dev/null 2>&1 &
+            echo $! > /run/ocbm/state-saver.pid
+        fi
+        exec /script/session_supervisor.sh >> "$L" 2>&1 < /dev/null
+        ;;
+    stop)
+        p=$(cat /run/ocbm/state-saver.pid 2> /dev/null)
+        [ -n "$p" ] && kill "$p" 2> /dev/null
+        pkill -f /script/session_supervisor.sh 2> /dev/null
+        ;;
+    *) echo "usage: rc.ocbm start|service|stop" >&2; exit 2 ;;
+esac

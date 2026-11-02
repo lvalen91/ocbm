@@ -1,0 +1,16 @@
+#!/bin/sh
+# ocbmd-launch — what the baseline's ocbm-accessory relay spawns once per pty generation (baseline/README.md
+# §2.8, §7.0e). Part of the OCBM overlay (this repository's Unlicense side; packed by tools/ocbm_overlay.sh),
+# not of the GPL baseline image.
+#
+# - argv[0] /usr/sbin/ocbmd: the stock OCBM layout's name (a link in the baseline rootfs into /opt/ocbm/bin),
+#   so every `pgrep`/`pidof` in the stock scripts matches it.
+# - stderr into /tmp/box.log, the universal log ocbmd's CH_LOG streams to the host app (LOG_SOURCES), as the
+#   stock run_ocbmd.sh does; O_APPEND (>>), which ocbmd's own log rotation relies on.
+# - OCBM_ENTER_NCM_CMD: the host app's MGMT_ENTER_NCM persists the baseline's NCM boot default (the baseline
+#   has no writable /script/ncm_only); ocbmd reboots after it succeeds.
+# The relay hands ocbmd a fresh pty per generation and respawns it when it exits; nothing else may start a
+# second ocbmd (the session supervisor's L2 restart is inhibited on the baseline: rc.ocbm).
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export OCBM_ENTER_NCM_CMD='usb-mode default ncm'
+exec /usr/sbin/ocbmd >> /tmp/box.log 2>&1

@@ -169,7 +169,8 @@ boot (`stop flag: boot identity = boot_count|boot_id|none`); Start or Restart se
 launch): effective = appop `allow`, OR appop `default` AND the permission granted. `install -g` grants
 it (`development`), so nothing extra is needed after an install with `-g`. Never set the appop to
 `ignore`/`deny` (that overrides the grant); `appops set --user 10 android.car.usb.handler SYSTEM_ALERT_WINDOW
-allow` is optional and lost on uninstall. Preflight (read-only, no serials printed):
+allow` is optional and lost on uninstall. Giving the ASSISTANT role back to its previous holder also resets
+the app-op to `default` (Steering-wheel Voice button section below). Preflight (read-only, no serials printed):
 
 ```bash
 adb shell appops get --user 10 android.car.usb.handler SYSTEM_ALERT_WINDOW
@@ -186,6 +187,94 @@ The bench steps (B-D6-0 … B-D6-5: replug with the app closed, box reboot, cold
 boot, headless missing credentials via the bench-only `finish_launcher` verb) and their pass values
 are in the plan's D6 "Bench" section; `grep -a` is mandatory on those captures (binary bytes stop a
 plain grep).
+
+### Steering-wheel Voice button → Siri (default assistant; added 2026-10-26, NOT bench-verified)
+
+The wheel's Voice key is a CarService custom input that GM's `com.gm.car.input` GMCarInputService captures.
+It is not a KeyEvent an app receives. On key-down GMCarInputService offers the stock projection
+`vrKeyEvent(0)`. On release of a **short** press it first runs a ringing-call pre-check, then offers the
+stock projection `vrKeyEvent(1)`, then BT call and OnStar; a press none of them consumed ends, on this GAS
+build, in `AssistUtils.showSessionForActiveService({EXTRA_CAR_PUSH_TO_TALK=true}, 0x20)`, which opens a
+VoiceInteractionSession in the **active assistant** with showFlags `0x23` (the system ORs in
+`WITH_ASSIST|WITH_SCREENSHOT`, 1|2). A long press never reaches the assistant. The ringing pre-check reads
+the native projection's call state, which gm_ccpa never feeds, so it never sees a CarPlay call carried by
+this app; but if the iPhone also has Bluetooth HFP to the radio, GM answers the ringing call itself and the
+press never reaches the app. What iOS does with a Siri tap during a call is UNVERIFIED.
+
+When the app holds `android.app.role.ASSISTANT`, that session is `zeno.gmccpa.assist.Assistant`. It sends
+one Siri-button tap to the phone (`requestSiri` buttondown 2 then buttonup 3, as MacHost `siriPress()`),
+then finishes with no UI. **Stock parity is partial.** That pair matches stock Cinemo only for the release
+half of a short press with no call and no Siri turn active and no built-in voice recognition. Stock also
+sends a prewarm `RequestSiriWithLatency(1)` on key-down, and by `VRStateMachine` state a short press sends
+NONE (no built-in VR): 2 then 3; NONE (built-in VR): 3 only; ACCESSORY: 3 only; CONTROLLER: 2 only;
+INSPEECH: nothing. During any CarPlay call stock swallows voice presses (jadx `ResourceManager.java`
+~2889-2905). gm_ccpa always sends 2 then 3 — a disclosed difference: the owner chose no call-state or
+Siri-state branching, iOS decides what the request means. The role cannot be requested in-app: the
+firmware's roles.xml has ASSISTANT `requestable=false`. It is set from the shell:
+
+```bash
+adb shell cmd role get-role-holders --user 10 android.app.role.ASSISTANT    # note it: the restore target
+adb shell cmd role add-role-holder --user 10 android.app.role.ASSISTANT android.car.usb.handler
+# The platform's role observer writes both settings itself; check them:
+adb shell settings --user 10 get secure voice_interaction_service   # android.car.usb.handler/zeno.gmccpa.assist.AssistantService
+adb shell settings --user 10 get secure assistant                   # same value
+# If they did not follow the role, re-run add-role-holder (preferred). A settings-only fallback must set
+# BOTH keys: GMCarInputService calls getAssistComponentForUser, so `assistant` must be non-null too. It is
+# fragile: the role observer re-runs at user start and can revert both to the role holder.
+adb shell settings --user 10 put secure voice_interaction_service android.car.usb.handler/zeno.gmccpa.assist.AssistantService
+adb shell settings --user 10 put secure assistant android.car.usb.handler/zeno.gmccpa.assist.AssistantService
+# Restore the previous assistant (the role is exclusive; this replaces Google Assistant for user 10):
+adb shell cmd role add-role-holder --user 10 android.app.role.ASSISTANT <previous holder>
+```
+
+**Role side effect on SYSTEM_ALERT_WINDOW.** Holding the role also grants the `SYSTEM_ALERT_WINDOW` app-op;
+restoring the previous holder resets that app-op to `default`. After an install made with `-g` that is
+harmless (the permission is granted; see the SYSTEM_ALERT_WINDOW rule above). On an install made without
+`-g`, re-run `appops set --user 10 android.car.usb.handler SYSTEM_ALERT_WINDOW allow` after restoring, or the
+background FGS start and CarPlay screen launch lose their admission.
+
+Logging must be revived first (§7.1 step 0). Watch with `adb logcat -s NETPROBE GMCarInputService | grep -a -E '\[vis  \]|Voice Assist|AssistUtils'`.
+On a short press, expect these lines:
+
+```
+[vis  ] ASSISTANT status (service): roleHeld=true voice_interaction_service=android.car.usb.handler/zeno.gmccpa.assist.AssistantService ...
+[vis  ] service created / service ready (connected; assist structure + screenshot disabled)
+GMCarInputService: Receive Voice Assist Key Short Press / voice key, invoke AssistUtils
+[vis  ] session onShow showFlags=0x23 (WITH_ASSIST|WITH_SCREENSHOT|SOURCE_PUSH_TO_TALK) pushToTalk=true
+[vis  ] session onHandleAssist (expected on every press: null assist data; nothing extra sent)
+[vis  ] Siri tap (wheel/assist show) result=3: sent requestSiri buttondown(2)+buttonup(3)
+[vis  ] session onHide
+```
+
+`onHandleAssist` fires on every press: the system's `WITH_ASSIST` bit is set, the service disabled that
+context, so `AssistDataRequester` delivers null assist data. The `Siri tap` line is written from the
+`cp-event-tx` thread, so its position relative to the session lines can vary. `result=-1`/`-3` reads
+`DROPPED — CarPlay not connected`, which is normal with no session. If the session tears down between the
+`session_started` gate and the send, the same disconnect is logged as `FAILED`/`PARTIAL` instead. The
+`ASSISTANT status (launcher)` line is printed once per process from MainActivity, whether or not the role is
+held. Side effect: once the role is held, system_server keeps the assistant service bound, so the app
+process runs from boot. Re-run the `add-role-holder` after an uninstall + reinstall, as with the USB grant.
+
+**Bench check: press during an active Siri turn.** Start Siri (one wheel press, or from the phone), then press
+the wheel Voice key again while Siri is listening or answering, and record what iOS does with the extra tap
+(expected: it toggles/ends Siri). This is intended: the app deliberately has no Siri-active guard.
+
+**Hangup key (1003 → `KEYCODE_VOLUME_MUTE` 164) does not reach the app** (2026-10-26 decompile of
+`com.gm.car.input` and the framework, Y181 Silverado). GMCarInputService closes an open voice session (GAS
+builds), ends a *telecom* call, offers the key to the stock projection (`vrKeyEvent(8/9)`) or OnStar, and
+only if none consumed it injects 164. `PhoneWindowManager.interceptKeyBeforeDispatching` then returns -1 for
+164 (`config_handleVolumeKeysInWindowManager=true`), so it goes only to AudioService, never to the focused
+window. It is not a call-control channel, and CarPlay's own answer and end are the uid-5 Telephony HID,
+which this app's `/info` does not advertise (§6.4).
+
+**Call key (1001 → `KEYCODE_CALL` 5) CAN reach a focused gm_ccpa activity — UNMEASURED.** It falls through
+to injection, and the window manager consumes 5 only while a Telecom call rings. The app has no key handler,
+so a 5 delivered to its focused window is unhandled and `PhoneFallbackEventHandler` starts
+`ACTION_CALL_BUTTON` (short press) or `ACTION_VOICE_COMMAND` (long press). Decompile evidence only; no live
+press log exists. Bench procedure: CarPlay screen focused, no call ringing, `adb logcat -b all | grep -a -E
+'GMCarInputService|CALL_BUTTON|VOICE_COMMAND|START u10'` while pressing the call key short, then long, and
+record which activity (if any) starts. For the hangup key the same capture should show
+`onKeyEvent(KeyEvent { … keyCode=164 … })` / `handle ENDCALL key` and nothing from the app.
 
 ### Run (scriptable — no tapping)
 
@@ -291,9 +380,15 @@ ls /script/radio_hal.sh /script/radio_detect.sh
    the link up; the 1 Hz heartbeat holds it.
 2. **The bulk endpoints are IN `0x81` / OUT `0x01`**, not `0x83`/`0x02`. Discover the bulk pair by
    walking the interface; anything that hardcodes the addresses will fail.
-3. **The phone must initiate the BR/EDR connection.** Outbound paging from the box returns
-   `CONNECT_FAILED status=0x07` / `SDP query failed: Connection refused`. Successful reconnects all rode
-   an ACL the phone opened. Trigger it from Settings ▸ General ▸ CarPlay on the iPhone.
+3. **A bonded phone is paged by the box; the phone does not have to initiate.** *(Corrected
+   2026-10-30: this item said the phone must open the BR/EDR link because outbound paging returned
+   `CONNECT_FAILED status=0x07` / `SDP query failed: Connection refused`. Refuted on the mainline
+   baseline, revision 8, iOS 27.2: every box-initiated reconnect with the phone in range succeeded —
+   `[reconnect] … driving reconnect` → `[sdp-client] L2CAP SDP channel up (phone paged)` (~1 s) →
+   `RFCOMM connected OUT … ch 1` → `IdentifyAccept` → 0x5703 in ~3 s, including the hands-off cold
+   boot after a radio reboot. With the phone out of range the page fails `CONNECT_FAILED
+   status=0x04` (page timeout, ~5 s) and the loop backs off 10 → 60 s.)* Settings ▸ Bluetooth on
+   the iPhone is only needed for the FIRST pairing, or when one side has lost the bond.
 4. **A stale hotspot poisons the next session.** After a session that handed out credentials for a
    network that no longer exists, forget that network on the iPhone before retrying.
 5. **`pkill -f session_supervisor` kills the shell running it** (its own cmdline matches). Use an

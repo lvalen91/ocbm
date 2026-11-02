@@ -5,7 +5,15 @@
 How the box binaries are built, what they cost in flash/RAM, and how they are pushed. Scope: the CCPA
 (armv7, stock firmware plus the OCBM userspace). Other build trees live elsewhere:
 - `baseline/README.md` (build order section 4, install flow section 5): the mainline-kernel recovery + busybox
-  rootfs image for the CCPA, built with `baseline/build.sh`. It carries no OCBM yet.
+  rootfs image for the CCPA, built with `baseline/build.sh`. Since revision 6 (2026-10-30, `baseline/README.md`
+  §2.8/§7.0c) it has an OCBM mode (`ocbm-accessory` serves ocbmd's `/dev/usb_accessory` over FunctionFS); since
+  revision 8 (§2.8, §7.0e) **OCBM is its boot default**: this tree's box binaries (ocbmd, btd, carplayd) and the
+  stock supervisor + radio seam scripts ship as ONE separate **OCBM overlay** image, built by
+  `tools/ocbm_overlay.sh [--minimal|--full]` (output under `~/.cache/carlink-artifacts/ocbm-overlay/`, refuses
+  `~/Documents`; runs `tools/pkill_selfmatch_check.py` on the packed scripts) and written on the unit with
+  `ocbm-overlay write <img> <sha256>` into the last 0x460000 B of its rootfs MTD, outside the GPL image; the rootfs
+  verifies it by sha256 and unpacks it into RAM at boot. Nothing is staged by hand any more. *(Corrected
+  2026-10-30: this said "no OCBM yet", then that ocbmd "is still staged onto the unit from this tree's build".)*
 - `c2air/README.md`: the C2Air (Allwinner V821, riscv32), a different box; shared Rust sources, own toolchain.
 - `pi/docs/00_PI_AAOS_PORT.md`: the Raspberry Pi / AAOS arm64 port of the box daemons.
 - Research repo `CPC200-CCPA_resources` (`~/Downloads/github/CPC200-CCPA_resources`, `custom/kernel_rootfs/`):
@@ -93,7 +101,10 @@ figures in the next section; no other per-binary footprint is recorded here.)*
    binaries. Measured on the current pair: ocbmd 454,864 → 230,316 B, aa-bridge 399,568 → 201,952 B.
 3. **jffs2 auto-compression** — free on-media reduction.
 4. **Run from `/tmp` (RAM)** — persist a small `.tar.xz` of binaries in rootfs, unpack to the 107 MB
-   tmpfs at boot via a tiny loader; running binaries never touch flash.
+   tmpfs at boot via a tiny loader; running binaries never touch flash. **Done on the mainline baseline
+   (revision 8, 2026-10-30)** as the OCBM overlay: a gzip'd tar (1,683,792 B for ocbmd + btd + carplayd + the
+   scripts, 3.1 MiB unpacked) in the rootfs MTD's last 0x460000 B, sha256-checked and unpacked into a tmpfs at
+   `/opt/ocbm` by the rootfs's `ocbm-overlay` (`baseline/README.md` §2.8).
 5. **Lean custom `mtd2`** — reflash a rootfs that drops more vendor cruft.
 
 ### What the size plan got right, and what it did not

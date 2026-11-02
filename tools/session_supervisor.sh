@@ -782,7 +782,13 @@ radio_off() { [ -f /tmp/radio_off ]; }
 # is a deliberate extension, enabled ONLY by the host YAML `hot_handover: true`. Absent/anything-else => the
 # standard "keep wireless on plug" behavior. See docs/ops/05_AUDITS.md and the transport-selection research 2026-08-01.
 hot_handover_enabled() { grep -qiE '^[[:space:]]*hot_handover:[[:space:]]*true' "$WIRELESS_CFG" 2>/dev/null; }
-wireless_running() { pgrep -f /usr/sbin/btd >/dev/null 2>&1; }
+# NOT `pgrep -f`: BusyBox pgrep/pkill -f see only the first ~1 KiB of a command line (procps
+# PROCPS_BUFSIZE), and wireless_up's bring-up wrapper names /usr/sbin/btd only at the END of a ~5 KiB
+# `sh -c` text — measured 2026-10-30 (busybox 1.38): a 1500-byte-prefixed `sh -c` was invisible to
+# pgrep -f and visible to grep. So the wrapper's whole radio bring-up (8-14 s) read as "not running":
+# a second edge in that window started a SECOND wrapper (reproduced: two btd, the second looping on
+# "Address in use"). grep reads the full /proc cmdline; the bracket keeps grep from matching its own.
+wireless_running() { grep -qs '[/]usr/sbin/btd' /proc/[0-9]*/cmdline; }
 # Is ANY part of the wireless stack still drawing power? The advertiser can be dead while hostapd is
 # still beaconing and hci0 is still UP — which is exactly the state that made a wired session crawl
 # (owner report 2026-08-11), so all three are checked, not just the daemon.
@@ -1081,9 +1087,11 @@ wireless_down() {
     # on WiFi with CarPlay inactive). `[/]usr/...` matches the real daemon but NOT this text (verified:
     # busybox pgrep `[h]ostapd` matches, `[z]hostapd` doesn't). Same footgun the wireless_up guard notes.
     setsid sh -c '
+      # A bring-up wrapper still in its radio phase is invisible to pkill -f (see wireless_running).
+      kill $(grep -ls "[/]usr/sbin/btd" /proc/[0-9]*/cmdline 2>/dev/null | cut -d/ -f3) 2>/dev/null
       pkill -f "[/]usr/sbin/btd" 2>/dev/null
       pkill -f "[c]arplayd" 2>/dev/null
-      pkill -f "[b]tmon" 2>/dev/null   # btmon bench lever (2026-09-03), harmless if never armed
+      pkill -f "[b]tmon" 2>/dev/null   # the bench capture lever (2026-09-03); harmless if never armed. NEVER spell its name in this quoted block: the text is the argv of this very shell, and `pkill -f` matched it here (2026-10-30, baseline busybox 1.38: the teardown killed itself after its first pkill, so sleep, -9, wifi_ap_off and bt_off never ran)
       sleep 1
       pkill -9 -f "[c]arplayd" 2>/dev/null
       pkill -9 -f "[/]usr/sbin/btd" 2>/dev/null
@@ -1120,8 +1128,10 @@ wireless_down() {
     # SELF-MATCH FIX 2026-08-01: `[/]usr/...` so this `sh -c` block doesn't SIGKILL itself before wlan_off
     # (see the COMPLETE-teardown branch above for the full rationale).
     setsid sh -c '
+      # A bring-up wrapper still in its radio phase is invisible to pkill -f (see wireless_running).
+      kill $(grep -ls "[/]usr/sbin/btd" /proc/[0-9]*/cmdline 2>/dev/null | cut -d/ -f3) 2>/dev/null
       pkill -f "[/]usr/sbin/btd" 2>/dev/null
-      pkill -f "[b]tmon" 2>/dev/null   # btmon bench lever (2026-09-03), harmless if never armed
+      pkill -f "[b]tmon" 2>/dev/null   # the bench capture lever (2026-09-03); harmless if never armed. NEVER spell its name in this quoted block: the text is the argv of this very shell, and `pkill -f` matched it here (2026-10-30, baseline busybox 1.38: the teardown killed itself after its first pkill, so sleep, -9, wifi_ap_off and bt_off never ran)
       sleep 1
       pkill -9 -f "[/]usr/sbin/btd" 2>/dev/null
       pkill -9 -f "[b]tmon" 2>/dev/null
@@ -1213,6 +1223,11 @@ WL_DOWN_WAIT_MAX_S=10   # cap on holding a due bring-up behind them: covers a bt
                         # + <=1 s handler tick + ~13 s = ~31 s, ~4 s under the 35 s (and any BT_PHASE
                         # progress stands the ladder down earlier). Only the cap and the 4 s are ours; do
                         # not grow either.
+_wl_dead_ticks=0        # consecutive ticks the wireless stack looked lost while it should be up (liveness)
+_wl_live_next=0         # uptime before which the liveness check may not restart the stack again
+_wl_live_back=30        # its backoff: 30 s, doubling to 300 s, back to 30 s after 120 s healthy
+_wl_live_ok_since=0     # uptime the stack was last seen healthy from (for that backoff reset)
+WL_LIVENESS_TICKS=5     # >= 5 s lost before acting: covers btd's own down->up at bring_up
 wireless_was_owner=0    # tracks wireless_owns_session across ticks (see the reset check below)
 last_r=0                # tracks the CT_RADIO inhibit flag across ticks (docs/carplay/04_CAPABILITIES_AND_CONFIG.md radio gating)
 
@@ -1427,6 +1442,48 @@ while :; do
           fi
         fi
         _a2_state="$_a2_want"
+      fi
+      # Wireless liveness (2026-10-30 stress test). Every wireless_up caller is an EDGE, so a btd that
+      # died while the host stayed present (measured: `kill -9` -> never restarted, hci0 left UP PSCAN
+      # ISCAN with no SDP server, RFCOMM listener or SSP agent), or a controller powered off under a
+      # running btd (measured: `hciconfig hci0 down` -> the reconnect loop failed "Host is unreachable"
+      # every 60 s for good; nothing in btd re-powers it, and a bare re-power would come back with
+      # Class 0x000000 and an EIR without the iAP2/CarPlay UUIDs) left the box silent until the next
+      # app reconnect. Only when the stack SHOULD be up and nothing is mid-transition; the restart is
+      # the Restart-wireless path (full bring-up: radio seam, then btd's own class/name/EIR), with a
+      # 30 -> 300 s backoff so a dead controller is retried, never hammered. Never while a WIRED
+      # iPhone owns the box: A2 (Hot-Handover off) took the radios down on purpose, and with
+      # Hot-Handover on preempt_wireless_for_wired SIGTERMed btd on purpose (the `phone_on_bus &&
+      # ! wireless_owns_session` clause; `_a2_state` alone does not cover the Hot-Handover case).
+      if [ "${last_p:-0}" = 1 ] && wireless_enabled && ! radio_off && [ -z "$wl_down_pids" ] \
+         && [ -z "$wireless_rebring_at" ] && [ "${_wl_held_for_aa:-0}" = 0 ] \
+         && [ "${_a2_state:-0}" = 0 ] && ! aa_owns_session \
+         && ! { phone_on_bus && ! wireless_owns_session; }; then
+        if ! wireless_running; then
+          _wl_lost="btd not running"
+        elif pgrep -x /usr/sbin/btd >/dev/null 2>&1 && command -v hciconfig >/dev/null 2>&1 \
+             && ! hciconfig hci0 2>/dev/null | grep -q "UP RUNNING"; then
+          _wl_lost="hci0 not UP RUNNING under a running btd"
+        else
+          _wl_lost=""
+        fi
+        if [ -n "$_wl_lost" ]; then
+          _wl_dead_ticks=$((_wl_dead_ticks + 1)); _wl_live_ok_since=0
+          if [ "$_wl_dead_ticks" -ge "$WL_LIVENESS_TICKS" ] && [ "$(now)" -ge "$_wl_live_next" ]; then
+            echo "[sup] wireless stack lost while the host is present ($_wl_lost, ${_wl_dead_ticks}s) -> restarting it (next retry no sooner than ${_wl_live_back}s)"
+            wireless_down "wireless liveness ($_wl_lost)"
+            wireless_rebring_at=$(( $(now) + 4 ))
+            _wl_live_next=$(( $(now) + _wl_live_back ))
+            _wl_live_back=$((_wl_live_back * 2)); [ "$_wl_live_back" -gt 300 ] && _wl_live_back=300
+            _wl_dead_ticks=0
+          fi
+        else
+          _wl_dead_ticks=0
+          [ "$_wl_live_ok_since" = 0 ] && _wl_live_ok_since=$(now)
+          [ $(( $(now) - _wl_live_ok_since )) -ge 120 ] && _wl_live_back=30
+        fi
+      else
+        _wl_dead_ticks=0
       fi
       # Liveness self-heal for the wireless AA pump, the analogue of arm_aa's per-tick relaunch.
       # wireless_up() reaches arm_aa_wireless only on a genuine bring-up (its own `wireless_running`

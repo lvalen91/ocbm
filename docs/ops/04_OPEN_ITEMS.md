@@ -4,6 +4,59 @@
 
 Every known-open item in one place, plus the ordered roadmap. An item leaves this file only when it is closed with evidence.
 
+## State at 2026-10-28
+
+Commits on `main` that day: `bd78cef` (licence and credit: `baseline/` is derived from f-io/LIVI and is
+GPL-3.0-or-later; the rest of the repository is Unlicense), `b4fd149` (documentation corrections across the
+corpus), `c9fbbb9` (comments only, no code change), `6eb4e92` (`tools/sync_mirror.sh` now publishes
+`git archive HEAD`, has `--dry-run` and an explicit `--push`, and protects three kept baseline images under
+`ccpa/backup/base/` from `--delete`).
+
+The publication mirror (`~/Downloads/github/ocbm`) holds one local sync commit that is not pushed. The
+baseline project is judged ready for OCBM work (owner, 2026-10-28).
+
+Not part of those commits: the owner's in-flight uncommitted work (`crates/vendor/receiver/src/events.rs`,
+the `host/gm_ccpa` app, `docs/04_SYSTEM_MODEL.md` and `docs/06_BRINGUP_RUNBOOK.md`, the new `assist/`
+directories).
+
+Open as of this date, one line each (detail stays with the owning document):
+
+- Publication of the mirror: three already-published commits contain session-scratch paths and need a history
+  scrub, then either a force-push or a plain push. Awaiting the owner's go.
+- Removal of the 36 session-trailer commits (see Settled) from ccpa_custom by a local rewrite. Last step;
+  it changes every cited commit hash.
+- NCM PID `1314:2d10` is decided but not in the host tables (`USBDeviceManager.swift`, `MessageTypes.kt`,
+  the Android `usb_device_filter.xml`) nor in `baseline/common/usb-ids.conf`, which still sets
+  `USB_NCM_PID=0x1520`.
+- D14 usb-mode persist/trigger file (design in the C2Air research repo `docs/userspace-spec.md`): on the CCPA
+  mainline baseline it is implemented as `usb-mode default ncm|ocbm` (a `usb-mode` file in the persist archive,
+  revision 8, `baseline/README.md` §2.8); `ocbmd` `MGMT_ENTER_NCM` runs `OCBM_ENTER_NCM_CMD` when set (the overlay's
+  `ocbmd-launch` sets it to `usb-mode default ncm`) and still writes the sticky `/script/ncm_only` elsewhere (stock
+  firmware, C2Air). *(Corrected 2026-10-30: this said "not implemented".)*
+- musb RX-flush upstream patch, and `ocbmd` queued reads for FunctionFS.
+- Baseline OCBM mode (revision 6 kernel + revision 7 rootfs, 2026-10-30, `baseline/README.md` §2.8/§7.0c/§7.0d):
+  FLASHED on the IW416 unit; the OCBM link is proven end-to-end against the GM radio's `gm_ccpa` app (HELLO/ACK, CH_MFI
+  cert + sign, MGMT_INFO, SETTIME, SUBSCRIBE, heartbeats, CH_LOG, CH_FILE pulls, CT_STOP) and against `ocbm-host` on a Mac
+  from the flashed revision-7 image (ECHO incl. every 512-multiple frame size up to 64 KiB, RTT, MFI, CH_CONSOLE, CH_FILE
+  push + pull, CH_IP, session, a 13-minute soak; revision 6's relay lost a lone 512-byte host → device frame, fixed in 7).
+  **Revision 8 (2026-10-30, `baseline/README.md` §7.0e): OCBM is the boot default**, ocbmd/btd/carplayd + the stock
+  supervisor and radio seam come from the separate OCBM overlay in the rootfs MTD's last 0x460000 B, and the GM radio
+  app links automatically after every boot (8 consecutive hands-off reboots); a SUBSCRIBE brings Bluetooth up and starts `btd`
+  (`BOX_HEALTH 0x51/0x53`). Left: no iPhone was paired against it (wireless CarPlay end to end, the 0x5703 handoff to
+  the vehicle hotspot and the bond store across a reboot with a real phone are UNVERIFIED on the baseline); HFP SCO
+  setup after `btd`'s controller reset has no baseline mapping; wired CarPlay (`iap2d`) cannot run on the mainline
+  gadget stack; host-driven MGMT_ENTER_NCM not exercised end to end (its command, `usb-mode default ncm`, was).
+  (Updated 2026-10-30: "Left" listed ECHO/RTT (ZLP case), CH_CONSOLE and CH_FILE push as unverified; then that ocbmd
+  was staged in `/tmp` per boot and the mode RAM-selected with NCM at every boot.)
+- Every MFi signing path must handle both signature lengths (CCPA 128-byte RSA, C2Air 64-byte ECDSA).
+  `crates/vendor/mfi` fixes `SIG_LEN` at 128 and the `carplayd` signer comments assume RSA-1024; not
+  checked for the 64-byte case. If a path does not, add a future-work code comment.
+- Android Auto TLS issuer check is log-only (`log_peer_certificate_issuer` in `host/aa-headunit/src/tls.rs`);
+  enforce it before wireless Android Auto is decided.
+- CCPA SoC label i.MX6UL vs i.MX6ULL vs i.MX6ULZ: DIGPROG read pending (`baseline/README.md` section 7.6).
+- USB DMA test on the C2Air (specified in the C2Air research repo).
+- The `radio` script `MODS` unload-list fix (`bd78cef`, Bluetooth core modules) is untested on hardware.
+
 
 ## Settled — do not re-raise
 

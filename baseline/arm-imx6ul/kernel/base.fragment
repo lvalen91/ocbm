@@ -124,6 +124,12 @@ CONFIG_USB_LIBCOMPOSITE=y
 CONFIG_USB_CONFIGFS=y
 CONFIG_USB_CONFIGFS_NCM=y
 CONFIG_USB_CONFIGFS_ACM=y
+# FunctionFS (revision 6, 2026-10-30): the userspace gadget function behind `net-up ocbm`.
+# common/ocbm-accessory serves ocbmd's /dev/usb_accessory over its two bulk endpoint files (README
+# §2.8). The kernel has no Android accessory function; this is the only mainline way to a vendor
+# bulk interface. Selects USB_F_FS (and with it DMA_SHARED_BUFFER); built in, the rootfs has no
+# module loader in the boot path and the gadget scripts assume the fs type is present.
+CONFIG_USB_CONFIGFS_F_FS=y
 CONFIG_NET=y
 CONFIG_INET=y
 CONFIG_IPV6=y

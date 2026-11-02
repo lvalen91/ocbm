@@ -125,6 +125,15 @@ Two phases, because the useful facts split cleanly by cost:
 * **Post-load:** the interface name and MACs, obtained by **enumerating** `/sys/class/net/*` for
   `wireless`/`phy80211` — never by assuming `wlan0`.
 
+Backend tiers, first match wins: **`baseline`** (added 2026-10-30) — the mainline baseline image
+(`/etc/baseline-release` and its own `/usr/sbin/radio`): no vendor dispatcher and no module tarball exist
+there, the image's `radio up` identifies the chip by its SDIO id and loads that chip's drivers from the kernel
+module tree, so `radio_hal.sh` calls `radio up` for `wifi_ap_on`/`bt_on`, keeps its own convergence tests
+(enumerated interface; a real HCI name read, strict) and its own AP layer (`radio_ap_up.sh`, shared with
+`mapped` through `ap_layer_up`), and names no chip; `sco_on` has no mapping there (exit 3). VERIFIED on the
+IW416 unit (`baseline/README.md` §7.0e). Then `owned` (`/script/wlan_on.sh` + `bt_on.sh`), `mapped` (the
+vendor dispatcher), `none`.
+
 The mapping is extracted with **no chipset table**: intersect the modules in *this unit's own
 tarball* with *this unit's own dispatcher's* `insmod` lines. A part nobody anticipated still
 resolves, because every unit ships a dispatcher that knows its silicon and a tarball that names
@@ -197,6 +206,17 @@ its own `pkill` patterns can see — a bug this project already paid for once (2
 `pkill -f` killed the teardown subshell before it reached `wlan_off`, orphaning a still-beaconing
 AP). So the script name and every verb must avoid `carplayd`, `btd`,
 `ocbmd`, `hostapd`. Audited clear; re-audit before renaming a verb.
+The opposite trap is just as real (measured 2026-10-30 on the mainline baseline, BusyBox 1.38): **`pgrep -f` /
+`pkill -f` read only the first 1 KiB of a command line**, and `wireless_up`'s bring-up wrapper is a 4,204-byte `sh -c`
+that names `/usr/sbin/btd` at byte 4,157, so `pgrep -f` could not see it during its radio phase and a second edge
+started a second `btd`. The supervisor finds `btd` and the wrapper with `grep -qs '[/]usr/sbin/btd'
+/proc/[0-9]*/cmdline` (reads the whole command line) and its teardowns `kill` that list before their `pkill`s
+(baseline/README.md §7.0f).
+
+**A powered-down adapter skips the "already converged" probe** (`do_bt_on`, 2026-10-30). The teardown leaves hci0
+attached but DOWN, where every name read fails at once with ENETDOWN, so the reluctant five-read probe could only miss
+and cost ~8 s per bring-up. When `hciconfig` reads DOWN, `bt_on` goes straight to the power-up check below it; any
+other state still gets the full probe.
 
 **The owned AP layer is invoked as `/script/radio_ap_up.sh`, never
 `/script/start_bluetooth_wifi.sh`.** Every unit already ships a vendor file at that second path,
@@ -331,7 +351,7 @@ never noticed it was hardcoded. On a Broadcom unit the interface is `sta0` and `
 exist at all, so the identical session would fail with the radios up and perfectly healthy.
 That makes §7's Rust item load-bearing risk rather than tidiness. The mainline baseline has the same
 problem on the IW416: its interface is `mlan0` (mwifiex), so `wlan0` does not exist there either
-(`baseline/README.md` §2.5).
+(`baseline/README.md` §2.5). *(Fixed 2026-10-30: the interface is enumerated, §7.)*
 
 ### 6c. What the box does with app-pushed config
 
@@ -414,6 +434,27 @@ Broadcom and NXP currently resolve to an honest "unsupported" rather than to a w
 Making those two families work needs the extraction to resolve the dispatcher's own literal
 variable assignments within the unit's branch — tracked in §7, not claimed here.
 
+### 6e. The supervisor keeps the stack alive while a host is present (2026-10-30)
+
+Every `wireless_up` caller is an EDGE (host present, Restart-wireless, CT_RADIO on, A2 restore, the AA retry), so
+before 2026-10-30 nothing noticed a stack that died *between* edges. Measured on the IW416 baseline with the GM app
+present: `kill -9` of `btd` was never restarted (hci0 left `UP PSCAN ISCAN` with no SDP server, RFCOMM listener or
+SSP agent), and `hciconfig hci0 down` under a running `btd` left its reconnect loop failing `Host is unreachable`
+every 60 s for good. Re-powering alone does not heal the second case: the controller comes back with class 0x000000
+and an EIR without the iAP2 UUID, which only `btd`'s own bring-up writes.
+
+`tools/session_supervisor.sh` now checks every tick, only while the stack SHOULD be up (host present, wireless enabled,
+no CT_RADIO inhibit, no teardown or deferred bring-up in flight, no Android Auto hold, no wired iPhone owning the box):
+`btd` missing, or hci0 not `UP RUNNING` under a running `btd`, for 5 consecutive ticks → the Restart-wireless path
+(`wireless_down`, then the 4 s deferred `wireless_up`), next attempt no sooner than 30 s, doubling to 300 s, reset after
+120 s healthy. While the bring-up wrapper runs (before it execs `btd`) the stack counts as healthy. Measured on the
+flashed overlay (baseline/README.md §7.0f): both faults heal in 23 s with class 0x200408 and the iAP2 UUID back in the
+EIR, and the bonded phone re-links by itself.
+
+In the GM bridge role a CarPlay session does not need Bluetooth once it streams (phone → vehicle hotspot → app): the
+video ran on through each of those restarts and through a box reboot. The restart is still right, because without it
+the box cannot be reached by Bluetooth for the *next* session.
+
 ### 7. Not yet done / not yet proven
 
 * Broadcom and NXP mappings are **refused, not resolved** (§6d). Making them work requires
@@ -428,10 +469,17 @@ variable assignments within the unit's branch — tracked in §7, not claimed he
   (the `FULL` branch of `tools/ocbm_install.sh`) — but a future shipped script referencing a path the target lacks
   would still slip through.
 * A reversible radio verification gate in the baseline, run while still on NCM.
-* Rust parameterisation: `WLAN_IFACE` (`av.rs`) and `AP_IP` (`box_common::net`) from the seam. **Decided:
-  the radio seam will export the wireless interface name to the Rust side; this is planned, not done.**
+* Rust parameterisation: `WLAN_IFACE` (`av.rs`) and `AP_IP` (`box_common::net`) from the seam. **Done
+  differently, 2026-10-30: the Rust side ENUMERATES the interface itself** (`box_common::net::wlan_iface()`:
+  the first `/sys/class/net/*/phy80211`, `wlan0` first among several, `wlan0` when there is none), which is
+  the seam's own rule (`radio_hal.sh` `wlan_iface`), so no export was needed; `av.rs` passes it as carplayd's
+  `RX_IFACE` (the `WLAN_IFACE` constant is gone). `AP_IP` stays one constant (the AP layer owns the address).
   Also the identity chain (`box_identity.rs` `hardware_id()`, `iap2-core/src/message.rs` `device_suffix()`,
-  and the `/sys/class/net/wlan0/address` read in ocbmd's `bt_name_from` caller — all read `wlan0` — a
+  and the `/sys/class/net/wlan0/address` read in ocbmd's `bt_name_from` caller — all read `wlan0` *(ALL FIXED
+  2026-10-30: ocbmd's `wifi_mac()`; `hardware_id()` through `wlan_iface()`; `device_suffix()` with the same
+  rule inline, test `wlan_mac_path_enumerates_the_wifi_interface`. On the mainline baseline (IW416 `mlan0`)
+  the box's BT name, SSID suffix and MGMT_INFO name now agree, `ccpa-fe01` / `CarLink-fe01` on the bench unit;
+  before, `btd` named it after the SoC serial)* — a
   live bug on IW416 too, since `/sys/class/net/wlan0/address` is absent whenever the driver is
   unloaded, which under on-demand radios is most of the time). *(The hardcoded Raspberry Pi BT MAC that
   was listed here is fixed: `bt_driver.rs` `accessory_bt_mac()` reads sysfs, 2026-09-03.)* **Added 2026-08-16:** that same chain is why §6c's "one box, one name" is

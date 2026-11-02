@@ -264,9 +264,14 @@ Three things that will bite:
    be *strict to declare success, reluctant to destroy* — a false negative resets a working chip.
 3. **The interface name is an insmod parameter**, not a constant (`if2name=sta0`,
    `iface_name=sta`; on Broadcom `wlan0` does not exist until explicitly created). Enumerate
-   `/sys/class/net/*/wireless`; never assume `wlan0`. The Rust side still hardcodes it
-   (`WLAN_IFACE` in `av.rs` — `AP_IP` there is an address re-exported from `box_common::net`, not an interface name — plus `box_identity.rs`,
-   `message.rs`, and ocbmd's `/sys/class/net/wlan0/address` read) — unfixed, tracked in docs/wireless/01_BT_AND_RADIO.md.
+   `/sys/class/net/*/wireless`; never assume `wlan0`. The Rust side enumerates it too since 2026-10-30:
+   `box_common::net::wlan_iface()` (`/sys/class/net/*/phy80211`, `wlan0` first among several, `wlan0` when there
+   is none) feeds `RX_IFACE` in `av.rs` and `box_identity.rs` `hardware_id()`; `iap2-core` `message.rs`
+   `device_suffix()` has the same rule inline (no box-common dependency there); ocbmd's `wifi_mac()` likewise.
+   (`AP_IP` in `av.rs` is an address re-exported from `box_common::net`, not an interface name.) *(Corrected
+   2026-10-30: this said `WLAN_IFACE`, `box_identity.rs` and `message.rs` still hardcoded `wlan0`; on the mainline
+   baseline, whose IW416 interface is `mlan0`, that named the box after the SoC serial and pointed carplayd's mDNS
+   at a missing interface.)
 
 **Disassembly and on-hardware experiments are the last resort, not the first.** Over 2026-07-22 → 07-25
 this project burned several sessions — six disassembly passes and multiple deploy-test-revert hardware

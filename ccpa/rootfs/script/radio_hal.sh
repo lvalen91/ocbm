@@ -404,37 +404,23 @@ do_wifi_ap_on() {
         return 1; }
       log "wlan interface $_i up (mac $(cat /sys/class/net/$_i/address 2>/dev/null))"
 
-      # The AP layer is OURS on every variant - see the header. It carries no chipset content;
-      # RADIO_WLAN_IF tells it which interface to configure, defaulting to wlan0 so the IW416
-      # unit's behaviour is unchanged when this variable is absent.
-      #
-      # DELIBERATELY /script/radio_ap_up.sh AND NOT /script/start_bluetooth_wifi.sh. Every unit
-      # already ships a VENDOR file at that second path, so testing it for existence proves the
-      # file is there, not that it is ours - and running the vendor's copy on a stripped box is
-      # destructive: with riddleBoxCfg removed it seds an empty wpa_passphrase into
-      # /etc/hostapd.conf (persistent, on flash) and defaults WLANIP to 192.168.50.2, which is
-      # NCM's own address, then repoints the DHCP pool onto the management subnet. An
-      # unambiguous name is the guard: presence at this path means it is the owned layer.
-      [ -x /script/radio_ap_up.sh ] || {
-        log "driver is up but the owned AP layer (/script/radio_ap_up.sh) is not installed"
-        log "  NOT falling back to /script/start_bluetooth_wifi.sh - that is the vendor's copy and"
-        log "  on a stripped box it corrupts hostapd.conf and collides with the NCM subnet"
-        publish "$WLAN_STATE" "result=fail" "backend=mapped" "ap_iface=$_i" "detail=no-owned-ap-layer"
+      ap_layer_up "$_i" mapped
+      return $?
+      ;;
+    baseline)
+      # The mainline baseline's own on-demand tool (baseline/README.md §2.5): it powers the module,
+      # identifies the chip by its SDIO id, loads that chip's Wi-Fi driver (and, when the kernel
+      # image carries its DT node, the Bluetooth one) and brings the interfaces up. Idempotent.
+      log "backend=baseline -> radio up"
+      radio up 2>&1 | sed "s/^/$LOGP   /"
+      _n=0; while [ "$_n" -lt 100 ]; do wlan_iface >/dev/null 2>&1 && break; _n=$((_n+1)); sleep 0.1; done
+      _i=$(wlan_iface 2>/dev/null) || {
+        log "radio up made no wireless interface (an unsupported chip, or the driver failed: radio status)"
+        publish "$WLAN_STATE" "result=fail" "backend=baseline" "detail=no-iface"
         return 1; }
-      # RADIO_BOX_NAME is resolved HERE, not inside the AP layer, so the SSID and the Bluetooth
-      # name provably come from one decision rather than two derivations that can disagree.
-      ONDEMAND_WIFI=1 RADIO_WLAN_IF="$_i" RADIO_BOX_NAME="$(box_name)" \
-        sh /script/radio_ap_up.sh AP 2>&1 | sed "s/^/$LOGP   /"
-      _n=0; while [ "$_n" -lt 50 ]; do ap_running && break; _n=$((_n+1)); sleep 0.2; done
-      if ap_running; then
-        publish "$WLAN_STATE" "result=ok" "backend=mapped" "chipset=$RADIO_SDIO_DEVICE" \
-                "ap_iface=$_i" "ap_ip=$(ap_ip_of "$_i")" "wlan_mac=$(cat /sys/class/net/$_i/address 2>/dev/null)"
-        log "AP converged on $_i"
-        return 0
-      fi
-      publish "$WLAN_STATE" "result=fail" "backend=mapped" "ap_iface=$_i" "detail=ap-did-not-start"
-      log "AP did not start on $_i"
-      return 1
+      log "wlan interface $_i up (mac $(cat /sys/class/net/$_i/address 2>/dev/null))"
+      ap_layer_up "$_i" baseline
+      return $?
       ;;
     *)
       log "NO BACKEND for wifi on this unit - wireless unavailable (wired projection unaffected)"
@@ -445,6 +431,42 @@ do_wifi_ap_on() {
 }
 
 ap_ip_of() { ifconfig "$1" 2>/dev/null | sed -n 's/.*inet addr:\([0-9.]*\).*/\1/p' | head -1; }
+
+# The AP layer is OURS on every variant - see the header. It carries no chipset content;
+# RADIO_WLAN_IF tells it which interface to configure, defaulting to wlan0 so the IW416
+# unit's behaviour is unchanged when this variable is absent. Shared by the mapped and the
+# baseline backends (factored out of the mapped branch 2026-10-30, unchanged).
+#
+# DELIBERATELY /script/radio_ap_up.sh AND NOT /script/start_bluetooth_wifi.sh. Every unit
+# already ships a VENDOR file at that second path, so testing it for existence proves the
+# file is there, not that it is ours - and running the vendor's copy on a stripped box is
+# destructive: with riddleBoxCfg removed it seds an empty wpa_passphrase into
+# /etc/hostapd.conf (persistent, on flash) and defaults WLANIP to 192.168.50.2, which is
+# NCM's own address, then repoints the DHCP pool onto the management subnet. An
+# unambiguous name is the guard: presence at this path means it is the owned layer.
+ap_layer_up() {  # $1 = wireless interface, $2 = backend name for the state file
+  _i=$1; _be=$2
+  [ -x /script/radio_ap_up.sh ] || {
+    log "driver is up but the owned AP layer (/script/radio_ap_up.sh) is not installed"
+    log "  NOT falling back to /script/start_bluetooth_wifi.sh - that is the vendor's copy and"
+    log "  on a stripped box it corrupts hostapd.conf and collides with the NCM subnet"
+    publish "$WLAN_STATE" "result=fail" "backend=$_be" "ap_iface=$_i" "detail=no-owned-ap-layer"
+    return 1; }
+  # RADIO_BOX_NAME is resolved HERE, not inside the AP layer, so the SSID and the Bluetooth
+  # name provably come from one decision rather than two derivations that can disagree.
+  ONDEMAND_WIFI=1 RADIO_WLAN_IF="$_i" RADIO_BOX_NAME="$(box_name)" \
+    sh /script/radio_ap_up.sh AP 2>&1 | sed "s/^/$LOGP   /"
+  _n=0; while [ "$_n" -lt 50 ]; do ap_running && break; _n=$((_n+1)); sleep 0.2; done
+  if ap_running; then
+    publish "$WLAN_STATE" "result=ok" "backend=$_be" "chipset=$RADIO_SDIO_DEVICE" \
+            "ap_iface=$_i" "ap_ip=$(ap_ip_of "$_i")" "wlan_mac=$(cat /sys/class/net/$_i/address 2>/dev/null)"
+    log "AP converged on $_i"
+    return 0
+  fi
+  publish "$WLAN_STATE" "result=fail" "backend=$_be" "ap_iface=$_i" "detail=ap-did-not-start"
+  log "AP did not start on $_i"
+  return 1
+}
 
 do_wifi_ap_off() {
   caps || true
@@ -481,7 +503,10 @@ do_bt_on() {
   caps || { publish "$BT_STATE" "result=unsupported" "detail=no-descriptor"; return 3; }
 
   _d=$(hci_dev 2>/dev/null) || _d=""
-  if [ -n "$_d" ] && bt_responsive_confirmed "$_d"; then
+  # A powered-down adapter (the teardown's end state, below) answers every name read with ENETDOWN at
+  # once, so the confirmed probe can only miss: skip it and go straight to the power-up. It used to
+  # spend its 4 x 2 s retries first - measured 2026-10-30, ~8 s of every bring-up after a teardown.
+  if [ -n "$_d" ] && ! hciconfig "$_d" 2>/dev/null | grep -q "DOWN" && bt_responsive_confirmed "$_d"; then
     log "already converged ($_d responsive)"
     publish "$BT_STATE" "result=ok" "backend=$RADIO_BACKEND" "hci_dev=$_d" \
             "bt_mac=$(cat /sys/class/bluetooth/$_d/address 2>/dev/null)"
@@ -519,6 +544,29 @@ do_bt_on() {
         return 0
       fi
       publish "$BT_STATE" "result=fail" "backend=owned" "detail=bt_on.sh rc=$_rc, not responsive"
+      return 1
+      ;;
+    baseline)
+      # `radio up` loads the chip's Bluetooth driver only when the kernel image carries the chip's
+      # Bluetooth DT node (the per-radio appended DTB, baseline/README.md §2.5) and brings the HCI
+      # device up with hciup (HCIDEVUP runs the controller's HCI init). Where the chip needs its Wi-Fi
+      # firmware first (the IW416 combo image), `radio up` loads both, in its own order; the seam does
+      # not need to know. Convergence is still OUR test: a real round-trip, strict to declare success.
+      log "backend=baseline -> radio up"
+      radio up 2>&1 | sed "s/^/$LOGP   /"
+      _d=""; _n=0
+      while [ "$_n" -lt 30 ]; do
+        _d=$(hci_dev 2>/dev/null) && bt_responsive "$_d" && break
+        _n=$((_n+1)); sleep 1
+      done
+      if [ -n "$_d" ] && bt_responsive_confirmed "$_d"; then
+        bt_set_name "$_d"
+        publish "$BT_STATE" "result=ok" "backend=baseline" "hci_dev=$_d" \
+                "bt_mac=$(cat /sys/class/bluetooth/$_d/address 2>/dev/null)"
+        return 0
+      fi
+      log "radio up gave no responsive HCI device (no Bluetooth DT node in this kernel image, or the chip has none)"
+      publish "$BT_STATE" "result=fail" "backend=baseline" "detail=no responsive hci after radio up"
       return 1
       ;;
     mapped)

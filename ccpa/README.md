@@ -6,6 +6,11 @@ frozen floor. A mainline
 kernel can replace it through U-Boot's staging path, a separate track in `../baseline/`; corrected
 2026-10-20). See [`../docs/carplay/00_ARCHITECTURE.md`](../docs/carplay/00_ARCHITECTURE.md).
 
+The C2Air is a separate box with its own tree ([`../c2air/README.md`](../c2air/README.md)). The daemons
+`ocbmd`, `iap2d` and `carplayd` build for it from these same sources (`../c2air/README.md`, daemon table);
+apart from `rootfs/` and `backup/`, nothing under `ccpa/` is specific to the CCPA board. (`aa-bridge`,
+`aa-wireless` and `mfid` were not checked against the C2Air build.)
+
 ## `rootfs/` — the box-side script overlay (source of truth for the OWNED files)
 
 Mirrors on-box paths, but **deploying is not a blanket copy of this tree.** The installers copy a
@@ -72,6 +77,10 @@ Each is a sibling crate (`Cargo.toml` + `src/`), cross-built for `armv7-unknown-
 | `iap2d/` | iAP2 / CarPlay control daemon (Identify, metadata — content selection is app-driven per docs/carplay/04_CAPABILITIES_AND_CONFIG.md; today's box tier levers are interim — session management) |
 | `carplayd/` | AirPlay receiver — pairing; SETUP/RECORD relayed to the app over `CH_RTSP` (app-driven SETUP is the default on both transports per docs/carplay/04_CAPABILITIES_AND_CONFIG.md, the local response is the fallback; wireless asserts from the app-pushed YAML); forward-encrypted A/V forwarding — the box never decrypts media by design (in-binary floor `fwd_enc()` in `../crates/vendor/receiver/src/levers.rs`; `OCBM_FWD_ENC` is the current-state mechanism) — input uplink |
 | `mfid/` | **not shipped** — an ephemeral MFi-chip service for NCM bring-up: serves the cert/sign ops over TCP so a host (the Pi) can reach the coprocessor when OCBM is not the transport. Shares the same `/tmp/carplay_mfi.lock` `flock` as `ocbmd`'s `CH_MFI`, `carplayd` and `iap2d`. Staged to `/tmp` by `tools/run_mfid.sh`, refuses to start in OCBM mode, erased by a reboot |
+
+`overlay/` (2026-10-30) is not a crate: the boot hook (`etc/rc.ocbm`), ocbmd's launcher and the AP templates of the
+**OCBM overlay** for the mainline baseline — the one image that carries these daemons and the stock scripts onto a
+baseline unit, outside its GPL rootfs (`../tools/ocbm_overlay.sh` builds it; `../baseline/README.md` §2.8, §7.0e).
 
 The MFi authentication bridge and radio/link glue live in the vendor crates under `../crates/vendor/`.
 See [`../docs/carplay/01_OCBM_PROTOCOL.md`](../docs/carplay/01_OCBM_PROTOCOL.md) and [`../docs/ops/04_OPEN_ITEMS.md`](../docs/ops/04_OPEN_ITEMS.md).

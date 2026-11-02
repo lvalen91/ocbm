@@ -11,10 +11,10 @@ use sha2::{Digest, Sha256};
 /// fallbacks. A box with none readable falls back to a fixed marker (degenerate, effectively the old
 /// single-identity behavior).
 fn hardware_id() -> String {
-    for path in [
-        "/sys/class/net/wlan0/address",
-        "/sys/devices/soc0/serial_number",
-    ] {
+    // The Wi-Fi interface by enumeration (box_common::net::wlan_iface: `wlan0` on the vendor kernel,
+    // `mlan0` on the mainline baseline); the literal `wlan0` until 2026-10-30.
+    let wifi = format!("/sys/class/net/{}/address", box_common::net::wlan_iface());
+    for path in [wifi.as_str(), "/sys/devices/soc0/serial_number"] {
         if let Ok(s) = std::fs::read_to_string(path) {
             let t = s.trim();
             if !t.is_empty() {

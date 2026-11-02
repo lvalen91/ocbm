@@ -977,6 +977,26 @@ fn read_trim(path: &str) -> String {
         .unwrap_or_default()
 }
 
+/// MAC of the unit's Wi-Fi interface, whatever the driver named it: `wlan0` (rtw88, the vendor
+/// Realtek stacks), `mlan0` (mwifiex on the IW416 units, e.g. the baseline image), `sta0`, ... Any
+/// interface with a `phy80211` link is a cfg80211 wireless interface (docs/wireless/01_BT_AND_RADIO.md
+/// §"never assume wlan0"); the first one in directory order wins, `wlan0` stays the fallback path so a
+/// legacy (non-cfg80211) stack reads what it always read. Empty when there is none (radio off).
+fn wifi_mac() -> String {
+    let mut names: Vec<String> = std::fs::read_dir("/sys/class/net")
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .filter(|e| e.path().join("phy80211").exists())
+                .filter_map(|e| e.file_name().into_string().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names.sort_by_key(|n| n != "wlan0"); // stable: a wlan0 among several keeps precedence
+    let name = names.into_iter().next().unwrap_or_else(|| "wlan0".to_string());
+    read_trim(&format!("/sys/class/net/{name}/address"))
+}
+
 /// Does a process whose `comm` and argv[0] basename are as given answer to `name`?
 ///
 /// Split out of [`running_procs`] so the truncation rule is testable without a /proc to read:
@@ -1031,11 +1051,18 @@ fn running_procs(names: &[&str]) -> Vec<bool> {
     found
 }
 
-/// Rootfs `/` (total_kb, free_kb) via statvfs (no `df` spawn).
+/// (total_kb, free_kb) of the filesystem the box writes its configs to, via statvfs (no `df` spawn).
+///
+/// That is `/etc` — hostapd.conf (the 0x5703 credentials), the bond store, the AirPlay peer store — not
+/// `/` as such. On the stock firmware `/etc` IS the jffs2 rootfs, so this is the same number as before.
+/// On the mainline baseline `/` is a read-only squashfs (0 free, by design) and the OCBM overlay
+/// bind-mounts a RAM copy over `/etc` (baseline/README.md §2.8): measuring `/` there cleared
+/// BH_ROOTFS_OK forever and the GM app declared a healthy box "missing rootfs-ok" (2026-10-30). An
+/// `/etc` nobody made writable still reads 0 free, which is the right verdict.
 fn rootfs_stats_kb() -> (u64, u64) {
     unsafe {
         let mut s: libc::statvfs = std::mem::zeroed();
-        if libc::statvfs(c"/".as_ptr(), &mut s) == 0 {
+        if libc::statvfs(c"/etc".as_ptr(), &mut s) == 0 {
             let frsize = s.f_frsize as u64;
             return (
                 s.f_blocks as u64 * frsize / 1024,
@@ -3413,9 +3440,27 @@ impl Daemon {
                 // next boot IS NCM even if the reboot spawn below were to fail. Sticky: the operator
                 // returns the box over ssh (`rm /script/ncm_only; reboot`). Same file effects as
                 // `tools/ocbm_install.sh revert`.
-                let armed = std::fs::write("/script/ncm_only", b"").is_ok();
+                //
+                // A box whose rootfs has no writable /script (the mainline baseline, baseline/README.md
+                // §2.8/§7.0e: read-only squashfs, /script is a link into the RAM overlay) names the command
+                // that persists its NCM boot default in OCBM_ENTER_NCM_CMD instead (`usb-mode default ncm`,
+                // exported by the overlay's ocbmd-launch). Exit status 0 = armed. It runs synchronously on
+                // this loop for the second its flash write takes; the box reboots right after anyway.
+                let armed = match std::env::var("OCBM_ENTER_NCM_CMD") {
+                    Ok(cmd) if !cmd.trim().is_empty() => std::process::Command::new("sh")
+                        .args(["-c", &cmd])
+                        .status()
+                        .is_ok_and(|s| s.success()),
+                    _ => std::fs::write("/script/ncm_only", b"").is_ok(),
+                };
                 let _ = std::fs::remove_file("/script/ocbm_trial");
-                eprintln!("[ocbmd] mgmt: ENTER_NCM requested by host — flag armed={armed}; rebooting into NCM");
+                if armed {
+                    eprintln!("[ocbmd] mgmt: ENTER_NCM requested by host — NCM flag armed; rebooting into NCM");
+                } else {
+                    eprintln!(
+                        "[ocbmd] mgmt: ENTER_NCM requested by host — could not arm the NCM flag; NOT rebooting (status 1)"
+                    );
+                }
                 self.mgmt_ack(verb, if armed { 0 } else { 1 });
                 self.drain();
                 if armed {
@@ -3469,7 +3514,7 @@ impl Daemon {
             .next()
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
-        let wifi_mac = read_trim("/sys/class/net/wlan0/address");
+        let wifi_mac = wifi_mac();
         // Safe on this thread, unlike the ioctl: `show_address` is a sprintf of `hdev->bdaddr` under
         // no HCI lock, and kernfs makes an unregistering attribute fail the open rather than block
         // the reader. Worst case it returns "" mid-teardown.
