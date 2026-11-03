@@ -59,7 +59,7 @@ internal object OcbmExpect {
  * Name a `CH_LOG` source id. Mirrors `ocbm-proto`'s `log_source_name` exactly.
  *
  * Lives here rather than in `OcbmProto.kt` because that file restates the wire protocol and nothing
- * else (an app-owned fork of ccpa_custom's since 2026-09-11, kept in step by `tools/proto_check.py`;
+ * else (an app-owned fork of ocbm's since 2026-09-11, kept in step by `tools/proto_check.py`;
  * until then it was consumed through a symlink) — this repo restates the protocol, it does not
  * extend it. An unknown id renders
  * rather than drops: the source table grows box-side, and a host that discards lines it cannot label

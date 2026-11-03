@@ -49,7 +49,7 @@ RECT="$SPEC"
 BID=zeno.carlink.mac
 OUT=/tmp/valog/$LABEL.txt
 APP_BIN=/tmp/carlink-run/Build/Products/Debug/carlink_macOS.app/Contents/MacOS/carlink_macOS
-cd ~/Documents/carlink/ccpa_custom
+cd "$(dirname "$0")/.."   # the ocbm/ checkout root, wherever it lives
 mkdir -p /tmp/valog
 ctl() { printf '%s\n' "$1" | nc -w 3 127.0.0.1 "$CTRL_PORT" 2>/dev/null; }
 jf() { printf '%s' "$1" | python3 -c "import json,sys

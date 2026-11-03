@@ -21,7 +21,7 @@ import java.util.concurrent.atomic.AtomicLong
  * The cap is the project's closed-loop backpressure, not a buffer-size tuning knob. When a lane backs
  * up, [write] blocks the OCBM read thread; the USB pipe fills; the box's per-stream read-gate stops
  * pulling; the iPhone throttles *that* encoder. That is the designed behaviour
- * (`ccpa_custom/docs/16`, and the 24 MB lane cap in the macOS host's `OCBMAVDecrypt.swift:160-183`) —
+ * (`ocbm/docs/16`, and the 24 MB lane cap in the macOS host's `OCBMAVDecrypt.swift:160-183`) —
  * the alternative, an unbounded queue, converts a transient decode stall into unbounded host memory
  * growth and a latency spike that never recovers.
  *

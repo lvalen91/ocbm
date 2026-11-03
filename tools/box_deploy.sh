@@ -30,7 +30,7 @@
 #   tools/box_deploy.sh --return \
 #     target/armv7-unknown-linux-musleabihf/release/carplayd:/usr/sbin/carplayd
 #
-# The box is reachable as ssh host `ccpa-ncm` (see ~/.ssh/config). Key auth only; no password, and
+# The box is reachable as ssh host `ccpa-ncm` (see your ssh_config). Key auth only; no password, and
 # no `PubkeyAuthentication=no` — dropbear here has no root password set, so forcing password auth is
 # how you get a confusing "Permission denied" on a box that is working perfectly.
 set -euo pipefail

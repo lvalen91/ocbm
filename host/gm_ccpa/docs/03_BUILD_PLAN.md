@@ -6,9 +6,9 @@ for the underlying feasibility work. Wire-level session ordering lives in
 writing protocol code.
 
 Sources analyzed:
-- `~/Documents/carlink/ccpa_custom` — the OCBM stack + AirPlay receiver core (Rust) + macOS OCBM host app (Swift).
-- `~/Documents/carlink/carlink_native_personal` — the current working stock-protocol Android app (renderer/touch/UI to salvage).
-- `~/Documents/carlink/carplay_simulator` — Apple's CarPlay Simulator (protocol reference).
+- `ocbm/` (this repo) — the OCBM stack + AirPlay receiver core (Rust) + macOS OCBM host app (Swift).
+- `carlink_native_personal` (outside the repo) — the current working stock-protocol Android app (renderer/touch/UI to salvage).
+- `$OCBM_CARPLAY_SIMULATOR` (outside the repo) — Apple's CarPlay Simulator (protocol reference).
 
 ---
 
@@ -227,7 +227,7 @@ the control events CarPlay expects (Siri 5/6, media 200–205, knob 111–114, D
 ## 8. Apple reference to build against (`carplay_simulator`)
 
 - `…/iAP2MessageKit.framework/…/iap2messages-external.i2mspecarchive` — authoritative iAP2 message +
-  TLV parameter dictionary (message ids, param ids, enums). Same archive `ccpa_custom/tools/i2mspec_dump.py` reads.
+  TLV parameter dictionary (message ids, param ids, enums). Same archive `ocbm/tools/i2mspec_dump.py` reads.
 - `logs/20260731-062508/oslog-stream.log` (445 MB) — a real receiver-side CarPlay session vs an
   iOS 27 iPhone: the exact handshake ordering (Bonjour `_airplay._tcp`:7000 → pair-verify → AuthSetup →
   SessionSetup → per-stream StreamSetup → DataStream/VehicleData/MediaControl) and decoded feature-flag
@@ -322,7 +322,7 @@ SAF — before it becomes product code. A failing brick then reports rather than
 right posture for protocol bring-up where most failures are silent (§8 of `05_SESSION_FLOW.md` lists
 nine that produce no diagnostic at all).
 
-**Keep the prober permanently.** This mirrors how `ccpa_custom` itself worked: `host/ocbm-host` (a CLI
+**Keep the prober permanently.** This mirrors how `ocbm` itself worked: `host/ocbm-host` (a CLI
 instrument with `hello`/`mfi`/`console`/`avdec`/`session`/`pull` subcommands) and `host/MacHost` (the
 product) both still exist, and the CLI is what gets reached for when the product misbehaves. Graduate a
 clean app out of the foundation once it holds; don't throw the instrument away.
@@ -348,7 +348,7 @@ value. **Device-proven** — the phone leads with `pair-verify` instead of `pair
 ### Track B — gated on hardware (COMPLETE — see §1–§2 of the runbook)
 
 **B0. Flash a spare CCPA adapter** to the OCBM state (PID 2d00, `ocbmd` + `wireless`;
-`ccpa_custom/boards/ccpa-imx6ul/rootfs/script/ocbm_boot.sh` + `install_fhs.sh`).
+`ocbm/boards/ccpa-imx6ul/rootfs/script/ocbm_boot.sh` + `install_fhs.sh`).
 
 **B1. USB claim + OCBM client.** `UsbManager` claim of `0x1314:0x2d00`, interface 0, bulk endpoints
 discovered by walking the interface (IN `0x81` / OUT `0x01` — device-measured; do not hardcode), no AOA

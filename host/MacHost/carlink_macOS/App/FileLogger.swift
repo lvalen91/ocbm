@@ -9,7 +9,7 @@ import Synchronization
 /// pressure — a long CarPlay session can lose the first minute of history before the
 /// user gets to export. This logger runs a background task that polls `OSLogStore`
 /// every ~2 s and appends new `com.carlink.*` entries to a text file under
-/// `~/Library/Logs/Carlink/`. The file:
+/// the user Library's `Logs/Carlink/`. The file:
 ///
 ///   • survives the app quitting (the export path later reads from here),
 ///   • survives an app crash up to the last fsynced batch,
@@ -277,7 +277,7 @@ final class FileLogger: Sendable {
 
     // MARK: - Pruning
 
-    /// Delete log files older than 14 days to keep ~/Library/Logs/Carlink tidy.
+    /// Delete log files older than 14 days to keep the Logs/Carlink directory tidy.
     private func pruneOldLogs() {
         let cutoff = Date().addingTimeInterval(-14 * 86_400)
         guard let entries = try? FileManager.default.contentsOfDirectory(

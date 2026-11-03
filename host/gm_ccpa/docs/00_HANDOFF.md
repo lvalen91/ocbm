@@ -9,9 +9,9 @@ protocol code), then `evidence/session_2026-08-05/WORKING_SESSION.md`
 `11_HARDENING_PLAN.md` (live landed-vs-deferred ledger — more current than this file for the hardening
 queue) and `13_AUDIO_ROUTING.md` (audio design + build status).
 
-Project root: `~/Documents/carlink/ccpa_custom/host/gm_ccpa` (this project was merged into `ccpa_custom`
-on 2026-09-08 — see §9). The `evidence/` archive is NOT under this root: it lives in the standalone
-checkout at `~/Documents/carlink/old/gm_ccpa/evidence/`. Every bare `evidence/...` path in this doc set
+Project root: `ocbm/host/gm_ccpa` (this project was merged into `ocbm`
+on 2026-09-08 — see §9). The `evidence/` archive is NOT under this root: it lives in the archived standalone
+`gm_ccpa` checkout's `evidence/` (outside the repo). Every bare `evidence/...` path in this doc set
 resolves there.
 
 
@@ -76,7 +76,7 @@ behaviour-preserving** (`AacPlayer` publish/duck/stop rework; `SessionSupervisor
 visit is a **deploy-and-verify** visit. Do not mark any ledger row device-verified from the
 2026-09-09 capture — it was taken from the older build.
 
-**3. Two adapters, interchangeable, one chipset difference.** Both run identical `ccpa_custom` OCBM
+**3. Two adapters, interchangeable, one chipset difference.** Both run identical `ocbm` OCBM
 firmware on identical hardware except the WLAN part — NXP IW416 and Realtek RTL8822CS — abstracted by
 the firmware's `radio_caps`. Nothing in this app is chipset-aware. Consequences worth knowing before
 debugging: the Realtek box must load its WLAN driver before Bluetooth will attach, so `wlan0` exists
@@ -138,7 +138,7 @@ Both rects are static constants for this panel — nothing measured or awaited a
 1. **`viewArea`/`safeArea` are NOT the mechanism for showing head-unit chrome.** They are Apple's
    answer to non-rectangular or trim-obscured panels: the view area is where CarPlay draws (including
    into a curved void), the safe area is the inset that keeps interactive controls out of it. This is
-   documented in `ccpa_custom/docs/carplay/06_AV_PIPELINE.md` with the WWDC 2019-252 quotes. Revealing
+   documented in `ocbm/docs/carplay/06_AV_PIPELINE.md` with the WWDC 2019-252 quotes. Revealing
    GM's UI is purely an AAOS windowing question with no CarPlay protocol involvement.
 2. **The static-plist path bypasses the generator — third instance.** `events::switch_view_area`
    refuses any index >= `info::declared_view_area_count()`, a static written only inside
@@ -161,7 +161,7 @@ Both rects are static constants for this panel — nothing measured or awaited a
 
 ## Migrated to current OCBM + box log passthrough, package squat reverted (2026-09-08) — TRUCK-VERIFIED
 
-The box side (`ccpa_custom`) had moved on; this session brought the app up to it and proved the whole
+The box side (`ocbm`) had moved on; this session brought the app up to it and proved the whole
 chain on the head unit with a real iPhone. **The subscribe config did not need to change** — current
 box code still reads `wifi_ap` / `wifi_ssid` / `wifi_pass` / `wifi_channel` in
 `session_supervisor.sh:apply_host_wifi_creds` on the `host_present` 0->1 edge, and still sources the
@@ -247,14 +247,14 @@ restored-session path put the box's mirrors and the supervisor's transitions in 
 
 `netprobe_app/app/src/main/java/zeno/gmccpa/ocbm/OcbmProto.kt` is a regular file in `package
 zeno.gmccpa.ocbm`. From 2026-08-31 it was a relative symlink into
-`ccpa_custom/host/CarlinkAndroid/app/src/main/kotlin/com/carlink/ocbm/OcbmProto.kt` ("edit the protocol
+`ocbm/host/CarlinkAndroid/app/src/main/kotlin/com/carlink/ocbm/OcbmProto.kt` ("edit the protocol
 once, in the main project"), which made sense when gm_ccpa was a separate checkout and did not once it
 was in-tree: CarlinkAndroid was dormant and behind the current OCBM protocol (it has been active since 2026-09-18, see its OCBMANDROID.md), and this app and the macOS
 host are the implementations that ship — the link pointed ownership the wrong way. The fork was born
 byte-identical to the CarlinkAndroid copy except the package line, so any later divergence is a
 deliberate edit here. Consequences for anyone working here:
 
-- `crates/ocbm-proto` is still canonical for the wire; `ccpa_custom/tools/proto_check.py` now checks
+- `crates/ocbm-proto` is still canonical for the wire; `ocbm/tools/proto_check.py` now checks
   this file by default (no root argument — it rejects one) and `tools/test.sh` Tier-0 runs it.
 - Same-package now, so `OcbmFraming`, `OcbmProbe` and `OcbmClient` no longer import it; the consumers
   outside the package (`logging/SessionSummary`, `MainActivity`, `SessionSupervisor`,
@@ -381,13 +381,13 @@ Universal fallback: reinstall the golden APK (**corrected 2026-10-08:** needs `u
 **Hotspot credentials (corrected 2026-10-08).** This note used to call the head-unit credential prefilled in
 `Ui.kt` a "deliberate placeholder". Per plan v5.7 OD-7A it was a real SSID/passphrase pair, present in git history
 (local only; the repo has no remote) and once in a doc. Owner decision 2026-10-07: no rotation, no history scrub;
-the compiled-in defaults are removed (blank first run + dialog). `ccpa_custom boards/rpi4-aaos/evidence/hostapd_5g.conf` stays
+the compiled-in defaults are removed (blank first run + dialog). `ocbm boards/rpi4-aaos/evidence/hostapd_5g.conf` stays
 an accepted bench placeholder (2026-08-31). The docs no longer print the SSID or passphrase.
 
 
 - **`CT_BOX_HEALTH` bit 0 (`BH_HCI_PRESENT`) is the first read when Bluetooth does nothing.** A healthy
   OCBM link, a proven MFi relay and `CT_SUBSCRIBE` can all succeed while `hci0` never exists. Full
-  write-up: `ccpa_custom` `docs/ops/06_CORRECTIONS_LEDGER.md` R-20W-5, `12_OBSERVED_FLOW.md` Phase 3.
+  write-up: `ocbm` `docs/ops/06_CORRECTIONS_LEDGER.md` R-20W-5, `12_OBSERVED_FLOW.md` Phase 3.
   `tools/ocbm_push.sh` is **not** an install (its default set omits the radio scripts, and now warns);
   use `ocbm_install.sh --full`.
 - **Box logs reach the app over OCBM, not UART.** `OcbmProbe` follows `/tmp/{bt,wlan,wl,supervisor,
@@ -428,15 +428,15 @@ an accepted bench placeholder (2026-08-31). The docs no longer print the SSID or
 - **In-motion display is proven ELIGIBLE, not proven working.** Preconditions confirmed on the truck
   (Play-attributed install, `distractionOptimized=true`, `canDrawOverlays=true`); every capture so far
   was parked. Re-test in motion.
-- **`ccpa_custom` is a PATH dependency — it compiles that checkout's working tree, not a pinned rev.**
+- **`ocbm` is a PATH dependency — it compiles that checkout's working tree, not a pinned rev.**
   Already bitten once: upstream flipped `OCBM_FWD_ENC` to forward-encrypted-ON by default; this app
   decrypts on-box and never set the var, so seams would have silently received encrypted frames. Fixed
-  by setting `OCBM_FWD_ENC=0` in `JNI_OnLoad`. **Any `ccpa_custom` advance requires a rebuild plus
+  by setting `OCBM_FWD_ENC=0` in `JNI_OnLoad`. **Any `ocbm` advance requires a rebuild plus
   T-REG**, and a re-scan of the `receiver`/`pairing`/`mfi`/`ocbm-proto` diffs.
 - **Logcat boots effectively dead.** `setprop persist.log.tag V` + `logcat -G 16M` before concluding
   anything from silence.
 - **Bluetooth is the single point of failure** — no cable fallback. A BT drop mid-session is total
-  session loss while the phone is still on the hotspot. `ccpa_custom` docs 37/40/41/51 are a history of
+  session loss while the phone is still on the hotspot. `ocbm` docs 37/40/41/51 are a history of
   BT bring-up fixes; read before debugging blind.
 - **The truck is the owner's daily driver** — changes must stay reversible; confirm before anything
   destructive.
@@ -445,7 +445,7 @@ an accepted bench placeholder (2026-08-31). The docs no longer print the SSID or
 
 **Hard cap: 10 files in `docs/`, enforced by `tools/test.sh` (`DOC_MAX=10`). Currently 9.**
 
-Cut from 15 to 10 on 2026-08-31. `ccpa_custom` has no cap and holds 65 documents; on 2026-08-28 a
+Cut from 15 to 10 on 2026-08-31. `ocbm` has no cap and holds 65 documents; on 2026-08-28 a
 superseded section there routed a fix to a script nothing calls. Models skim, and a stale paragraph in
 an authoritative-looking file is indistinguishable from a live one. Fewer files makes correcting the
 right one the path of least resistance.
@@ -509,9 +509,9 @@ non-issue — coarse-grained, zero-copy `ByteBuffer`s, decode is HW `MediaCodec`
 
 | Path | Role | Key reuse |
 |---|---|---|
-| `~/Documents/carlink/ccpa_custom` | Rust OCBM stack + AirPlay receiver core + macOS host | JNI the `receiver`/`pairing`/`rtsp`/`mfi`/`metadata`/`iap2-core` crates; `crates/ocbm-proto`; `host/MacHost` = Kotlin OCBM-client template |
-| `~/Documents/carlink/carlink_native_personal` | stock-protocol Kotlin app (works today) | UI theme + touch model + `video/H264Renderer.java` (feedDirect) + Media3/PCM audio stack salvaged verbatim/near-verbatim |
-| `~/Documents/carlink/carplay_simulator` | Apple protocol reference | iAP2 msg/TLV dict, real receiver-session oslog captures, `VDCSchema-External.json` |
+| `ocbm/` (this repo) | Rust OCBM stack + AirPlay receiver core + macOS host | JNI the `receiver`/`pairing`/`rtsp`/`mfi`/`metadata`/`iap2-core` crates; `crates/ocbm-proto`; `host/MacHost` = Kotlin OCBM-client template |
+| `carlink_native_personal` (outside the repo) | stock-protocol Kotlin app (works today) | UI theme + touch model + `video/H264Renderer.java` (feedDirect) + Media3/PCM audio stack salvaged verbatim/near-verbatim |
+| CarPlay Simulator (`$OCBM_CARPLAY_SIMULATOR`, outside the repo) | Apple protocol reference | iAP2 msg/TLV dict, real receiver-session oslog captures, `VDCSchema-External.json` |
 
 Built from scratch, no salvage: the OCBM/wireless facade, AAC/AAC-ELD codec stage, the avcC→Annex-B
 shim, a separate HEVC renderer (the salvage app is H.264-only PCM).
@@ -523,16 +523,16 @@ shim, a separate HEVC renderer (the salvage app is H.264-only PCM).
   `carlink_native_personal`). Do not confuse it with this project (applicationId `android.car.usb.handler`, classes `zeno.gmccpa.*`).
 - **`uart_cmd.sh` signature:** `uart_cmd.sh OUTFILE SECONDS 'command'`. Send one or two short commands
   per call — long compound commands over UART get truncated/garbled. **This means
-  `ccpa_custom/scratchpad/uart_cmd.sh` specifically** — a different, incompatible `uart_cmd.sh` also
-  exists at `ccpa_custom/host/uart_cmd.sh` (`Usage: uart_cmd.sh "shell command" [read_seconds]` —
+  `ocbm/scratchpad/uart_cmd.sh` specifically** — a different, incompatible `uart_cmd.sh` also
+  exists at `ocbm/host/uart_cmd.sh` (`Usage: uart_cmd.sh "shell command" [read_seconds]` —
   command first, seconds optional, no outfile argument); running that one against this doc's examples
   fails confusingly rather than loudly (found 2026-09-09).
-- **Mac build toolchain:** Android SDK `~/Library/Android/sdk` (platforms 35–37), kotlinc 2.3.10.
+- **Mac build toolchain:** Android SDK `$ANDROID_HOME` (platforms 35–37), kotlinc 2.3.10.
   Gradle-free build via `tools/build_apk.sh` (kotlinc→d8→aapt2→zipalign→apksigner; Java 21 fights AGP
   7.4). **Compiles against `android-32`** (the unit's real API level, since `11` R0) — `android-35` let
   API 33+ symbols resolve at build time and `NoSuchMethodError` on the truck. Rust core: NDK
   `30.0.15729638`, target `x86_64-linux-android` (the head unit is x86_64, not arm64), **not**
-  `cargo-ndk` (panics on this workspace) — recipe in `06` §6.3. Use `~/.cargo/bin/cargo`; Homebrew's
+  `cargo-ndk` (panics on this workspace) — recipe in `06` §6.3. Use rustup's `$CARGO_HOME/bin/cargo`; Homebrew's
   cargo shadows rustup and cannot add cross-targets.
 - **APKs:** `tools/build_apk.sh` emits `apk/gmccpa-debug-<sha>.apk` and repoints
   no "latest" symlink — it prints the exact path and a ready-made `adb install` line instead
@@ -550,7 +550,7 @@ shim, a separate HEVC renderer (the salvage app is H.264-only PCM).
 
 | What | Restore |
 |---|---|
-| `/script/session_supervisor.sh` patched (`wifi_ap` gate, credential injection) | `git checkout tools/session_supervisor.sh` in `ccpa_custom`, then `tools/uart_push.sh` |
+| `/script/session_supervisor.sh` patched (`wifi_ap` gate, credential injection) | `git checkout tools/session_supervisor.sh` in `ocbm`, then `tools/uart_push.sh` |
 | `/etc/hostapd.conf` rewritten with vehicle creds | `cp /etc/hostapd.conf.stock /etc/hostapd.conf` |
 | `/tmp/no_escalate` inhibits the reboot ladder | tmpfs — clears itself on next boot, re-assert every session |
 
@@ -593,7 +593,7 @@ docs/                      reading order: 04 -> 05 -> evidence/session_2026-08-0
                            04 AirPlay/pair-setup · 05 codecs · ios/ · session_2026-08-05/ (the
                            working-session corpus). Lives in the standalone gm_ccpa archive.
 netprobe_app/              the Kotlin app: ocbm/ · pair/ · av/ · CarPlayRx · MainActivity (instrument)
-native/carplay-jni/        the Rust core — JNI over ccpa_custom's receiver/pairing/mfi crates
+native/carplay-jni/        the Rust core — JNI over ocbm's receiver/pairing/mfi crates
 apk/                       gitignored build output, empty on a fresh clone:
                            gmccpa-debug-<sha>.apk builds; no 'latest' symlink.
                            v4.0 = GOLDEN / rollback target — in the archive, not here.
@@ -604,11 +604,11 @@ reference/                 debloat script · removed_packages.txt · kept_packag
 
 Git: tag `baseline-2026-08-05-working` is the golden commit; each hardening release is its own commit
 (`R0` `df0cedc` → `R4 partial` `43f41b0`), so a truck failure bisects to a task. **Those hashes and that
-tag belong to the standalone `gm_ccpa` repo.** This project was merged into `ccpa_custom` at
+tag belong to the standalone `gm_ccpa` repo.** This project was merged into `ocbm` at
 `host/gm_ccpa` on 2026-09-08 via `git subtree add`, which preserved the commits but **rewrote every
-hash** — the tag was not carried across. To bisect or roll back by tag, use the standalone checkout at
-`~/Documents/carlink/old/gm_ccpa/`, which is the archive of record for history, `evidence/` and the
+hash** — the tag was not carried across. To bisect or roll back by tag, use the archived standalone `gm_ccpa`
+checkout (outside the repo), which is the archive of record for history, `evidence/` and the
 golden APKs. Do not delete it.
 
-Cross-project memory: the Claude memory `direct-wifi-carplay-aaos` (in the `ccpa_custom` project's
-memory dir) carries the full device-proven history.
+Cross-project memory: the Claude memory `direct-wifi-carplay-aaos` (in this project's
+memory) carries the full device-proven history.

@@ -745,7 +745,7 @@ Real builds need a Linux host (the Lima VM): `make gcc ${CROSS_COMPILE}gcc ${CRO
 bzip2 patch bc flex bison perl file awk sed grep mksquashfs depmod` (`build.sh`, the tool check after
 sourcing `board.env`), plus `pkg-config` for mtd-utils and iw/libnl and `tic`/`infocmp` (Debian
 `ncurses-bin`, generate ncurses' built-in terminal entries) for `RADIO_TOOLS=1`. Output goes to
-`TOP=/tmp/ccpa-baseline-build` (the script refuses anything under `~/Documents`, per CLAUDE.md). No
+`TOP=/tmp/ccpa-baseline-build` (the script refuses anything inside the working tree, per CLAUDE.md). No
 toolchain is downloaded by the script. The measured build used a Debian trixie arm64 chroot inside the
 Alpine `ccpa-build` VM (`apt install gcc-arm-linux-gnueabihf make bc bison flex libssl-dev libelf-dev
 squashfs-tools cpio xz-utils bzip2 device-tree-compiler python3 curl file patch perl kmod pkgconf
@@ -761,7 +761,7 @@ sh baseline/build.sh userspace                     # musl, BusyBox full+recovery
                                                    # RADIO_TOOLS: libnl, iw, wpa_supplicant, ncurses, readline, BlueZ tools
 sh baseline/build.sh measure                       # kernels nousb, recovery-usb-vfat, default-nossh, default; cap check
 sh baseline/build.sh kernel                        # the chosen variant, one image per radio DTB
-sh baseline/build.sh [AUTHORIZED_KEYS=~/.ssh/id_ed25519.pub] [ROOT_PASSWORD_HASH='$6$...'] rootfs
+sh baseline/build.sh [AUTHORIZED_KEYS=<your-ssh-public-key.pub>] [ROOT_PASSWORD_HASH='$6$...'] rootfs
 sh baseline/common/tools/selftest.sh               # host regression checks (no device)
 ```
 
@@ -872,7 +872,7 @@ superseded by revision 7. Revision 7 (2026-10-30): `…/20261030/rev7/` (`rootfs
 + `.sha256` = the flashed `a5435446…`, `build1/` = the superseded `793d2cb4…`, `ocbm-accessory`, `hostapd`, the OCBM overlay
 images `ocbm-overlay-full-20261030T2119Z.img` (on the unit) and `ocbm-overlay-minimal-20261030T2013Z.img` (+ `.sha256`), `logs/`:
 `build8-rootfs.log`, `selftest8b.log`, `selftest8c.log`, `hostapd.log`, `qemu-rootfs8.log`); on the unit (§7.0e). Overlay
-images are rebuilt by `tools/ocbm_overlay.sh` into `~/.cache/carlink-artifacts/ocbm-overlay/`.
+images are rebuilt by `tools/ocbm_overlay.sh` into `$OCBM_CACHE/carlink-artifacts/ocbm-overlay/`.
 
 > **Paths as of 2026-11-02:** `ccpa/rootfs` is now `boards/ccpa-imx6ul/rootfs`; `ccpa/overlay` is `boards/ccpa-imx6ul/overlay`; `ccpa/<daemon>` (ocbmd, iap2d, carplayd, mfid, aa-bridge, aa-wireless) is `box/<daemon>`; `accessory_init/` is `boards/ccpa-imx6ul/tools/`. The records below (§7.0c-§7.0f) keep the paths they were written with.
 

@@ -2471,7 +2471,7 @@ fn spawn_screen(
                 }
             };
         }
-        // COMMITTED MODEL (ccpa_custom): by DEFAULT (unless OCBM_FWD_ENC is explicitly disabled), do NOT
+        // COMMITTED MODEL (ocbm): by DEFAULT (unless OCBM_FWD_ENC is explicitly disabled), do NOT
         // decrypt — forward the encrypted frames + the
         // key to the seam so the HOST app decrypts. Wire (each a forward_screen length-prefixed msg):
         //   key:   [SEAM_MAGIC "SEAV"][0x00][key.output 32B][scid 8B LE]

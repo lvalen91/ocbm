@@ -7,7 +7,7 @@
 //! connection target: claims `wireless`, brings Bluetooth up while held, and goes quiet (not powers
 //! off) the moment a wired session preempts it.
 //!
-//! PORT NOTE (ccpa_custom): the arbiter SERVER doesn't exist yet (the box's wired supervisor is the
+//! PORT NOTE (ocbm): the arbiter SERVER doesn't exist yet (the box's wired supervisor is the
 //! shell `session_supervisor.sh`, not a Rust `carplayd`). Until it does, an ABSENT arbiter socket is
 //! treated as "granted, standalone" so the Bluetooth layer is testable now; the real arbiter wires in
 //! with the dual-transport supervisor (docs/wireless/00_WIRELESS_CARPLAY.md).

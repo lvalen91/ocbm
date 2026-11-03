@@ -11,18 +11,19 @@ Package `com.carlink.callsim`, minSdk 31, no third-party dependencies. Logcat ta
 
 ```sh
 cd host/CallSim
-~/.claude/bin/bt ./gradlew assembleDebug
-# APK: ~/.cache/gradle-builds/callsim/app/outputs/apk/debug/app-debug.apk
+./gradlew assembleDebug
+# APK: $OCBM_CACHE/gradle-builds/callsim/app/outputs/apk/debug/app-debug.apk
 ```
 
 `gradlew` and `gradle/` are symlinks into `../CarlinkAndroid` (same Gradle 9.6.1 wrapper,
 AGP 9.2.1 with built-in Kotlin, JDK 21 daemon toolchain). Build output goes to
-`~/.cache/gradle-builds/callsim` for the same iCloud-sync reason as CarlinkAndroid.
+`$OCBM_CACHE/gradle-builds/callsim` (outside the working tree; `${TMPDIR:-/tmp}/ocbm-cache` when
+`OCBM_CACHE` is unset) for the same cloud-sync reason as CarlinkAndroid.
 
 ## Install and grant
 
 ```sh
-adb install -r ~/.cache/gradle-builds/callsim/app/outputs/apk/debug/app-debug.apk
+adb install -r "${OCBM_CACHE:-${TMPDIR:-/tmp}/ocbm-cache}/gradle-builds/callsim/app/outputs/apk/debug/app-debug.apk"
 adb shell pm grant com.carlink.callsim android.permission.RECORD_AUDIO
 adb shell pm grant com.carlink.callsim android.permission.POST_NOTIFICATIONS
 adb shell pm grant com.carlink.callsim android.permission.BLUETOOTH_CONNECT   # only for the BT device name in logs

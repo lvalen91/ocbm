@@ -172,7 +172,7 @@ class MainActivity : Activity() {
      * can commit after we sample it (see UsbAttachActivity's "process age" note), which is why
      * UsbBulkTransport polls hasPermission() instead of trusting this. (Until 2026-09-08 the
      * app installed as `android.car.usb.handler`, the GM USB fixed-handler squat — see the manifest
-     * header + `ccpa_custom/docs/host/01_ANDROID_AND_AAOS.md` §"GM AAOS USB permission handler". That
+     * header + `ocbm/docs/host/01_ANDROID_AND_AAOS.md` §"GM AAOS USB permission handler". That
      * squat was SUPPOSED to make the framework grant our UID USB permission silently on every attach;
      * corrected 2026-09-10, it did not — the app still needed the user to grant adapter permission,
      * which is why it was reverted. The squat was reverted; the install package was `zeno.gmccpa`

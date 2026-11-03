@@ -267,7 +267,7 @@ Two habits that actually catch it, both now in the code:
 **`docs/boards/04_IMAGE_REBUILD_GUIDE.md` is the actionable version**, organised by where each change
 goes in the AOSP tree, with per-item confidence and post-rebuild verification commands.
 `docs/boards/04_IMAGE_REBUILD_GUIDE.md` ("Measured notes") holds the device observations behind it, and the earlier round is in
-`/Volumes/stuff/rpi/aaos/docs/os-corrections-2026-08-16.md` (external volume).
+the earlier Pi AAOS port workspace's `os-corrections-2026-08-16.md` (outside this repo).
 
 The two with the largest payoff both **delete code this port had to write**: `CONFIG_BT_RFCOMM=y`
 removes `rfcomm_uspace.rs` entirely, and fixing the Wi-Fi vendor HAL's `setCountryCode` would let

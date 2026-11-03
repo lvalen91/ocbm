@@ -46,7 +46,7 @@ CAR_PROJECTION`, `ACCESS_CAR_PROJECTION_STATUS`, `CAR_NAVIGATION_MANAGER`,
 unobtainable by a third-party app on a locked unit (the same `/system` write / signature barrier
 recorded below for `MANAGE_USB`). `CAR_INFO` is the one exception, `normal`. Separately,
 `CarUxRestrictionsManager` listening and `CarAppFocusManager` focus claims need NO permission at
-all. The public SDK jar (`~/Library/Android/sdk/platforms/android-35/optional/android.car.jar`)
+all. The public SDK jar (`$ANDROID_HOME/platforms/android-35/optional/android.car.jar`)
 exposes 55 classes and contains neither `CarProjectionManager` nor `ClusterHomeManager` — both are
 `@SystemApi`, which is why `car-system-stubs/` exists as a compile-only shim for `:projection` and
 was never a route to a runtime grant.
@@ -129,7 +129,7 @@ host-mode vendor device (`0x1314:0x2d00`) with no kernel driver and no privilege
 also why GM never noticed — everything GM ships is privileged and routes around the broken handler.
 
 **Log-confirmed unique (POTATO capture, 2026-08-17).** A sweep of ~4.9 GB of real `adb logcat` from this
-unit (43 boots, `/Volumes/POTATO/logcat`) found `Default USB handling package (android.car.usb.handler)
+unit (43 boots, the POTATO capture drive's `logcat/`, outside the repo) found `Default USB handling package (android.car.usb.handler)
 not found` **1,176 times and it is the ONLY variant** of the "handling package (X) not found" grant
 signature — no sibling handler is broken this way. 148 packages log as "allowlisted but not present," but
 that set is inert for squatting (test apps, RRO theme overlays, stripped stock apps — nothing consumes
@@ -187,7 +187,7 @@ change makes a persistent grant miss. See `../carplay/00_ARCHITECTURE.md`.
 
 ### 2026-10-07 re-analysis — why the squat "worked, then stopped", and the adb-once route
 
-Sources: Y181 `services.jar` jadx at `/Volumes/stuff/virtual-machines/gm-x86_64/gm_emu/hy/re/services.jadx`
+Sources: Y181 `services.jar` jadx in the maintainer's GM emulator workspace (outside the repo), `gm_emu/hy/re/services.jadx`
 (md5 `b1e33fcdb798590eef43e485f8aedc58`, from the `y181gm` emulator tree, `com/android/server/usb/*`);
 `DeviceFilter` from the same tree's `framework.jar`; GM SystemUI jadx in the same dir; live truck
 data `/tmp/ccpa_sess/allpkg_B.txt` (`dumpsys package`, 2026-10-06) and `/tmp/ccpa_sess/logcat_cp10.txt`
@@ -226,9 +226,9 @@ live package dump. The device number changes on every re-enumeration (`001/007` 
    the time in the field … never reproducible with a Mac attached".
 
 Corroboration on another GM image (not the truck): the CT5 real-kernel emulator log
-`/Volumes/stuff/misc/research/GM_research/aaos/gm_aaos/realk/run/ccpa1.log:12504` shows `…not found
+in the maintainer's GM research archive (outside the repo), `gm_aaos/realk/run/ccpa1.log:12504`, shows `…not found
 for user UserHandle{0}` before `switchUser | user: 10` at `:13846`. [UNVERIFIED on the truck]: no
-truck cold-boot log is on this machine (the `/Volumes/POTATO` capture cited in
+truck cold-boot log is on this machine (the POTATO capture drive cited in
 `gminfo_resources/analysis/platform_faq.md:72-75` is not mounted). Also unknown: whether the box
 enumerates before or after the user switch on a real ignition cycle, and how GM suspend/resume affects
 re-enumeration.
@@ -275,7 +275,7 @@ re-enumeration.
 - [SRC] It is invalidated by: an uninstall+reinstall (new uid; no pruning code was found), a different
   box or different descriptor strings or serial, and a different Android user.
 - The call requires the device to be attached once, from an `app_process` helper running as shell
-  (same pattern as `~/carlink/btctl`), using uid = `zeno.gmccpa`'s user-10 uid and user 10.
+  (same pattern as the separate `btctl` tool), using uid = `zeno.gmccpa`'s user-10 uid and user 10.
 - Writing the helper is a code task.
 
 **Bench test (read-only first):**

@@ -80,9 +80,9 @@ because `rustc`/`cargo` resolved to the **Homebrew** Rust, which ships std for t
 target — it was simply never on `PATH`. The error names the target, not the toolchain, which is what
 makes it expensive.
 
-Fixed by removing the Homebrew formula (nothing depended on it) and sourcing `~/.cargo/env` from
-**both** `~/.zshrc` and `~/.zshenv`. Both are needed and the second is the one that is easy to miss:
-`~/.zshrc` runs for interactive shells only, so without the `~/.zshenv` line every scripted or
+Fixed by removing the Homebrew formula (nothing depended on it) and sourcing rustup's `$CARGO_HOME/env` from
+**both** `.zshrc` and `.zshenv`. Both are needed and the second is the one that is easy to miss:
+`.zshrc` runs for interactive shells only, so without the `.zshenv` line every scripted or
 non-interactive build — which is where the box cross-builds actually run — still finds no `cargo`.
 
 ## 2. The bootstrap protocol — recovered, not guessed
@@ -308,7 +308,7 @@ bootstrap half was the new work.
 
 ### Bluetooth control without touching the screen
 
-`~/carlink/btctl` (built by a parallel effort, 2026-09-01) drives the phone's Bluetooth over adb with
+`btctl` (a separate tool outside the repo, built by a parallel effort, 2026-09-01) drives the phone's Bluetooth over adb with
 no root and no screen taps, which is what makes an automated bootstrap loop possible at all:
 
 ```
@@ -320,7 +320,7 @@ btctl ui dump | tap <regex> | wait <regex> [s]
 ```
 
 `btctl accept` is the relevant one: our box initiates, so the phone raises the consent prompt, and
-this grants it without a human. Run `~/carlink/btctl/build.sh` once, and again after any phone wipe.
+this grants it without a human. Run btctl's own `build.sh` once, and again after any phone wipe.
 
 It works because `com.android.shell` (uid 2000) holds `BLUETOOTH_PRIVILEGED` and `BLUETOOTH_STACK`,
 and a dex in `app_process` runs at that privilege with the full `BluetoothAdapter` API —

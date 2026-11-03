@@ -153,7 +153,7 @@ object AacCsd {
 
     /**
      * AAC-ELD ASC as the shipping fdk-aac encoder actually emits it for the 16 kHz mono Siri/telephony
-     * stream (`ccpa_custom/docs/50`): SBR enabled by fdk auto-mode, frameLength 480. NOT the
+     * stream (`ocbm/docs/50`): SBR enabled by fdk auto-mode, frameLength 480. NOT the
      * `f8f03000` the older docs claim. Device-confirmed, so it is returned verbatim rather than
      * synthesised.
      */

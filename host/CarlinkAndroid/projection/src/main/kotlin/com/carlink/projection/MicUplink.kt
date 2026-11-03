@@ -421,7 +421,7 @@ class MicUplink(
                     "which is why this needs its own detector. Confirm with " +
                     "`logcat -s AHAL_StreamAlsa` (\"inserting N frames of silence\") and " +
                     "/proc/asound/card*/pcm*c/sub0/status. THIS IS A HAL/USB FAULT — AudioRecord " +
-                    "buffer sizing and read cadence cannot affect it; see pi/docs/02.",
+                    "buffer sizing and read cadence cannot affect it; see docs/boards/04_IMAGE_REBUILD_GUIDE.md, Measured notes.",
             )
         }
         if (levelPeak < INAUDIBLE_PEAK && !silenceDetected) {
@@ -430,7 +430,7 @@ class MicUplink(
                 "microphone level is inaudible — the phone will hear nothing. Check which input " +
                     "device AudioRecord actually opened (dumpsys audio, /proc/asound/card*/pcm*c). " +
                     "NOTE: do NOT assume ro.boot.audio.tinyalsa.simulate_input is the cause — that " +
-                    "diagnosis was tested and retracted, see pi/docs/02 §1.",
+                    "diagnosis was tested and retracted, see docs/boards/04_IMAGE_REBUILD_GUIDE.md, Measured notes.",
             )
         }
         levelSamples = 0

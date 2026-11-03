@@ -1,5 +1,5 @@
 #!/bin/sh
-# ccpa_custom: owned -- audited & adopted from stock; part of the open CCPA userspace.
+# ocbm: owned -- audited & adopted from stock; part of the open CCPA userspace.
 . /etc/profile
 umask 022
 echo "----------------start ssh----------------"

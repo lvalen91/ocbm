@@ -10,7 +10,7 @@ members = ["crates/ocbm-proto", "crates/box-common", "crates/bt-common", "box/oc
     # with no board-specific changes. See boards/c2air-v821b/README.md.
     "boards/c2air-v821b/btattach"]
 # Vendored external crates (copied in 2026-07-13 to make the project self-contained): carplayd's
-# receiver_core deps (from old/ncm_carplayd) + iap2d's carplay iAP2 core. Excluded from membership so
+# receiver_core deps (from the archived ncm_carplayd tree) + iap2d's carplay iAP2 core. Excluded from membership so
 # `--workspace` builds them only as path DEPENDENCIES with the features the project requests
 # (carplayd uses receiver default-features=false + ["mic-uplink", "local-mfi"] and enables
 # `receiver/mic-uplink-eld` through its own default feature, so the optional eld-codec /

@@ -78,7 +78,7 @@ adb shell 'ss -ltn | grep -E "9001|9002|9003|9004"'
   it reads `carplay-wireles`. Match `-f` on the command line. This let two instances run at once.
 * **`adb shell "... &" &` does not detach** — adb holds the remote stdout, so the script hangs while
   the stack runs perfectly. Use `nohup` plus closing all three fds.
-* **`~/Documents` is iCloud-synced** and generates `* 2.*` conflict copies that break the Gradle
+* **A cloud-synced working tree (iCloud "Desktop & Documents" on the maintainer's Mac)** generates `* 2.*` conflict copies that break the Gradle
   build with duplicate-class and invalid-resource-name errors. 416 of them appeared in one session.
   Delete with `find . -name "* [0-9].*" -not -path "./.git/*"` — verify none are tracked first.
 * **USB audio on this board cannot carry 24-bit stereo 48 kHz.** A full-speed device drops ~10
@@ -109,8 +109,8 @@ adb shell 'ss -ltn | grep -E "9001|9002|9003|9004"'
 
 ## 6. Image-level changes
 
-All in `docs/boards/04_IMAGE_REBUILD_GUIDE.md` (including its "Measured notes"), with the earlier round on the (currently
-unmounted) `/Volumes/stuff/rpi/aaos`. The two with the largest payoff both **delete code this port
+All in `docs/boards/04_IMAGE_REBUILD_GUIDE.md` (including its "Measured notes"), with the earlier round in the earlier Pi AAOS port
+workspace (outside this repo; unmounted at the time). The two with the largest payoff both **delete code this port
 had to write**: `CONFIG_BT_RFCOMM=y` removes `rfcomm_uspace.rs` entirely, and fixing the Wi-Fi
 vendor HAL's `setCountryCode` would let the framework SoftAP work and remove both standalone
 `hostapd` and `boards/rpi4-aaos/apdhcpd`.

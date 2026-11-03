@@ -38,7 +38,8 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BOXSH="$REPO/tools/boxsh.py"
-SRC_TAR="${SRC_TAR:-$HOME/Downloads/ccpa_backups/20260708_042628_vanilla_state/rootfs.tar.gz}"
+# SRC_TAR: the vanilla-state rootfs.tar.gz from the 20260708_042628 CCPA backup (outside the repo; no default).
+SRC_TAR="${SRC_TAR:-}"
 BOX="${BOX:-192.168.50.2}"
 MODE=run
 case "${1:-}" in --check) MODE=check ;; --rollback) MODE=rollback ;; --cleanup) MODE=cleanup ;; esac
@@ -73,6 +74,7 @@ if [ "$MODE" = cleanup ]; then
 fi
 
 # ------------------------------------------------------------------ 0. extract + fingerprint
+[ -n "$SRC_TAR" ] || die "set SRC_TAR to the vanilla-state rootfs.tar.gz (20260708_042628 CCPA backup)"
 [ -f "$SRC_TAR" ] || die "source rootfs not found: $SRC_TAR"
 tar xzf "$SRC_TAR" -C "$RUN_DIR" bin/busybox 2>/dev/null || die "no bin/busybox in $SRC_TAR"
 NEW="$RUN_DIR/bin/busybox"

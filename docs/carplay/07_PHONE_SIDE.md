@@ -38,8 +38,8 @@ projection on phone *plug* without a host app is intentionally NOT done — the 
 ### The cold-start sequence (proven with a real iPhone; run by `projection_up.sh`)
 The iPhone enumerates on ci_hdrc.0 as a **device** in PTP mode (05ac:12a8, config 1 of 4). To start
 wired CarPlay it must be role-switched to USB **host**, and the box must present the accessory gadget
-the instant it does. Sequence (`projection_up.sh`, and `old/ncm_carplayd/ccpa/probes/iap2_carplay_test.sh` —
-that tree is archived at `~/Documents/carlink/old/ncm_carplayd`, docs/carplay/00_ARCHITECTURE.md §Vendored assets):
+the instant it does. Sequence (`projection_up.sh`, and `ncm_carplayd/ccpa/probes/iap2_carplay_test.sh` —
+that tree is archived outside the repo, docs/carplay/00_ARCHITECTURE.md §Vendored assets):
 
 1. iPhone present as device → find `/dev/bus/usb/BBB/DDD`.
 2. Configure the phone-facing gadget (do NOT enable yet): `bDeviceClass=239/2/1`, VID `08e4` PID
@@ -93,7 +93,7 @@ advertise `_airplay._tcp`, iPhone browses `_carplay-ctrl._tcp`, dials `GET /ctrl
 RTSP/AirPlay. HEVC is confirmed in `carplayd`/`receiver_core` on a Pi 4B.
 
 ### Committed boundary (supersedes the earlier "host runs the whole session" note)
-See repo `README.md` §Architecture. Split by stability:
+See `box/README.md` §Architecture in brief. Split by stability:
 - **Box (stable):** runs the AirPlay **pairing path of `receiver_core`** on its real `ncm0`
   (pair-setup/verify + **MFi on the local chip**), derives the **ChaCha20 session key**, and forwards
   the **encrypted A/V untouched** over OCBM plus the **ephemeral session key**. All MFi crypto stays on
@@ -101,7 +101,7 @@ See repo `README.md` §Architecture. Split by stability:
 - **App (evolving):** claims the accessory over USB, decrypts with the handed-over key, **drives the
   post-pairing SETUP** (codecs/HEVC, resolution, screens — target), decodes HEVC (VideoToolbox), renders
   (the shipping macOS app now lives in THIS repo at `host/MacHost/carlink_macOS`; it began as
-  `old/ncm_carplayd/macos` carplay-app), and sends input back.
+  `ncm_carplayd/macos` carplay-app), and sends input back.
 
 So: **box = iAP2/pairing *mechanics* + MFi + encrypted-A/V forward + key handoff; app = every
 configurable content decision (incl. the iAP2 identification/declaration content, pushed as config
@@ -120,6 +120,6 @@ receiver (`ocbm-host avdec`) decrypted hundreds of video frames + thousands of a
 **0 failures**, driven by the host-app-driven projection lifecycle above. Pairing persists (disk-backed
 PeerStore) so a known device reconnects with pair-verify only. The host app that was "remaining" here is **done and
 hardware-validated** (`host/MacHost/carlink_macOS` — VideoToolbox decode/render, audio, touch
-uplink). Open work: `../ops/04_OPEN_ITEMS.md`. See also `README.md` §Architecture and
+uplink). Open work: `../ops/04_OPEN_ITEMS.md`. See also `box/README.md` §Architecture in brief and
 `../carplay/02_SESSION_LIFECYCLE.md`.
 

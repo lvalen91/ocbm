@@ -16,7 +16,7 @@ plugins {
 
 // Build outputs live OUTSIDE the source tree, deliberately.
 //
-// This project sits under ~/Documents, which macOS "Desktop & Documents" iCloud sync covers
+// The maintainer's checkout sits in a folder macOS "Desktop & Documents" iCloud sync covers
 // (`brctl status` → `Desktop & Documents: current=YES`). iCloud resolves its own races by writing
 // conflict copies next to the original — "BuildConfig 2.java", "classes 2.jar",
 // "CarlinkManager$Callback$DefaultImpls 2.dex" — and Gradle then feeds those duplicates straight
@@ -28,12 +28,17 @@ plugins {
 // It is not deterministic: a build can pass, then fail minutes later with hundreds of conflict
 // copies, and `./gradlew clean` only helps until sync catches up again. Redirecting the build
 // directory out of the synced tree removes the input entirely. Same reasoning as this repo's
-// Rust `target` symlink into ~/.cache.
+// Rust `target` symlink out of the tree.
 //
-// Override with -Pcarlink.buildRoot=/some/path if ~/.cache is not writable.
+// Root: $OCBM_CACHE (the cache root outside the working tree, docs/ops/03_REFERENCE_INDEX.md), else
+// ${TMPDIR:-/tmp}/ocbm-cache — the same expression the shell tools use. Override with
+// -Pcarlink.buildRoot=/some/path.
+val ocbmCache =
+    System.getenv("OCBM_CACHE")?.takeIf { it.isNotEmpty() }
+        ?: "${(System.getenv("TMPDIR")?.takeIf { it.isNotEmpty() } ?: "/tmp").trimEnd('/')}/ocbm-cache"
 val buildRoot =
     (findProperty("carlink.buildRoot") as String?)
-        ?: "${System.getProperty("user.home")}/.cache/gradle-builds/carlink-android-ocbm"
+        ?: "${ocbmCache.trimEnd('/')}/gradle-builds/carlink-android-ocbm"
 
 allprojects {
     layout.buildDirectory.set(file("$buildRoot/${project.path.replace(':', '_').trim('_').ifEmpty { "root" }}"))

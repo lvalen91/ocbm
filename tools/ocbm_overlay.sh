@@ -19,8 +19,8 @@
 #   --minimal  ocbmd only (link, MFi, console, file, log, settime, heartbeat): the Stage-A image
 #   --full     (default) + btd, carplayd, session_supervisor.sh, projection_up.sh, radio_detect.sh,
 #              radio_hal.sh, radio_ap_up.sh: the app-driven wireless stack (Stage B)
-# Output: ~/.cache/carlink-artifacts/ocbm-overlay/ocbm-overlay-<profile>-<stamp>.img (+ .sha256), never under
-# ~/Documents (CLAUDE.md). Install on the unit (rootfs, any USB mode): get the file into /tmp (UART:
+# Output: $OCBM_CACHE/carlink-artifacts/ocbm-overlay/ocbm-overlay-<profile>-<stamp>.img (+ .sha256); OCBM_CACHE
+# defaults to ${TMPDIR:-/tmp}/ocbm-cache. Never inside the working tree (CLAUDE.md). Install on the unit (rootfs, any USB mode): get the file into /tmp (UART:
 # baseline/common/tools/uart_xmodem_send.py into `rx`; NCM: scp -O), then
 #   ocbm-overlay write /tmp/<file> <sha256>     (0 written, 3 already there, 4 refused; the next boot uses it)
 set -euo pipefail
@@ -41,8 +41,9 @@ while [ $# -gt 0 ]; do
   esac
 done
 STAMP=$(date -u +%Y%m%dT%H%MZ)
-[ -n "$OUT" ] || OUT="$HOME/.cache/carlink-artifacts/ocbm-overlay/ocbm-overlay-$PROFILE-$STAMP.img"
-case "$OUT" in "$HOME/Documents"/*) echo "refusing to write under ~/Documents (iCloud-synced; CLAUDE.md)" >&2; exit 2 ;; esac
+CACHE="${OCBM_CACHE:-${TMPDIR:-/tmp}/ocbm-cache}"
+[ -n "$OUT" ] || OUT="${CACHE%/}/carlink-artifacts/ocbm-overlay/ocbm-overlay-$PROFILE-$STAMP.img"
+case "$OUT" in "$REPO"/*) echo "refusing to write inside the working tree $REPO (it may be cloud-synced; CLAUDE.md)" >&2; exit 2 ;; esac
 mkdir -p "$(dirname "$OUT")"
 
 W=$(mktemp -d /tmp/ocbm-overlay.XXXXXX)
@@ -50,7 +51,7 @@ trap 'rm -rf "$W"' EXIT
 R=$W/root
 mkdir -p "$R/bin" "$R/etc" "$R/script"
 
-need() { [ -f "$1" ] || { echo "missing: $1 (build first: ~/.claude/bin/bt ./build.sh)" >&2; exit 1; }; }
+need() { [ -f "$1" ] || { echo "missing: $1 (build first: ./build.sh)" >&2; exit 1; }; }
 put() { need "$1"; cp "$1" "$2"; chmod "$3" "$2"; }
 
 put "$ARM/ocbmd" "$R/bin/ocbmd" 755

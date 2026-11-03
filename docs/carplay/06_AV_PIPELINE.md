@@ -69,9 +69,9 @@ implements. Apple's enum is larger, and the bits it omits are not gaps in the pr
 
 Source: `AppleCarPlay/Sources/AirPlayCommon.h` lines 335–368 in the licensed R14G17 drop —
 **34 defines, top bit 32.** (Path updated 2026-08-16 to the copy CLAUDE.md designates,
-`~/Documents/carlink/old/carplay_RE/carplay_sdk/reference/apple_carplay_sdk_R14G17/AppleCarPlay/Sources/AirPlayCommon.h`.
-The originally-cited `old/carplay_RE/carplay_sdk/reference/…` copy is NOT gone — it still exists under the
-workspace root, `…/carlink/old/carplay_RE/…`, and is byte-identical over this range; it is simply no longer
+`$OCBM_CARPLAY_SDK/reference/apple_carplay_sdk_R14G17/AppleCarPlay/Sources/AirPlayCommon.h`.
+The originally-cited second copy of `reference/…` is NOT gone — it still exists on the maintainer's machine,
+outside the repo, and is byte-identical over this range; it is simply no longer
 the designated drop. The line range and every row of the table below were re-verified define-for-define
 against the designated copy on the same date.)
 
@@ -94,11 +94,11 @@ Apple's enum is already in the token table.
 #### Two findings from diffing against the current SDK
 
 The CarPlay Simulator bundle ships Apple's **current** format-name table
-(`~/Documents/carlink/carplay_simulator/CarPlay Simulator.app/Contents/Frameworks/CarPlaySDK.framework/Versions/A/CarPlaySDK`,
+(`$OCBM_CARPLAY_SIMULATOR/Contents/Frameworks/CarPlaySDK.framework/Versions/A/CarPlaySDK`,
 extractable with `strings`). Diffed against R14G17:
 
-*(Path rooted 2026-08-16 — it was written bundle-relative, and the `/Volumes/Additional Tools` image it was
-originally read from is no longer mounted; the bundle itself was copied to `~/Downloads/Carplay WWDC/` (gone as of 2026-10-19; now `~/Documents/carlink/carplay_simulator/CarPlay Simulator.app`)
+*(Path rooted 2026-08-16 — it was written bundle-relative, and the Additional-Tools-for-Xcode image it was
+originally read from is no longer mounted; the bundle itself was copied to a "Carplay WWDC" download folder (gone as of 2026-10-19; now the copy `$OCBM_CARPLAY_SIMULATOR` names)
 and is indexed in [`../ops/03_REFERENCE_INDEX.md`](../ops/03_REFERENCE_INDEX.md) §D. Xcode's
 `CarPlaySimulator.devicekitplugin` ships its OWN, separate copy of `CarPlaySDK.framework` — per CLAUDE.md's
 order of authority §1 — so do not treat the two as interchangeable when quoting a `strings` extraction.)*
@@ -120,7 +120,7 @@ wire, in any SDK revision on disk (R11B 27 defines → intermediate 32 → R14G1
 best media path CarPlay offers is AAC-LC 48 kHz stereo**, and the direction of travel across revisions is
 more mono voice codecs, not higher fidelity.
 
-**Corroborated by Apple's own sessions** (`reference/wwdc_transcripts/`; the old `~/Downloads/Carplay WWDC/` is gone as of 2026-10-19, indexed at
+**Corroborated by Apple's own sessions** (`reference/wwdc_transcripts/`; the old "Carplay WWDC" download folder is gone as of 2026-10-19, indexed at
 [`../ops/03_REFERENCE_INDEX.md`](../ops/03_REFERENCE_INDEX.md) §E). The entire CarPlay audio-format
 story Apple has ever told publicly is three sentences, `wwdc2016-722.txt:80-82`:
 
@@ -156,7 +156,7 @@ introduced in `wwdc2023-10150.txt:136-142`:
 ahead of playout; the vehicle accumulates up to two minutes and drains it against its own clock.
 
 Every symbol in the Simulator confirms the direction — all of it receiver-side
-(`~/Documents/carlink/carplay_simulator/CarPlay Simulator.app/Contents/Frameworks/CarPlaySDK.framework/Versions/A/CarPlaySDK`,
+(`$OCBM_CARPLAY_SIMULATOR/Contents/Frameworks/CarPlaySDK.framework/Versions/A/CarPlaySDK`,
 via `strings`; path rooted 2026-08-16 — see the path note under "Two findings from diffing against the
 current SDK" above, and do not substitute Xcode's separate `CarPlaySimulator.devicekitplugin` copy):
 
@@ -566,7 +566,7 @@ provisional.
   `reference/gm_cinemo/jadx_GMCarPlay_CT5_AAOS14/sources/com/gm/server/carplay/service/internals/`.
 - **Bench.** `/tmp/ccpa_sess/logcat_cp8.txt` (the gm_ccpa receiver's clock) and
   `/tmp/ccpa_sess/ios/ios_cp6.txt` (the iPhone's clock, about 0.1 s ahead).
-- **Cross-check.** Apple R14G17 (`~/Documents/carlink/old/carplay_RE/carplay_sdk/reference/apple_carplay_sdk_R14G17/AppleCarPlay/`).
+- **Cross-check.** Apple R14G17 (`$OCBM_CARPLAY_SDK/reference/apple_carplay_sdk_R14G17/AppleCarPlay/`).
   Cinemo r14 embeds this receiver core. Where a native finding matches R14G17 source, it is cited as
   confirmed.
 
@@ -799,7 +799,7 @@ to 1920×720, the fix, and the on-hardware proof. From a 6-agent parse of the Ru
 live validation.
 
 ### Root cause — a hardcoded override (EVIDENCED, 5 of 6 agents)
-`~/Documents/carlink/ccpa_custom/box/carplayd/src/main.rs` (the daemon the box actually runs)
+`ocbm/box/carplayd/src/main.rs` (the daemon the box actually runs)
 constructs `DeviceConfig::default()` (1920×720) and then **overrides it to 800×480** before building `/info`:
 ```rust
 let mut dev = DeviceConfig::default();   // 1920×720 (`impl Default for DeviceConfig` in `crates/vendor/receiver/src/info.rs`)
@@ -807,8 +807,7 @@ dev.display_width  = 800;                // ← the override
 dev.display_height = 480;                // ←
 let info = build_info(&dev);
 ```
-`build_info` (then `old/ncm_carplayd/receiver_core/crates/receiver/src/info.rs` — that tree is archived at
-`~/Documents/carlink/old/ncm_carplayd`; the LIVE copy is vendored in-repo at
+`build_info` (then `ncm_carplayd/receiver_core/crates/receiver/src/info.rs` — that tree is archived outside the repo; the LIVE copy is vendored in-repo at
 `crates/vendor/receiver/src/info.rs`) bakes those into three iPhone-facing `/info` fields simultaneously
 (anchors converted to symbols 2026-10-28; the 2026-07-10 line numbers were the old tree's):
 - `displays[0].widthPixels`/`heightPixels` — **`build_info`, the main `displays[]` block in `info.rs`** (the field the iPhone reads
@@ -872,7 +871,7 @@ Primary sources:
 - `CarPlaySDK.framework/Versions/A/CarPlaySDK` (arm64e) — sourced from SDK symbols/strings/templates.
 - `CarPlaySimulator` binary (sender side).
 - Receiver: then `ncm_carplayd/receiver_core/crates/receiver/src/{session.rs, info.rs, events.rs}` — that
-  tree is now archived at `~/Documents/carlink/old/ncm_carplayd` and the LIVE copy is vendored
+  tree is now archived outside the repo and the LIVE copy is vendored
   in this repo at `crates/vendor/receiver/src/{session.rs, info.rs, events.rs}`. All `session.rs`/`info.rs`/
   `events.rs` anchors below were re-verified against the vendored copy on 2026-08-16 except those marked
   historical in §4.
@@ -1033,13 +1032,13 @@ Today the receiver is a **single flat main display** (`info.rs` had one `display
 
 The earlier body inferred the cluster trigger was `requestUI{url:"maps:/car/instrumentcluster/map"}`
 and concluded there is no dedicated altScreen focus. A cross-source trace (old Carlinkit firmware +
-live wired [CAP], see `old/ncm_carplayd/docs/14_WIRED_CARPLAY_PROTOCOL.md` §4.3 & §8.1 — that tree is archived at `~/Documents/carlink/old/ncm_carplayd`) corrects this:
+live wired [CAP], see `ncm_carplayd/docs/14_WIRED_CARPLAY_PROTOCOL.md` §4.3 & §8.1 — that tree is archived outside the repo) corrects this:
 
 - **The old firmware's "two nav commands"** = adapter Command `0x08` opcodes **508
   `RequestNaviScreenFocus`** (START) / **509 `ReleaseNaviScreenFocus`** (STOP). Live-verified
   2026-06-13: 508 → iPhone spins up its 2nd encoder and streams cluster video; 509 → it stops within
   ~seconds; main video keeps flowing. (Main-screen pair for contrast = 500/501 RequestVideoFocus.)
-- Those are **USB-adapter** opcodes. `ccpa_custom` IS the AirPlay receiver, so it does not send 508;
+- Those are **USB-adapter** opcodes. `ocbm` IS the AirPlay receiver, so it does not send 508;
   it emits the AirPlay operations 508 maps to. VERIFIED wired handshake order (docs/carplay/04_CAPABILITIES_AND_CONFIG.md [CAP]):
   `SETUP type:111 → Modes: screen accessory → RequestNaviScreenFocus → SETUP type:110 → RequestVideoFocus
   → Modes: screen controller, mainAudio accessory`.
@@ -1057,11 +1056,11 @@ live wired [CAP], see `old/ncm_carplayd/docs/14_WIRED_CARPLAY_PROTOCOL.md` §4.3
   RequestVideoFocus, but the 320.17 SDK only defines one screen resourceID (mainScreen=1); a dedicated
   altScreen resourceID is net-new (later SDK, not in source). If type-111 sets up but sends no frames,
   the missing piece is that distinct alt focus — experiment with resourceID candidates then.
-- **Evidence:** old firmware `~/Documents/carlink/carlink_macOS/carlink_macOS/Protocol/{MessageTypes.swift:436-443
+- **Evidence:** old firmware host app (legacy `carlink_macOS`, outside the repo) `carlink_macOS/Protocol/{MessageTypes.swift:436-443
   (`aaRequestNaviScreen = 508` / `aaReleaseNaviScreen = 509` at :442-443), AdapterProtocol.swift:174-201}`
   (the OLD-firmware companion app — NOT this repo's `host/MacHost/carlink_macOS`);
-  `old/carplay_RE/carplay_sdk/MAP/tbox_map/libSdCarplay.md:150` (changeModes altScreen dimension);
-  `old/ncm_carplayd/docs/14` §4.3, §8.1.
+  `$OCBM_CARPLAY_SDK/MAP/tbox_map/libSdCarplay.md:150` (changeModes altScreen dimension);
+  `ncm_carplayd/docs/14` §4.3, §8.1.
 
 #### VALIDATED 2026-07-12 — end-to-end, live session
 Deployed (carplayd `180e796d`) + fixed host YAML generator + session reset. Live box log:
@@ -1085,8 +1084,7 @@ command needed.** The dedicated alt decoder + isolated floating window behave ex
 
 Status: **IMPLEMENTED for the main-screen second view area and runtime switching (box + macOS Settings arm, device-proven 2026-09-05 / 2026-09-09); REFERENCE ONLY for the type-112 third stream.** Grounded in WWDC 2019-252 & 2023-10150 + the local Xcode 27 CarPlay
 Simulator (`CarPlaySimulator.devicekitplugin`, BuildVersion 456) + the CarPlaySDK protocol reference notes and the wired
-CPC200-CCPA session capture (`old/ncm_carplayd/research/**`, that tree archived at
-`~/Documents/carlink/old/ncm_carplayd`). Labels: [CAP] wire-verified · [SIM] in the local
+CPC200-CCPA session capture (`ncm_carplayd/research/**`, that tree archived outside the repo). Labels: [CAP] wire-verified · [SIM] in the local
 Simulator · [SDK] SDK-symbol reference · [I] inferred.
 
 Runtime view-area switching is implemented on the box (`events::switch_view_area`, which answers an inbound
@@ -1109,7 +1107,7 @@ implementation cost + teardown risk.
   constraint "Only one cluster UI stream should display a map"). WWDC's "map + card in two parallel
   streams" = using BOTH clusters (111 map + 112 card) to show them simultaneously. [SIM]
 - Type 112 is **[SDK]/[SIM] only — never observed on the CCPA wire**
-  (`old/ncm_carplayd/research/ios27_sdk_inventory/10_video.md:207`; the genuine box ran 110+111).
+  (`ncm_carplayd/research/ios27_sdk_inventory/10_video.md:207`; the genuine box ran 110+111).
   Advertising a 3rd display is the HIGHEST teardown risk (incomplete display dict →
   RECORD `-17483`); validate against a hand-authored 2-cluster Simulator config first.
 
@@ -1544,7 +1542,7 @@ The phone always offers it: the SETUP-request `features` array includes `cornerM
 
 **The validator (`carEndpoint_checkCarPlayFeatureAcceptance`, inlined in `carEndpoint_Activate…`,
 `AirPlaySender` arm64e) reads the flag ONLY from `displays[]`** — offsets from
-`reference/ios27_extract` (in-repo; the earlier `~/Downloads/ios27_extract_24A5390f` copy is gone; whether a `split/AirPlaySender` is in it is unchecked):
+`reference/ios27_extract` (in-repo; the earlier raw `ios27_extract_24A5390f` copy is gone; whether a `split/AirPlaySender` is in it is unchecked):
 - enumerates `infoDict["displays"]` (`@0x2516cfd60`); per display dict it tests the `"cornerMasks"` key
   and sets a run-wide SEEN flag (`@0x2516cfff8`). Same object also yields `widthPixels`/`viewAreas`/… →
   it is the display dict, not a viewArea entry.

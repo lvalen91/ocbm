@@ -1,7 +1,7 @@
 package zeno.gmccpa.ocbm
 
 /**
- * OCBM v1 wire constants — a byte-faithful port of `ccpa_custom/crates/ocbm-proto/src/lib.rs`.
+ * OCBM v1 wire constants — a byte-faithful port of `ocbm/crates/ocbm-proto/src/lib.rs`.
  *
  * Everything in the OCBM envelope is LITTLE-endian. The one exception in the whole protocol is the
  * 16-bit length inside a CH_MFI payload, which is BIG-endian (see [Mfi]).

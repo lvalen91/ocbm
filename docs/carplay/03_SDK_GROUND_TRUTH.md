@@ -22,7 +22,7 @@ or **[I]** inferred. Every fact links to its discovery location.
 - **YAML VehicleConfig templates (10):** `<plugin>/Contents/Resources/VehicleConfigs/Configs/*.yaml` → copied to `reference/carplay_sdk/apple_vehicleconfigs/`.
 - **VDC (nav telemetry) schema:** `<plugin>/Contents/Frameworks/CarPlaySDK.framework/Versions/A/Resources/VDCSchema-External.json` + instance `<plugin>/Contents/Resources/VehicleConfigs/VehicleDataConfigs/Navigation/Navigation.vdc.json` → `reference/carplay_sdk/apple_vdc/`.
 - **Retained reference notes (scratchpad):** `sdk_strings.txt`, `sim_strings.txt`, `all.txt`, `hidparse.py`, `cfstr.py`.
-- **Project mapping targets:** `crates/vendor/receiver/src/info.rs` (`build_info`), `.../session.rs`, `.../events.rs`, `.../hid.rs`, `.../uplink.rs` (the pre-vendoring `ncm_carplayd/receiver_core` tree is gone); `ccpa_custom/box/carplayd/src/main.rs`.
+- **Project mapping targets:** `crates/vendor/receiver/src/info.rs` (`build_info`), `.../session.rs`, `.../events.rs`, `.../hid.rs`, `.../uplink.rs` (the pre-vendoring `ncm_carplayd/receiver_core` tree is gone); `ocbm/box/carplayd/src/main.rs`.
 
 ### 1. Two layers: authoring (YAML) vs wire (`/info`)
 Apple's simulator loads a **`VehicleConfig` YAML** (authoring) and *translates* it into the on-wire AirPlay
@@ -110,8 +110,8 @@ Transport: `POST /command` (`_requestProcessCommand`), binary plist `{type, para
 **Enums [E]:** entity{controller/accessory/none}; transferType{take/untake/borrow/unborrow}; priority{niceToHave/userInitiated/anytime/never}; speechMode{none/speaking/recognizing}; app-state{standby/audioOff/nativeVR/displayOff/backupCamera/uiNotification/videoPlayback}; gear{park/reverse/neutral/drive/unknown}; GPS-validity{deadReckonedAndValid/gpsOnlyAndValid/notValid}.
 **CORRECTED 2026-08-16** — this line previously claimed `events.rs` covers only four verbs and listed nine missing outbound; five of those nine have existed for some time, and §10's table had it right all along. `events.rs` implemented **thirteen** outbound verbs at that date (18 `pub fn send_*` on 2026-10-28, incl. `send_update_view_area`): `iAPSendMessage`, `forceKeyFrame`, `changeMapZoomLevel`, `changeModes`, `requestUI`, `showUI`, `stopUI`, `setLimitedUI`, `uiAppearanceUpdate`, `mapAppearanceUpdate`, `setNightMode`, `requestSiri`(+`siriAction`), `hidSendReport`. Inbound `session.rs` acts on `modesChanged` + the iAP-tunnel frames and logs the rest (inbound `requestUI`/`suggestUI` are logging-only BY DESIGN — docs/carplay/05_METADATA_AND_CONTROLS.md §1.1, 2026-09-05; do not add handlers). **Genuinely missing outbound (`updateViewArea` since landed, see §10):** `updateDisplayPanels`, `updateVehicleInformation`, focus (`accessoryAcquireFocus`/`accessoryGiveFocus`), `changeUIContext`, `suggestUI`, `updateVocoderInfo`, `hidSetInputMode`, `requestViewArea` — i.e. exactly §10's list, which is the authoritative one.
 
-### 10. Mapping to ccpa_custom + prioritized gaps
-| capability | Apple mechanism | ccpa_custom status |
+### 10. Mapping to ocbm + prioritized gaps
+| capability | Apple mechanism | ocbm status |
 |---|---|---|
 | Resolution | `displays[].widthPixels/heightPixels` (Class A) | ✅ app-pushed per control connection (`carplayd::load_device_config`); 1920×720 survives only as the app-less fallback in `base_device_config()` |
 | Config framework | `VehicleConfig` YAML → `/info` | ✅ host-authoritative YAML → `vehicle_config.rs` → `/info`; regression-covered by `receiver/tests/r4_c2_schema.rs` |
@@ -150,7 +150,7 @@ directly, whereas the conclusions it corrects were derived by inference from dis
 firmware, and on-hardware behaviour.
 
 Reference root (see `../ops/03_REFERENCE_INDEX.md`):
-`~/Documents/carlink/old/carplay_RE/carplay_sdk/reference/apple_carplay_sdk_R14G17/` — below, `SDK/`. *(corrected 2026-10-19: the old `~/carlink/local_carplay_sdk/` path no longer exists; the tree lives under `old/carplay_RE/carplay_sdk/`.)*
+`$OCBM_CARPLAY_SDK/reference/apple_carplay_sdk_R14G17/` — below, `SDK/`. *(corrected 2026-10-19: an older `local_carplay_sdk/` location no longer exists; `OCBM_CARPLAY_SDK` names the tree, outside the repo.)*
 
 Every claim below was read in that source this session and is cited `file:line`.
 
@@ -555,9 +555,9 @@ Apple's seq/ack reset.
 Twelve parallel agents checked the project's CarPlay-related code against ground truth:
 the **standalone** `CarPlay Simulator.app` binary + `CarPlaySDK.framework` + `iAP2MessageKit`
 message archive (read at the time from the mounted Additional-Tools-for-Xcode image,
-`/Volumes/Additional Tools/Hardware/CarPlay Simulator.app`. **Path note 2026-08-16:** that volume is no
+`Hardware/CarPlay Simulator.app` inside it. **Path note 2026-08-16:** that volume is no
 longer mounted, but the same standalone bundle is on disk at
-`~/Documents/carlink/carplay_simulator/CarPlay Simulator.app` *(corrected 2026-10-19: was `~/Downloads/Carplay WWDC/Hardware/…`, no longer present; this is the on-disk mirror)* — indexed in
+`$OCBM_CARPLAY_SIMULATOR` *(corrected 2026-10-19: was the "Carplay WWDC/Hardware" download folder, no longer present; this is the on-disk copy)* — indexed in
 [`../ops/03_REFERENCE_INDEX.md`](../ops/03_REFERENCE_INDEX.md) §D, and the source these findings
 actually came from. Xcode's `CarPlaySimulator.devicekitplugin` ships a SEPARATE copy of
 `CarPlaySDK.framework` plus the same ten `VehicleConfig` templates and is the one CLAUDE.md ranks first

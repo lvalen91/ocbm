@@ -23,7 +23,7 @@
 #   measure    kernels nousb / recovery-usb-vfat / default-nossh / default: sizes, fail one over KERNEL_MAX
 #
 # variables (0|1 unless noted); variant names: default = RECOVERY_USB=1 RECOVERY_EXFAT=1 RECOVERY_SSH=1
-#   BOARD=arm-imx6ul  TOP=/tmp/ccpa-baseline-build (never under ~/Documents)  JOBS=<n>  CROSS_COMPILE=<prefix>
+#   BOARD=arm-imx6ul  TOP=/tmp/ccpa-baseline-build (never inside the working tree)  JOBS=<n>  CROSS_COMPILE=<prefix>
 #   RECOVERY_USB=1    USB storage in the recovery initramfs (forces USB_HOST=1, USB_VFAT_BUILTIN=1): one
 #                     scan at recovery start, the first FAT32/exFAT data partition read-write at /mnt/usb
 #   RECOVERY_EXFAT=1  exFAT built in (with RECOVERY_USB=1; else recovery reads FAT only)
@@ -101,7 +101,8 @@ case $ROOT_PASSWORD_HASH in
 esac
 case $ROOT_PASSWORD_HASH in *[!./0-9A-Za-z\$=]*) die "ROOT_PASSWORD_HASH has characters sha512-crypt does not use" ;; esac
 [ "${#ROOT_PASSWORD_HASH}" -ge 90 ] || die "ROOT_PASSWORD_HASH is too short for sha512-crypt"
-case $TOP in "$HOME"/Documents*) die "TOP=$TOP is under ~/Documents (iCloud-synced; build output must live outside, see CLAUDE.md)" ;; esac
+REPO_ROOT=$(cd "$HERE/.." && pwd)
+case $TOP in "$REPO_ROOT" | "$REPO_ROOT"/*) die "TOP=$TOP is inside the working tree $REPO_ROOT (it may be cloud-synced; build output must live outside, see CLAUDE.md)" ;; esac
 [ -d "$HERE/$BOARD" ] && [ -r "$HERE/$BOARD/board.env" ] || die "no board $BOARD in $HERE"
 
 . "$HERE/common/versions.env"

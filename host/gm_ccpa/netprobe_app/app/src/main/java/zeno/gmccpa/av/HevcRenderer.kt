@@ -241,7 +241,7 @@ class HevcRenderer(
         // Skip only a PURE parameter-set message — csd-0 already carries those. A mixed message
         // (parameter sets + VCL slices, which HEVC IDR access units routinely are) must be fed whole:
         // MediaCodec accepts in-band parameter sets inside an Annex-B AU, and dropping it would throw
-        // away the keyframe. ccpa_custom's macOS consumer reaches the same outcome by the other route:
+        // away the keyframe. ocbm's macOS consumer reaches the same outcome by the other route:
         // `performDecodeAVCCWithParamSets` (`VideoDecoder.swift`) diffs the in-band sets, rebuilds the
         // format if they changed, and still decodes the AU's displayable NALs — VideoToolbox needs
         // them out-of-band, MediaCodec takes them in-band.

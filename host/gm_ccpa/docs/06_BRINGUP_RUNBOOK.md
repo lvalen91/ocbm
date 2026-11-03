@@ -63,7 +63,7 @@ Two files on the adapter. Nothing else was modified.
 
 | File | Change | Restore |
 |---|---|---|
-| `/script/session_supervisor.sh` | `wifi_ap:` gate, `apply_host_wifi_creds()`, `AV_SUPPRESS` | `git checkout tools/session_supervisor.sh` in `ccpa_custom`, then `tools/uart_push.sh` |
+| `/script/session_supervisor.sh` | `wifi_ap:` gate, `apply_host_wifi_creds()`, `AV_SUPPRESS` | `git checkout tools/session_supervisor.sh` in `ocbm`, then `tools/uart_push.sh` |
 | `/etc/hostapd.conf` | ssid / passphrase / channel regenerated from the app's OCBM config | `cp /etc/hostapd.conf.stock /etc/hostapd.conf` (backup made automatically) |
 
 Both default to stock when the keys are absent, so an unmodified app sees unmodified behaviour.
@@ -84,13 +84,13 @@ bash tools/build_apk.sh            # release flavor;  GMCCPA_BENCH=1 bash tools/
 # -> apk/gmccpa-debug-<STAMP>[-bench].apk. The build prints the full path AND the install line; copy it.
 ```
 
-**Build output never lives in the tree (owner rule, enforced 2026-10-08).** `~/Documents` is iCloud-synced
-and its conflict copies poison build trees (`ccpa_custom/CLAUDE.md`). Both scripts route every cargo call
-through `CARGO_TARGET_DIR` under `~/.cache/cargo-targets/` (the receiver/pairing `cargo test` runs included —
-until 2026-10-08 those built ≈1.1 GB in-tree), the APK work dir is a `mktemp -d`, `apk/` is a symlink into
-`~/.cache`, and python runs with `PYTHONDONTWRITEBYTECODE=1`. The gate's first step,
+**Build output never lives in the tree (owner rule, enforced 2026-10-08).** A cloud-synced working tree's
+conflict copies poison build trees (`ocbm/CLAUDE.md`). Both scripts route every cargo call
+through `CARGO_TARGET_DIR` under `$OCBM_CACHE/cargo-targets/` (the receiver/pairing `cargo test` runs included —
+until 2026-10-08 those built ≈1.1 GB in-tree), the APK work dir is a `mktemp -d`, `apk/` is a symlink out of
+the tree, and python runs with `PYTHONDONTWRITEBYTECODE=1`. The gate's first step,
 `tools/tree_artifact_guard.sh`, FAILS and lists any real `target`/`build`/`.gradle`/`__pycache__`/`.build`/
-`node_modules` directory under `host/gm_ccpa` or `crates/` (symlinks into `~/.cache` pass); set
+`node_modules` directory under `host/gm_ccpa` or `crates/` (symlinks out of the tree pass); set
 `GMCCPA_ALLOW_TREE_ARTIFACTS=1` only to run the rest of the gate while cleaning such a directory up.
 
 **Version stamp (corrected 2026-10-08; `build_apk.sh` header, V6/Q009).** `versionCode` is the commit count
@@ -331,7 +331,7 @@ as `--es pass`.
 the command.
 
 ```bash
-cd ../..   # host/gm_ccpa -> ccpa_custom root; `cd ../ccpa_custom` does not exist (corrected 2026-09-09)
+cd ../..   # host/gm_ccpa -> ocbm root; `cd ../ocbm` does not exist (corrected 2026-09-09)
 bash scratchpad/uart_cmd.sh /tmp/u1.txt 8 'tail -40 /tmp/wl.log'   # BT / iAP2 / handoff trace
 tr -d '\r' < /tmp/u1.txt | tail -40
 bash scratchpad/uart_cmd.sh /tmp/u2.txt 8 'grep -E "^(ssid|channel)=" /etc/hostapd.conf'
@@ -361,7 +361,7 @@ cannot starve a live A/V session.
 **`tools/ocbm_push.sh` is not an install.** Its default set is `ocbmd` + `btd` and nothing
 else — pushing `session_supervisor.sh` without `/script/radio_hal.sh` and `radio_detect.sh` leaves the
 box with no radio bring-up and no error anywhere. This is exactly how Bluetooth died silently once
-(`ccpa_custom` `docs/ops/06_CORRECTIONS_LEDGER.md` R-20W-5): a targeted push landed the supervisor without the radio
+(`ocbm` `docs/ops/06_CORRECTIONS_LEDGER.md` R-20W-5): a targeted push landed the supervisor without the radio
 seam, `hciattach` failed with `Can't set line discipline: Invalid argument` underneath a flawless
 firmware download, and the supervisor never reads the exit status of the detached script that reported
 it. Use `ocbm_install.sh --full` for a real deploy, and after pushing the supervisor verify the radio
@@ -521,13 +521,13 @@ Everything needed was already on the machine except two Rust components.
 | `cargo-ndk` | 4.1.2 installed, but panics on this workspace — not needed, see below |
 
 **Gotcha:** `/opt/homebrew/bin/cargo` (Homebrew's Rust) shadows rustup's shim and cannot add
-cross-targets. Use `~/.cargo/bin/cargo`.
+cross-targets. Use rustup's `$CARGO_HOME/bin/cargo`.
 
 **Working recipe** (no `cargo-ndk`):
 
 ```bash
-export PATH="$HOME/.cargo/bin:$PATH"
-NDK=~/Library/Android/sdk/ndk/30.0.15729638/toolchains/llvm/prebuilt/darwin-x86_64/bin
+export PATH="$CARGO_HOME/bin:$PATH"
+NDK=$ANDROID_HOME/ndk/30.0.15729638/toolchains/llvm/prebuilt/darwin-x86_64/bin
 export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$NDK/x86_64-linux-android32-clang"
 cargo build --release --target x86_64-linux-android
 ```
@@ -646,8 +646,8 @@ receiver's forwarder then connects to `nc` instead of the CarPlay screen's decod
 ## 7.1 Bringing up a full A/V session (the working procedure)
 
 This is the sequence that produced the working session in
-`~/Documents/carlink/old/gm_ccpa/evidence/session_2026-08-05/WORKING_SESSION.md` (the `evidence/`
-archive lives in that standalone checkout, not under this tree — see `00_HANDOFF.md` §"Document
+`evidence/session_2026-08-05/WORKING_SESSION.md` (the `evidence/`
+archive lives in the archived standalone `gm_ccpa` checkout, not under this tree — see `00_HANDOFF.md` §"Document
 policy"). Assumes the CCPA adapter is on USB and the iPhone is paired to the vehicle over Bluetooth.
 
 ### 0. Revive logging first — silence is not evidence
@@ -692,7 +692,7 @@ adb logcat -d -s NETPROBE | grep -E "\[hevc \]|\[aac  \]|\[cpui \]"
 the seams keep running; `carplay_ui` reattaches it. (The `av_sink`/`av_stats` diagnostic sink that
 used to be listed here was removed 2026-09-11: it bound the same :9001/:9002 the real decoders need,
 and the running counts it printed are in the `[hevc ]`/`[aac  ]` lines above.)
-(`~/Documents/carlink/old/gm_ccpa/evidence/session_2026-08-05/WORKING_SESSION.md`
+(`evidence/session_2026-08-05/WORKING_SESSION.md` in the archived `gm_ccpa` checkout,
 §5).
 
 ### 4. Restore the screen after anything backgrounds it
@@ -757,7 +757,7 @@ that gap on this unit — the media-browser bind relaunches the app and re-claim
 in-app Stop or the `ocbm_stop` verb to hold the box released for the 20 s. Verify before trusting it:
 
 ```bash
-bash scratchpad/uart_cmd.sh /tmp/h.txt 11 'cat /etc/hostapd.conf'   # in ccpa_custom root (cd ../.. from here)
+bash scratchpad/uart_cmd.sh /tmp/h.txt 11 'cat /etc/hostapd.conf'   # in ocbm root (cd ../.. from here)
 tr -d '\r' < /tmp/h.txt | grep -aE '^ssid=|^channel=|^wpa_passphrase='
 ```
 Expect `ssid=<vehicle SSID>`. If it still says `<box stock SSID>`, the credentials did not reach

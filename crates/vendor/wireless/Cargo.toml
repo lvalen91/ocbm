@@ -9,7 +9,7 @@ name = "btd"
 path = "src/main.rs"
 
 [dependencies]
-# Vendored into ccpa_custom 2026-07-13 from the carplayd PoC (Phase A1+A2, iPhone-verified). Ported
+# Vendored into ocbm 2026-07-13 from the carplayd PoC (Phase A1+A2, iPhone-verified). Ported
 # for the IW416 + OCBM box: log/env_logger dropped (the crate never used the `log` macros — it logs
 # via local println wrappers), matching the box daemons' stderr/println convention.
 libc = "0.2"

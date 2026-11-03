@@ -93,7 +93,7 @@ fn run(args: &[&str]) -> std::io::Result<()> {
 /// brings `hci0` up but also starts `hcid` (and possibly `bluetoothDaemon`), which runs its own SDP
 /// server on L2CAP PSM 1 and would answer the iPhone's SDP with no iAP2 record -- the exact failure
 /// the PoC documents for `bluetoothd`. Best-effort `killall` (ignore "no such process"); neither is
-/// respawn-protected, so this is enough. This is the ccpa_custom analog of the PoC masking
+/// respawn-protected, so this is enough. This is the ocbm analog of the PoC masking
 /// `bluetoothd` via systemd.
 fn stop_conflicting_daemons() {
     // `hfpd` is in this list because `bluetoothDaemon` starts it: it is the vendor's HFP/HSP
@@ -119,7 +119,7 @@ fn stop_conflicting_daemons() {
 /// directly beneath a flawless firmware download. That combination cost a full session on
 /// 2026-08-28: no `hci0`, no pairing, no CarPlay, and every layer above still reporting success.
 ///
-/// `/proc/tty/ldiscs` answers it in one read, so check before walking into it. See ccpa_custom
+/// `/proc/tty/ldiscs` answers it in one read, so check before walking into it. See ocbm
 /// `docs/ops/06_CORRECTIONS_LEDGER.md` R-20W-5.
 fn hci_ldisc_registered() -> bool {
     std::fs::read_to_string("/proc/tty/ldiscs")
@@ -194,7 +194,7 @@ pub fn bring_up(hci_dev: &str, name: &str) -> std::io::Result<()> {
         eprintln!(
             "[bt-bringup] WARNING: no n_hci line discipline registered — hciattach cannot create \
              {hci_dev} and BT will not come up. hci_uart is a loadable module here; check that \
-             /script/radio_hal.sh and /script/radio_detect.sh are installed (ccpa_custom \
+             /script/radio_hal.sh and /script/radio_detect.sh are installed (ocbm \
              docs/ops/06_CORRECTIONS_LEDGER.md R-20W-5)."
         );
     }

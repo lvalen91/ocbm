@@ -55,10 +55,11 @@ esac
 say "building :projection ($VARIANT)"
 ( cd "$gradle_root" && ./gradlew "$GRADLE_TASK" -q )
 
-# The build directory is redirected out of ~/Documents deliberately (iCloud sync writes conflict
+# The build directory is redirected out of the working tree deliberately (iCloud sync writes conflict
 # copies into a synced tree and Gradle then feeds them back into javac/D8), so resolve it from the
 # same property the root build.gradle.kts uses rather than assuming ./build.
-build_root="${CARLINK_BUILD_ROOT:-$HOME/.cache/gradle-builds/carlink-android-ocbm}"
+OCBM_CACHE="${OCBM_CACHE:-${TMPDIR:-/tmp}/ocbm-cache}"   # must match host/CarlinkAndroid/build.gradle.kts
+build_root="${CARLINK_BUILD_ROOT:-${OCBM_CACHE%/}/gradle-builds/carlink-android-ocbm}"
 apk=$(find "$build_root/projection/outputs/apk/$VARIANT" -name '*.apk' 2>/dev/null | head -1)
 [ -n "$apk" ] || { echo "no APK found under $build_root/projection/outputs/apk/$VARIANT" >&2; exit 1; }
 say "APK: $apk"

@@ -2,7 +2,7 @@ package com.carlink.ocbm
 
 /**
  * OCBM framing — a byte-faithful port of the `Header` / `frame()` / `Reassembler` trio in
- * `ccpa_custom/crates/ocbm-proto/src/lib.rs`.
+ * `ocbm/crates/ocbm-proto/src/lib.rs`.
  *
  * Header layout (all multi-byte fields little-endian):
  *

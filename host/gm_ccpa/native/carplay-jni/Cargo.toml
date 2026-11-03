@@ -12,11 +12,11 @@ jni = "0.21"
 libc = "0.2"
 # The :9112 mic-ingest auth token (F136). Already in the graph via rand_core; no new crate.
 getrandom = "0.2"
-# Vendored protocol crates from the sibling ccpa_custom checkout.
+# Vendored protocol crates from this same ocbm checkout (crates/vendor/, four levels up).
 #
 # THESE ARE PATH DEPS: cargo compiles whatever is on disk RIGHT NOW. The "rev" below is a RECORD of
 # what was last reviewed, not a mechanism — nothing enforces it. Treat a mismatch between this line
-# and `git -C ../../../ccpa_custom rev-parse --short HEAD` as "the build contains unreviewed code".
+# and `git rev-parse --short HEAD` as "the build contains unreviewed code".
 #
 # LAST REVIEWED REV: 273aed1 (2026-08-09; was f1558f8).
 # ON-DISK HEAD AT LAST CHECK: 6bc326d (2026-08-11) — 21 commits AHEAD of the reviewed rev.

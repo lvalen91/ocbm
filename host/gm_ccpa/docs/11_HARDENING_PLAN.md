@@ -5,7 +5,7 @@ review (Appendix A) and continued through the 2026-08-27/28 lifecycle work and t
 post-audit remediation (R6). The ledger below is the current truth. Everything after it —
 release/track structure, verification method, Appendix A — is historical or reference material and
 is subordinate to the ledger. Re-verified against source 2026-08-31 (see "Verification method"
-per row below: grep/read of `netprobe_app/`, `native/carplay-jni/src/lib.rs`, `ccpa_custom`).
+per row below: grep/read of `netprobe_app/`, `native/carplay-jni/src/lib.rs`, `ocbm`).
 
 **Governing constraints that still hold:**
 - **`crates/` and `box/` Rust is STATIC. Do not change it.** *(Owner, 2026-09-10.)* That code is
@@ -48,14 +48,14 @@ State legend: **LANDED** (confirmed in source), **OPEN** (not started or not fin
 | — | `AacPlayer.reclaimFocus()` recovers media after permanent `AUDIOFOCUS_LOSS` | LANDED | `av/AacPlayer.kt` `reclaimFocus()` | No |
 | — | `AacPlayer` full focus-listener + duck/pause/restore (R6.7 item 31) | LANDED | `av/AacPlayer.kt`: the `AudioFocusRequest.Builder(...)...setOnAudioFocusChangeListener(focusListener)` call in `requestFocus()`, and the `focusListener` lambda (ends just above `focusName()`) | No |
 | C4/M3/T3.1–3.4 | `OcbmClient` `mfiLock`, length-correlated MFi responses, `Mfi.parse` truncation reject, `Tlv8` consecutive-only coalescing (`Tlv8` part: removed v5.9 D016 — `pair/Tlv8.kt` deleted with the Kotlin pair-setup stub) | LANDED | `ocbm/OcbmClient.kt`, `ocbm/OcbmProto.kt` | No |
-| T5.3 | Gate `mfi-i2c-local` behind `local-mfi` (off on Android); route `iap_tunnel` through `Arc<Mutex<dyn MfiSigner>>` | LANDED | `receiver`'s `local-mfi` feature in `ccpa_custom crates/vendor/receiver/Cargo.toml`; the `receiver::iap_tunnel::set_remote_signer(...)` call in `Java_zeno_gmccpa_pair_NativeCore_nativeInit` (`native/carplay-jni/src/lib.rs`) | **Yes — 2026-09-09.** Tunnel got real `0xAA01`/`0xAA03` round trips through the OCBM relay (945 B cert, 128 B sig), reached `Identified`, and subscribed all three metadata channels. Zero `lock busy` lines. See `12_OBSERVED_FLOW.md` |
+| T5.3 | Gate `mfi-i2c-local` behind `local-mfi` (off on Android); route `iap_tunnel` through `Arc<Mutex<dyn MfiSigner>>` | LANDED | `receiver`'s `local-mfi` feature in `ocbm crates/vendor/receiver/Cargo.toml`; the `receiver::iap_tunnel::set_remote_signer(...)` call in `Java_zeno_gmccpa_pair_NativeCore_nativeInit` (`native/carplay-jni/src/lib.rs`) | **Yes — 2026-09-09.** Tunnel got real `0xAA01`/`0xAA03` round trips through the OCBM relay (945 B cert, 128 B sig), reached `Identified`, and subscribed all three metadata channels. Zero `lock busy` lines. See `12_OBSERVED_FLOW.md` |
 | — | Box-log streaming into logcat — **now `CH_LOG` push, not `CH_FILE` poll** (relabelled 2026-09-10: the row's title lagged the mechanism). Live streaming is `OcbmClient.handleLog` armed by `OcbmProbe.startBoxLogStream()`; `CH_FILE` survives only as the end-of-session snapshot | LANDED | `OcbmProbe.captureBoxLogsNow()` (`ocbm/OcbmProbe.kt`), `OcbmClient.filePull()` (`ocbm/OcbmClient.kt`); stale line cite, re-anchored 2026-09-10 — the old ranges are now `OcbmProbe.stop()` and `OcbmClient.startHeartbeat()` | **Yes** |
 | T5.1 | `JNI_OnLoad` env-var config → one explicit `nativeInit` config; `/info` generated from same config | **OPEN** | the `std::env::set_var(...)` block in `JNI_OnLoad` (`native/carplay-jni/src/lib.rs`) still present | No |
 | M7/T5.4 | Rust owns the control `TcpListener`/accept loop | **DEFERRED** (by design — hardware-gated) | no `TcpListener` in `lib.rs` | No |
 | T6.4 | Gate `CARPLAY_SCREEN_DUMP`/`CARPLAY_SETUP_DUMP`/`.verbose(true)` behind a debug flag | **CLOSED 2026-09-10 — the premise was wrong, do not gate these** | The unconditional `std::env::set_var("CARPLAY_SCREEN_DUMP", "1")` in `JNI_OnLoad` (`native/carplay-jni/src/lib.rs`). **RETRACTED: it is NOT per-frame.** `spawn_screen` in `crates/vendor/receiver/src/session.rs` guards the dump with `if screen_dump && frames < 6` — at most **six lines per session**, and the 2026-09-09 capture contains exactly six (`DUMP frame#0` … `#5`). The earlier claim in this row, that it writes a hex line per video frame and is per-frame log volume on the A/V path, was a wrong generalisation from seeing frames 0–5 in a grep; commit `89c5c97`'s message repeats it and is likewise wrong. Those six lines are the only in-band codec identity a capture carries (they are what proved `hvc1` and the sample-description wrapping), so gating them off by default would remove evidence for no volume saving. `.verbose(true)` on `ControlServer` gates control-plane lines only — one per request plus pair-setup/verify and the `auth-setup (MFi-SAP) OK/FAILED` verdict, which is the receiver's own word on the `CH_MFI` relay — and is likewise kept. `CARPLAY_SETUP_DUMP` remains deliberately unset for the reason its own comment gives (unbounded per-SETUP files in an unreadable private dir) | Bound verified on hardware: 6 lines in a 1358-frame session |
 | T6.5 | `SecureRandom` `edSeed`, persisted per install (invalidates pairings — ships alone) | **LANDED 2026-10-08 (plan v5.8 V5, Q001)** | `AccessoryKey.kt`: 32 `SecureRandom` bytes in `noBackupFilesDir/carplay_accessory_ed25519.seed`, created once under an `O_EXCL` claim (the plan's `Files.move`-without-`REPLACE_EXISTING` was shown non-atomic by the race test and replaced); `CarPlayRx.edSeed` has NO default any more, the only build site (`SessionCore.toggleCarPlayRx`) passes `AccessoryKey.loadOrCreate(...)`. A seed created over an existing `carplay_peers.bin` (an upgrade), or a corrupt/legacy-pattern file, persists a rekey flag: OD-8B runs Forget Pairing automatically once on the next OCBM link and keeps a launcher hint up until a pair-verify succeeds under the new key. Only `created`/`loaded`/one E are logged, never key material. Tier-0: `AccessoryKeyTest` (incl. 8-thread races and mutation checks in it_v58_V5.sh) | Host JVM only; bench B-V5-1 pending |
-| T0.1 | Pin `ccpa_custom` as a submodule/vendored snapshot, replacing the bare path dep | **OPEN** | the `receiver`/`pairing`/`mfi` `[dependencies]` entries in `native/carplay-jni/Cargo.toml` still bare relative path deps. **Literal corrected 2026-09-10:** they read `path = "../../../../crates/vendor/receiver"` and siblings, not the `"../../../ccpa_custom/..."` this row used to quote — `host/gm_ccpa` now lives *inside* the `ccpa_custom` checkout, so the path no longer names it. The substantive point stands: unpinned, and the "LAST REVIEWED REV" comment is manual, not enforced | No |
-| — | Build-time check that fails/warns on `ccpa_custom` HEAD ≠ reviewed rev | **OPEN** | **MOOT in the current layout — reframed 2026-09-10.** This row assumed two repos. There is one: `git -C host/gm_ccpa rev-parse --show-toplevel` resolves to `ccpa_custom`, and `build_apk.sh` sets `REPO="$GM_ROOT"`, so the SHA it stamps already covers both the app and the vendored crates. The gm_ccpa-vs-ccpa_custom rev distinction this row was written against no longer exists. What DOES remain is T0.1's real hazard — the crates are compiled from the working tree, so a dirty or advanced `crates/vendor/` is invisible in that SHA except for the `-dirty` suffix | n/a |
+| T0.1 | Pin `ocbm` as a submodule/vendored snapshot, replacing the bare path dep | **OPEN** | the `receiver`/`pairing`/`mfi` `[dependencies]` entries in `native/carplay-jni/Cargo.toml` still bare relative path deps. **Literal corrected 2026-09-10:** they read `path = "../../../../crates/vendor/receiver"` and siblings, not the `"../../../ocbm/..."` this row used to quote — `host/gm_ccpa` now lives *inside* the `ocbm` checkout, so the path no longer names it. The substantive point stands: unpinned, and the "LAST REVIEWED REV" comment is manual, not enforced | No |
+| — | Build-time check that fails/warns on `ocbm` HEAD ≠ reviewed rev | **OPEN** | **MOOT in the current layout — reframed 2026-09-10.** This row assumed two repos. There is one: `git -C host/gm_ccpa rev-parse --show-toplevel` resolves to `ocbm`, and `build_apk.sh` sets `REPO="$GM_ROOT"`, so the SHA it stamps already covers both the app and the vendored crates. The gm_ccpa-vs-ocbm rev distinction this row was written against no longer exists. What DOES remain is T0.1's real hazard — the crates are compiled from the working tree, so a dirty or advanced `crates/vendor/` is invisible in that SHA except for the `-dirty` suffix | n/a |
 | T0.2/T0.3/T0.5 | R8 keep-rule for `MfiRelay`; `build_apk.sh` → android-32, fail-fast, `pipefail`; `Cargo.toml` lto/strip/codegen-units | LANDED | the `MfiRelay` `-keep` rules in `netprobe_app/app/proguard-rules.pro`; `ANDJAR`/`CARJAR` pointing at `platforms/android-32` and `set -euo pipefail` in `tools/build_apk.sh`; `[profile.release]` in `Cargo.toml` | No |
 | T6.1 | Delete `AirPlayRx.kt` + wirings | LANDED | absent from tree | No |
 | T6.3 | Delete dead code (`unsafe impl Send for Native`, `_UNUSED`, `nativeReady`, etc.) | LANDED | `unsafe impl Send for Native` absent from `lib.rs` | No |
@@ -97,7 +97,7 @@ live owner session on the bench was not disturbed. Each row names its test where
 
 | ID | What | State | Evidence | Device-verified |
 |---|---|---|---|---|
-| E-F1 / owner rule | `tools/test.sh` built carplay-jni and the receiver/pairing `cargo test`s IN-TREE (≈1.7 GB under `~/Documents`); every cargo call now sets `CARGO_TARGET_DIR` under `~/.cache/cargo-targets/` (the JNI build shares `build_apk.sh`'s exact dir); new first gate step `tools/tree_artifact_guard.sh` FAILS on any real `target`/`build`/`.gradle`/`__pycache__`/`.build`/`node_modules` dir under `host/gm_ccpa` or `crates/` (symlinks pass; `GMCCPA_ALLOW_TREE_ARTIFACTS=1` only while cleaning up); `PYTHONDONTWRITEBYTECODE=1` + `python3 -I -B`; proto-check output under the run's mktemp dir | LANDED | `tools/test.sh`, `tools/tree_artifact_guard.sh`, `README.md` "Build and run", `06` §4 | n/a — the existing in-tree dirs are listed by the guard and deleted by the owner, not by the gate |
+| E-F1 / owner rule | `tools/test.sh` built carplay-jni and the receiver/pairing `cargo test`s IN-TREE (≈1.7 GB in the synced working tree); every cargo call now sets `CARGO_TARGET_DIR` under `$OCBM_CACHE/cargo-targets/` (the JNI build shares `build_apk.sh`'s exact dir); new first gate step `tools/tree_artifact_guard.sh` FAILS on any real `target`/`build`/`.gradle`/`__pycache__`/`.build`/`node_modules` dir under `host/gm_ccpa` or `crates/` (symlinks pass; `GMCCPA_ALLOW_TREE_ARTIFACTS=1` only while cleaning up); `PYTHONDONTWRITEBYTECODE=1` + `python3 -I -B`; proto-check output under the run's mktemp dir | LANDED | `tools/test.sh`, `tools/tree_artifact_guard.sh`, `README.md` "Build and run", `06` §4 | n/a — the existing in-tree dirs are listed by the guard and deleted by the owner, not by the gate |
 | E-F4 | `tools/adb_radio_probe.sh` wrote its capture beside itself (untracked → every later build `-dirty`); now `${GM_OUT:-/tmp}`; `__pycache__` and `radio_probe_*.txt` ignored (slashless) | LANDED | `tools/adb_radio_probe.sh:28-30`, `.gitignore` | n/a |
 | E-F5 | `build_apk.sh`: `git rev-list --count` failure is FATAL (was `\|\| echo 7`); `cargo build --locked` (gate too); kotlinc version printed on drift (`KOTLINC_EXPECTED`, warn-only) | LANDED | `tools/build_apk.sh` | **Yes** — 2026-10-08 bench, build `230eaa7` (code 428), `install -r` over rc2: built and installed; versionCode 420 → 428 |
 | B-F1 | `SessionSupervisor.onBoxLost` (non-GRACE) cancels the ladder's retry and resets `rung`/`skipped1`: a retry armed before the transport died fired into IDLE under the relink (rungs 1-2 skipped → false STALLED "wait a few seconds") or rung 2 `MGMT_RESTART_WIRELESS` 27 s into a successful relink; `onRelinkEnded` also rewrites a STALLED whose cause is ADAPTER | LANDED | `SessionSupervisor.kt` `onBoxLost`/`onRelinkEnded`/`stalledCause`; `SessionSupervisorTest.bf1_*` (5 tests, 4 of them red without the fix) | Partially — 2026-10-08 (evening) bench, build `6c95684` (code 430): adapter unplugged under a live session ("box gone, session live", CarPlay kept running), the phone-side break then ran the grace window and the ladder (rung 0, rungs 1-2 skipped `adapter: ABSENT`, STALLED with the accurate no-adapter text); after the replug (claim, HELLO_ACK 13 ms, SUBSCRIBE, armed) NO `MGMT_RESTART_WIRELESS` followed in the next 30+ s. Not the exact transport-death-mid-ladder case; keep Partially |
@@ -313,22 +313,22 @@ ledger may be moved to device-verified on the strength of a capture taken from t
 | RFC 6762 hygiene | AAAA answered with A + NSEC; announce spacing 250 ms → 1 s | LANDED | the AAAA/NSEC arm of `MdnsResponder.handleQuery()`, `recNsec()`, and the 1 s `Thread.sleep` in `announce()` | Partial (A1 verified; AAAA/NSEC path not separately isolated) |
 | — | Capture always-on from `onCreate` | LANDED | (`LogCapture.start` wired) | **Yes** |
 
-### Box side (`ccpa_custom`)
+### Box side (`ocbm`)
 
 | ID | What | State | Evidence | Device-verified |
 |---|---|---|---|---|
-| Radio seam | `radio_hal.sh`/`radio_detect.sh` missing from deployed supervisor → no BT bring-up, no error surfaced | **LANDED (fixed 2026-08-28)** | `ccpa_custom docs/ops/06_CORRECTIONS_LEDGER.md` `R-20W-5`; `check_supervisor_deps()` in `tools/ocbm_push.sh` now warns on a partial push | **Yes** — `hci0 UP RUNNING` from cold boot after the two scripts were pushed |
-| N3 | `pgrep -x`/`pkill -x ocbmd` (was `-f`, matched the respawn wrapper) | LANDED | `restart_ocbmd_daemon()` in `ccpa_custom tools/session_supervisor.sh` (stale line cite, re-anchored 2026-09-10 — the old lines are now the `carplayd` spawn in the ARM path) | Unverified this pass |
+| Radio seam | `radio_hal.sh`/`radio_detect.sh` missing from deployed supervisor → no BT bring-up, no error surfaced | **LANDED (fixed 2026-08-28)** | `ocbm docs/ops/06_CORRECTIONS_LEDGER.md` `R-20W-5`; `check_supervisor_deps()` in `tools/ocbm_push.sh` now warns on a partial push | **Yes** — `hci0 UP RUNNING` from cold boot after the two scripts were pushed |
+| N3 | `pgrep -x`/`pkill -x ocbmd` (was `-f`, matched the respawn wrapper) | LANDED | `restart_ocbmd_daemon()` in `ocbm tools/session_supervisor.sh` (stale line cite, re-anchored 2026-09-10 — the old lines are now the `carplayd` spawn in the ARM path) | Unverified this pass |
 | N4 | Reboot budget write-verified after `sync`, fails closed | LANDED | the `FAIL CLOSED (audit N4)` block in `escalate()`, `session_supervisor.sh` (stale line cite, re-anchored 2026-09-10 — the old lines are now the `wireless_owns_session` ARM-suppression check) | Unverified this pass |
 | 3.3 | `/tmp/bt_phase` un-latched (`rm -f` on exit/teardown/start) | LANDED | the `rm -f /tmp/bt_phase` in `wireless_down()`, `session_supervisor.sh` (stale line cite, re-anchored 2026-09-10 — the old line is now a comment block in `wireless_up()`) | Unverified this pass |
 | 5.7 | BT SYN resend capped at 10 total | LANDED | `const SYN_RESEND_MAX` inside `fn session`, `crates/vendor/wireless/src/bt_driver.rs` (`SYN_RESEND_MAX = 9`, "audit 5.7") | Unverified this pass |
 | 3.4/3.5 | Split HOST_GONE emission; `F_REPLAY` bit2 semantics | 3.5 **LANDED**; 3.4 **UNVERIFIED** (half) | Corrected 2026-10-08 (B-DOC): the source IS in this checkout. `F_REPLAY` is `crates/ocbm-proto/src/lib.rs:95` (bit2), set by ocbmd on every state-mirror replay (`box/ocbmd/src/main.rs:1341-1348`) and consumed by `OcbmClient.kt:378` (`handleCtrl(…, replay)`). `SEV_HOST_GONE` is emitted from more than one site in ocbmd (`main.rs` ~`:1873` the unsubscribed-heartbeat nudge, ~`:3855` the answer path); whether that split matches the audit's intended semantics was not re-derived | No |
 | R6.5 | TTL-gated deploy trial / dead-man before flashing a daemon | Process step, not code — treat as standing procedure, not a landed/open item | — | — |
 | R6.6.27–28 | Rotate AP passphrase; rotate `edSeed`/setup code fallback | **OPEN** | Corrected 2026-09-09: the `crates/vendor/pairing/src/srp.rs` `b"3939"` citation was a false positive — every occurrence (`:205,218,226,231,232`) sits inside `#[cfg(test)] mod tests` (opens `:195`, EOF `:236`), a test fixture never read at runtime, not a shippable credential; dropped as evidence. The real setup-code fallback is `const PI_FALLBACK` in `box/carplayd/src/main.rs` (read by the `CARPLAY_PI` `get_or_init` fallback) — the old `crates/vendor/rx-connect/src/main.rs:29` pointer was stale, that crate no longer exists in this checkout and appears to have been merged into `carplayd`. `edSeed` rotation remains open per T6.5 above | No |
-| R6.6.29 | Scrub tracked credential files, widen `RE_WPA` redactor | scrub **OPEN**; widen **LANDED 2026-10-08** | `ccpa_custom/boards/rpi4-aaos/evidence/hostapd_5g.conf` still tracked; no box-side `RE_WPA` symbol found in `ccpa_custom`. Scoping note (2026-09-09, cite corrected 2026-10-08): an `RE_WPA` symbol does exist, but in this repo as `RE_WPA` in `logging/Redactor.kt` (moved out of `LogExport.kt` in v5.8 V7) — that is app-side export redaction, not the box-side credential-file scrub this item is about, and must not be mistaken for coverage of it. The widening (E-F3: `wpa_passphrase`, `password`, `hotspot_pass`) is in the remediation table | No |
+| R6.6.29 | Scrub tracked credential files, widen `RE_WPA` redactor | scrub **OPEN**; widen **LANDED 2026-10-08** | `ocbm/boards/rpi4-aaos/evidence/hostapd_5g.conf` still tracked; no box-side `RE_WPA` symbol found in `ocbm`. Scoping note (2026-09-09, cite corrected 2026-10-08): an `RE_WPA` symbol does exist, but in this repo as `RE_WPA` in `logging/Redactor.kt` (moved out of `LogExport.kt` in v5.8 V7) — that is app-side export redaction, not the box-side credential-file scrub this item is about, and must not be mistaken for coverage of it. The widening (E-F3: `wpa_passphrase`, `password`, `hotspot_pass`) is in the remediation table | No |
 
 **On the two open box-side credential items (R6.6.27–29): these are real, unremediated exposures in
-a sibling repo (`ccpa_custom`). This doc does not fix them (out of scope for this file) — flagging
+the box side (`ocbm`; a sibling repo when this was written). This doc does not fix them (out of scope for this file) — flagging
 here so the ledger doesn't imply otherwise. Do not print the actual passphrase/seed value into any
 future doc; use a placeholder and rotate before any further sharing of that repo.**
 
@@ -338,11 +338,11 @@ future doc; use a placeholder and rotate before any further sharing of that repo
 
 Kept here because a one-line ledger entry isn't enough to act on.
 
-- **T0.1 — pin `ccpa_custom`.** Still a bare relative path dep (the `receiver`/`pairing`/`mfi` `[dependencies]` entries in `native/carplay-jni/Cargo.toml`); the "LAST
+- **T0.1 — pin `ocbm`.** Still a bare relative path dep (the `receiver`/`pairing`/`mfi` `[dependencies]` entries in `native/carplay-jni/Cargo.toml`); the "LAST
   REVIEWED REV" comment is manually maintained, not enforced. Add either a submodule/vendored
-  snapshot, or at minimum a build-time `git -C ../../../ccpa_custom rev-parse --short HEAD` compare
+  snapshot, or at minimum a build-time `git rev-parse --short HEAD` compare
   against a `REVIEWED_REV` constant that fails the build (or stamps a loud banner) on mismatch.
-  Until then, diff `ccpa_custom` by hand at the start of every session — see "Upstream drift" below.
+  Until then, diff `ocbm` by hand at the start of every session — see "Upstream drift" below.
 - **T2.2 — full session-ownership relocation into `CarPlaySessionService`.** The service exists and
   owns process priority; whether `cpRx`/`ocbmProbe` construction itself now lives inside it
   (survives Activity *destruction*, not just backgrounding) was not confirmed this pass — read
@@ -388,7 +388,7 @@ Kept here because a one-line ledger entry isn't enough to act on.
   write timeout. Fix: reader thread + bounded queue, drop-oldest of whole AUs only, never a
   keyframe/param-set-carrying AU.
 - **Box: 3.4/3.5 (HOST_GONE split, `F_REPLAY` bit2), R6.6 credential rotation/scrub.** See ledger
-  above — unverified or open, in `ccpa_custom`, not this repo.
+  above — unverified or open, in `ocbm`, not this repo.
 
 ---
 
@@ -402,13 +402,13 @@ for that reason.
 
 ---
 
-## Upstream `ccpa_custom` drift — standing procedure
+## Upstream `ocbm` drift — standing procedure
 
 `gm_ccpa` links `receiver`/`pairing`/`mfi` as **path deps** (compiles the working tree, not a pinned
 rev — see T0.1 above). Last manual review was at `6bc326d` (2026-08-12); re-check before trusting any
 later build:
 
-1. `git -C ../ccpa_custom rev-parse --short HEAD`, diff against the reviewed rev.
+1. `git rev-parse --short HEAD` (anywhere in the `ocbm/` checkout), diff against the reviewed rev.
 2. Re-scan `receiver`/`pairing`/`mfi`/`ocbm-proto` for changes to `forward.rs`/`stream.rs`/
    `server.rs`/`net.rs`/`datastream.rs`/`iap_tunnel.rs` (the `:9001`/`:9002` seam contract) and to
    `levers.rs`/`session.rs` (the `OCBM_FWD_ENC` and lever-write contract).
@@ -456,7 +456,7 @@ possible — while OCBM claim/HELLO/MFi/SUBSCRIBE all still reported success wit
 **Root cause, confirmed on hardware:** `radio_hal.sh`/`radio_detect.sh` were absent from the deployed
 unit (`ls` returned "No such file or directory"). The supervisor invokes them inside a detached
 `setsid` wrapper and never reads the exit status, so the missing scripts produced no signal. Fix:
-push the two scripts; `hci0` came up `UP RUNNING` from a cold boot. See `ccpa_custom docs/ops/06_CORRECTIONS_LEDGER.md`
+push the two scripts; `hci0` came up `UP RUNNING` from a cold boot. See `ocbm docs/ops/06_CORRECTIONS_LEDGER.md`
 `R-20W-5` for the full account. **Process fix landed:** `tools/ocbm_push.sh` now warns when a
 supervisor push is missing the radio seam (`check_supervisor_deps()`, `tools/ocbm_push.sh`).
 

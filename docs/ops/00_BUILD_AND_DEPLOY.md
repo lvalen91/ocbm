@@ -9,14 +9,14 @@ How the box binaries are built, what they cost in flash/RAM, and how they are pu
   §2.8/§7.0c) it has an OCBM mode (`ocbm-accessory` serves ocbmd's `/dev/usb_accessory` over FunctionFS); since
   revision 8 (§2.8, §7.0e) **OCBM is its boot default**: this tree's box binaries (ocbmd, btd, carplayd) and the
   stock supervisor + radio seam scripts ship as ONE separate **OCBM overlay** image, built by
-  `tools/ocbm_overlay.sh [--minimal|--full]` (output under `~/.cache/carlink-artifacts/ocbm-overlay/`, refuses
-  `~/Documents`; runs `tools/pkill_selfmatch_check.py` on the packed scripts) and written on the unit with
+  `tools/ocbm_overlay.sh [--minimal|--full]` (output under `$OCBM_CACHE/carlink-artifacts/ocbm-overlay/`, refuses
+  the working tree; runs `tools/pkill_selfmatch_check.py` on the packed scripts) and written on the unit with
   `ocbm-overlay write <img> <sha256>` into the last 0x460000 B of its rootfs MTD, outside the GPL image; the rootfs
   verifies it by sha256 and unpacks it into RAM at boot. Nothing is staged by hand any more. *(Corrected
   2026-10-30: this said "no OCBM yet", then that ocbmd "is still staged onto the unit from this tree's build".)*
 - `boards/c2air-v821b/README.md`: the C2Air (Allwinner V821, riscv32), a different box; shared Rust sources, own toolchain.
 - `docs/boards/00_PI_AAOS_PORT.md`: the Raspberry Pi / AAOS arm64 port of the box daemons.
-- Research repo `CPC200-CCPA_resources` (`~/Downloads/github/CPC200-CCPA_resources`, `custom/kernel_rootfs/`):
+- Research repo `CPC200-CCPA_resources` (a separate checkout outside the repo; `custom/kernel_rootfs/`):
   baseline hardware test records, backups, handoff.
 
 ## Build footprint
@@ -39,7 +39,7 @@ How the box binaries are built, what they cost in flash/RAM, and how they are pu
   separate build. The only `clang` + `libusb` artifact in the tree is `host/accbench.c` (hand-built,
   see `host/README.md`). The `aarch64-linux-android` NDK target IS used — but for the AAOS/Pi port of
   the **box** daemons (`boards/rpi4-aaos/`), not for any host client.
-  - **Gate:** `~/.claude/bin/bt ./gradlew :app:assembleDebug :app:testDebugUnitTest :app:detekt
+  - **Gate:** `./gradlew :app:assembleDebug :app:testDebugUnitTest :app:detekt
     :app:ktlintCheck` from `host/CarlinkAndroid`; run `python3 tools/proto_check.py` from the repo
     root whenever `OcbmProto.kt` changes. The box binaries above are unaffected by this gate — it
     is client-only and does not rebuild or redeploy any box daemon.

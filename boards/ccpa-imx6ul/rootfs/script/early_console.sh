@@ -1,5 +1,5 @@
 #!/bin/sh
-# ccpa_custom / Lever 1 — earliest-possible UART root console.
+# ocbm / Lever 1 — earliest-possible UART root console.
 # Registered as a ::sysinit action BEFORE /etc/init.d/rcS so a diagnostic root shell
 # exists on ttymxc0 (115200 8N1) before rcS's mount/mdev/service steps can hang.
 # Backgrounds a self-respawning login shell and returns IMMEDIATELY (sysinit must not block).

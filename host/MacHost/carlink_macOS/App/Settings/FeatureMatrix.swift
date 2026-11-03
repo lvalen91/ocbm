@@ -312,7 +312,7 @@ enum FeatureMatrix {
         case (.headUnitName, .carPlay):
             return FeatureSupport(level: .limited, vendorTerm: "name", vendorKey: "name",
                 effect: "Stored as the config document's name only. iOS shows \"CarLink-<suffix>\" — the base is hardcoded on the box and the suffix is the Wi-Fi MAC's last two octets (or the serial's last 4 hex); the profile name never reaches the phone, and the CarPlay-only Accessory name below is parsed by the box but not applied yet.",
-                verification: .sourceVerified("2026-09-04", "ccpa/iap2d/src/main.rs:370,392 pass message::accessory_name(\"CarLink\") at both Identify sites (iap2-core message.rs:193-206 derives the suffix); crates/vendor/wireless/src/main.rs:287 uses the same for the BT name; vehicle_config.rs:948 accessory_name_bounded() has no caller — docs/ops/04_OPEN_ITEMS.md:337-341"))
+                verification: .sourceVerified("2026-09-04", "box/iap2d/src/main.rs:370,392 pass message::accessory_name(\"CarLink\") at both Identify sites (iap2-core message.rs:193-206 derives the suffix); crates/vendor/wireless/src/main.rs:287 uses the same for the BT name; vehicle_config.rs:948 accessory_name_bounded() has no caller — docs/ops/04_OPEN_ITEMS.md:337-341"))
         // CORRECTED 2026-09-04 (audit finding 5). Was `.supported` + proven "the phone shows it". No
         // docs/androidauto/ file records the name being observed on the phone, and what is emitted is
         // not the profile's name verbatim: AAWire appends " OCBM" to display_name. Declared, not observed.
@@ -455,7 +455,7 @@ enum FeatureMatrix {
                 // CORRECTED 2026-09-04 (audit finding 8). Was proven 2026-09-02 "C-3". C-3 resolved
                 // 2026-09-01 and it is a CODE landing (docs/ops/04_OPEN_ITEMS.md:337): the identity now
                 // rides the wire, but no session log records an iPhone accepting an app-authored param 20.
-                verification: .unverified("C-3 landed 2026-09-01 as code — ccpa/iap2d/src/main.rs passes vehicle_identity_from(&cfg) into build_ident_info_with at both Identify sites (docs/ops/04_OPEN_ITEMS.md:337-341); only the compiled baseline identity (Gasoline, no connectors) has been through phone sessions, an app-authored powertrain has not been observed accepted"))
+                verification: .unverified("C-3 landed 2026-09-01 as code — box/iap2d/src/main.rs passes vehicle_identity_from(&cfg) into build_ident_info_with at both Identify sites (docs/ops/04_OPEN_ITEMS.md:337-341); only the compiled baseline identity (Gasoline, no connectors) has been through phone sessions, an app-authored powertrain has not been observed accepted"))
         case (.powertrain, .androidAuto):
             return FeatureSupport(level: .limited, vendorTerm: "fueltypes / evconnectors", vendorKey: "fueltypes",
                 effect: "Android Auto's vocabulary is coarser (unleaded/biodiesel/electric/other; j1772/chademo/combo/supercharger); this app does not send it yet.",

@@ -1,7 +1,7 @@
 package zeno.gmccpa.pair
 
 /**
- * The JNI door to the proven CarPlay receiver core (`ccpa_custom`'s `receiver`/`pairing`/`rtsp`/`mfi`).
+ * The JNI door to the proven CarPlay receiver core (`ocbm`'s `receiver`/`pairing`/`rtsp`/`mfi`).
  *
  * Kotlin owns the control TCP connection and hands raw bytes through [feed]; everything on the other
  * side — the RTSP state machine, SRP-6a, the Ed25519/X25519 pairing API 32 cannot do, the

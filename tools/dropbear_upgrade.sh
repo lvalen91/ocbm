@@ -35,7 +35,8 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BOXSH="$REPO/tools/boxsh.py"
-SRC_TAR="${SRC_TAR:-$HOME/Downloads/ccpa_backups/20260708_042628_vanilla_state/rootfs.tar.gz}"
+# SRC_TAR: the vanilla-state rootfs.tar.gz from the 20260708_042628 CCPA backup (outside the repo; no default).
+SRC_TAR="${SRC_TAR:-}"
 BOX="${BOX:-192.168.50.2}"
 ALT_PORT=2222
 MODE="run"
@@ -62,6 +63,7 @@ box() { if ssh_box 'true' >/dev/null 2>&1; then ssh_box "$1"; else tel_box "$1";
 say "run dir: $RUN_DIR"
 
 # ---------------------------------------------------------------------------- 0. extract
+[ -n "$SRC_TAR" ] || die "set SRC_TAR to the vanilla-state rootfs.tar.gz (20260708_042628 CCPA backup)"
 [ -f "$SRC_TAR" ] || die "source rootfs not found: $SRC_TAR"
 tar xzf "$SRC_TAR" -C "$RUN_DIR" usr/sbin/dropbear 2>/dev/null \
   || die "could not extract usr/sbin/dropbear from $SRC_TAR"

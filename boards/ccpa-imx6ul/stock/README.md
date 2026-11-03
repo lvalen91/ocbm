@@ -1,9 +1,8 @@
-> **SUPERSEDED as a description of the live box (note added 2026-08-16).** This file describes the
-> 2026-07-08 archive in this directory and is accurate for it — do not rewrite it. The unit has since
-> moved on twice: OCBM is now the boot default (`/script/ncm_only` **or** `/script/ncm_wifi` selects
-> NCM instead), and the IW416-only `wlan_on`/`bt_on` path was replaced by the chipset-neutral radio
-> seam `radio_detect.sh` / `radio_hal.sh` / `radio_ap_up.sh`. See `../../README.md`,
-> `../../../docs/wireless/01_BT_AND_RADIO.md` and `../../../tools/ocbm_install.sh`.
+> **Not a description of the live box.** This file describes the 2026-07-08 stock archive in this
+> directory and is accurate for it. On a live unit OCBM is the boot default (`/script/ncm_only` **or**
+> `/script/ncm_wifi` selects NCM instead), and radio bring-up goes through the chipset-neutral seam
+> `radio_detect.sh` / `radio_hal.sh` / `radio_ap_up.sh`, not the IW416-only `wlan_on`/`bt_on` path. See
+> `../README.md`, `../../../docs/wireless/01_BT_AND_RADIO.md` and `../../../tools/ocbm_install.sh`.
 
 # CPC200-CCPA Starting Baseline
 State: **BASELINE** — the clean owned base. Stock projection stack (riddleBox) removed;
@@ -22,21 +21,20 @@ This was the starting baseline CCPA rootfs from which OCBM was built ontop of.
 - mtd1.bin (kernel, 3328K) @ 0x040000
 - mtd2.bin (rootfs, 12800K)@ 0x380000 — **kept local, not in this repo**
 - rootfs.tar.gz : live jffs2 rootfs contents (top-level dirs; excludes /proc /sys /dev /tmp) — **kept local, not in this repo**
-- rootfs.files.txt : the file list of rootfs.tar.gz (`tar tzf | sed 's|^\./||' | grep -v '/$' | sort`), names only; added 2026-10-20 so `tools/ncm_base_install.sh` baselinediff keeps working without the tarball
+- rootfs.files.txt : the file list of rootfs.tar.gz (`tar tzf | sed 's|^\./||' | grep -v '/$' | sort`), names only; lets `tools/ncm_base_install.sh` baselinediff work without the tarball
 
-**Removed from the repo 2026-10-20 (owner decision): the three files that hold the rootfs embed device
-credentials** (dropbear private host keys, root password hash, Wi-Fi configs). They were `git rm`'d;
-earlier commits still contain them, and the same bytes were already published through the mirror and
-as CPC200-CCPA_resources `flash_dumps/CCPA_stripped/` (removed there the same day). Byte-identical local
-copies, same sha256 (also listed in `SHA256SUMS`):
+**Not in the repo: the three files that hold the rootfs embed device credentials** (dropbear private
+host keys, root password hash, Wi-Fi configs). Earlier commits still contain them, and the same bytes
+were already published through the mirror and as CPC200-CCPA_resources `flash_dumps/CCPA_stripped/`
+(no longer there). Byte-identical local copies, same sha256 (also listed in `SHA256SUMS`):
 
 | File | sha256 | Local copy |
 |---|---|---|
-| `CPC200-CCPA_full_nor_16MB.bin` | `edd024536c6f71d8038aa1c9be7fe6379610ba9486636e655fe058300c9fc761` | `~/Documents/carlink/carlinkit_misc/ccpa_backups/_removed_from_repo_2026-10-20/ccpa_custom/ccpa/backup/base/` |
-| `mtd2.bin` | `4250029cdf1edac27e47e101fd06aacec7ff2b5b2658ccb78a50cdd9ea1e32ea` | same folder |
-| `rootfs.tar.gz` | `32b48dc174e0b1cbaa2bf5680a99271afc8a75f502cf738e7d5407d2b7ea7800` | same folder |
+| `CPC200-CCPA_full_nor_16MB.bin` | `edd024536c6f71d8038aa1c9be7fe6379610ba9486636e655fe058300c9fc761` | the maintainer's CCPA backup archive |
+| `mtd2.bin` | `4250029cdf1edac27e47e101fd06aacec7ff2b5b2658ccb78a50cdd9ea1e32ea` | same archive |
+| `rootfs.tar.gz` | `32b48dc174e0b1cbaa2bf5680a99271afc8a75f502cf738e7d5407d2b7ea7800` | same archive |
 
-The original 07-08 backup is also at `~/Documents/carlink/carlinkit_misc/ccpa_backups/20260708_042628_vanilla_state/`.
+The original 07-08 backup (`20260708_042628_vanilla_state`) is also in that archive.
 A restore uses the local copies; only `mtd0.bin`/`mtd1.bin` are in this folder.
 - manifest.txt  : device state at backup time (process list, /script, /usr/sbin, gadget/radios)
 - SHA256SUMS

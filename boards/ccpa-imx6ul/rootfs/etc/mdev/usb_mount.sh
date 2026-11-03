@@ -1,5 +1,5 @@
 #!/bin/sh
-# ccpa_custom: owned -- the one mdev USB-storage hook (2026-10-19; replaces stock udisk_insert.sh
+# ocbm: owned -- the one mdev USB-storage hook (2026-10-19; replaces stock udisk_insert.sh
 # and udisk_hotplug.sh). mdev.conf points both rules at it, add and remove (`*`):
 #   sd[a-z]       0:0 666 */etc/mdev/usb_mount.sh    whole disk
 #   sd[a-z][0-9]  0:0 666 */etc/mdev/usb_mount.sh    partition

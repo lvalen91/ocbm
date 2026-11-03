@@ -838,7 +838,7 @@ struct VehicleProfilePreset: Sendable, Identifiable, Equatable {
     enum Origin: Sendable, Equatable {
         /// This project's own.
         case project
-        /// Derived from a DHU preset (`~/Library/Android/sdk/extras/google/auto/config/<file>`).
+        /// Derived from a DHU preset (`$ANDROID_HOME/extras/google/auto/config/<file>`).
         case desktopHeadUnit(file: String)
         /// Derived from a CarPlay Simulator template (`…/VehicleConfigs/Configs/<file>`).
         case carPlaySimulator(file: String)

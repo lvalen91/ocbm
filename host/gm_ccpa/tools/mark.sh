@@ -1,7 +1,7 @@
 #!/bin/bash
 # Label the current moment in ALL THREE logs at once, so a scenario can be found later.
 # The head-unit marker goes through `log`, so it lands in the same ring as everything else.
-# Repo-relative roots. This project lives at ccpa_custom/host/gm_ccpa, so the tools resolve both
+# Repo-relative roots. This project lives at ocbm/host/gm_ccpa, so the tools resolve both
 # roots from their own location rather than hard-coding an absolute path — moving the checkout, or
 # having a second one, must not silently build against the wrong tree.
 GM_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"

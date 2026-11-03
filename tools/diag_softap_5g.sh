@@ -26,7 +26,7 @@ SSID="CarlinkAP"
 PASS="Passw0rd123"
 HOSTAPD_DD="${HOSTAPD_DD:-0}"              # 1 = install hostapd -dd wrapper (optional step)
 SETTLE_SECS=8                              # wait after each start-softap before sampling
-OUT="${OUT:-$HOME/Desktop/softap_diag_$(date +%Y%m%d_%H%M%S)}"
+OUT="${OUT:-${TMPDIR:-/tmp}/softap_diag_$(date +%Y%m%d_%H%M%S)}"
 
 HOSTAPD_BIN="/apex/com.android.hardware.wifi.hostapd.rpi/bin/hw/hostapd"
 HOSTAPD_CONF="/data/vendor/wifi/hostapd/hostapd_wlan0.conf"

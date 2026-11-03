@@ -15,6 +15,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// duplicated; a Keychain-backed lookup is a separate follow-up, not landed here.
     private nonisolated static let defaultAAP12Password = "carlink"
 
+    /// The AA head-unit PKCS#12, repo-relative `host/aa-headunit/certs/headunit.p12`. Resolution order:
+    /// `AA_P12` (the file itself), then `OCBM_ROOT` (the `ocbm/` checkout root), then the checkout this
+    /// binary was compiled from — `#filePath` is `<root>/host/MacHost/carlink_macOS/App/AppDelegate.swift`,
+    /// so five components up is the root. No home-relative literal: the checkout can live anywhere.
+    nonisolated static func aaP12Path(env: [String: String] = ProcessInfo.processInfo.environment) -> String {
+        if let p = env["AA_P12"] { return p }
+        let root: URL
+        if let r = env["OCBM_ROOT"], !r.isEmpty {
+            root = URL(fileURLWithPath: r, isDirectory: true)
+        } else {
+            var u = URL(fileURLWithPath: #filePath)
+            for _ in 0..<5 { u.deleteLastPathComponent() }
+            root = u
+        }
+        return root.appendingPathComponent("host/aa-headunit/certs/headunit.p12").path
+    }
+
     private var windowController: MainWindowController!
     private var usbManager: USBDeviceManager!
     private var transport: USBTransport?
@@ -240,8 +257,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let parts = target.split(separator: ":")
         let host = parts.count >= 2 ? String(parts[0]) : "127.0.0.1"
         let port = UInt16(parts.count >= 2 ? String(parts[1]) : target) ?? 5277
-        let p12 = ProcessInfo.processInfo.environment["AA_P12"]
-            ?? NSHomeDirectory() + "/Documents/carlink/ccpa_custom/host/aa-headunit/certs/headunit.p12"
+        let p12 = Self.aaP12Path()
         let password = ProcessInfo.processInfo.environment["AA_P12_PASS"] ?? Self.defaultAAP12Password
 
         let decoder = VideoDecoder()
@@ -336,8 +352,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Self.logger.info("AA-over-OCBM already running — ignoring duplicate start")
             return
         }
-        let p12 = ProcessInfo.processInfo.environment["AA_P12"]
-            ?? NSHomeDirectory() + "/Documents/carlink/ccpa_custom/host/aa-headunit/certs/headunit.p12"
+        let p12 = Self.aaP12Path()
         let password = ProcessInfo.processInfo.environment["AA_P12_PASS"] ?? Self.defaultAAP12Password
 
         let decoder = VideoDecoder()

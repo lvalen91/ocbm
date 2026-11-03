@@ -6,7 +6,7 @@
 # That image is the distributed on-ramp; this script is the CONTINUATION and assumes the link
 # exists. It does not bootstrap NCM and will refuse to run without it.
 #
-# ENDPOINT: the 2026-07-08 baseline (`ccpa/backup/base`) MINUS OCBM — Carlinkit's projection
+# ENDPOINT: the 2026-07-08 baseline (`boards/ccpa-imx6ul/stock`) MINUS OCBM — Carlinkit's projection
 # stack (riddleBox: ARMadb-driver / ARMiPhoneIAP2 / AppleCarPlay / ARMAndroidAuto / ARMHiCar /
 # boa / riddle_top / …) removed, every remaining script owned and dead-reference-free, radios
 # on-demand, NCM always-on, UART root console armed before rcS. No ocbmd, no ocbm_boot.sh, no
@@ -185,7 +185,7 @@ gate() {
 # --------------------------------------------------------------------------------------
 # Transport. box/push/pull dispatch on --via so every phase below is written once.
 # --------------------------------------------------------------------------------------
-# `id_ccpa_ncm` is the dedicated per-Mac key for the NCM maintenance link (see ~/.ssh/config's
+# `id_ccpa_ncm` is the dedicated per-Mac key for the NCM maintenance link (see the ssh_config's
 # `ccpa-ncm` host). Offered only when it exists, so a machine without it falls back to whatever the
 # agent/default identities provide. NOTE: never add `-o PubkeyAuthentication=no` here — dropbear on
 # this unit has NO root password set, so forcing password auth turns a working box into a confusing
@@ -973,7 +973,7 @@ EOS
 }
 
 phase_baselinediff() {
-  # The 07-08 baseline snapshot (ccpa/backup/base/rootfs.tar.gz) is a REAL rootfs that reached
+  # The 07-08 baseline snapshot (boards/ccpa-imx6ul/stock/rootfs.tar.gz) is a REAL rootfs that reached
   # the endpoint, so it beats any hand-written kill list as a specification: anything on this
   # box that the baseline does not have is, by definition, something the original pass removed
   # or never had. Two categories are filtered out before reporting, and only two:
@@ -985,10 +985,10 @@ phase_baselinediff() {
   # Everything else that differs is signal. EXTRA = still to remove; MISSING = the baseline had
   # something this box does not (usually the owned scripts, installed by `strip`).
   # Only the file LIST is used. rootfs.tar.gz left the repo on 2026-10-20 (it embeds device
-  # credentials; kept local, see ccpa/backup/base/README.md); rootfs.files.txt is its listing,
+  # credentials; kept local, see boards/ccpa-imx6ul/stock/README.md); rootfs.files.txt is its listing,
   # produced by the same pipeline as below, so the result is identical. A local tarball, if
   # present, still wins.
-  local base_dir="$REPO/ccpa/backup/base"
+  local base_dir="$REPO/boards/ccpa-imx6ul/stock"
   local base_tar="$base_dir/rootfs.tar.gz" base_list="$base_dir/rootfs.files.txt"
   if [ -f "$base_tar" ]; then
     say "=== baselinediff — this box vs the 07-08 vanilla rootfs (WLAN/BT + identity excluded) ==="

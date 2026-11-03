@@ -1,7 +1,7 @@
 #!/bin/sh
 # capture_iphone_carplay.v2.sh
 # Reliable capture of the iPhone's OWN iAP2 packet trace + CoreMedia carEndpoint
-# logs over USB, for the ccpa_custom CarPlay accessory project.
+# logs over USB, for the ocbm CarPlay accessory project.
 #
 # WHAT MAKES THE TRACE APPEAR (verified 2026-07-25 against the good/bad captures):
 #   The `LOG; ...` iAP2 packet trace and the `iAP2PacketParseBuffer` lines are emitted

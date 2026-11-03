@@ -57,7 +57,7 @@ import zeno.gmccpa.ocbm.UsbBulkTransport
  * starts this trampoline for every USB attach (the class itself stays `zeno.gmccpa`). The two
  * paragraphs above are the history of the 2026-09-08..10-15 `zeno.gmccpa` package. Whether the
  * grant now lands on every attach is what the bench has to show (the 2026-10-07 re-analysis in
- * `ccpa_custom/docs/host/01_ANDROID_AND_AAOS.md` predicts no grant for an attach handled before the
+ * `ocbm/docs/host/01_ANDROID_AND_AAOS.md` predicts no grant for an attach handled before the
  * switch to user 10); the `via=` field of the `attach ctx: pkg=` line says which route fired.
  *
  * The diagnostics below are kept as-is. They were written to explain the squat's intermittency, and

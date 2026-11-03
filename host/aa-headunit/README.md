@@ -37,7 +37,7 @@ cargo build --release
 ```
 
 The crate carries an empty `[workspace]` table so it builds standalone, outside the parent
-`ccpa_custom` workspace.
+`ocbm` workspace.
 
 ## Run
 

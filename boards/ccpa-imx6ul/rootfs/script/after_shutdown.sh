@@ -1,5 +1,5 @@
 #!/bin/sh
-# ccpa_custom: owned -- audited & adopted from stock; part of the open CCPA userspace.
+# ocbm: owned -- audited & adopted from stock; part of the open CCPA userspace.
 ########################
 # Copyright(c) 2014-2020 DongGuan HeWei Communication Technologies Co. Ltd.
 # file    after_shutdown.sh

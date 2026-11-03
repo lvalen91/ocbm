@@ -16,7 +16,7 @@ import javax.crypto.spec.SecretKeySpec
  * there is no box-side interpretation left to correct a mistake here.
  *
  * That is also why this is the right mode for a 60 fps target: the box spends no CPU on crypto, which
- * is the resource `ccpa_custom/docs/16` records as the framerate ceiling.
+ * is the resource `ocbm/docs/16` records as the framerate ceiling.
  *
  * ## Crypto, byte for byte
  *

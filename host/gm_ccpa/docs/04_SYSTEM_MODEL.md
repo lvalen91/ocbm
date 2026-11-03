@@ -19,7 +19,7 @@ jobs: it is the phone's **Bluetooth radio**, and it is the **MFi coprocessor**. 
 endpoint, it is not an access point, and no media ever crosses it.
 
 **There are TWO such adapters, and they are interchangeable.** Both run identical OCBM firmware built
-from `ccpa_custom`, on identical hardware **except the WLAN chipset** — one NXP IW416, one Realtek
+from `ocbm`, on identical hardware **except the WLAN chipset** — one NXP IW416, one Realtek
 RTL8822CS. The firmware's `radio_caps` layer (`RADIO_CHIP`, `RADIO_BT_ATTACH`, `RADIO_WLAN_MODULES`,
 `RADIO_BT_AFTER_WLAN`) abstracts that difference, so nothing in this app is chipset-aware and neither
 box is "the test box". Two places where the variant is nonetheless observable, both recorded where
@@ -60,7 +60,7 @@ The app runs **on the AP host**, so client isolation never applies to it — see
 **Box-side `airplayd`/`rx-connect` are not gated off, and that is deliberate for now.** They start,
 latch "A/V layer up," and carry no media for us. An explicit `AV_DISABLED` gate that stops them from
 spawning at all does not exist yet (the `av::ensure_av_layer` call site in
-`ccpa_custom/tools/session_supervisor.sh`); pointing their launch env at a no-op binary was tried and
+`ocbm/tools/session_supervisor.sh`); pointing their launch env at a no-op binary was tried and
 rejected because the health-check's `pid_alive` requires `argv[0]` to equal the full binary path,
 which no shell script or immediately-exiting binary satisfies.
 
@@ -69,7 +69,7 @@ which no shell script or immediately-exiting binary satisfies.
 > subnet can reach them." That premise is chipset-dependent, and it does not hold on the
 > Realtek-WLAN box.
 >
-> Both adapters run **identical `ccpa_custom` OCBM firmware on identical hardware except the WLAN
+> Both adapters run **identical `ocbm` OCBM firmware on identical hardware except the WLAN
 > chipset** — one NXP IW416, one Realtek RTL8822CS — and the firmware's `radio_caps` layer abstracts
 > the difference. On the Realtek part that abstraction reports `RADIO_BT_AFTER_WLAN=1`: the WLAN
 > driver **must be insmod'd before Bluetooth can attach at all** (`[radio_hal] chipset requires the
@@ -117,7 +117,7 @@ dormant `UsbAttachActivity`.)
 
 The box's `CT_BOX_HEALTH` (`0x1A`) report carries per-subsystem readiness bits, including
 `BH_HCI_PRESENT` (bit 0), which the box sets from `HCIGETDEVINFO` on a raw HCI socket — the same ioctl
-`hciconfig` uses to print `UP RUNNING` (ioctl in `fn hci0_up`, `ccpa_custom/box/ocbmd/src/main.rs`; the bit is set
+`hciconfig` uses to print `UP RUNNING` (ioctl in `fn hci0_up`, `ocbm/box/ocbmd/src/main.rs`; the bit is set
 in `box_health_tick`; corrected 2026-09-09, previously cited `:789-839`, which is `LogTail`/`CH_LOG` rotation code).
 This is the
 signal the app's lifecycle layer (§4b) uses to know the box's radios actually came up, not just that
@@ -210,7 +210,7 @@ carries only kilobytes.
 | **USB / OCBM** (`0x1314:0x2d00`) | `CH_CTRL` (handshake, heartbeat, session events, pairing code), `CH_MFI` (four chip ops/session), `CH_MGMT` (health, identity, forget-bond, reboot), `CH_LOG` (the box's own logs, PUSHED continuously into app logcat as `[box:<source>]` lines, armed by `CT_LOG_CTL` — `OcbmClient.handleLog`), `CH_FILE` (one-shot `FILE_PULL` of the few logs `CH_LOG` does not carry). Kilobytes. | Video, audio, metadata, input, mic — ever |
 | **5 GHz Wi-Fi** (`br0`) | Everything heavy: video, audio, RTSP control, pair-verify, auth-setup, HID, mic, iAP2 DataStream | — |
 
-**Why media doesn't ride USB:** not primarily bandwidth — `ccpa_custom/docs/carplay/00_ARCHITECTURE.md` measures
+**Why media doesn't ride USB:** not primarily bandwidth — `ocbm/docs/carplay/00_ARCHITECTURE.md` measures
 339 Mbps adapter→host and 90 Mbps host→adapter, both well above CarPlay's 8–30 Mbps video need in
 either direction. The real constraint is §4a below: the box has no network route to `br0`, and the
 owner's requirement is that the phone join the *vehicle's* SoftAP, not the adapter's.
@@ -606,7 +606,7 @@ additionally gated by `debug.gmccpa.mic_inject` (`bench/BenchHooks.kt`). Runbook
 
 ## 5. Non-goals and consequences of wireless-only
 
-Stated explicitly because the upstream `ccpa_custom` project supports a wired path, and a good deal of
+Stated explicitly because the upstream `ocbm` project supports a wired path, and a good deal of
 its machinery exists only to serve it:
 
 - **No wired CarPlay.** `iap2d` never runs.

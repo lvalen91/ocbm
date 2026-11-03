@@ -2,7 +2,39 @@
 
 > **STATUS:** CURRENT · single owner for this topic. Consolidated 2026-08-31 from pre-consolidation docs 42; the originals are in git history and in the 2026-08-31 backup. Correct this file in place — do not add a sibling.
 
-Which external source answers which kind of question, and where each lives on disk.
+Which external source answers which kind of question, and how to reach it.
+
+> **Locations outside the repo.** Every path in this corpus is relative to the repository root, `ocbm/`;
+> nothing above it is assumed. Material that is not in the repo is named by role, and the ones scripts or
+> the host app read are reached through an environment variable each maintainer sets for their own machine:
+> `OCBM_CARPLAY_SDK` (the CarPlay SDK reference tree: `reference/apple_carplay_sdk_R14G17/`, `reference/tbox_speedplay/`,
+> `reference/cinemo_*`, plus `src/`, `include/`, `conformance/`, `MAP/`), `OCBM_CARPLAY_SIMULATOR` (the standalone
+> `CarPlay Simulator.app` bundle, §C), `OCBM_MIRROR` (the publication mirror, `tools/sync_mirror.sh`), `OCBM_CACHE`
+> (build output and caches outside the working tree; scripts fall back to `${TMPDIR:-/tmp}/ocbm-cache`).
+> Archives consulted by hand carry no variable: the archived `ncm_carplayd` tree, the archived standalone `gm_ccpa`
+> checkout (pre-merge history, `evidence/`, golden APKs), the legacy `carlink_macOS` and `carlink_native_personal`
+> apps, the `CPC200-CCPA_resources` research repo, the `carplayd` PoC, the GM CarPlay reference collection, the
+> per-device CCPA backups, the earlier CPC200-CCPA research working directory (`aa_rebuild/`), the earlier Pi
+> AAOS port workspace, the GM firmware research archive and GM emulator workspace, and the POTATO logcat
+> capture drive.
+>
+> **Standard per-tool locations the scripts use.** These are the default locations of the tools themselves, identical on any
+> machine, not the maintainer's layout; nothing here needs setting:
+>
+> - `$HOME/.cargo/bin`: rustup's `cargo`, put first on `PATH` by `build.sh`, `tools/run_tests.sh`, `tools/run_mfid.sh`,
+>   `host/gm_ccpa/tools/{test.sh,build_apk.sh}` and `boards/rpi4-aaos/tools/build_pi_binaries.sh`.
+> - `$HOME/Library/Android/sdk`: Android Studio's default SDK location on macOS. `boards/rpi4-aaos/tools/{build_pi_binaries.sh,build_fdk_aac_arm64.sh}`
+>   honour `ANDROID_HOME` over it; `host/gm_ccpa/tools/{build_apk.sh,test.sh,deepprobe.sh}` use the default path.
+> - `~/.ssh`: the SSH keys. The Pi Zero tools (`boards/rpi-zero2w/tools/pizero_flash.sh`, `pizero_link.sh`) use or generate `id_pizero`;
+>   `tools/ncm_base_install.sh` uses `id_ccpa_ncm` when present.
+> - `~/Library/Logs/Carlink`: the macOS app's log folder, read by `tools/va_limit_probe.sh` and `tools/va_wired_sweep.sh`.
+> - `~/.gradle` (Gradle cache, read by `host/gm_ccpa/tools/test.sh`) and `~/.android` (the debug keystore, used by
+>   `host/gm_ccpa/tools/build_apk.sh`).
+> - `/Volumes/bootfs`: the macOS mount point of a freshly written Pi SD card (`PIZERO_BOOT` overrides it in `boards/rpi-zero2w/tools/pizero_flash.sh`).
+>
+> **Additional-Tools-for-Xcode image:** Apple's downloadable developer-tools disk image, which contains the standalone
+> `CarPlay Simulator.app` (`Hardware/CarPlay Simulator.app`). An archive consulted by hand, with no variable; the CarPlay
+> docs name it as the original source of that bundle, which `OCBM_CARPLAY_SIMULATOR` now points at.
 
 ## Reference material index
 
@@ -64,7 +96,7 @@ Separately, `../carplay/05_METADATA_AND_CONTROLS.md` reconstructed HID descripto
 
 ### A. Apple CarPlay Communication Plug-in R14G17 — rank 5 by search order; byte-authoritative where it contains the thing
 
-**`~/Documents/carlink/old/carplay_RE/carplay_sdk/reference/apple_carplay_sdk_R14G17/`** (6.0 MB, 263 files)
+**`$OCBM_CARPLAY_SDK/reference/apple_carplay_sdk_R14G17/`** (6.0 MB, 263 files)
 
 Licensed first-party material under the owner's Apple Developer Program membership. This is Apple's
 own **accessory-side** reference implementation — the same role this project plays. Where any project
@@ -100,7 +132,7 @@ Interface Specification") for link parameters, and the AISpec is **not present a
 machine** (verified 2026-07-25). iAP2 link-layer questions must be answered from the shipping vendor
 implementations in §B, or the AISpec obtained separately.
 
-The surrounding project `~/Documents/carlink/old/carplay_RE/carplay_sdk/` (`src/`, `include/`, `docs/`,
+The surrounding project `$OCBM_CARPLAY_SDK/` (`src/`, `include/`, `docs/`,
 `conformance/`, `MAP`) is a separate CarPlay SDK implementation effort — check it before mining
 binaries; it may already have solved the problem.
 
@@ -114,10 +146,10 @@ accessory actually does it*, which is evidence but not spec — distinguish "ven
 
 | Path | What it is | Best for |
 |---|---|---|
-| `~/Documents/carlink/old/carplay_RE/carplay_sdk/reference/tbox_speedplay/` (36 MB) | SpeedPlay TBox: `SpeedPlay_chelianyi.apk` + `extracted/lib/armeabi-v7a/` — `libcustomiap.so`, `libAirPlay.so`, `libCarplayJni.so`, `libAirPlaySupport.so`, `libAudioConverter.so`, `libMirrorAirPlay.so`, plus `classes.dex` | **iAP2 link layer** (`libcustomiap.so` is the obvious first stop), ARM CarPlay receiver internals |
-| `ccpa_custom/reference/gm_cinemo/` (522 MB) | GM Silverado AAOS12 + CT5 AAOS14: `CT5_extracted_libs_and_apks/`, jadx decompiles of GMCarPlay (both), GMConnections; plus two research write-ups | Wireless metadata architecture, `libNmeIAP.so` / `libNmeCarPlay.so` / `libNmeTransport.so` / `libNmeBaseClasses.so`, the `iap://wifi://` socket transport (iAP2 over a reliable stream — structurally the same problem as our AirPlay tunnel) |
-| `~/Documents/carlink/old/carplay_RE/carplay_sdk/reference/cinemo_aarch64_ct5/` (19 MB) | Additional CT5 Cinemo material | Cross-check against §B gm_cinemo |
-| `~/Documents/carlink/old/carplay_RE/carplay_sdk/reference/cinemo_reference/` (14 MB) | Additional Cinemo reference | As above |
+| `$OCBM_CARPLAY_SDK/reference/tbox_speedplay/` (36 MB) | SpeedPlay TBox: `SpeedPlay_chelianyi.apk` + `extracted/lib/armeabi-v7a/` — `libcustomiap.so`, `libAirPlay.so`, `libCarplayJni.so`, `libAirPlaySupport.so`, `libAudioConverter.so`, `libMirrorAirPlay.so`, plus `classes.dex` | **iAP2 link layer** (`libcustomiap.so` is the obvious first stop), ARM CarPlay receiver internals |
+| `ocbm/reference/gm_cinemo/` (522 MB) | GM Silverado AAOS12 + CT5 AAOS14: `CT5_extracted_libs_and_apks/`, jadx decompiles of GMCarPlay (both), GMConnections; plus two research write-ups | Wireless metadata architecture, `libNmeIAP.so` / `libNmeCarPlay.so` / `libNmeTransport.so` / `libNmeBaseClasses.so`, the `iap://wifi://` socket transport (iAP2 over a reliable stream — structurally the same problem as our AirPlay tunnel) |
+| `$OCBM_CARPLAY_SDK/reference/cinemo_aarch64_ct5/` (19 MB) | Additional CT5 Cinemo material | Cross-check against §B gm_cinemo |
+| `$OCBM_CARPLAY_SDK/reference/cinemo_reference/` (14 MB) | Additional Cinemo reference | As above |
 
 ---
 
@@ -140,8 +172,8 @@ name, source, and the full parameter tree — ids, types, cardinality, enum valu
 **This is the authority for TLV parameter ids.** Earlier sessions derived them from exported symbol
 names (`nm -gU`), which gives names but neither ids nor cardinality nor the notes that state a
 parameter's prerequisites. Do not hand-derive a parameter id when this file will state it.
-| `~/Downloads/Carplay WWDC/Hardware/CarPlay Simulator.app` | **RE-CHECKED 2026-10-19: `~/Downloads/Carplay WWDC/` no longer exists — the surviving copy is the mirror `~/Documents/carlink/carplay_simulator/CarPlay Simulator.app` (its `Contents/Frameworks/` holds `CarPlaySDK`, `iAP2MessageKit`, `iAP2MessageKitCore`); read every `~/Downloads/Carplay WWDC/Hardware/...` path in this corpus as that mirror.** Was: **Available on disk since 2026-08-16** (previously indexed as the unmounted `/Volumes/Additional Tools/…`). Standalone Hardware IO Tools build 267 / v4.0. **Mirrored at `~/Documents/carlink/carplay_simulator/CarPlay Simulator.app` (verified 2026-08-16) — the two standalone copies are the ONLY place `iap2messages-external.i2mspecarchive` exists on this machine; Xcode's plugin ships `-internal` and `mfi4authmessages-internal` and nothing else. `../carplay/05_METADATA_AND_CONTROLS.md` §2.2's wireless iAP2 message table is sourced from that external archive, so this entry is its only recorded path.** Carries its OWN `CarPlaySDK.framework` (6.8 MB arm64), `iAP2MessageKit` — with the **external** archive `iap2messages-external.i2mspecarchive` at `Contents/Frameworks/iAP2MessageKit.framework/Versions/A/Resources/` (the shipped MFi contract, vs Xcode's `-internal`; pass it with `--archive`) — `iAP2MessageKitCore`, `LunaUI`, and the same 10 `VehicleConfig` templates. **The `CarPlay Simulator` binary itself is the best source for the VEHICLE-SIDE session event ladder** (`strings`): connection ladder, delegate names, terminal session states. Basis for `docs/carplay/02_SESSION_LIFECYCLE.md`. Its `Resources/Javascript/*.bundle.js` is the AirPlay **Video player** web app — no CarPlay session logic, do not mine it for one. |
-| `ccpa_custom/reference/carplay_sdk/` (72 KB) | Verbatim copies already pulled out: `apple_vehicleconfigs/`, `apple_vdc/` |
+| `$OCBM_CARPLAY_SIMULATOR` (the standalone `CarPlay Simulator.app`) | **RE-CHECKED 2026-10-19: the former "Carplay WWDC" download folder no longer exists — the surviving copy is the one `$OCBM_CARPLAY_SIMULATOR` names (its `Contents/Frameworks/` holds `CarPlaySDK`, `iAP2MessageKit`, `iAP2MessageKitCore`); read every "Carplay WWDC/Hardware/..." location in older text as that copy.** Was: **Available on disk since 2026-08-16** (previously indexed inside the unmounted Additional-Tools-for-Xcode image). Standalone Hardware IO Tools build 267 / v4.0. **Mirrored locally (verified 2026-08-16) — the two standalone copies are the ONLY place `iap2messages-external.i2mspecarchive` exists on this machine; Xcode's plugin ships `-internal` and `mfi4authmessages-internal` and nothing else. `../carplay/05_METADATA_AND_CONTROLS.md` §2.2's wireless iAP2 message table is sourced from that external archive, so this entry is its only recorded path.** Carries its OWN `CarPlaySDK.framework` (6.8 MB arm64), `iAP2MessageKit` — with the **external** archive `iap2messages-external.i2mspecarchive` at `Contents/Frameworks/iAP2MessageKit.framework/Versions/A/Resources/` (the shipped MFi contract, vs Xcode's `-internal`; pass it with `--archive`) — `iAP2MessageKitCore`, `LunaUI`, and the same 10 `VehicleConfig` templates. **The `CarPlay Simulator` binary itself is the best source for the VEHICLE-SIDE session event ladder** (`strings`): connection ladder, delegate names, terminal session states. Basis for `docs/carplay/02_SESSION_LIFECYCLE.md`. Its `Resources/Javascript/*.bundle.js` is the AirPlay **Video player** web app — no CarPlay session logic, do not mine it for one. |
+| `ocbm/reference/carplay_sdk/` (72 KB) | Verbatim copies already pulled out: `apple_vehicleconfigs/`, `apple_vdc/` |
 
 Basis for `docs/carplay/03_SDK_GROUND_TRUTH.md` (SDK ground truth), `../carplay/05_METADATA_AND_CONTROLS.md`, `docs/carplay/04_CAPABILITIES_AND_CONFIG.md`, `docs/carplay/03_SDK_GROUND_TRUTH.md`.
 
@@ -151,8 +183,8 @@ Basis for `docs/carplay/03_SDK_GROUND_TRUTH.md` (SDK ground truth), `../carplay/
 
 | Path | Notes |
 |---|---|
-| `ccpa_custom/reference/ios27_extract/` (15 MB) | Distilled: `CARPLAY_FEATURE_REFERENCE.md`, `METADATA_FINDINGS.md`, `headers/`, `mined/` (strings), `dyld_extract.log`. **`METADATA_FINDINGS.md`'s endorsement of `iAPSendMessage` as the wireless iAP2 carrier is inbound-refuted — see docs/carplay/05_METADATA_AND_CONTROLS.md §1.1; its strings-level observations stand.** Note `reference/` is gitignored, so nothing under it is version-controlled or swept by a docs pass |
-| `~/Downloads/ios27_extract_24A5390f/` | **UNVERIFIED 2026-10-19: not present at this path (not found under ~/Downloads or ~/Documents/carlink/old); only the distilled `reference/ios27_extract/` above is confirmed on disk.** The raw dyld/`mnt_fs` dumps (**8.3 GB**) — `AirPlaySender`, `accessoryd`, `CarKit`, `CoreAccessories` |
+| `ocbm/reference/ios27_extract/` (15 MB) | Distilled: `CARPLAY_FEATURE_REFERENCE.md`, `METADATA_FINDINGS.md`, `headers/`, `mined/` (strings), `dyld_extract.log`. **`METADATA_FINDINGS.md`'s endorsement of `iAPSendMessage` as the wireless iAP2 carrier is inbound-refuted — see docs/carplay/05_METADATA_AND_CONTROLS.md §1.1; its strings-level observations stand.** Note `reference/` is gitignored, so nothing under it is version-controlled or swept by a docs pass |
+| `ios27_extract_24A5390f/` (raw extract, outside the repo) | **UNVERIFIED 2026-10-19: not found on the maintainer's machine; only the distilled `reference/ios27_extract/` above is confirmed on disk.** The raw dyld/`mnt_fs` dumps (**8.3 GB**) — `AirPlaySender`, `accessoryd`, `CarKit`, `CoreAccessories` |
 
 Basis for `docs/carplay/05_METADATA_AND_CONTROLS.md`/`docs/carplay/05_METADATA_AND_CONTROLS.md`'s chain analysis. **AMENDED 2026-07-25: this demotion is conditional on §A actually speaking.** R14G17 is a 2017 drop and
 is silent on everything added since — SETUP stream type 130, `APEndpointRemoteControlSession`, the whole
@@ -174,7 +206,7 @@ derive the accessory contract** — that is what §A is for. This inversion is p
 *Added 2026-08-02. Several docs already cite these informally (`docs/carplay/06_AV_PIPELINE.md`, `docs/carplay/02_SESSION_LIFECYCLE.md`, `docs/carplay/05_METADATA_AND_CONTROLS.md`,
 `docs/carplay/05_METADATA_AND_CONTROLS.md`); this is where the paths live.*
 
-Location: `~/Downloads/Carplay WWDC/` (**not found 2026-10-19**; the five transcripts below are on disk at `reference/wwdc_transcripts/`; session IDs are the stable identifier, the local path is not).
+Location: the former "Carplay WWDC" download folder (**not found 2026-10-19**; the five transcripts below are on disk at `reference/wwdc_transcripts/`; session IDs are the stable identifier, the local path is not).
 
 | File | Session | Authoritative for |
 |---|---|---|
@@ -276,11 +308,10 @@ Read it before assuming anything in this tree is CCPA-specific, and before re-de
   unrecognised flag).
 
 Required AAOS *image* changes are recorded outside this repo, in
-`/Volumes/stuff/rpi/aaos/docs/os-corrections-2026-08-16.md` - **an external volume, NOT mounted as of
-2026-08-16 (`/Volumes/` holds only `Macintosh HD`, `Recovery` and the Time Machine local-snapshots
-mount). Mount `stuff` before following this pointer; unmounted, it reads as a missing file rather than
+the earlier Pi AAOS port workspace's `os-corrections-2026-08-16.md` - **an external volume, NOT mounted as of
+2026-08-16 (only the system volumes were mounted). Mount it before following this pointer; unmounted, it reads as a missing file rather than
 an absent one.**
-*Re-checked 2026-10-19: `stuff` IS mounted now (`/Volumes/stuff`); the in-repo copy of the same findings is the "Measured notes" section of `docs/boards/04_IMAGE_REBUILD_GUIDE.md`. The external `os-corrections-2026-08-16.md` is present there.*
+*Re-checked 2026-10-19: that volume IS mounted now; the in-repo copy of the same findings is the "Measured notes" section of `docs/boards/04_IMAGE_REBUILD_GUIDE.md`. The external `os-corrections-2026-08-16.md` is present there.*
 
 ### F. Android Auto — the Desktop Head Unit is the authority (owner directive, 2026-08-25)
 
@@ -291,7 +322,7 @@ found no AA sources at all.
 **Consult order for ANY Android Auto protocol question:**
 
 1. **Google's Desktop Head Unit (DHU)** — the first-party head-unit reference, installed by Android
-   Studio ▸ SDK Manager at `~/Library/Android/sdk/extras/google/auto/` (v2.0). It is the AA analogue of
+   Studio ▸ SDK Manager at `$ANDROID_HOME/extras/google/auto/` (v2.0). It is the AA analogue of
    the CarPlay Simulator and the authoritative statement of what a head unit is expected to do:
    - `config/default.ini` — Google's reference head-unit config (**800×480, dpi 160, 30 fps**, sensors
      location/night/driving). Every geometry/sensor choice in our ServiceDiscoveryResponse matches it.
@@ -339,7 +370,7 @@ found no AA sources at all.
    does", and it is where the public head-unit credential comes from, but where it disagrees with the
    DHU or the shipping app, THEY win. Treat it exactly as this document treats SpeedPlay on the CarPlay
    side: separate its *choices* from its *observations*.
-4. **Our own captures** — `analysis/aa_full_session_emulator_*.txt` (a DHU session; **UNVERIFIED 2026-10-19: no `analysis/` directory in this repo or its parent, no such file under `~/Documents/carlink`**) and the stock-adapter
+4. **Our own captures** — `analysis/aa_full_session_emulator_*.txt` (a DHU session; **UNVERIFIED 2026-10-19: no `analysis/` directory in this repo, no such file in the maintainer's local reference trees**) and the stock-adapter
    capture, for diffing behaviour rather than deriving contracts.
 
 **What Google has said in public (surveyed 2026-09-04; every item fetched, dates are access dates).**

@@ -90,7 +90,7 @@ BT_PRELOAD=""
 #            five of the six variants.
 #   none   - no path. Report it loudly; wireless is unavailable. WIRED projection is unaffected,
 #            it never touches a radio.
-#   baseline - the mainline baseline image (baseline/README.md §2.5, §7.0e; ccpa_custom/baseline): no vendor
+#   baseline - the mainline baseline image (baseline/README.md §2.5, §7.0e; ocbm/baseline): no vendor
 #            dispatcher and no module tarball exist there. Its own `radio up|down` identifies the chip by the
 #            SDIO id and loads that chip's drivers from the rootfs's module tree, so the seam calls it and
 #            names no chip itself. Checked FIRST: on the baseline /script is the OCBM overlay, which never

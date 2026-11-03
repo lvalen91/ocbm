@@ -8,7 +8,7 @@ import java.util.concurrent.atomic.AtomicLong
 /**
  * The `:9004` metadata seam framer.
  *
- * Wire format, from the producer (`ccpa_custom/crates/vendor/iap2-core/src/metadata.rs`, `SEAM_MAGIC`
+ * Wire format, from the producer (`ocbm/crates/vendor/iap2-core/src/metadata.rs`, `SEAM_MAGIC`
  * and `frame()`):
  *
  *     [u32 BE 0x4D455441 "META"][u32 BE len][marker u8][payload]     len = 1 + payload.size

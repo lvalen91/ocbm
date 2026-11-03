@@ -1,4 +1,4 @@
-//! JNI bridge from the Android app to the proven CarPlay receiver core in `ccpa_custom`.
+//! JNI bridge from the Android app to the proven CarPlay receiver core in `ocbm`.
 //!
 //! **Why this exists.** API 32 does not expose X25519 or Ed25519, so `pair-setup` M5/M6 and
 //! `pair-verify` cannot be done in Kotlin. Everything else the control plane needs — the RTSP state
@@ -387,7 +387,7 @@ pub extern "system" fn JNI_OnLoad(vm: JavaVM, _reserved: *mut libc::c_void) -> j
     // the encrypted frames + key ("forward-encrypted" is the box's role, where a separate host
     // decodes).
     //
-    // MUST be set explicitly. ccpa_custom @273aed1 flipped the default: session.rs went from
+    // MUST be set explicitly. ocbm @273aed1 flipped the default: session.rs went from
     // `std::env::var("OCBM_FWD_ENC").is_ok()` (absent → false → on-box decode) to
     // `levers::fwd_enc()`, which defaults forward-encrypted ON unless OCBM_FWD_ENC is explicitly
     // 0/false/off/empty. So leaving it unset now selects the OPPOSITE path — the consumers would
@@ -420,7 +420,7 @@ pub extern "system" fn JNI_OnLoad(vm: JavaVM, _reserved: *mut libc::c_void) -> j
     // capture has. (This comment used to add "it is currently yielding a 0 B VideoConfig" — that
     // was the 2026-08 bug the dump was added for and has been fixed; the claim was stale.)
     std::env::set_var("CARPLAY_SCREEN_DUMP", "1");
-    // (OCBM_FWD_ENC is set to "0" above — see that block. It used to be left unset; the ccpa_custom
+    // (OCBM_FWD_ENC is set to "0" above — see that block. It used to be left unset; the ocbm
     // default flip at @273aed1 means unset now selects forward-encrypted, so it must be set here.)
 
     // THE LEVERS — and this was the bug.

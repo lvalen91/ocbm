@@ -821,10 +821,19 @@ final class VehicleConfigModel: ObservableObject {
     }
 
     /// "Use Simulator icon" — reuse the CarPlay Simulator's own `OEMIcon.png` (180×180 RGB) if present
-    /// on this Mac. No-op if the Simulator isn't installed at the expected path.
+    /// on this Mac. Looked up in order: `OCBM_CARPLAY_SIMULATOR` (a `CarPlay Simulator.app`, or any bundle
+    /// with the same `Contents/Resources/VehicleConfigs/` layout), the standalone app in /Applications, then
+    /// the copy Xcode bundles in its DeviceKit CarPlaySimulator plug-in (same icon bytes). No-op if none exists.
     func useSimulatorOemIcon() {
-        let p = NSHomeDirectory() + "/Documents/carlink/carplay_simulator/CarPlay Simulator.app/Contents/Resources/VehicleConfigs/Images/OEMImages/OEMIcon.png"
-        if FileManager.default.fileExists(atPath: p) { loadOemIcon(from: URL(fileURLWithPath: p)) }
+        let rel = "Contents/Resources/VehicleConfigs/Images/OEMImages/OEMIcon.png"
+        var bundles: [String] = []
+        if let s = ProcessInfo.processInfo.environment["OCBM_CARPLAY_SIMULATOR"], !s.isEmpty { bundles.append(s) }
+        bundles.append("/Applications/CarPlay Simulator.app")
+        bundles.append("/Applications/Xcode.app/Contents/SharedFrameworks/DeviceKit.framework/Versions/A/PlugIns/CarPlaySimulator.devicekitplugin")
+        for b in bundles {
+            let p = URL(fileURLWithPath: b, isDirectory: true).appendingPathComponent(rel).path
+            if FileManager.default.fileExists(atPath: p) { loadOemIcon(from: URL(fileURLWithPath: p)); return }
+        }
     }
 
     /// Clamp numeric fields to the allowed ranges (called on load, on every save, and after

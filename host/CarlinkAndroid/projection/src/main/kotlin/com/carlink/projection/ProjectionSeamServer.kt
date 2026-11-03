@@ -229,7 +229,7 @@ class ProjectionSeamServer(
                 log.e(
                     "stream is H.264 but the decoder is HEVC — NOTHING WILL RENDER. " +
                         "The box did not receive the pushed config: relaunch btd with " +
-                        "CARPLAY_CFG_FILE set (see pi/tools/start_stack.sh).",
+                        "CARPLAY_CFG_FILE set (see boards/rpi4-aaos/tools/start_stack.sh).",
                 )
             }
             status.setHevcNegotiated(isHevc)

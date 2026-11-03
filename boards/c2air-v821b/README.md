@@ -1,6 +1,6 @@
 # C2Air (Allwinner V821, riscv32) — OCBM port
 
-> **Roles and boards:** see the roles table in [../../README.md](../../README.md#roles-and-boards).
+> **Roles and boards:** see the roles table in [docs/ocbm/01_ROLES_AND_MFI_SOURCE.md](../../docs/ocbm/01_ROLES_AND_MFI_SOURCE.md#three-roles).
 
 Board-specific material for the **C2Air**, a second adapter unrelated to the CPC200-CCPA:
 **Allwinner V821, 32-bit RISC-V** (`rv32imafdc`, `sun300i_riscv32`), kernel 5.4.220, musl, 58 MB RAM,
@@ -12,8 +12,8 @@ Board-specific material for the **C2Air**, a second adapter unrelated to the CPC
 > [!NOTE]
 > Historical. This document describes the stock-firmware-based C2Air unit as of 2026-08 (kernel
 > 5.4.220, ADB over functionfs, OCBM run on 2026-08-17). The current C2Air baseline (clean LIVI-derived
-> Linux 7.2.x image, NCM control channel, FEL recovery) lives in the research repo
-> (`/Volumes/stuff/misc/research/carlinkit_adapters/c2air/`, `README.md` and `docs/hardware.md`). OCBM has
+> Linux 7.2.x image, NCM control channel, FEL recovery) lives in the C2Air research repo
+> (outside this repo; its `README.md` and `docs/hardware.md`). OCBM has
 > not been run on that new baseline. The C2Air MFi chip is 3.x (device version 0x07, 64-byte ECDSA
 > signature), not the CCPA's 2.0C (128-byte RSA); the bus and address (`/dev/i2c-1 @0x11`) match.
 

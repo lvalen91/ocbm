@@ -334,7 +334,7 @@ DISABLE_PACKAGES=(
 # myChevrolet hotspot; those settings persist and one run poisoned the unit
 # until reverted by hand. The 2026-07-01 original is byte-exact at commit b049810
 # (git show b049810:host/gm_ccpa/reference/debloat/gm_debloat_full.sh); the copy
-# in old/gm_ccpa is a separate 2026-09-08 variant, not this file's ancestor.
+# in the archived standalone gm_ccpa checkout is a separate 2026-09-08 variant, not this file's ancestor.
 # Revert recipe in docs/01_FINDINGS.md §8.
 
 # --- keep-list guard (2026-09-10) -------------------------------------------

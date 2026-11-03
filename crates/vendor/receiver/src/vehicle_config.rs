@@ -1,7 +1,7 @@
 //! `VehicleConfig` — the host-authored YAML config that drives the `/info` the box advertises.
 //!
 //! This mirrors Apple's own **CarPlaySimulator** authoring schema (`CarPlayConfigs.VehicleConfig`,
-//! parsed there by Yams; see `ccpa_custom/docs/13` §2 and `reference/carplay_sdk/apple_vehicleconfigs/`).
+//! parsed there by Yams; see `ocbm/docs/13` §2 and `reference/carplay_sdk/apple_vehicleconfigs/`).
 //! The model is **host-authoritative / ephemeral** (docs/carplay/04_CAPABILITIES_AND_CONFIG.md): the macOS app ships a YAML at OCBM
 //! SUBSCRIBE, ocbmd lands it at `/tmp/carplay_cfg.yaml`, and carplayd parses it **per control
 //! connection** into a [`DeviceConfig`] before building `/info`. A config push = a fresh session = a

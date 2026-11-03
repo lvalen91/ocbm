@@ -1,304 +1,47 @@
-# OCBM (working directory `ccpa_custom`) — open-source phone-projection firmware userspace + host app for the Carlinkit CPC200-CCPA and other boxes
+# OCBM
 
-CarPlay and Android Auto, over one open transport (OCBM).
+Open-source CarPlay and Android Auto projection for the Carlinkit CPC200-CCPA and other boxes.
 
-> **Documentation:** [docs/README.md](docs/README.md) is the map — seven categories
-> (`carplay/`, `androidauto/`, `wireless/`, `host/`, `ops/`, `ocbm/`, `boards/`), capped at 10 documents each by `tools/docs_check.py`.
-> One topic, one file: correct the owning document, never add a dated sibling.
+A phone connects to a small adapter in the car, and the car gets CarPlay (iPhone) or Android Auto
+(Android). OCBM replaces the adapter's closed userspace with open, Rust-first code and pairs it
+with a host app, on a Mac or an Android Automotive head unit, that decodes and renders. Both
+protocols ride one open transport, also called OCBM.
 
 > **License:** Unlicense (public domain), except baseline/ which is derived from LIVI and is
 > GPL-3.0-or-later; see [NOTICE.md](NOTICE.md). Based on LIVI by Lasse Heitgres (https://github.com/f-io/LIVI)
 
 > **Scope & authorization:** licensed Apple/MFi developer, genuine hardware, ordinary accessory development — not security work. See [docs/ops/07_AUTHORIZATION.md](docs/ops/07_AUTHORIZATION.md).
 
-**What it is.** The CPC200-CCPA is a small ARM Linux dongle that plugs into a car's USB port; a phone
-connects to it and the car gets **phone projection** — CarPlay from an iPhone, Android Auto from an
-Android phone. This project replaces the dongle's closed userspace with open code, and pairs it with a
-host app — on a Mac, or on an Android Automotive head unit — that does the decode and rendering. Both
-projection protocols ride the same open transport, **OCBM**: the dongle owns the stable,
-hardware-bound half, the app owns the half that changes with every phone-OS release.
+## Scope
 
-An open, Rust-first replacement for the CCPA's stock projection stack (Carlinkit "riddleBox":
-`ARMadb-driver` / `AppleCarPlay` / `ARMiPhoneIAP2`), running as ordinary userspace on the same
-hardware. It reuses the adapter's **hardware** — WLAN/BT radios and the onboard genuine Apple
-**MFi** authentication coprocessor (a 2.0C on the CCPA bench unit; the stack supports MFi 2.0 through 3.0; `/dev/i2c-1 @0x11`), used the way Apple's accessory
-program intends — and its **factory vendor boot stack** (HAB-signed U-Boot + kernel 3.14.52, whose
-first 192 KB are DCP-encrypted per chip with an OTPMK-derived key; the rest is a plain zImage). The signed U-Boot is never modified and is treated as fixed platform firmware (a
-BIOS); the vendor kernel stays the default on production units, and `baseline/` can replace it with a
-mainline kernel through U-Boot's own staging mechanism (owner decision, 2026-10-20).
-Everything above the kernel is rewritten open-source.
+OCBM began as an open replacement for the closed protocol in Carlinkit's adapter firmware. It has
+since grown into a modular, universal protocol. It is not limited to Carlinkit adapters and can be
+adapted to other hardware and operating systems.
 
-> **The problem this solves:** the stock CCPA ships an older, deliberately stripped CarPlay
-> implementation — old SDK, H.264 only, features dropped. Replacing the userspace gets current,
-> full-featured HEVC CarPlay, and keeps it current: new features land app-side. No phone
-> modification, no custom PCB, no soldered MFi chip.
+## What is here
 
-> **Android Auto:** the same split also carries **Android Auto, wired and wireless** — wired: the box
-> does the AOAP USB switch and pumps raw bytes; wireless: the box pairs as a Bluetooth headset (HFP),
-> the phone dials the box's own AA record, then the phone joins the box's AP and streams over TCP. The
-> host runs the AA protocol engine and decodes either way, over OCBM. Video, all three audio sinks, the
-> mic uplink, touch, hardware buttons, the night/driving sensors and HFP call audio are device-proven
-> against a Pixel 10, driven from the app's own vehicle profile rather than hardcoded. See Status and
-> `docs/androidauto/00_ARCHITECTURE.md`.
+| Directory | What | Details |
+|---|---|---|
+| `box/` | Daemons that run on the adapter (`ocbmd`, `iap2d`, `carplayd`, `aa-bridge`), the architecture overview, build | [box/README.md](box/README.md) |
+| `boards/` | Per-board material: CCPA (i.MX6UL), C2Air, Raspberry Pi 4, Pi Zero 2 W | [boards/ccpa-imx6ul/README.md](boards/ccpa-imx6ul/README.md) |
+| `host/` | Host apps and tools: macOS app, Android/AAOS apps, CLI tools | [host/README.md](host/README.md) |
+| `baseline/` | Mainline-kernel image recipe for the CCPA (derived from LIVI, GPL) | [baseline/README.md](baseline/README.md) |
+| `docs/` | Protocol, design, ops and board documents | [docs/README.md](docs/README.md) |
+| `crates/` | Shared Rust crates, including the OCBM wire codec `ocbm-proto` | [layout](docs/README.md#repository-layout) |
+| `tools/` | Dev and ops scripts: install, recovery, checks | [tools/README.md](tools/README.md) |
 
----
+## Start here
 
-## Requirements
-
-- A genuine **Carlinkit CPC200-CCPA** adapter (i.MX6UL, 123 MB RAM, jffs2 rootfs, on-board MFi 2.0C
-  coprocessor). The C2Air is a separate box (MFi 3.x) and is not yet supported on its new baseline — see
-  `boards/c2air-v821b/`. OCBM is MFi-version agnostic by intent; see the MFi-version note in
-  [`docs/carplay/00_ARCHITECTURE.md`](docs/carplay/00_ARCHITECTURE.md).
-- An **iPhone**, and an active **Apple Developer Program membership** for the licensed CarPlay SDK
-  material the protocol work is checked against.
-- A **Mac with Xcode** to build the host app, or an AAOS head unit for the Android one.
-- Rust with `rustup target add armv7-unknown-linux-musleabihf` and `cargo install cargo-zigbuild`
-  (the box binaries cross-compile with the zig linker — no Linux VM needed).
-
-## Getting started
-
-| Step | Where |
-|---|---|
-| Build the box daemons and the host CLI | `./build.sh` (without an fdk-aac prefix: `SKIP_CARPLAYD=1 ./build.sh`; otherwise set `FDK_AAC_PREFIX`) — detail in [`docs/ops/00_BUILD_AND_DEPLOY.md`](docs/ops/00_BUILD_AND_DEPLOY.md) |
-| Commission a fresh adapter | `tools/ncm_base_install.sh`, then `tools/ocbm_install.sh` — its `manifest()` is the authoritative file set |
-| Run the macOS host app | Xcode project at `host/MacHost/carlink_macOS` — [`docs/host/00_MACOS_HOST_APP.md`](docs/host/00_MACOS_HOST_APP.md) |
-| Recover a wedged or bricked box | [`docs/ops/01_RECOVERY.md`](docs/ops/01_RECOVERY.md) |
-| Verify a change before committing | `tools/docs_check.py`, `tools/proto_check.py`, and the test plans in [`docs/ops/02_TESTING.md`](docs/ops/02_TESTING.md) |
-
-## The one hard constraint (the vendor floor)
-
-The i.MX6UL boot ROM enforces HAB signature verification on U-Boot, so **U-Boot is fixed platform
-firmware** — never written here (env-block erase only). The kernel is not signature-checked: only its first 192 KB are per-chip
-DCP-encrypted, and the vendor U-Boot's own staging path can replace it (`baseline/`, owner decision
-2026-10-20). The OCBM userspace targets the stock 3.14.52 kernel, which stays the default on production
-units. *(Corrected 2026-10-20: this said U-Boot + kernel are both fixed.)* All CCPA behavior is userspace,
-and userspace is 100% open in this project. Practical implication of the stock kernel: no
-configfs/gadgetfs/functionfs, so development uses the kernel's existing USB-gadget functions
-(`f_accessory` bulk + `f_ncm`). See [`docs/carplay/00_ARCHITECTURE.md`](docs/carplay/00_ARCHITECTURE.md),
-which covers the architecture and the transport.
-
----
+- Build, run or understand the box side: [box/README.md](box/README.md)
+- Install on a CCPA, recover it, requirements: [boards/ccpa-imx6ul/README.md](boards/ccpa-imx6ul/README.md)
+- Host apps (macOS, Android/AAOS): [host/README.md](host/README.md)
+- Protocol and design documents, reference material, full layout: [docs/README.md](docs/README.md)
+- Roles and the board list: [docs/ocbm/01_ROLES_AND_MFI_SOURCE.md](docs/ocbm/01_ROLES_AND_MFI_SOURCE.md)
 
 ## Status
 
-Open work and the pick-up point: **[docs/ops/04_OPEN_ITEMS.md](docs/ops/04_OPEN_ITEMS.md)**.
-
-**CarPlay — wired and wireless, end to end.** HEVC 1920x720, every `audioType` negotiated and
-decoded, mic uplink, touch and HID, metadata (NowPlaying, route guidance, call state). Lane guidance (`0x5204`) is parsed and rendered in the macOS Metadata window; it is declared only at metadata tier `extended` and above and the parsers drop `0x5201` lane ids 16-18. Live-observed at `extended` on 2026-10-19 (one route, no archived capture; ledger `R-49-8`, `R-49-10`). ExitInfo (`0x5202` id 13) arrived live once, for one exit, after `0x5200` selector 3 was sent (test build, committed in `bbf3325`; ledger `R-49-9`).
-Wireless rides BT pair -> WiFi handoff -> AirPlay/RTSP -> OCBM; the inbound iAP2 carrier is the
-RemoteControlSession DataStream, stream type 130. App-driven SETUP is the default on **both**
-transports, with box-driven SETUP as the selectable sticky fallback.
-
-**Head-unit CarPlay app (`host/gm_ccpa/`) — device-proven on a 2024 Silverado.** A second, inverted
-architecture, merged in 2026-09-08: the phone streams CarPlay over the **vehicle's own** hotspot to an
-unprivileged AAOS app, and the adapter is reduced to the Bluetooth radio and the MFi coprocessor,
-carrying no media at all. Proven end to end against a real iPhone — BT/iAP2, the `0x5703` handoff,
-pair-setup and pair-verify, HEVC 2400x960 on the Intel hardware decoder, AAC-LC audio, touch, now-playing
-metadata on the AAOS media card, CarPlay dynamic resize, and vehicle state driving the CarPlay UI
-(drive-restricted UI from `GEAR_SELECTION`, day/night from `NIGHT_MODE`). It links this tree's
-`receiver`/`pairing`/`mfi` crates through JNI, so the protocol has one home.
-
-**Android Auto — wired and wireless, both device-proven against a Pixel 10.** Wired: the box does
-the AOAP switch and pumps raw bytes (`box/aa-bridge`). Wireless: the box pages the bonded phone,
-completes an HFP hands-free link (the gate gearhead waits on), the phone dials the box's own AA
-record over RFCOMM and joins the box AP, and `aa-bridge --wireless` pumps the session over TCP. Both
-arms feed the same host AA protocol engine over OCBM `CH_IP`. Video, all three audio sinks, mic,
-touch, hardware buttons, the night/driving sensors and HFP call audio (both directions) work, driven
-from the same app-pushed vehicle profile CarPlay uses. The box selects AA on its own, and CarPlay/AA
-arbitration is first-come-wins with neither able to interrupt the other. Beyond the base A/V,
-all device-proven on a Pixel 10 (gearhead 17.5, 2026-09-04): the metadata services (now-playing,
-turn-by-turn navigation with the phone's own maneuver glyph, and phone/call state) feed the same
-Metadata window CarPlay uses; drive side, all nine video codec tiers (H.265 above 1080p, 60 fps to
-4K), non-tier panel sizes via codec margins (e.g. 2400×960 with the UI cropped and scaled to fit),
-and display density are declared from the vehicle profile; guidance and Assistant audio run at
-48 kHz; and calls negotiate HFP wideband (mSBC, 16 kHz) with a graceful CVSD fallback.
-
-**Recent OCBM/app work.** Audio-lane resync (`F_NEW_SOURCE` + `SEAM_MAGIC` on a torn frame), a
-box→host log pipeline with write-time backfill tagging (`LOG_F_BACKFILL`), SSP numeric-comparison
-pairing (box auto-confirms in production; an interactive Pair/Cancel lever with a pairing-code panel
-in the app), `MGMT_ENTER_NCM` (app button and a `carlink://box/enter-ncm` URL to drop the box into
-NCM maintenance mode), a bounded video `FrameFIFO` with off-main render hand-off, AA rows in the
-app's CCPA metrics panel, and `host/CallSim` — a self-managed-`ConnectionService` Android call
-simulator for exercising AA telephony without a SIM. See `docs/ocbm/00_PROTOCOL.md` and
-`docs/host/00_MACOS_HOST_APP.md`.
-
-**Two hosts.** `host/MacHost/` is the shipping macOS app. `host/CarlinkAndroid/` is an AAOS
-head-unit app (GM `gminfo3.7`, AAOS 12L / API 32) that claims the adapter over OCBM and runs full
-wireless CarPlay — same client contract, its own decode/render/mic stack. See
-`host/CarlinkAndroid/OCBMANDROID.md`.
-
-**One protocol definition.** `crates/ocbm-proto` is canonical and `tools/proto_check.py` verifies
-every client against it — the Swift client and both Kotlin clients (CarlinkAndroid, gm_ccpa), all
-in-tree, with no arguments. A value that disagrees is an error; a constant a client has not defined is a gap, and an
-error only for channels, `CT_*` opcodes and frame flags.
-
-**In-tree, not a sibling.** `host/gm_ccpa/` is a different architecture — wireless CarPlay as an
-unprivileged AAOS app, with the adapter reduced to the Bluetooth radio and the MFi coprocessor — and it
-was merged into this repo on 2026-09-08 (`git subtree add`, history preserved). Its `carplay-jni` takes
-`receiver`, `pairing` and `mfi` as cargo path deps; its `OcbmProto.kt` is its own file (forked from the
-CarlinkAndroid copy 2026-09-11 — it was a symlink before), kept honest by `tools/proto_check.py` against
-`crates/ocbm-proto`. Its app-level code is deliberately its own.
-
-## Architecture in brief
-
-Full detail: [`docs/carplay/00_ARCHITECTURE.md`](docs/carplay/00_ARCHITECTURE.md). The governing
-doctrine is app-driven configuration ([`docs/carplay/04_CAPABILITIES_AND_CONFIG.md`](docs/carplay/04_CAPABILITIES_AND_CONFIG.md)):
-anything configurable is owned by the app, the box presents what the app pushes, and box placement is
-earned rather than designed in.
-
-**The split is by configurability, not by transport** (per the doctrine in `docs/carplay/04_CAPABILITIES_AND_CONFIG.md`:
-anything capable of multiple values is app-side, even if the protocol part is stable). The adapter owns the hardware-bound parts Apple keeps
-backward-compatible forever — the iAP2 accessory handshake, MFi authentication (2.0 through 3.0) on the on-board
-coprocessor, HomeKit pair-setup/pair-verify, and the ChaCha20 session-key derivation. The host app
-owns the part that changes with every SDK: the AirPlay/RTSP SETUP negotiation (codec, resolution,
-screens, audio formats, feature enablement), A/V decode, UI and input. New CarPlay features therefore
-land app-side, usually with no adapter change.
-
-| | Adapter (rarely changes) | Host app (where features live) |
-|---|---|---|
-| Owns | iAP2 handshake, MFi auth, pairing, key derivation, the OCBM mux | SETUP negotiation, decode, render, input, the YAML config |
-| Media | forwards encrypted A/V untouched — never decodes or re-encodes it | decrypts with the adapter-provided ephemeral key, decodes HEVC (VideoToolbox) |
-| Config | presents what the app pushed | single source of truth |
-
-The adapter does parse CarPlay above pairing — it answers SETUP including the `enabledFeatures` echo,
-reads the decrypted `/command` channel, decrypts the type-130 DataStream and relays iAP2 TLVs. What it
-never touches is the media itself.
-
-**No OS network interface.** The host app claims the adapter by VID:PID (`0x1314:0x2d00`) and speaks a
-bulk protocol entirely inside the app — OCBM, the open replacement for the stock `0x55AA55AA` typed-bulk
-protocol. The OS only ever sees "an app claimed a USB device".
-[`docs/ocbm/00_PROTOCOL.md`](docs/ocbm/00_PROTOCOL.md).
-
-**Two secrets, not one.** The MFi private key never leaves the coprocessor; all MFi crypto happens on
-the box and the app sees only status. The ChaCha20 session key is derived at pair-verify, is ephemeral
-and per-connection, and is what lets the app decrypt A/V the adapter forwarded untouched.
-
-**HEVC, not H.264** — the stock box negotiated H.264 High every session. Both sides of the assertion
-are driven by the app's `enablesHEVC`: the adapter emits `hevcInfo` in `/info`, and the SETUP
-`enabledFeatures` echo is app-authored on both transports.
-[`docs/carplay/06_AV_PIPELINE.md`](docs/carplay/06_AV_PIPELINE.md).
-
-**Config is an Apple-shape `VehicleConfig` YAML** held app-side and pushed at SUBSCRIBE; the box never
-persists it. [`docs/carplay/04_CAPABILITIES_AND_CONFIG.md`](docs/carplay/04_CAPABILITIES_AND_CONFIG.md).
-
-**SETUP is app-driven on both transports**, with the box's local response as the fallback the phone
-never notices. Measured relay cost is p99 2.36 ms under A/V load against a 50 ms gate.
-[`docs/carplay/02_SESSION_LIFECYCLE.md`](docs/carplay/02_SESSION_LIFECYCLE.md).
-
-Rejected alternatives and why, so they are not re-litigated:
-[`docs/carplay/00_ARCHITECTURE.md`](docs/carplay/00_ARCHITECTURE.md).
-
----
-
-## Reproducibility bar
-
-Install needs a root shell over USB-NCM — which the stock firmware leaves open (a telnet/SSH login with no password set, as shipped; no keys or certificates are involved), so what bounds it is the local USB link rather than a credential — or an **SPI flash programmer** for the offline recovery path.
-The CCPA has no FEL, no U-Boot console and no other recovery: a firmware brick is permanent without a
-programmer (untested here) or a recovery-initramfs kernel (`baseline/`). Lower and less invasive than any field alternative (no
-phone modification, no soldered chip). See [`docs/ops/01_RECOVERY.md`](docs/ops/01_RECOVERY.md).
-
----
-
-## Roles and boards
-
-**CCPA** means only the Carlinkit CPC200-CCPA box family (every unit an NXP i.MX SoC, ARMv7, differing Wi-Fi/BT radios).
-**C2Air** is a different box (Allwinner V821, rv32); neither is a variant of the other, and the Pi / Orange Pi ports are not CCPA variants.
-
-| Role | What runs where | Hardware today | Code that serves it |
-|---|---|---|---|
-| **R1. Replacement-firmware box** | Full OCBM stack as the box's own userspace (with `baseline/`, its own mainline kernel/rootfs) | CCPA family; C2Air V821 (one unit, personal reference) | box daemons + a board directory + `baseline/` (CCPA only) |
-| **R2. CCPA as peripheral** | The CCPA supplies MFi (for `host/gm_ccpa` also the Bluetooth radio); the session runs on another computer | Pi 4 AAOS, a Linux workstation, GM radio AAOS (`host/gm_ccpa`) | `mfid`, `mfi-wire`, `ocbmd` `CH_MFI` / `btd` on the CCPA; the SBC or app on the other side |
-| **R3. Host apps and clients** | Decode/render, UI, vehicle profile; speak OCBM to a box | macOS app, Android/AAOS app suite, gm_ccpa app, CLI tools | `host/**` |
-
-| Board | Directory | SoC | Status |
-|---|---|---|---|
-| CCPA (i.MX6UL class) | `boards/ccpa-imx6ul/` (`rootfs/`, `overlay/`, `tools/`; the stock dumps stay in `ccpa/backup/`); the board-independent daemons are in `box/` | NXP i.MX, ARMv7 | production target |
-| C2Air V821B | `boards/c2air-v821b/` | Allwinner V821, rv32 | separate box, one unit |
-| Raspberry Pi 4 + AAOS | `boards/rpi4-aaos/` | BCM2711 | light testing, CCPA as MFi source |
-| Raspberry Pi Zero 2 W | `boards/rpi-zero2w/` | BCM2710A1 | bring-up only |
-
-MFi chip version is not assumed (CCPA 2.0C, C2Air 3.x, future SBCs 3.0).
-
----
-
-## Layout
-
-| Path | Contents |
-|---|---|
-| `docs/carplay/`, `docs/androidauto/`, `docs/wireless/`, `docs/host/`, `docs/ops/`, `docs/ocbm/`, `docs/boards/` | The whole corpus: seven categories, capped at 10 documents each by `tools/docs_check.py`. Start at [`docs/README.md`](docs/README.md) |
-| `crates/ocbm-proto/` | OCBM wire codec (envelope, channels, Reassembler, CRC-32) — shared by box + host |
-| `crates/vendor/` | Nine crates vendored in on 2026-07-13 (ten at the time; the `rx-connect` crate was retired and merged into `carplayd` as `box/carplayd/src/discovery.rs` on 2026-09-08) to make the tree self-contained. Provenance is mixed: `receiver`, `pairing`, `rtsp`, `mfi` and `eld-codec` came from the archived `ncm_carplayd` tree; `iap2-core`, `metadata` and `wireless` came from the `carplayd` tree; `mfi-i2c-local` was written here (a port of `wireless/src/mfi_local.rs`, split out because `receiver`/`mfi` are `#![forbid(unsafe_code)]`). Eight are path-dependencies only (`Cargo.toml` `exclude`); `wireless` is the one workspace member, producing the shipped `btd` (BT/WiFi wireless-CarPlay stack) box binary; the mDNS `_airplay._tcp` advertiser that used to be a separate `rx-connect` binary is now a thread inside `carplayd` |
-| `box/ocbmd/` | Box OCBM daemon (armv7-musl), over `/dev/usb_accessory`: CTRL `0x00` (incl. session-control SUBSCRIBE/heartbeat/presence → `/tmp/host_present`) / MFI `0x01` / CONSOLE `0x02` (root PTY) / IP `0x10` / FILE `0x11` / ETH `0x12` / VIDEO `0x20` / MEDIA_AUDIO `0x21` / ALT_AUDIO `0x22` (voice sink, seam `:9003`) / METADATA `0x23` (seam `:9004`) / ALT_VIDEO `0x24` (cluster screen, seam `:9005`) / INPUT `0x30` (HID uplink) / MIC `0x31` (mic uplink) / MGMT `0x40` (the app's adapter/management tab) / RTSP `0x41` (app-driven SETUP relay, seam `:9106`) / ECHO `0xFF` / DISCARD `0x0FFF`. Authoritative list: `crates/ocbm-proto/src/lib.rs` |
-| `box/iap2d/` | Box iAP2 accessory daemon (armv7-musl): handshake + local-i2c MFi → Identify → the wired metadata plane (the `iap2-core` `features.rs` table generates Identify params 6/7 and the `Start*` subscribes; inbound updates go out as JSON on the `CH_METADATA` `:9004` seam; the app-pushed tier is armed at startup and again at SendIdentify — `box/iap2d/src/main.rs:373,597`) |
-| `box/carplayd/` | Box AirPlay pairing daemon (armv7-musl): reuses receiver_core `ControlServer` + `LocalMfiSigner` (local i2c) → pair-setup/verify on `ncm0:5000` → derives the session key → forwards **encrypted** A/V + hands the per-stream key; disk-backed PeerStore (`/etc/carplay_peers.bin`) |
-| `boards/ccpa-imx6ul/rootfs/` | Deployable box rootfs overlay (stripped scripts + boot config): boot chain `ocbm_boot.sh` (launches ocbmd + supervisor) + `early_console.sh` (UART recovery shell) |
-| `host/ocbm-host/` | Host OCBM client (rusb/libusb): hello/echo/mfi/ip/console/settime/push/bridge/session/**avdec** (debug receiver: SUBSCRIBE + heartbeat + decrypt A/V) |
-| `boards/ccpa-imx6ul/tools/` | `iap_role_switch.c`/`.armv7` (45 lines) — issues Apple's standard `0x51` host-role USB control request over raw usbfs (no libusb, so it runs on the stripped appliance). **First-party, implemented from documentation**, carried over from this owner's own `ncm_carplayd/ccpa/probes/iap_trigger.c`; the only C binary the box ships (built by `build.sh`, installed to `/usr/bin`) |
-| `tools/` | Dev/ops. **Current provisioning path:** `ncm_base_install.sh` (Carlinkit stack out, owned boot path, USB-NCM root shell) then `ocbm_install.sh` (place → verify → reboot → reversible trial → finalize; `--full` also installs `iap2d`/`carplayd`/`btd`, `session_supervisor.sh`/`projection_up.sh` **and** the `radio_detect.sh`/`radio_hal.sh`/`radio_ap_up.sh` seam). `install_fhs.sh` is the older OCBM-era FHS install and still works, but places only `ocbmd`/`iap2d`/`carplayd` + `iap_role_switch` — no `btd`, no radio seam. Also: `session_supervisor.sh` + `projection_up.sh` (lifecycle actor + IDLE→projection bring-up), `uart_push.sh` (UART file deploy over the serial console), `boxsh.py`, script auditor, UART pad finder |
-| `box/aa-bridge/` | Box Android Auto USB bridge (armv7-musl): AOAP switch + raw byte pump between the phone's bulk endpoints and the host, over OCBM `CH_IP`. No AA protocol knowledge — the engine is app-side |
-| `crates/box-common/` | Protocol-agnostic box layer shared by the CarPlay and Android Auto sets: usbdevfs primitives, phone-type detection, the single projection-owner arbitration flag, and the app-pushed config levers |
-| `boards/c2air-v821b/` | C2Air: a separate box (Allwinner V821B, rv32), MFi 3.x. OCBM not yet run on its new baseline; the earlier run on the stock-firmware-based unit is recorded in `boards/c2air-v821b/README.md`. `btattach` is deliberately the only board-specific Rust |
-| `baseline/` | Vanilla CCPA image recipe (mainline kernel, recovery initramfs, busybox rootfs), derived from LIVI. GPL-3.0-or-later (DTS and patches GPL-2.0); see [NOTICE.md](NOTICE.md) and [`baseline/README.md`](baseline/README.md) |
-| `boards/rpi4-aaos/` | Raspberry Pi 4 + AAOS port (light testing): full CarPlay A/V reached with a CCPA in NCM mode as MFi source only (`box/mfid`), the Pi's own BT/Wi-Fi used. See `docs/boards/00_PI_AAOS_PORT.md` |
-| `crates/mfi-wire/` | `MFI1` framing and blocking client for the opt-in remote MFi path (`CARPLAY_MFI_ADDR`), linked into production crates |
-| `box/mfid/` | Not shipped: ephemeral MFi service over USB-NCM for hosts without a coprocessor |
-| `boards/rpi-zero2w/` | Raspberry Pi Zero 2 W bring-up. Measurement only — no OCBM port yet, and the board facts differ from the CCPA |
-| `host/gm_ccpa/` | **Wireless CarPlay as an unprivileged AAOS app** on a 2024 Silverado (GM Info 3.7, API 32). The phone streams over the *vehicle's own* hotspot; the adapter carries no media. Device-proven end to end — pairing, HEVC 2400x960 hardware decode, audio, touch, drive-restricted UI, day/night. Its Rust core links this tree's crates. See [`host/gm_ccpa/README.md`](host/gm_ccpa/README.md) |
-| `host/CarlinkAndroid/` | AAOS head-unit host app (Kotlin) for GM Info 3.7 — full OCBM, wireless CarPlay over the *adapter's* radios. The opposite division of labour to `gm_ccpa/`. See [`host/CarlinkAndroid/OCBMANDROID.md`](host/CarlinkAndroid/OCBMANDROID.md) |
-| `host/mfi-probe/` | Host-side exerciser for `mfid`: proves the MFi coprocessor answers with a real certificate and signature over USB-NCM, before anything depends on it |
-| `host/aa-headunit/` | Rust Android Auto head-unit reference client (TCP / `adb forward`) — the de-risking path the macOS engine was built against |
-| `host/MacHost/` | The shipping macOS host app (Xcode project `carlink_macOS`) — VideoToolbox decode, audio, touch/media-key uplink, Settings/YAML, OCBM client |
-| `host/CallSim/` | Android app: self-managed Telecom `ConnectionService` that fakes real phone calls (ringing, answer/hang-up, HFP/SCO audio routing) for testing AA telephony without a SIM |
-
----
-
-## Reference material (locations + what each is authoritative for)
-
-**Apple CarPlay Kit SDK — the single source of truth for the CarPlay/iAP2 protocol AND the config schema.**
-`/Applications/Xcode.app/Contents/SharedFrameworks/DeviceKit.framework/Versions/A/PlugIns/CarPlaySimulator.devicekitplugin`
-(Xcode 27 beta; bundled `Contents/Frameworks/CarPlaySDK.framework`). Accessed under an active Apple
-Developer Program membership — licensed first-party material used under the developer program, obtained directly from the SDK install. Use it for:
-- protocol truth (link/state/message framing, TLV layouts, message ids);
-- the **YAML config schema** — `Contents/Resources/VehicleConfigs/Configs/*.yaml` (Standard, Widescreen,
-  Portrait, Instrument Cluster, Navigation, Minimum…) and the feature toggles in the `MacOS/CarPlaySimulator`
-  binary (`_enablesHEVC`, `_enablesMainBufferedAudio`, `supportsAltScreen`, cluster config…).
-- See auto-memory `carplaysimulator-devicekitplugin-spec`.
-
-**`carlink_macOS` — the reference model for the HOST APP (USB claim + typed-bulk protocol + decode).**
-`~/Documents/carlink/carlink_macOS`. The original macOS host app for the *stock* CCPA. Shows
-the isolated-USB-claim integration model we mirror: `USB/USBTransport.swift` (IOKit
-`IOUSBInterfaceInterface300` bulk claim, no OS interface), `Protocol/MessageTypes.swift` (the
-`0x55AA55AA` 16-byte header + typed message catalog OCBM replaces), `Video/H264Decoder.swift`
-(VideoToolbox — we go HEVC), `Audio/`, `App/AppDelegate.swift`. The new host app is rebuilt from this.
-
-**`CPC200-CCPA_resources` — community interoperability documentation for the original firmware + protocol.**
-`~/Downloads/github/CPC200-CCPA_resources`. Authoritative for how the stock box worked:
-`documentation/02_Protocol_Reference/{usb_protocol,video_protocol,audio_protocol,carplay_handshake,
-inbound_session_sequence,command_ids}.md`, `documentation/04_Implementation/host_app_guide.md`,
-`documentation/01_Firmware_Architecture/hardware_platform.md`. Documents the `0x55AA55AA` framing, the
-full message catalog, video (H.264 + 20-byte sub-header) / audio (PCM + 12-byte sub-header), and the
-**host config flow** (`Open` 0x01, `BoxSettings` 0x19, `SendFile` 0x99 → AirPlay SETUP `viewAreas`) —
-the field set our YAML absorbs. NOTE: the stock box *terminated + stripped*; we mirror its transport
-model, not its scope.
-
-**`ncm_carplayd` — proven Rust CarPlay receiver + CCPA helpers to reuse.**
-`~/Documents/carlink/old/ncm_carplayd`. `receiver_core/` = independent, from-documentation Rust receiver (RTSP,
-SRP/25519 pairing, MFi-SAP, ChaCha20 decrypt, typed A/V seams) — the code we cross-compile to the box.
-`macos/{carplay-app,carplay-hud}/` = the SwiftUI/AppKit consumer apps (IPC-seam consumers) the host app
-descends from. Its `ccpa/` bring-up helpers = the USB host-role switch helper, `iap2_auth.c` (the proven box-side iAP2 auth reference),
-the MFi auth-service helper, and `ncm_bridge.c`. `ccpa/scripts/` = proven cold-start orchestration.
-
-**`carplayd` — Apple-spec iAP2 core + reinforcing session reference.**
-`~/Downloads/github/carplayd/rust/carplayd`. `crates/iap2-core/` = the transport-agnostic
-iAP2 link/state/message/spec crate `iap2d` depends on (`src/spec.rs` machine-generated from the Apple
-plugin; `src/link.rs` holds the coalesced-read fix from this project).
-
-**Chip backups — both in-repo and out.** The clean owned **baseline** is recorded in this repo at
-`ccpa/backup/base/`: per-region `mtd0`/`mtd1`, `SHA256SUMS`, `manifest.txt` and `rootfs.files.txt` (the
-rootfs file list `tools/ncm_base_install.sh baselinediff` compares against) — see its own `README.md` for
-the programmer restore procedure. *(Corrected 2026-10-20: the full 16 MB image, `mtd2.bin` and
-`rootfs.tar.gz` were tracked here too; they embed device credentials — dropbear private host keys, root
-password hash, Wi-Fi config — and were removed by owner decision. Byte-identical copies are kept local,
-see `ccpa/backup/base/README.md`.)* Additional **per-device / per-session** factory and pre-change backups are
-kept outside the repo at `~/Documents/carlink/carlinkit_misc/ccpa_backups` (and on the box's USB stick at
-`/mnt/UPAN/ccpa_backups/`). All of it exists solely for recovery.
+CarPlay and Android Auto both work end to end, wired and wireless, with the macOS and AAOS host
+apps. The C2Air and the Pi ports are earlier-stage. Per-feature detail:
+[docs/carplay/](docs/README.md#carplay--the-carplay-protocol-and-session) and
+[docs/androidauto/01_SESSION_AND_AV.md](docs/androidauto/01_SESSION_AND_AV.md). Open work:
+[docs/ops/04_OPEN_ITEMS.md](docs/ops/04_OPEN_ITEMS.md).

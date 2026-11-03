@@ -1,6 +1,6 @@
 //! ocbm-probe — bench instrument for the gm_ccpa host client.
 //!
-//! `ocbm-host` (in ccpa_custom) covers HELLO / MFi / console / file transfer, but it has no
+//! `ocbm-host` (in ocbm) covers HELLO / MFi / console / file transfer, but it has no
 //! CH_LOG or CH_MGMT support, and CH_LOG is the thing gm_ccpa has to learn. This claims the box,
 //! arms the log stream, and prints every control frame and every decoded log entry, so the Kotlin
 //! decoder can be written against captured bytes rather than the spec alone.

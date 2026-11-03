@@ -15,7 +15,7 @@ import org.junit.Test
  * three app states. Plus synthetic maps for the 1/2 speech modes and the malformed shapes.
  */
 class ModesChangedTest {
-    /** The ccpa_custom checkout root, found by walking up from the working directory. */
+    /** The capture inside the `ocbm/` checkout, found by walking up from the working directory (no directory name assumed). */
     private fun captureFile(): File {
         var d: File? = File(System.getProperty("user.dir") ?: ".").absoluteFile
         while (d != null) {

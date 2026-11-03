@@ -19,7 +19,8 @@
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
-CACHE=${PIZERO_CACHE:-$HOME/.cache/pizero/images}   # NOT under ~/Documents: that is iCloud-synced
+OCBM_CACHE=${OCBM_CACHE:-${TMPDIR:-/tmp}/ocbm-cache}
+CACHE=${PIZERO_CACHE:-${OCBM_CACHE%/}/pizero/images}   # NOT inside the working tree: it may be cloud-synced
 IMG_REL=raspios_lite_arm64-2026-06-19/2026-06-18-raspios-trixie-arm64-lite.img.xz
 IMG_URL=https://downloads.raspberrypi.com/raspios_lite_arm64/images/$IMG_REL
 IMG_XZ=$CACHE/$(basename "$IMG_REL")
@@ -239,7 +240,7 @@ write_files:
   - path: /etc/motd
     permissions: '0644'
     content: |
-      carlink Pi Zero 2 W — OCBM bring-up board (boards/rpi-zero2w/ in ccpa_custom)
+      carlink Pi Zero 2 W — OCBM bring-up board (boards/rpi-zero2w/ in ocbm)
       NCM $PI_IP  |  ACM console /dev/ttyGS0  |  UART GPIO14/15 @115200
       Hardware report:  sudo pizero_verify.sh
       This board has no MFi coprocessor and no 5 GHz radio. See boards/rpi-zero2w/README.md.

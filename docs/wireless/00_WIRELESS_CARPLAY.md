@@ -130,8 +130,8 @@ bound to `wlan0` instead of `ncm0`.**
 Wireless CarPlay starts over **Bluetooth**, carrying **iAP2**. Over that iAP2 link the phone and
 accessory negotiate CarPlay and the WiFi hand-off. Authoritative iAP2 messages (from
 `iap2messages-external.i2mspecarchive` — **path recorded 2026-08-16**, per docs/ops/03_REFERENCE_INDEX.md standing rule 1: the
-`-external` archive ships ONLY in the standalone Simulator, at `~/Documents/carlink/carplay_simulator/CarPlay Simulator.app/Contents/Frameworks/iAP2MessageKit.framework/Versions/A/Resources/`
-(mirrored under `~/Documents/carlink/carplay_simulator/CarPlay Simulator.app/…`); Xcode's
+`-external` archive ships ONLY in the standalone Simulator, at `$OCBM_CARPLAY_SIMULATOR/Contents/Frameworks/iAP2MessageKit.framework/Versions/A/Resources/`
+(`OCBM_CARPLAY_SIMULATOR` names the local copy, outside the repo); Xcode's
 CarPlaySimulator plugin carries only `-internal`. Decode with `tools/i2mspec_dump.py --archive <path>`,
 never by inference — docs/ops/03_REFERENCE_INDEX.md §C):
 
@@ -318,9 +318,9 @@ What survives as current design:
 ---
 
 *Probe + protocol sources: UART session 2026-07-13; `iap2messages-external.i2mspecarchive` (standalone
-CarPlay Simulator only — `~/Documents/carlink/carplay_simulator/CarPlay Simulator.app/Contents/Frameworks/iAP2MessageKit.framework/Versions/A/Resources/`;
+CarPlay Simulator only — `$OCBM_CARPLAY_SIMULATOR/Contents/Frameworks/iAP2MessageKit.framework/Versions/A/Resources/`;
 path recorded 2026-08-16); mempalace `carplay_receiver` (audio/protocol rooms); WWDC 2016-722/723,
-2017-717; the `carplayd` PoC (`~/Downloads/github/carplayd`, docs 16/19–23 +
+2017-717; the `carplayd` PoC (a separate checkout outside the repo, docs 16/19–23 +
 `rust/carplayd/crates/wireless/`).*
 
 ---

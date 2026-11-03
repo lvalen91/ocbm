@@ -20,7 +20,16 @@ I2C chip, MFi version not assumed. Adding a board should be a directory plus a `
 ## Boards
 
 `ccpa-imx6ul`, `c2air-v821b`, `rpi4-aaos`, `rpi-zero2w`; later `opi-*`. `baseline/arm-imx6ul/board.env` is the first
-real `board.env` (key `BOARD=arm-imx6ul` is not renamed). Board directories and their paths are listed in the top-level README.
+real `board.env` (key `BOARD=arm-imx6ul` is not renamed). Board directories and their paths are listed in the table below.
+
+| Board | Directory | SoC | Status |
+|---|---|---|---|
+| CCPA (i.MX6UL class) | `boards/ccpa-imx6ul/` (`rootfs/`, `overlay/`, `tools/`; the stock dumps are in `stock/`); the board-independent daemons are in `box/` | NXP i.MX, ARMv7 | production target |
+| C2Air V821B | `boards/c2air-v821b/` | Allwinner V821, rv32 | separate box, one unit |
+| Raspberry Pi 4 + AAOS | `boards/rpi4-aaos/` | BCM2711 | light testing, CCPA as MFi source |
+| Raspberry Pi Zero 2 W | `boards/rpi-zero2w/` | BCM2710A1 | bring-up only |
+
+MFi chip version is not assumed (CCPA 2.0C, C2Air 3.x, future SBCs 3.0).
 
 ## MFi source (a documentation model, not a config key that code reads)
 

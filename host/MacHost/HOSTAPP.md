@@ -11,7 +11,7 @@
 > 2. **"Carlink macOS" was not available as the replacement.** That name belongs to the *predecessor* —
 >    the app built against the stock **Carlinkit riddlebox firmware**. This tree is the
 >    **reimplementation of that app onto OCBM firmware**, and it lives beside sibling host apps in the
->    same `ccpa_custom/` project, so a name that only states brand + target platform distinguishes it
+>    same `ocbm/` project, so a name that only states brand + target platform distinguishes it
 >    from neither. `MacHost/` states platform + role, in a tree where OCBM is already the given.
 >
 > **Nothing about the build changed** — the Xcode project, target and source dir remain `carlink_macOS`
@@ -22,7 +22,7 @@
 > passes; `tools/proto_check.py` resolves `OCBM/OCBMFraming.swift` and reports OK.
 
 Refactored from `carlink_macOS` (the original riddlebox-firmware CCPA host app) into
-`ccpa_custom/host/MacHost/`. Goal
+`ocbm/host/MacHost/`. Goal
 of this first milestone: **real pixels on screen + audio playing**, proving the committed OCBM
 forward-encrypted A/V wire works with an actual app (not just the Rust `ocbm-host avdec` frame-counter).
 
@@ -128,12 +128,12 @@ Confirmed end-to-end: **CarPlay video renders + media audio plays correctly**, b
 **Audio endianness fix (the "static" bug):** wired CarPlay media PCM is 16-bit **big-endian** (network
 byte order); `feedMediaPCM` was copying it into a host-endian (LE) `int16ChannelData` buffer, byte-swapping
 every sample → white-noise static. Fixed by swapping BE→host on copy (see `AudioPlayer.feedMediaPCM` +
-`WIRED_AUDIO_ROOT_CAUSE.md`, which is NOT in this repo — it lives in the archived predecessor tree at
-`../old/ncm_carplayd/research/` relative to the repo root: BE Δ/amp≈0.03 clean vs LE≈1.30 static). Decrypt was
+`WIRED_AUDIO_ROOT_CAUSE.md`, which is NOT in this repo — it lives in the archived predecessor tree,
+the archived `ncm_carplayd` tree's `research/` (outside the repo): BE Δ/amp≈0.03 clean vs LE≈1.30 static). Decrypt was
 never the problem — audio always ran 0-fail; only playback interpretation was wrong.
 
 **Logging:** OCBM loggers use subsystem `com.carlink.ocbm` so the `FileLogger` (`OSLogStore`, captures
-`com.carlink.*`) persists them to `~/Library/Logs/Carlink/`. The 1 Hz heartbeat only emits a tally line
+`com.carlink.*`) persists them to the app's log directory (`Library/Logs/Carlink/`). The 1 Hz heartbeat only emits a tally line
 when the counts change (no idle flood).
 
 **Resolution:** the box advertises the negotiated dimensions — default **1920×720**, up to **4K@60

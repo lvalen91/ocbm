@@ -217,7 +217,7 @@ surface). All exist on MacHost's Adapter tab; none is wired on Android.
 |---|---|---|
 | `carlink_native_personal` | The product: frosted-glass UI, Controls dashboard, `MediaSessionManager` / `AlbumArtCache` / MediaBrowserService, `DualStreamAudioManager`, `MicrophoneCaptureManager`, `PlatformDetector` / `AudioConfig`, `H264Renderer`, day/night. **Authoritative for working AAOS behaviour.** | imported whole, builds green |
 | `gm_ccpa` | `ocbm/` (framing, proto, transport, USB bulk, client) and `av/` (`HevcRenderer`, `AacPlayer`, `VoiceRouter`; the first two replaced 2026-09-25 by `VideoRenderer` / `MediaAudioPlayer`) — **head-unit-proven** | imported, repackaged `zeno.gmccpa` → `com.carlink` |
-| `ccpa_custom` | The A/V transport half neither of the above has: this document's `ocbm/seam/`, plus `CH_INPUT` / `CH_METADATA` / the config push (still to come) | new code |
+| `ocbm` | The A/V transport half neither of the above has: this document's `ocbm/seam/`, plus `CH_INPUT` / `CH_METADATA` / the config push (still to come) | new code |
 
 `applicationId` is **`zeno.carlink.ocbm`**, deliberately distinct from the riddleBox app's
 `zeno.carlink`: that app is the working fallback on a head unit that is also a daily driver, and a
@@ -237,7 +237,7 @@ Do not re-litigate these; they are hardware records, not inference.
 - **Wireless AAC-LC 48 kHz stereo media is what the box negotiates** — `preset_wireless_8`
   (`crates/vendor/receiver/src/info.rs`, `pub fn preset_wireless_8` — currently `:1008-1035`),
   device-proven in
-  `ccpa_custom/docs/ops/captures/2026-07-25_SUCCESS_airplayd_wl_handshake.txt:71-75`. Wireless is this
+  `ocbm/docs/ops/captures/2026-07-25_SUCCESS_airplayd_wl_handshake.txt:71-75`. Wireless is this
   project's architecture, so AAC stereo is the default, not an aspiration.
 
 ## `ocbm/seam/` — the forward-encrypted A/V seam
@@ -1384,7 +1384,7 @@ only state that matters here. These remain hardware-verified only.
   files. That waives complexity/style findings on new code, not just pre-existing code — a process
   smell worth revisiting. `ktlintFormat` also reformatted the imported `av/*.kt`; a token-level diff
   against the `gm_ccpa` originals confirmed all three remain semantically identical.
-- ~~**This directory is untracked in the parent `ccpa_custom` git repo**, so there is no history to
+- ~~**This directory is untracked in the parent `ocbm` git repo**, so there is no history to
   diff against. Worth fixing before the Part B cutover.~~ **SUPERSEDED 2026-08-15 — true when
   written, and fixed by the very commit that carried it.** `d842daf` imported `host/CarlinkAndroid/`
   into the repo (~100 tracked files, this document among them), so `git log` / `git blame` /

@@ -34,7 +34,7 @@ PREFIX="$FDK_DIR/install-android-arm64"
 STUB="$FDK_DIR/stub"
 API=34
 
-# Build OUT of ~/Documents. That tree is covered by iCloud "Desktop & Documents" sync, which
+# Build OUT of the working tree. It may be covered by cloud sync (iCloud "Desktop & Documents"), which
 # resolves its own races by writing conflict copies next to the original — the vendored source
 # already contains a `config 2.log` from a previous build. autotools picking up a "* 2.*" file, or
 # make consuming a duplicated object, produces failures that come and go. Only the finished install

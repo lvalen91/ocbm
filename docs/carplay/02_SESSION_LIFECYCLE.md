@@ -39,12 +39,12 @@ variant sweeps and a ChangeLog check. R14G17's `stopSession` is a *different, un
 
 | Source | Path | Answers |
 |---|---|---|
-| `CarPlaySDK.framework` (standalone) | `~/Documents/carlink/carplay_simulator/CarPlay Simulator.app/Contents/Frameworks/CarPlaySDK.framework` (the `~/Downloads/Carplay WWDC/Hardware/` original is gone as of 2026-10-19) | Current receiver-side contract: SETUP keys, `/info` handling, `/command` dispatch, control-plane ports |
+| `CarPlaySDK.framework` (standalone) | `$OCBM_CARPLAY_SIMULATOR/Contents/Frameworks/CarPlaySDK.framework` (the original in the former "Carplay WWDC/Hardware" download folder is gone as of 2026-10-19) | Current receiver-side contract: SETUP keys, `/info` handling, `/command` dispatch, control-plane ports |
 | CarPlay Simulator binary | `…/CarPlay Simulator.app/Contents/MacOS/CarPlay Simulator` | Vehicle-side `SessionEventType` enum and the `SessionController` operational log (§3) |
 | `iAP2MessageKit` **external** spec archive | `…/Frameworks/iAP2MessageKit.framework/Resources/iap2messages-external.i2mspecarchive` | Byte-authoritative iAP2 parameter tables (§4) |
 | iOS 27 extract — CarKit | `reference/ios27_extract/headers/CarKit/CarKit/` | Phone-side counterpart: `CARSession`, `CARSessionStatus`, `CARSessionObserving` (§9) |
 | iOS 27 extract — mined strings | `reference/ios27_extract/mined/` | `AirPlaySender`/`AirPlayReceiver` cross-checks that settled two disputes |
-| R14G17 licensed source | `~/Documents/carlink/old/carplay_RE/carplay_sdk/reference/apple_carplay_sdk_R14G17/` | Literal C for what it covers: teardown triggers, timeout constants, hijack |
+| R14G17 licensed source | `$OCBM_CARPLAY_SDK/reference/apple_carplay_sdk_R14G17/` | Literal C for what it covers: teardown triggers, timeout constants, hijack |
 
 #### 1.1 This standalone build is NOT the one docs/ops/03_REFERENCE_INDEX.md already indexed
 
@@ -77,7 +77,7 @@ trees for 0x4300 / 0x4301 / 0x4E0D across external vs internal spec archives.
   CallStateUpdate` carries enum `CallStateUpdateDisconnectReason` = 0 No Reason / 1 Declined / 2 Failed.
   The session-stop one is in *CarPlaySDK*. Clean cross-binary separation — do not conflate.
 - **No shipped `VehicleConfig` template sets `sessionManagement`.** Verified by full read of all ten, plus
-  this machine's live `~/Library/CarPlaySimulator/UserConfigs/`. **But "it defaults off" is NOT
+  the maintainer's live CarPlay Simulator user configs (`Library/CarPlaySimulator/UserConfigs/`). **But "it defaults off" is NOT
   established** — the default lives in a compiled Swift initializer; absence from templates is equally
   consistent with defaulting on. Note the schema property is `sessionManagement`, *not*
   `enablesSessionManagement` like every sibling (`enablesHEVC`, `enablesMainBufferedAudio`, …), which hints
@@ -424,7 +424,7 @@ literal pool — so this is a genuine handler key list, not a linker coincidence
 - **`sessionCorrelationUUID` — corroborated, not airtight.** Read via `CFDictionaryGetValue` immediately
   after the hijack call; where the value is *compared* was not traced. "Correlates a new session to a
   prior one" is the best-supported reading. **It is live on the wire**: a Dec-2025 capture (iOS 26.3) at
-  `old/carplay_RE/carplay_sdk/conformance/captures/phone_incoming/adapter_tty_025839_29DEC25.log:874-876` shows the
+  `$OCBM_CARPLAY_SDK/conformance/captures/phone_incoming/adapter_tty_025839_29DEC25.log:874-876` shows the
   phone sending `sessionCorrelationUUID`, `sessionUUID` and `timingPort` in one SETUP dict.
 - **New: `hijackID`.** The sender-side `apsession_appendControlSetupRequest` key list groups
   `sessionCorrelationUUID` / `macAddress` / `sessionUUID` / `isRemoteControlOnly` and, further down, a
@@ -1185,7 +1185,7 @@ This document exists because the previous session's conclusion — "our sequence
 everything R14G17 specifies" — was true of *message content* and false of *ordering*.
 
 Reference root (see `../ops/03_REFERENCE_INDEX.md`):
-`~/Documents/carlink/old/carplay_RE/carplay_sdk/reference/apple_carplay_sdk_R14G17/` — below, `SDK/`.
+`$OCBM_CARPLAY_SDK/reference/apple_carplay_sdk_R14G17/` — below, `SDK/`.
 
 ---
 
@@ -1510,10 +1510,10 @@ path) is unrecoverable by any means.
 **Status: REFERENCE (2026-07-23).** Synthesis of two independent research passes — Apple's own
 CarPlay session-management implementation (iOS 27 RE + WWDC + CarPlay Simulator.app) and GM's
 production CINEMO-based CarPlay stack (Silverado AAOS12 vs CT5 AAOS14) — diffed against
-`ccpa_custom`'s current session code (`crates/vendor/receiver/src/session.rs`,
+`ocbm`'s current session code (`crates/vendor/receiver/src/session.rs`,
 `tools/session_supervisor.sh`, and the "Lifecycle — states and transitions" section above). Purpose:
 **planning input** for ccpa/box-side changes (and, downstream of those, host-app changes). The
-"`ccpa_custom` today" columns are the 2026-07-23 snapshot; where later work changed an entry, the entry
+"`ocbm` today" columns are the 2026-07-23 snapshot; where later work changed an entry, the entry
 says so (the `sessionManagement` declaration exists behind `CARPLAY_SESSION_MGMT`; the grace values are
 10 s heartbeat and no grace on a clean stop). The recommendations in the closing list were not adopted
 unless stated.
@@ -1525,7 +1525,7 @@ primary sources indexed in `docs/ops/03_REFERENCE_INDEX.md` (§C the CarPlay Sim
 re-verifying.
 
 **Scope discipline (per explicit user correction):** GM/CINEMO and Apple findings here describe
-*other* systems, used only as reference points. They are not conflated with `ccpa_custom`'s own
+*other* systems, used only as reference points. They are not conflated with `ocbm`'s own
 independent OCBM firmware, nor with the original stock Carlinkit CCPA firmware this project
 replaces. Priority direction: the ccpa/box side is the actual lever for session behavior; host-app
 changes are downstream of ccpa changes, not a parallel track.
@@ -1534,14 +1534,14 @@ changes are downstream of ccpa changes, not a parallel track.
 
 ### 1. Session establishment
 
-| | Apple (protocol owner) | GM/CINEMO (OEM implementer) | `ccpa_custom` today |
+| | Apple (protocol owner) | GM/CINEMO (OEM implementer) | `ocbm` today |
 |---|---|---|---|
 | Transport negotiation | `StartSession` dict: `sessionType`/`transportType`/`BT Classic`/`nextGenCarPlaySession`; wireless variant additionally carries `ssid`/`pass`/`securityType`/`pubKey`/`mutualAuth` inline (`accessoryd` `platform_CarPlay_startSession`) | iAP1/iAP2 session/metapool config (`com.gm.server.iap2.*`) parametrizes the Cinemo SDK's transport; both USB and WiFi iAP transports registered together (`NmeAndroidTransport`/`NmeIAPWifiTransport`/`NmeIAPUSBTransport`) | Wired: iAP2 over NCM. Wireless: AirPlay SETUP over WiFi. No unified StartSession-style negotiation dict; transport is implicit in which control server is running |
 | Wireless handshake | Bonjour-based (`CARSessionRequestClient/-Host/-BonjourHost`) is the *legacy* path; iOS14+ "simplified connection flow" reuses the **existing iAP2 connection** to exchange IP/port directly, dropping Bonjour entirely (WWDC 2023-10150) | n/a (not observed in extraction) | Uses Bonjour/mDNS (`_airplay._tcp` advertised by carplayd's discovery thread, formerly `rx-connect`) — closer to Apple's *legacy* pre-iOS14 path than the modern simplified flow |
 | Mutual auth | MFi-certificate-serial-backed, optional (`supportsMutualAuthentication` flag on `CARSessionRequestHost`) | `OPTION_APPLEAUTH_URL` = `i2c:///dev/i2c-0:16` — hardware MFi chip addressed directly | On a CCPA: onboard MFi 2.0C coprocessor at `/dev/i2c-1@0x11` (with `CARPLAY_MFI_ADDR` set, cert/sign go to a remote CCPA's `mfid` instead) — architecturally the same "hardware chip over I2C" shape as GM's, just a different bus address |
 | Fast-path for known devices | `attempting fast-reconnection with %@` gate, requires cached WiFi credentials + "known & enabled CarPlay vehicle" | n/a | Disk-backed `PeerStore` (Ed25519 pairing persisted, pair-verify-only on reconnect) — already matches the "known device skips expensive handshake" principle Apple describes |
 
-**Takeaway:** ccpa_custom's wireless bring-up mirrors Apple's *legacy* Bonjour-based flow, not the
+**Takeaway:** ocbm's wireless bring-up mirrors Apple's *legacy* Bonjour-based flow, not the
 newer iOS14+ simplified flow that reuses an existing iAP2 connection. Since wired already holds an
 iAP2 link independent of AirPlay, there may be room to align wireless bring-up closer to that model —
 but this needs its own investigation, not a conclusion drawn here.
@@ -1550,7 +1550,7 @@ but this needs its own investigation, not a conclusion drawn here.
 
 ### 2. Resource arbitration (screen/audio ownership)
 
-| | Apple | GM/CINEMO | `ccpa_custom` today |
+| | Apple | GM/CINEMO | `ocbm` today |
 |---|---|---|---|
 | Vocabulary | `changeModes`/`modesChanged`, two verbs: **take** (unconditional, no give-back bookkeeping — no `epp_UntakeScreen` exists) and **borrow** (temporary, tied to an opaque token, released via explicit `unborrow`) | **TAKE(1)/UNTAKE(2)/BORROW(3)/UNBORROW(4)** — a *symmetric* 4-verb model; TAKE/UNTAKE must NOT carry a borrow ID, BORROW/UNBORROW MUST, and every BORROW is validated against a live borrow-ID map | Sends a one-shot `send_request_ui()` + `send_take_screen()` at RECORD (`crates/vendor/receiver/src/session.rs`, the post-RECORD session-focus handshake in `record()`, not `setup_phase2`) — a single outbound "take," no borrow, no untake, no arbitration state machine at all |
 | Authority | iOS (the *controller*) is the sole arbiter; accessory proposes via `changeModes`, iOS's `modesChanged` is authoritative — no unilateral local state change on either side | Native VR **borrows** (not takes) Main Audio via `CinemoConstants.CARPLAY_BORROWID_NATIVE_VR` — modeled as a returnable loan, matching Apple's take/borrow distinction exactly | ccpa is accessory-side only; it never contests or arbitrates — it asks once at connect and never again |
@@ -1559,7 +1559,7 @@ but this needs its own investigation, not a conclusion drawn here.
 
 **Takeaway:** this is the largest structural gap. Both real implementations (protocol owner and OEM)
 model resource ownership as an explicit, stateful, two-party negotiation with a request/response
-round-trip and a persistent-until-transferred ownership record. `ccpa_custom` currently fires a single
+round-trip and a persistent-until-transferred ownership record. `ocbm` currently fires a single
 one-way `takeScreen` at connect and never revisits it — there is no borrow concept, no observation of
 `modesChanged`-equivalent state from iOS, and no way to model a preempting overlay or native VR
 interrupt. Whether this matters in practice depends on whether iOS ever actually contests the screen
@@ -1575,7 +1575,7 @@ own**: GM has both TAKE and a real UNTAKE for screen and audio alike, whereas Ap
 FigEndpoint layer has no `untakeScreen`/`epp_UntakeScreen` counterpart at all (confirmed by direct
 string-table exhaustive search — take is a one-way, no-give-back operation in Apple's own API,
 though a bare "Untake" label does appear once, at `AirPlaySender.strings.txt:11443`, in an unrelated
-StarkMode logging cluster). **If `ccpa_custom` ever adopts an arbitration vocabulary, GM's symmetric
+StarkMode logging cluster). **If `ocbm` ever adopts an arbitration vocabulary, GM's symmetric
 TAKE/UNTAKE/BORROW/UNBORROW-with-typed-reason-ID model is arguably the cleaner reference of the two**,
 not Apple's own asymmetric one.
 
@@ -1583,16 +1583,16 @@ not Apple's own asymmetric one.
 
 ### 3. Session status / connect-disconnect observation
 
-| | Apple | GM/CINEMO | `ccpa_custom` today |
+| | Apple | GM/CINEMO | `ocbm` today |
 |---|---|---|---|
 | State machine | `CARSessionStatus`: idle → connecting-timer started → attempt-on-transport (possibly cancelled) → connected/disconnected/updated → notification posted. Confirmed live (not dead code) via 1:1 log-string correlation | `OnSessionFinalize(reason)` fires at session end; session objects otherwise long-lived (see §4/§5) | IDLE → ARMED → STREAMING → RECOVERING (10 s heartbeat grace, none on a clean stop) → TEARDOWN ("Lifecycle — states and transitions" above) — a comparable number of states, different triggers (host-presence-driven, not phone-presence-driven) |
 | Detection signal | Darwin notifications (`com.apple.carplay.in-car`/`out-of-car`/`starting-wired-connection`) + endpoint/auth/config-updated callbacks | Not directly observed (native-only) | Drain-health / backpressure (box-visible, immediate) + accessory-fd error/close + de-prioritized app heartbeat — a deliberately *different but analogous* three-signal design, already justified in docs/carplay/02_SESSION_LIFECYCLE.md by on-hardware measurement (`/sys/class/udc/*/state` proven NOT to be an app-presence signal) |
 | Numeric timeout for "connecting"/grace | **`CARSessionStatus.timeoutInterval` defaults to 30s** — confirmed 2026-07-23 by disassembling the real device `CarKit` binary (`split/CarKit`, iOS27/24A5390f): `-[CARSessionStatus initWithOptions:...]` does `mov w2,#0x1e; setTimeoutInterval:`, and the timer fires `timeoutInterval * NSEC_PER_SEC` after `_sessionUpdatesQueue_startConnectingTimer`. (The Simulator's "30 seconds" string was NOT dev-tool-only after all — it matches the real compiled constant exactly.) | `IAP_AUTH_TIMEOUT=10s`, `IAPSession.CLOSE_TIMEOUT=5s`; **better analogue found on verification: `SESSION_FINALIZE_DELAY=2000ms`** (`CarPlayManager.java`) — the actual "wait N seconds after DISCONNECTING, then finalize the session" grace timer, distinct from CLOSE_TIMEOUT (which bounds the lower-level Cinemo `Disconnect()` call itself) | `HEARTBEAT_GRACE=10s` in ocbmd (widened from 3 s by audit QC #428; the `~5s` figure in the 2026-07-23 snapshot matched no constant), no grace on a clean `CT_STOP` (changed 2026-09-03), `ESTAB_CONNECT_GRACE=90s`, `ESTAB_STREAM_GRACE=30s` (session_supervisor.sh) |
 
-**Takeaway (revised):** `ccpa_custom`'s 10 s heartbeat grace (the 2026-07-23 text said ~5 s, which matched no constant) is
+**Takeaway (revised):** `ocbm`'s 10 s heartbeat grace (the 2026-07-23 text said ~5 s, which matched no constant) is
 **five times** GM's own measured "wait after disconnect, then finalize" window (GM's
 `SESSION_FINALIZE_DELAY` = 2s, not the previously-cited 5s `CLOSE_TIMEOUT`) — so ccpa's grace is
-generous by that comparison, not under-tuned. A clean stop gets no grace at all. Separately, `ccpa_custom`'s `ESTAB_CONNECT_GRACE=90s` ("must reach pair-verify within
+generous by that comparison, not under-tuned. A clean stop gets no grace at all. Separately, `ocbm`'s `ESTAB_CONNECT_GRACE=90s` ("must reach pair-verify within
 this, covers the human Allow tap") is 3x Apple's own real 30s connecting-timeout default — though the
 two aren't measuring quite the same window (Apple's timer covers iOS's own connection-attempt state,
 ccpa's covers the full human-interaction pair-verify wait), this is now a real, not hypothetical,
@@ -1602,7 +1602,7 @@ number to weigh ccpa's own timers against.
 
 ### 4. Session-boost / quick-reconnect
 
-Apple ships **two distinct, non-overlapping** fast-reconnect mechanisms `ccpa_custom` has no
+Apple ships **two distinct, non-overlapping** fast-reconnect mechanisms `ocbm` has no
 equivalent of:
 
 1. **`CRSessionBoostService`/`CRSessionBoostClient`** (carkitd⇄caraccessoryd XPC pair): a proactive
@@ -1619,7 +1619,7 @@ equivalent of:
    exceeded — confirming Apple holds OEMs (and by extension, any accessory) to a real, if
    unpublished, reconnect-speed bar.
 
-`ccpa_custom`'s `session_supervisor.sh` is reactive only (ARM on host-presence 0→1, TEARDOWN on
+`ocbm`'s `session_supervisor.sh` is reactive only (ARM on host-presence 0→1, TEARDOWN on
 1→0) — there is no proactive/anticipatory reconnect path, and no link-quality-aware fast path
 distinct from the general grace-timer logic.
 
@@ -1641,7 +1641,7 @@ session/media-session objects across a drop — pause/error-state them in place.
   OEMs to **not** close CarPlay TCP sockets on a short link disconnection — i.e. Apple's own public
   guidance is "debounce and hold the session," not "tear down and recreate."
 
-`ccpa_custom`'s own design (docs/carplay/02_SESSION_LIFECYCLE.md) already independently arrived at the same principle for its
+`ocbm`'s own design (docs/carplay/02_SESSION_LIFECYCLE.md) already independently arrived at the same principle for its
 *own* layer: RECOVERING holds the iAP2 link and resumes STREAMING without phone-side relanuch if the
 host returns within grace, and a fresh SUBSCRIBE (not a stale reconnect) is the only thing that
 triggers a genuinely new session. **This is a confirmed point of alignment, not a gap** — worth
@@ -1654,7 +1654,7 @@ disconnect, the `MediaSession` object itself IS kept alive (`setActive(false)`, 
 rebuilt* (`stopCinemoPlayer()` releases the player + both playlists + all three listeners;
 reconnect calls `startCinemoPlayer()` to rebuild them from scratch). So "pause, don't recreate"
 describes the **session/media-session identity and token**, not the entire playback pipeline
-underneath it — a useful distinction if `ccpa_custom` adopts a similar philosophy: which parts of a
+underneath it — a useful distinction if `ocbm` adopts a similar philosophy: which parts of a
 session actually need to survive a drop (identity/keys/pairing) versus which parts are fine to
 rebuild fresh each time (active A/V pipeline state) need not be the same answer for every subsystem.
 
@@ -1662,17 +1662,17 @@ rebuild fresh each time (active A/V pipeline state) need not be the same answer 
 
 ### 6. Teardown reason taxonomy
 
-| | Apple | GM/CINEMO (CT5) | `ccpa_custom` today |
+| | Apple | GM/CINEMO (CT5) | `ocbm` today |
 |---|---|---|---|
 | Exists? | `sendStopSessionWithReason:(unsigned long long)reason` takes an integer, logged as raw `%lu`. **Verified 2026-07-23: not a static enum at all** — the reason space is *dynamically accessory-declared*: `supportedStopSessionDisconnectReasons` is populated via `APCarPlay_CRFetchStopSessionReasonsList` → `NSArray<NSNumber *>`, and the key `stopSessionReasons` lives inside the **`sessionManagementInfo`** SETUP dict (`AirPlaySender.strings.txt:10891,11781`; `CarKit.strings.txt:1308`) — i.e. each accessory advertises which integer reasons *it* supports, Apple ships no fixed named-case list | **Yes, concretely: a 5-value enum** — `UNSPECIFIED`/`RECEIVED_TEARDOWN`/`OUT_OF_RANGE_ACTIVE`/`OUT_OF_RANGE_IDLE`/`NETWORK_CHANGE` (+ catch-all `UNKNOWN`), logged at `Log.i` on every session end. **Verified + extended:** CT5 also carries a *second, separate* 4-value `CarPlayUtils.ConnectionState` enum — `DISCONNECTED(0)`/`CONNECTING(1)`/`CONNECTED(2)`/`DISCONNECTING(3)` — surfaced via `onCarPlayConnectionStateChanged(...)`; this is a coarser connection-phase taxonomy, distinct from the session-*end*-reason enum | No taxonomy — `session_supervisor.sh` has a free-text `stuck_reason` string for its own health-escalation logging only, not a protocol-level teardown reason concept |
 
 **Takeaway (revised):** GM's CT5 enum is a concrete, minimal, real-shipped reference shape if/when
-`ccpa_custom` wants one: one explicit case, two range-loss flavors (distinguishing *active* vs *idle*
+`ocbm` wants one: one explicit case, two range-loss flavors (distinguishing *active* vs *idle*
 at time of loss — itself a useful distinction ccpa doesn't currently make), one network-change case,
 and a defensive default; its separate 4-value `ConnectionState` enum is a good reference for a
 coarser phase indicator distinct from the end-reason. **Apple's own mechanism is now understood, not
 just absent**: rather than a fixed enum, Apple has the *accessory* declare a `stopSessionReasons` set
-inside `sessionManagementInfo` at SETUP time. This is directly actionable for `ccpa_custom`: it
+inside `sessionManagementInfo` at SETUP time. This is directly actionable for `ocbm`: it
 declared no `sessionManagementInfo`/`sessionManagement` feature at the time of this snapshot. It now
 declares both, but only when the spawn-scoped lever `CARPLAY_SESSION_MGMT` is set (wireless `av.rs`
 sets it), with the `[0,1,2,3,4]` reason list, and has no inbound `stopSession` handler (see "Gap
@@ -1689,7 +1689,7 @@ session rather than gating session establishment itself:
 - **[Apple, WWDC 2016-722]**: location/setup metadata flows as soon as the CarPlay Home screen shows
   (no media playing yet); media-specific metadata is added only once media starts — layered, not
   gated behind an extra handshake.
-- This doesn't resolve `ccpa_custom`'s own still-open wireless-metadata mystery (docs/wireless/00_WIRELESS_CARPLAY.md) — that
+- This doesn't resolve `ocbm`'s own still-open wireless-metadata mystery (docs/wireless/00_WIRELESS_CARPLAY.md) — that
   investigation (whether `iAPSendMessage` even routes into `accessoryd`'s real NowPlaying producer on
   iOS 27, or whether the wireless tunnel needs the full FF5A link-layer wrapper) remains separate and
   unresolved; this section is provided only as general context, not a new finding on that question.

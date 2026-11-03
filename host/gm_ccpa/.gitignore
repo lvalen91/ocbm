@@ -48,24 +48,24 @@ apk/*-dirty.apk
 # never dirties the APK sha stamp, but guard against an in-tree build anyway.
 tools/ocbm-probe/target/
 
-# Build output and capture scratch, now that this project lives under ccpa_custom/host. The
+# Build output and capture scratch, now that this project lives under ocbm/host. The
 # sha-stamped APKs and the golden rollback build are NOT carried here — they remain in the
 # standalone gm_ccpa checkout, together with the evidence corpus.
 #
 # NO TRAILING SLASH, deliberately. `apk/` matches a directory only, and apk/ is a SYMLINK into
-# ~/.cache (see below) — the pattern stopped matching the moment it was relinked, and git offered the
-# symlink for commit. A committed symlink to an absolute ~/.cache path is worse than a committed
+# a cache outside the tree (see below) — the pattern stopped matching the moment it was relinked, and git offered the
+# symlink for commit. A committed symlink to an absolute cache path is worse than a committed
 # build: it resolves to nothing on any other machine. Slashless matches both shapes.
 apk
 evidence
 logs
 
-# Build artifacts and caches must never live under ~/Documents on this Mac: it is iCloud
-# "Desktop & Documents" synced, and iCloud drops conflict copies (`classes 2.jar`, `Foo$Bar 2.dex`)
+# Build artifacts and caches must never live in the working tree: it can be cloud-synced (iCloud
+# "Desktop & Documents" on the maintainer's Mac), and sync drops conflict copies (`classes 2.jar`, `Foo$Bar 2.dex`)
 # into build trees, which the toolchain then eats as real inputs — nondeterministic duplicate-class
 # failures that survive a clean until sync catches up. So:
-#   * cargo output  -> $CARGO_TARGET_DIR, set by tools/build_apk.sh to ~/.cache/cargo-targets/
-#   * APK output    -> apk/ is a symlink to ~/.cache/carlink-artifacts/
+#   * cargo output  -> $CARGO_TARGET_DIR, set by tools/build_apk.sh to $OCBM_CACHE/cargo-targets/
+#   * APK output    -> apk/ is a symlink to $OCBM_CACHE/carlink-artifacts/
 #   * kotlinc/d8/aapt2 scratch -> mktemp -d under /tmp, already outside the tree
 # These entries are the belt to that braces: if any of it is ever produced in-tree again, it still
 # must not reach a commit, an rsync mirror, or GitHub.

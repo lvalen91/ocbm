@@ -1,6 +1,6 @@
 # Consolidated audit — 20 independent Fable agents, 2026-08-27
 
-Two repos: `gm_ccpa` (Android app + JNI), `ccpa_custom` (box firmware + vendored Rust).
+Two repos: `gm_ccpa` (Android app + JNI), `ocbm` (box firmware + vendored Rust).
 Every finding below carries an agent's code citation; log-backed ones carry file+timestamp.
 "UNVERIFIED" = source-only, no hardware evidence. Hardware was disconnected for most of the audit.
 

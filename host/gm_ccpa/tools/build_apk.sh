@@ -1,6 +1,6 @@
 #!/bin/bash
 # Gradle-free debug APK build for netprobe (single Kotlin file, no app resources).
-# Repo-relative roots. This project lives at ccpa_custom/host/gm_ccpa, so the tools resolve both
+# Repo-relative roots. This project lives at ocbm/host/gm_ccpa, so the tools resolve both
 # roots from their own location rather than hard-coding an absolute path — moving the checkout, or
 # having a second one, must not silently build against the wrong tree.
 GM_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
@@ -46,7 +46,7 @@ SRCDIR="$PROJ/app/src/main/java"
 MAN="$PROJ/app/src/main/AndroidManifest.xml"
 # INSTALL PACKAGE = android.car.usb.handler, DELIBERATELY, again (owner request 2026-10-15: recent
 # bench testing used that package name). It is the package GM's config_UsbDeviceConnectionHandling_component
-# names (ccpa_custom/docs/host/01_ANDROID_AND_AAOS.md); it was this app's package until 2026-09-08,
+# names (ocbm/docs/host/01_ANDROID_AND_AAOS.md); it was this app's package until 2026-09-08,
 # then zeno.gmccpa until 2026-10-15. The manifest keeps package="zeno.gmccpa" (= the Gradle namespace,
 # the class package) and `aapt2 link --rename-manifest-package` below sets the installed id, exactly as
 # Gradle's applicationId does (netprobe_app/app/build.gradle carries the same value). Classes, JNI
@@ -169,7 +169,7 @@ fi
 # versionCode/versionName are INJECTED here, not written in the manifest — `aapt2 link` only honours
 # --version-code when the manifest carries none, so the attributes were removed from AndroidManifest.xml
 # on 2026-09-11 to hand this script the authority. The code is the commit count, which is monotonic
-# because this repo has one linear branch (see ccpa_custom/CLAUDE.md "One branch: main"), needs no
+# because this repo has one linear branch (see ocbm/CLAUDE.md "One branch: main"), needs no
 # state file, and cannot collide. The name carries the sha so `dumpsys package $INSTALL_PKG` names the
 # exact sources on the unit — which a pinned 7/"4.0" never could.
 #
@@ -210,14 +210,15 @@ if [ ! -f "$FDK_AAC_PREFIX/lib/libfdk-aac.a" ]; then
     exit 1
 fi
 NATIVE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/native/carplay-jni"
-# Cargo output goes OUTSIDE ~/Documents, which is iCloud "Desktop & Documents" synced on this Mac.
+# Cargo output goes OUTSIDE the working tree, which can be cloud-synced (iCloud "Desktop & Documents" on the maintainer's Mac).
 # iCloud resolves its own write races by dropping conflict copies beside the original — `classes 2.jar`,
 # `Foo$Bar 2.dex` — and a toolchain then consumes them as real inputs, giving nondeterministic
 # duplicate-class and wrong-filename failures that a `clean` only fixes until sync catches up. A build
 # tree is exactly the wrong thing to sync: hundreds of megabytes, rewritten constantly, worthless off
-# this machine. Same convention as the repo root, whose `target` is symlinked to the same cache root.
+# this machine. Same convention as the repo root, whose `target` is a symlink out of the tree.
 # Override with CARGO_TARGET_DIR=... for a one-off build elsewhere.
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/.cache/cargo-targets/gm_ccpa-carplay-jni}"
+OCBM_CACHE="${OCBM_CACHE:-${TMPDIR:-/tmp}/ocbm-cache}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${OCBM_CACHE%/}/cargo-targets/gm_ccpa-carplay-jni}"
 JNILIB="$CARGO_TARGET_DIR/x86_64-linux-android/release/libcarplayjni.so"
 NDK_BIN="$HOME/Library/Android/sdk/ndk/30.0.15729638/toolchains/llvm/prebuilt/darwin-x86_64/bin"
 # CC/AR must be set, not just the LINKER. eld-codec's build.rs compiles csrc/eld_shim.c with the cc
@@ -230,7 +231,7 @@ NDK_BIN="$HOME/Library/Android/sdk/ndk/30.0.15729638/toolchains/llvm/prebuilt/da
 # fallback since v5.9 UC1) — a total CarPlay failure whose only symptom is one log line. tools/test.sh already sets
 # these for the same reason; the two must stay in lockstep.
 # RUSTFLAGS --remap-path-prefix (plan v5.8 V6 / Q022): without it the release .so embedded 82 host
-# paths (58 under /Users/<name>/.cargo/registry/src, 24 under /Users/<name>/.rustup/toolchains)
+# paths (58 under $CARGO_HOME/registry/src, 24 under $RUSTUP_HOME/toolchains)
 # — the build machine's account name and layout, shipped to the head unit. tools/test.sh builds
 # the same crate into the same CARGO_TARGET_DIR (since 2026-10-08; before that it built in-tree), and
 # cargo's fingerprints include RUSTFLAGS, so the two can share that tree only while both pass the
@@ -310,7 +311,7 @@ REPO="$GM_ROOT"
 # STAMP (computed once, above) — this used to re-derive the sha and `-dirty` with a second, weaker
 # predicate of its own, which could disagree with the asset and the versionName.
 # apk/ is BUILD OUTPUT and is not tracked — the historical sha-stamped builds and the golden APK
-# stayed behind in the standalone gm_ccpa checkout when this project moved under ccpa_custom/host.
+# stayed behind in the standalone gm_ccpa checkout when this project moved under ocbm/host.
 # Create it on demand so a fresh clone builds without a manual step.
 mkdir -p "$REPO/apk"
 OUT="$REPO/apk/gmccpa-debug-$STAMP$FLAVOR_SFX.apk"

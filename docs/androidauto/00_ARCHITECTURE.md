@@ -104,7 +104,7 @@ workstream is therefore already answered; see §3.
 
 #### 2d. Reference material on disk
 
-Prior working directory (`/Volumes/stuff/misc/research/CPC200-CCPA/`):
+Prior working directory: the earlier CPC200-CCPA research working directory (outside this repo; see [`docs/ops/03_REFERENCE_INDEX.md`](../ops/03_REFERENCE_INDEX.md), "Locations outside the repo"):
 
 - `aa_rebuild/aasdk-main`, `aa_rebuild/openauto-main` — extracted GPL source (protobuf definitions,
   framing, channel logic).

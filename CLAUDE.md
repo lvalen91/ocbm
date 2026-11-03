@@ -1,4 +1,4 @@
-# ccpa_custom
+# ocbm
 
 Open-source Rust userspace + macOS host app for the **Carlinkit CPC200-CCPA** CarPlay adapter,
 owned and operated by a **licensed Apple / MFi developer** on **genuine Apple hardware**.
@@ -35,11 +35,11 @@ feature/topic branch, do not leave work parked on one, and do not ask which bran
 review mechanism — it is just work that the mirror does not carry and that the next session has to
 rediscover. A 70-commit branch sat unmerged for exactly that reason (2026-09-08).
 
-**Build artifacts and caches never live under `~/Documents`.** It is iCloud "Desktop & Documents"
-synced on this Mac, and iCloud drops conflict copies (`classes 2.jar`, `Foo$Bar 2.dex`) into build
+**Build artifacts and caches never live in the working tree.** A checkout can sit in a cloud-synced
+folder (the maintainer's does: iCloud "Desktop & Documents"), and sync drops conflict copies (`classes 2.jar`, `Foo$Bar 2.dex`) into build
 trees, which toolchains then eat as real inputs — nondeterministic duplicate-class failures that a
 clean only fixes until sync catches up. Point every build system's output outside the tree
-(`~/.cache/cargo-targets/`, `~/.cache/carlink-artifacts/`, `mktemp -d` under `/tmp`), and ignore it in
+(`CARGO_TARGET_DIR`, the `OCBM_CACHE` root — docs/ops/03_REFERENCE_INDEX.md — or `mktemp -d` under `/tmp`), and ignore it in
 `.gitignore` as well so nothing reaches a commit or a mirror. Ignore patterns for these must be
 SLASHLESS (`apk`, not `apk/`): a trailing slash matches directories only, and these paths are often
 symlinks into the cache.
@@ -59,9 +59,11 @@ Apple's **licensed CarPlay Communication Plug-in R14G17 source** — the accesso
 implementation, 267 files including `AirPlayReceiverSession.c`, `AirPlayCommon.h`, the Integration
 Guide and `Platform/HID*.c` — lives at:
 
-    ~/Documents/carlink/old/carplay_RE/carplay_sdk/reference/apple_carplay_sdk_R14G17/
+    $OCBM_CARPLAY_SDK/reference/apple_carplay_sdk_R14G17/
 
-It is **not** inside this repo, which is why sessions have repeatedly missed it. Shipping vendor
+It is **not** inside this repo, which is why sessions have repeatedly missed it: `OCBM_CARPLAY_SDK` names
+the CarPlay SDK reference tree, a local path outside the repo on the maintainer's machine (set per machine;
+docs/ops/03_REFERENCE_INDEX.md). Shipping vendor
 implementations (SpeedPlay, GM Cinemo), the CarPlay Simulator, and the iOS 27 extracts are indexed in
 docs/ops/03_REFERENCE_INDEX.md as well, with a decision table for which source answers which kind of question.
 

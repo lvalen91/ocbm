@@ -1,11 +1,11 @@
-# 05 — CarPlay wireless session flow (traced from `ccpa_custom`)
+# 05 — CarPlay wireless session flow (traced from `ocbm`)
 
 **What this is:** the code-traced sequence a wireless CarPlay session goes through, from Bluetooth
 discovery to live streaming. [`04_SYSTEM_MODEL.md`](04_SYSTEM_MODEL.md) says what the system is; this
 says what happens, in what order, and what breaks if the order is wrong. Treat it as the implementation
 checklist for the head-unit app.
 
-**Source:** traced across `~/Documents/carlink/ccpa_custom` — the `wireless`, `receiver`,
+**Source:** traced across `ocbm/` — the `wireless`, `receiver`,
 `pairing`, `mfi`, `rtsp` and `metadata` crates, plus that project's on-hardware captures
 (`docs/ops/captures/`) and unredacted iPhone-side logs (`scratchpad/syslog_profile.log`, 2026-08-02, iOS 27).
 Timings and failure modes below are measured, not inferred, unless marked otherwise. iPhone-side log
@@ -109,7 +109,7 @@ decrypt.
 `/auth-setup` runs inside the already-encrypted channel — an MFi attestation layered on top of
 pair-verify, not a bootstrap for it. Sequence: X25519 ECDH → SHA-1-derived AES-128-CTR key/IV →
 `create_signature(SHA1(ourPK‖peerPK))` **then** `copy_certificate()` (signature first,
-`exchange_with_secret` in `ccpa_custom/crates/vendor/mfi/src/sap.rs`) → M2 of 1113 bytes, with the certificate
+`exchange_with_secret` in `ocbm/crates/vendor/mfi/src/sap.rs`) → M2 of 1113 bytes, with the certificate
 in the clear and only the signature AES-encrypted.
 
 ---
@@ -158,7 +158,7 @@ re-SETUPs MainAudio on every Siri turn.
 > R14G17 `AirPlayCommon.h:251-255` defines only four stream types (100, 101, 102, 110). Everything else
 > is post-2017, evidenced by `CarPlaySDK` symbols in the Simulator, not the header —
 > `_AuxInSetup`/`_AuxInTearDown`/`AudioStreamAuxInStart`, `_BufferedAudioSetup`/`_BufferedAudioThread`,
-> `_MainAltAudioSetup`/`_MainAltAudioThread`. Recorded in `ccpa_custom/docs/carplay/03_SDK_GROUND_TRUTH.md` §7 "Audio + Siri", under **Stream types**. Cited by section, not line: that corpus is being cut and line anchors do not survive it.
+> `_MainAltAudioSetup`/`_MainAltAudioThread`. Recorded in `ocbm/docs/carplay/03_SDK_GROUND_TRUTH.md` §7 "Audio + Siri", under **Stream types**. Cited by section, not line: that corpus is being cut and line anchors do not survive it.
 > Silence in a 2017 source is not evidence of absence — that assumption hid the missing type-130 channel
 > for that project's entire history.
 
@@ -173,7 +173,7 @@ The buffer lives in the head unit — i.e. the app — not on the phone. Every b
 `CarPlaySDK` is receiver-side, and the decisive one is RTSP verb `FLUSHBUFFERED` — the phone must be
 able to tell the receiver to discard what it already sent on a skip or seek, which only makes sense if
 the receiver holds it. Worth doing here: a `br0` glitch of a few seconds becomes inaudible instead of a
-dropout. Full evidence: `ccpa_custom/docs/carplay/06_AV_PIPELINE.md`.
+dropout. Full evidence: `ocbm/docs/carplay/06_AV_PIPELINE.md`.
 
 Concurrently with the A/V SETUPs, the second iAP2 handshake runs over stream 130 — DETECT/SYN, then
 `0xAA00`→`0xAA01` (**chip call #5**), `0xAA02`→`0xAA03` (**chip call #6**), `0x1D00`→`0x1D01`→`0x1D02`,
@@ -188,7 +188,7 @@ which carries no `streamConnectionID` — its salt uses the SETUP `seed` instead
 > object-based entry — no way to express Atmos or multichannel on this protocol in any SDK revision
 > available. Best media path: type 102, AAC-LC 48 kHz stereo. Spatial-audio-mixed content still plays —
 > the phone renders it down to stereo first. Full enum + provenance:
-> `ccpa_custom/docs/carplay/06_AV_PIPELINE.md`.
+> `ocbm/docs/carplay/06_AV_PIPELINE.md`.
 
 ---
 
@@ -212,7 +212,7 @@ metadata plane): 30.5 minutes, 58,068 video + 93,314 audio frames, zero failures
 **Teardown** is partial or full, distinguished by presence *and non-emptiness* of `streams[]` — a
 non-empty array stops just those streams and keeps the session; absent, non-array, or an **empty**
 array means full teardown
-(`fn teardown`, `ccpa_custom/crates/vendor/receiver/src/session.rs`). Treating `streams: []` as partial is a
+(`fn teardown`, `ocbm/crates/vendor/receiver/src/session.rs`). Treating `streams: []` as partial is a
 real bug that leaks every stream thread — in Rust, `as_array()` returns `Some(&[])` for it, so test the
 length, not the `Option`.
 
@@ -249,7 +249,7 @@ Each of these is an observed, reproducible hard failure. Highest-value section h
    loudly.
 10. **Never advertise a stream you haven't implemented.** Rules 1 and 9 combined: advertise
     `enhancedSiri` and iOS will SETUP AuxIn 107 and AuxOut 106; advertise `mainBuffered` and it will
-    SETUP the buffered stream. `ccpa_custom/docs/wireless/00_WIRELESS_CARPLAY.md (was docs/29:99`) names the trap — "AuxOutAudio, AuxInAudio and
+    SETUP the buffered stream. `ocbm/docs/wireless/00_WIRELESS_CARPLAY.md (was docs/29:99`) names the trap — "AuxOutAudio, AuxInAudio and
     MainBuffered are the same shape today" as the type-130 bug. Implement, then advertise.
 
     Weigh the two differently. **`mainBuffered` is worth doing** — a receive buffer and a
@@ -261,7 +261,7 @@ Each of these is an observed, reproducible hard failure. Highest-value section h
     The car only does first-pass detection; iOS re-verifies and can reject it
     (`kAFErrorSpeechAbortedFalseVoiceTrigger`). None of that is plausible from an unprivileged app.
     **Classic Siri via the steering-wheel button needs none of it** — no AuxIn, no feature gate, the
-    phone's own mic (`ccpa_custom/docs/wireless/00_WIRELESS_CARPLAY.md` §5). Ship Classic; skip Enhanced.
+    phone's own mic (`ocbm/docs/wireless/00_WIRELESS_CARPLAY.md` §5). Ship Classic; skip Enhanced.
 
 ---
 

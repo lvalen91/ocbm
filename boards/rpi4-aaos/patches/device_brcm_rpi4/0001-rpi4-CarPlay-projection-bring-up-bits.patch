@@ -37,7 +37,7 @@ index 9da830c..3484dd0 100644
 -# --- Pi 4 platform corrections, 2026-08-22 ---
 -# Hardware-verified; see docs/os-corrections-2026-08-16.md.
 +# --- CarPlay port, 2026-08-22 ---
-+# See pi/docs/04_IMAGE_REBUILD_GUIDE.md (ccpa_custom) and
++# See docs/boards/04_IMAGE_REBUILD_GUIDE.md (ocbm) and
 +# docs/os-corrections-2026-08-16.md.
  
  # adb root across reboots. `adb remount` refuses on this board ("bootloader

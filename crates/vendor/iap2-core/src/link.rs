@@ -221,7 +221,7 @@ impl Link {
     /// Build a packet whose payload is sent RAW on `sess` — no `[40 40][total][msg_id]` control
     /// wrapper. Needed by the **File Transfer session (session 2)**, whose datagrams are bare
     /// `[id][opcode][args…]` (the album-artwork path: Accept `[id][01]` / Success `[id][05]`).
-    /// Consumes a seq like `build_msg`. See ccpa_custom `iap2d/src/metadata.rs`.
+    /// Consumes a seq like `build_msg`. See ocbm `iap2d/src/metadata.rs`.
     pub fn build_raw(&mut self, sess: u8, payload: &[u8]) -> Vec<u8> {
         let total = 9 + payload.len() + 1;
         debug_assert!(total <= u16::MAX as usize, "link raw frame length overflows u16"); // audit Fix #23

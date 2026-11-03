@@ -101,7 +101,7 @@ readings and shapes the whole design.
 > **separate** `/system/etc/ip6tables.rules`. That table's `INPUT` chain carries one blanket rule,
 > `-A INPUT -i br0 -s fe80::/64 -j ACCEPT`, that passes any link-local-sourced packet on `br0`
 > regardless of destination port — no per-port allowlist needed on v6 at all. A live capture
-> (`~/Downloads/logcat.log`, 2026-09-09 session) confirms it end to end: `>>> INBOUND CONTROL
+> (a one-off `logcat.log`, not kept in the repo, 2026-09-09 session) confirms it end to end: `>>> INBOUND CONTROL
 > CONNECTION from fe80::1ce2:543a:822d:2fb2%br0:50341` followed by a normal pair-verify → `/auth-setup`
 > → encrypted-control-channel sequence. **Always check both `iptables.rules` and `ip6tables.rules`
 > before concluding a port is unreachable on this platform** — the app's own IPv4 vs IPv6 behavior is
@@ -169,8 +169,8 @@ readings and shapes the whole design.
 
 ---
 
-## 5. Media codecs (Intel HD 505 Gen9 — raw dump in `evidence/05_codecs.txt`, archive at
-`~/Documents/carlink/old/gm_ccpa/evidence/` — not under this tree; see §9)
+## 5. Media codecs (Intel HD 505 Gen9 — raw dump in `evidence/05_codecs.txt`, archive in the
+archived standalone `gm_ccpa` checkout — not under this tree; see §9)
 
 **Video — all hardware-decoded, max 3840×2160 @ up to 40 Mbps, each with a `.secure` DRM variant:**
 
@@ -222,7 +222,7 @@ faster than real time, which survives a Wi-Fi glitch (`wwdc2023-10150.txt:136-14
 5 GHz to a moving vehicle, `mainBuffered` is the more valuable of the two, and is what
 `12_OBSERVED_FLOW.md` Phase 6 shows negotiated live.
 
-Full enum, WWDC quotes and Simulator symbol evidence: `ccpa_custom/docs/carplay/06_AV_PIPELINE.md`;
+Full enum, WWDC quotes and Simulator symbol evidence: `ocbm/docs/carplay/06_AV_PIPELINE.md`;
 stream types in `05_SESSION_FLOW.md` §6, §8 rule 10.
 
 **Build implication (realized):** `MediaCodec` + the Intel HW decoder feeding a `Surface`. HEVC is what
@@ -244,7 +244,7 @@ Sessions completed pairing, `/auth-setup`, SETUP and RECORD, then iOS tore the c
 later. Root cause: `sessionManagementInfo` is one of six keys Apple's per-feature `/info` validator
 checks for presence (`carEndpoint_validateInfoResponseKeyPresentForFeature` —
 `sessionManagementInfo`, `mainBufferedInfo`, `fileTransferInfo`, `vehicleStateProtocolInfo`,
-`logTransferInfo`, `uiSyncInfo`; `ccpa_custom/docs/carplay/05_METADATA_AND_CONTROLS.md (was docs/35:157-162`)) and it was absent from this project's
+`logTransferInfo`, `uiSyncInfo`; `ocbm/docs/carplay/05_METADATA_AND_CONTROLS.md (was docs/35:157-162`)) and it was absent from this project's
 static `/info` while the SETUP response still echoed `"sessionManagement"` in `features` — a
 desync between the two. HEVC was ruled out separately: it gates on three independent conditions
 (non-null `hevcInfo`, `hevc` in SETUP `features`, iOS streaming `hvc1`), and the first two were already
@@ -292,18 +292,18 @@ parameter sets, decodes to 0 bytes, and produces a healthy-looking session with 
 screen. Fix: `unwrap_sample_description()` in `session.rs` scans for the nested atom; bare records
 (`body[0] == 1`) pass through untouched, so the wired path is unaffected.
 
-`session.rs` is not under `host/gm_ccpa` — it lives in the external `ccpa_custom` `receiver` crate
+`session.rs` is not under `host/gm_ccpa` — it lives in the external `ocbm` `receiver` crate
 (`crates/vendor/receiver/src/session.rs`, `fn unwrap_sample_description`), reached via the
 `receiver = { path = "../../../../crates/vendor/receiver", … }` dependency in
 `native/carplay-jni/Cargo.toml`. Do not hunt for it in this tree.
 
-This bug is latent in `ccpa_custom`'s own reference implementation too — its proven wireless capture
+This bug is latent in `ocbm`'s own reference implementation too — its proven wireless capture
 runs `OCBM_FWD_ENC` and forwards encrypted frames to the host without ever parsing the config, so that
 branch is never exercised there. This project is the first thing to decrypt on-box over wireless and
 therefore the first to hit it.
 
 **Codec confirmed by decoded NAL stream, not by negotiation:** HEVC (`hvc1`) — VPS (type 32), SPS
-(33), PPS (34), then IDR (`IDR_N_LP`, type 20). Per `ccpa_custom/docs/carplay/03_SDK_GROUND_TRUTH.md` §5 the codec is never declared
+(33), PPS (34), then IDR (`IDR_N_LP`, type 20). Per `ocbm/docs/carplay/03_SDK_GROUND_TRUTH.md` §5 the codec is never declared
 in the SETUP dict; it rides in-band as the FourCC. For `MediaCodec`: MIME `video/hevc`, `csd-0` =
 VPS+SPS+PPS concatenated (not the separate SPS/PPS pair H.264 uses) — confirmed live in
 `12_OBSERVED_FLOW.md` Phase 7.
@@ -377,7 +377,7 @@ poisons the unit until six settings are reverted by hand. `com.gm.hmi.connection
 placed after the arrays so `--status` is guarded too) reads `kept_packages.txt` and hard-fails with
 exit 1 if any keep-list package appears in `BLOAT_PACKAGES` or `DISABLE_PACKAGES`;
 `remove_package`/`disable_package` refuse kept packages a second time. To disable one deliberately,
-delete its line from `kept_packages.txt` first. Note the copy under `old/gm_ccpa` is a *different*
+delete its line from `kept_packages.txt` first. Note the copy in the archived standalone `gm_ccpa` checkout is a *different*
 2026-09-08 variant ("hotspot kept enabled; Play Store/Services/Maps removed"), not this file's ancestor.
 
 **Changed 2026-10-15 (owner request).** `com.android.vending`, `com.google.android.gms` and

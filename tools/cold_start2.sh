@@ -1,10 +1,10 @@
 #!/bin/sh
-# cold_start2.sh — phone-side wired-CarPlay cold start for ccpa_custom (runs ON the box).
+# cold_start2.sh — phone-side wired-CarPlay cold start for ocbm (runs ON the box).
 #
 # Brings the iPhone into CarPlay by role-switching it to USB host, presenting the iap2,ncm
 # gadget, and running iap2d (the local-i2c iAP2 accessory L3 daemon) through auth + identify.
 # Faithful to ncm_carplayd's proven iap2_carplay_test.sh / carplay_stack.sh, minus the
-# NCM MFi signing service (ccpa_custom does MFi on the local chip inside iap2d).
+# NCM MFi signing service (ocbm does MFi on the local chip inside iap2d).
 #
 # Deploy: push iap2d + iap_role_switch to the box (over OCBM `ocbm-host push`, or UART), then run
 # this over the UART console. Each cold start needs a FRESH physical replug of the iPhone

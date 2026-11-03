@@ -5,7 +5,7 @@
 # The vendored crates are path deps, not members of the carplay-jni workspace, so they must be tested
 # from their own directories. receiver must be built with --no-default-features --features mic-uplink
 # to dodge the eld-codec / fdk-aac feature-unification trap (docs/06 §6.3, item 3).
-# Repo-relative roots. This project lives at ccpa_custom/host/gm_ccpa, so the tools resolve both
+# Repo-relative roots. This project lives at ocbm/host/gm_ccpa, so the tools resolve both
 # roots from their own location rather than hard-coding an absolute path — moving the checkout, or
 # having a second one, must not silently build against the wrong tree.
 GM_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
@@ -26,12 +26,13 @@ bash "$GM_ROOT/tools/tree_artifact_guard.sh" "$GM_ROOT" "$CCPA_ROOT/crates"
 
 CCPA="$CCPA_ROOT/crates/vendor"
 
-# Every cargo invocation below writes OUTSIDE ~/Documents (ccpa_custom/CLAUDE.md "Build artifacts and
-# caches never live under ~/Documents": iCloud drops conflict copies into build trees). The vendored
+# Every cargo invocation below writes OUTSIDE the working tree (ocbm/CLAUDE.md "Build artifacts and
+# caches never live in the working tree": cloud sync drops conflict copies into build trees). The vendored
 # crates are not workspace members, so without this each `cargo test` created its own in-tree
 # crates/vendor/<crate>/target (≈1.1 GB between them). The JNI cross-build uses build_apk.sh's exact
 # directory so the two share one fingerprint tree; the host test builds get their own.
-CARGO_CACHE="$HOME/.cache/cargo-targets"
+OCBM_CACHE="${OCBM_CACHE:-${TMPDIR:-/tmp}/ocbm-cache}"   # same expression as build_apk.sh
+CARGO_CACHE="${OCBM_CACHE%/}/cargo-targets"
 JNI_TARGET_DIR="${CARGO_TARGET_DIR:-$CARGO_CACHE/gm_ccpa-carplay-jni}"
 
 echo "=== Tier-0: receiver ==="
@@ -178,7 +179,7 @@ fi
 # structural stops them drifting: the constants are hand-maintained on both sides, and a value that
 # disagrees is not a compile error anywhere — it is a frame the other end misreads at runtime.
 #
-# ccpa_custom's checker parses ocbm-proto as canonical and diffs every client against it — this app's
+# ocbm's checker parses ocbm-proto as canonical and diffs every client against it — this app's
 # OcbmProto.kt is an app-owned fork (2026-09-11, no longer a symlink into CarlinkAndroid), so it is a
 # real third client and the checker covers it with no arguments. A value disagreement is an error; a
 # constant this app has not defined is a GAP and only fails for the core set (channel ids, CT_*
@@ -205,7 +206,7 @@ if [ -x "$PROTO_CHECK" ]; then
     fi
     tail -1 "$JVM_OUT/proto_check.out"
 else
-    echo "=== Tier-0: OCBM protocol conformance (SKIPPED — no ccpa_custom checkout) ==="
+    echo "=== Tier-0: OCBM protocol conformance (SKIPPED — no ocbm checkout around this tree) ==="
 fi
 
 echo "[Tier-0] all green"

@@ -392,7 +392,7 @@ is fully booted (no box surgery). A real fix would have the app retry HELLO unti
 #### Deploy/build gotchas hit during validation (for next time)
 - **xcodebuild writes to DerivedData, not `host/MacHost/build/`.** The stale `build/Debug|Release`
   dirs are leftovers; launching them runs OLD code. Always launch the `-showBuildSettings`
-  `BUILT_PRODUCTS_DIR` app (`~/Library/Developer/Xcode/DerivedData/carlink_macOS-…/Build/Products/<cfg>`).
+  `BUILT_PRODUCTS_DIR` app (Xcode's `DerivedData/carlink_macOS-…/Build/Products/<cfg>`).
 - **`strings`/`nm` don't surface Swift interpolated-literal segments or (stripped) symbols** — don't use
   them to check "is my change in the binary"; verify functionally (the box shows the pushed YAML).
 - With the host app closed the OCBM accessory de-enumerates → `ocbm-host push` can't reach the box; use

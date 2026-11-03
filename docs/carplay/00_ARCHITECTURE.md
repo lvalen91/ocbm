@@ -23,7 +23,7 @@ truth: you need the **genuine Apple MFi coprocessor** — real silicon, not soft
 
 ### What this is
 
-`ccpa_custom` is an **open-source, Rust-first userspace** that replaces riddleBox entirely while
+`ocbm` is an **open-source, Rust-first userspace** that replaces riddleBox entirely while
 reusing what can't be replaced:
 
 - the adapter's **radios** (WLAN/BT) and its onboard **genuine MFi coprocessor**
@@ -114,7 +114,7 @@ cover. Nothing that defines the CCPA's behavior lives below userspace.
 ### The committed model: split by configurability (docs/carplay/04_CAPABILITIES_AND_CONFIG.md), not by transport
 
 > **⚠️ SUPERSEDES the earlier "Model A passthrough vs Model B decode-on-adapter" framing.** The
-> canonical statement is repo `README.md` §Architecture; this is the architecture-doc detail. Full
+> canonical statement is `box/README.md` §Architecture in brief; this is the architecture-doc detail. Full
 > reasoning: [../ops/06_CORRECTIONS_LEDGER.md](../ops/06_CORRECTIONS_LEDGER.md) `R-01-1`.
 
 CarPlay divides into a **hardware-bound / permanently-stable-mechanics** layer and a **configurable /
@@ -202,8 +202,8 @@ C daemons that no longer exist)
 
 The former sibling `ncm_carplayd/receiver_core` is now **vendored in-repo** as
 `crates/vendor/{receiver, pairing, rtsp, mfi, mfi-i2c-local, iap2-core, metadata, wireless,
-eld-codec}`; the original tree is archived at `../old/ncm_carplayd` *(path is relative to the repo
-root, i.e. the sibling directory `~/Documents/carlink/old/`; it is not under `docs/`)*. "Vendored" covers two
+eld-codec}`; the original tree is archived outside the repo *(the archived `ncm_carplayd` tree; it is
+not under `docs/` and not in this checkout — docs/ops/03_REFERENCE_INDEX.md)*. "Vendored" covers two
 different things there: eight are path-dependency-only (`Cargo.toml` `exclude`), while `wireless` is a
 full workspace member producing the shipped `btd` binary. **Corrected 2026-10-19: this list also named
 `rx-connect` as a vendored crate and a shipped binary. It no longer exists — the mDNS advertiser was
@@ -312,7 +312,7 @@ Mac acting as USB host, over the host-facing gadget port.
 > **Endpoint-address correction (2026-08-17, live on GM `gminfo37`).** Two independent Android hosts —
 > the `:usbhandler` proof app and the `zeno.carlink.ocbm` app's own USB transport — both enumerated this
 > CCPA-OCBM as **bulk IN `0x81`, bulk OUT `0x01`** (interface 0, class `0xFF`, mps 512), logged in
-> `~/Downloads/log.txt`. The earlier `0x83`/`0x02` in this table is not what the shipped gadget presents
+> a one-off host capture (`log.txt`, not kept in the repo). The earlier `0x83`/`0x02` in this table is not what the shipped gadget presents
 > on this unit. Functionally moot — every host here discovers the bulk pair by walking interface 0's
 > endpoints rather than hard-coding, and both claimed and ran a full OCBM session — but do not hard-code
 > `0x83`/`0x02` anywhere; enumerate. If an older CCPA firmware genuinely presented `0x83`/`0x02`, note

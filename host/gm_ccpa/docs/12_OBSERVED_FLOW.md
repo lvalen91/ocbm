@@ -2,7 +2,7 @@
 
 **What this is.** The end-to-end sequence of a working wireless CarPlay session **as observed on our own
 hardware**, with the failure points marked. [`05_SESSION_FLOW.md`](05_SESSION_FLOW.md) is traced from
-`ccpa_custom` source and remains the authority on *protocol* ordering; this is what our stack actually
+`ocbm` source and remains the authority on *protocol* ordering; this is what our stack actually
 does, in order, with the log lines you should expect to see.
 
 > **UPDATE THIS FILE IN PLACE.** When the flow changes, edit the affected phase — do not write a new
@@ -74,8 +74,8 @@ Session totals: **1358 frames rendered, 0 AUs dropped**, 843 media audio frames,
 >   2026-10-08 (evening, `6c95684`): an adb transport dropout of ≈13 min with the radio NOT rebooting (uptime
 >   continuous, same app pid) was observed — the earlier "restart" may have been the same thing, unconfirmed.
 
-Earlier captures remain the archive (`evidence/` lives in the standalone checkout at
-`~/Documents/carlink/old/gm_ccpa/evidence/`, not under this tree):
+Earlier captures remain the archive (`evidence/` lives in the archived standalone
+`gm_ccpa` checkout, not under this tree):
 `evidence/session_2026-08-12-standby/`, `evidence/session_2026-08-12-freshpair/` and
 `evidence/session_2026-08-12/` (16 min unbroken, 21,000 frames).
 
@@ -195,7 +195,7 @@ retries `0x5702`, so the handler must be idempotent.
 > down`). A health of `0x50` (`btd|rootfs-ok`) with bit 0 clear is the exact signature.
 > The box's own `/tmp/bt.log`, `/tmp/wl.log` and friends are now streamed into logcat as
 > `[box:<file>]` lines, so the box side of this lands in the same capture as the app side.
-> See `ccpa_custom` `docs/ops/06_CORRECTIONS_LEDGER.md` R-20W-5.
+> See `ocbm` `docs/ops/06_CORRECTIONS_LEDGER.md` R-20W-5.
 
 ## Phase 4 — App becomes the accessory on Wi-Fi
 

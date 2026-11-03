@@ -48,7 +48,7 @@ kernel path is already implemented in `rfcomm.rs` and was the original code.
 
 ### 1.2 Wi-Fi vendor HAL: `IWifiApIface.setCountryCode` must not return `NOT_SUPPORTED` — *verified earlier in this project*
 
-Recorded in the earlier round on `/Volumes/stuff/rpi/aaos/docs/os-corrections-2026-08-16.md` (external volume, not in this repository). This is
+Recorded in the earlier round in the earlier Pi AAOS port workspace's `os-corrections-2026-08-16.md` (outside this repository). This is
 what blocks the framework's 5 GHz SoftAP, and it forced two workarounds:
 
 * standalone `hostapd` outside the Wi-Fi framework (`boards/rpi4-aaos/tools/hostapd_5g.conf`), and
@@ -233,7 +233,7 @@ That document was a dated sibling of this guide and was removed (folded here, 20
 what was observed on the device; items already covered by Tier 1-4 above are not repeated. Platform
 and image as at the top of this file. These changes are `/vendor` build-config and HAL changes: none
 can be made from userspace with root, each needs an image rebuild. The earlier round (UART overlay,
-Wi-Fi country code, SoftAP HAL, `CONFIG_BT_RFCOMM`) is in `/Volumes/stuff/rpi/aaos/docs/os-corrections-2026-08-16.md` (external volume, not in this repository).
+Wi-Fi country code, SoftAP HAL, `CONFIG_BT_RFCOMM`) is in the earlier Pi AAOS port workspace's `os-corrections-2026-08-16.md` (outside this repository).
 
 **Microphone: the "synthesised input" finding was WRONG and is retracted.** The claim was that
 `ro.boot.audio.tinyalsa.simulate_input=true` in `/vendor/build.prop`, only

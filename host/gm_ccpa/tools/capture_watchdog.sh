@@ -4,7 +4,7 @@
 #
 # Each leg already self-restarts; this covers the case where the supervising subshell is killed
 # (logout, pkill, OOM). Writes heartbeat.txt so liveness is checkable at a glance without pgrep.
-# Repo-relative roots. This project lives at ccpa_custom/host/gm_ccpa, so the tools resolve both
+# Repo-relative roots. This project lives at ocbm/host/gm_ccpa, so the tools resolve both
 # roots from their own location rather than hard-coding an absolute path — moving the checkout, or
 # having a second one, must not silently build against the wrong tree.
 GM_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"

@@ -3,7 +3,7 @@
 Real device logs kept as ground-truth reference (what the wire/state actually did), captured over the
 UART console from the box during live iPhone tests. Not code; evidence.
 
-> **Verification method (important):** these runs were driven by `ccpa/airplayd`, which for the
+> **Verification method (important):** these runs were driven by `airplayd` (since renamed; today `box/carplayd`), which for the
 > on-hardware validation **reused another project's CarPlay receiver — `ncm_carplayd/receiver_core`** —
 > as the harness: its proven `ControlServer` (pair-setup/verify + auth-setup) and, for the full-session
 > capture, its `AvSession` (SETUP/RECORD/stream handling). This **proves the session works on the
@@ -11,8 +11,8 @@ UART console from the box during live iPhone tests. Not code; evidence.
 > key over OCBM to the host app (no on-box decode). Our own code is the `LocalMfiSigner` (genuine local
 > MFi chip) and the OCBM/box plumbing. Each `.log` carries this note in its header.
 >
-> **PATH UPDATE 2026-08-16:** that sibling tree is archived at
-> `~/Documents/carlink/old/ncm_carplayd/receiver_core`, and the receiver has since been
+> **PATH UPDATE 2026-08-16:** that sibling tree (`ncm_carplayd/receiver_core`) is archived outside
+> this repo, and the receiver has since been
 > vendored into this repo as `crates/vendor/receiver` — so the harness these headers name is today's
 > in-repo receiver, not an external dependency.
 
@@ -20,7 +20,7 @@ UART console from the box during live iPhone tests. Not code; evidence.
 
 The first time the adapter's full **stable crypto foundation** ran to completion against a real iPhone:
 iAP2 → Identified → AirPlay pair-setup → pair-verify → MFi-SAP auth-setup → derived ChaCha20 session
-key — all on the genuine **local** MFi chip, via `ccpa/airplayd` (582 KB, reusing `receiver_core`).
+key — all on the genuine **local** MFi chip, via `airplayd` (today `box/carplayd`; 582 KB, reusing `receiver_core`).
 
 | File | What it shows |
 |---|---|

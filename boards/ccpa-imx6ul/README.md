@@ -1,8 +1,8 @@
 # boards/ccpa-imx6ul — CCPA (NXP i.MX6UL class, ARMv7) board material
 
-> **Classification:** CCPA board material split out of `ccpa/` on 2026-11-02: `rootfs/` and `overlay/` live here, `tools/` holds the
-> CCPA-only `iap_role_switch.c` (moved from `accessory_init/`). The board-independent daemons are in [`../../box/`](../../box/README.md). The stock
-> `mtd0`/`mtd1` dumps (`ccpa/backup/`) stay where they were. See [../../README.md](../../README.md#roles-and-boards).
+> **Classification:** CCPA board material: `rootfs/` and `overlay/` live here, `tools/` holds the
+> CCPA-only `iap_role_switch.c`. The board-independent daemons are in [`../../box/`](../../box/README.md). The stock
+> `mtd0`/`mtd1` dumps, checksums and manifests are in [`stock/`](stock/README.md). See [docs/ocbm/01_ROLES_AND_MFI_SOURCE.md](../../docs/ocbm/01_ROLES_AND_MFI_SOURCE.md#three-roles).
 
 The CCPA runs on top of the fixed vendor floor
 (HAB-signed U-Boot, never written: env-block erase only; stock 3.14.52 kernel, unmodified by this userspace and not part of the
@@ -64,4 +64,36 @@ with **neither** present the box boots the OCBM appliance. Always test
 > **`script/run_ocbmd.sh` divergence (noted 2026-08-16):** `tools/ocbm_install.sh` installs
 > `tools/run_ocbmd.sh`, **not** this overlay copy — the two have diverged (the overlay copy gained a
 > deploy dead-man on 2026-08-15 that no installer ships). `ocbm_boot.sh` is the mirror image: the
-> overlay copy is the one installed, and the stale `tools/ocbm_boot.sh` duplicate was deleted on 2026-11-02 (reorganisation phase 1).
+> overlay copy is the one installed; there is no `tools/` duplicate.
+
+## Requirements
+
+- A genuine **Carlinkit CPC200-CCPA** adapter (i.MX6UL, 123 MB RAM, jffs2 rootfs, on-board MFi 2.0C
+  coprocessor). The C2Air is a separate box (MFi 3.x) and is not yet supported on its new baseline — see
+  `boards/c2air-v821b/`. OCBM is MFi-version agnostic by intent; see the MFi-version note in
+  [`docs/carplay/00_ARCHITECTURE.md`](../../docs/carplay/00_ARCHITECTURE.md).
+
+## Getting started
+
+| Step | Where |
+|---|---|
+| Commission a fresh adapter | `tools/ncm_base_install.sh`, then `tools/ocbm_install.sh` — its `manifest()` is the authoritative file set |
+| Recover a wedged or bricked box | [`docs/ops/01_RECOVERY.md`](../../docs/ops/01_RECOVERY.md) |
+
+## The one hard constraint (the vendor floor)
+
+The i.MX6UL boot ROM enforces HAB signature verification on U-Boot, so **U-Boot is fixed platform
+firmware** — never written here (env-block erase only). The kernel is not signature-checked: only its first 192 KB are per-chip
+DCP-encrypted, and the vendor U-Boot's own staging path can replace it (`baseline/`). The OCBM userspace targets the stock 3.14.52 kernel, which stays the default on production
+units. All CCPA behavior is userspace,
+and userspace is 100% open in this project. Practical implication of the stock kernel: no
+configfs/gadgetfs/functionfs, so development uses the kernel's existing USB-gadget functions
+(`f_accessory` bulk + `f_ncm`). See [`docs/carplay/00_ARCHITECTURE.md`](../../docs/carplay/00_ARCHITECTURE.md),
+which covers the architecture and the transport.
+
+## Reproducibility bar
+
+Install needs a root shell over USB-NCM — which the stock firmware leaves open (a telnet/SSH login with no password set, as shipped; no keys or certificates are involved), so what bounds it is the local USB link rather than a credential — or an **SPI flash programmer** for the offline recovery path.
+The CCPA has no FEL, no U-Boot console and no other recovery: a firmware brick is permanent without a
+programmer (untested here) or a recovery-initramfs kernel (`baseline/`). Lower and less invasive than any field alternative (no
+phone modification, no soldered chip). See [`docs/ops/01_RECOVERY.md`](../../docs/ops/01_RECOVERY.md).

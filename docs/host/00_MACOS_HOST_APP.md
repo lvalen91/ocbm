@@ -32,7 +32,7 @@ delegated to the box or deferred with justification — roadmap, not bugs.
 
 ### Correction to one agent's framing
 The nav/AltVideo audit concluded the app "can't be Apple-faithful because the dongle is the AirPlay
-endpoint." That is true for the *legacy stock-firmware* model but **wrong for ccpa_custom**: our own
+endpoint." That is true for the *legacy stock-firmware* model but **wrong for ocbm**: our own
 `carplayd` on the box IS the AirPlay receiver, so real AltVideo / VDC navigation / cluster ARE
 implementable (in the box, forwarded over OCBM). The agent's useful finding stands: the 0x2C/508/509 nav
 path is legacy proprietary code to retire — not a fidelity target.

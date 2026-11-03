@@ -1,6 +1,6 @@
 #!/bin/bash
 # Build-on-demand wrapper for tools/winshot.swift. The binary lives in /tmp, NOT next to the source:
-# ~/Documents is iCloud-synced and a build artefact there breeds "* 2.swift" conflict copies.
+# The working tree may be cloud-synced, and a build artefact there breeds "* 2.swift" conflict copies.
 #     tools/winshot.sh list <pid> | shot <pid> <out.png> | stats <png> ... | diff <a> <b> ...
 set -e
 SRC="$(cd "$(dirname "$0")" && pwd)/winshot.swift"

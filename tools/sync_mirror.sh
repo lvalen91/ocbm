@@ -2,7 +2,8 @@
 # Sync the COMMITTED state of this repository (HEAD) into the publication mirror, then commit it there.
 # Nothing is pushed unless --push is given.
 #
-# The mirror (~/Downloads/github/ocbm) is its own git repo with a GitHub remote; its root IS this
+# The mirror is its own git repo with a GitHub remote, outside this repo; its path comes from
+# OCBM_MIRROR, which is REQUIRED (no default: exits 2 when unset). Its root IS this
 # repo's content, no wrapper directory. It keeps its own history and gets one commit per sync, whose
 # message names the source commit.
 #
@@ -14,14 +15,28 @@
 #      reflected in the mirror until deletions were synced). rsync protects excluded paths from
 #      --delete, so anything excluded that already sits in the mirror is removed explicitly below.
 #   3. Three files are deliberately KEPT PUBLISHED although they are no longer tracked here
-#      (owner decision 2026-10-28): the baseline rootfs images under ccpa/backup/base/. They embed
-#      device credentials and are already public in the mirror's history; they are protected from
-#      --delete and are not added, changed or removed by this script.
+#      (owner decision 2026-10-28): the baseline rootfs images under boards/ccpa-imx6ul/stock/
+#      (until 2026-11-03: ccpa/backup/base/). They embed device credentials, exist nowhere in this
+#      repo and are already public in the mirror's history; they are protected from --delete by
+#      PATH and are not added, changed or removed by this script.
 #   4. The excludes are anchored where a bare name would also match tracked source (a bare
 #      `reference/` dropped host/gm_ccpa/reference). Symlinked build output publishes as a dangling
 #      link, so those are excluded slashless.
 #   5. Before committing, the mirror's file list is compared with HEAD's tracked list; anything in the
 #      mirror that HEAD does not track (other than the protected files) aborts the run.
+#   6. ONE-TIME MIRROR RENAME (2026-11-03). The stock images moved from ccpa/backup/base/ to
+#      boards/ccpa-imx6ul/stock/, and PROTECTED names the new paths only. A mirror that still holds
+#      the three images at the old path would have them DELETED by rsync --delete, and this repo
+#      cannot restore them. So before syncing (also under --dry-run) the run aborts with exit 2
+#      while the mirror has any file under ccpa/backup/ (tracked, or on disk other than .DS_Store).
+#      Do the rename by hand once, inside the mirror, and commit it:
+#          cd "$OCBM_MIRROR"
+#          mkdir -p boards/ccpa-imx6ul/stock
+#          git ls-files ccpa/backup | while IFS= read -r f; do git mv "$f" boards/ccpa-imx6ul/stock/; done
+#          git commit -m "Move the CCPA stock images from ccpa/backup/base/ to boards/ccpa-imx6ul/stock/"
+#      That moves the three protected images plus the old copies of the six tracked files (README.md,
+#      SHA256SUMS, manifest.txt, rootfs.files.txt, mtd0.bin, mtd1.bin), which the next sync then
+#      overwrites from HEAD. Then check with --dry-run that no "*deleting" line names a protected file.
 #
 # Usage: tools/sync_mirror.sh [--dry-run] [--push] ["commit subject"]
 #   --dry-run  list what rsync would create, update and delete; change nothing
@@ -39,18 +54,37 @@ for a in "$@"; do
 done
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DST="${OCBM_MIRROR:-$HOME/Downloads/github/ocbm}"
+[ -n "${OCBM_MIRROR:-}" ] || { echo "FATAL: set OCBM_MIRROR to the publication mirror checkout" >&2; exit 2; }
+DST="$OCBM_MIRROR"
 SRC_REV="$(git -C "$SRC" rev-parse HEAD)"
-SUBJECT="${SUBJECT:-sync: mirror ccpa_custom @ ${SRC_REV:0:7}}"
+SUBJECT="${SUBJECT:-sync: mirror ocbm @ ${SRC_REV:0:7}}"
 
 [ -d "$DST/.git" ] || { echo "FATAL: no git repo at $DST" >&2; exit 1; }
 
 # Kept published although untracked here (see design note 3).
 PROTECTED=(
-  ccpa/backup/base/rootfs.tar.gz
-  ccpa/backup/base/mtd2.bin
-  ccpa/backup/base/CPC200-CCPA_full_nor_16MB.bin
+  boards/ccpa-imx6ul/stock/rootfs.tar.gz
+  boards/ccpa-imx6ul/stock/mtd2.bin
+  boards/ccpa-imx6ul/stock/CPC200-CCPA_full_nor_16MB.bin
 )
+
+# The old location of the protected files must be empty before anything syncs (see design note 6):
+# PROTECTED no longer covers it, so rsync --delete would remove whatever still sits there.
+OLD_STOCK=ccpa/backup
+OLD_LEFT="$( { git -C "$DST" ls-files -- "$OLD_STOCK"
+               if [ -d "$DST/$OLD_STOCK" ]; then ( cd "$DST" && find "$OLD_STOCK" -type f ! -name '.DS_Store' ); fi
+             } | sort -u )"
+if [ -n "$OLD_LEFT" ]; then
+    echo "FATAL: the mirror still holds files under $OLD_STOCK/ (the pre-2026-11-03 stock-image folder):" >&2
+    printf '%s\n' "$OLD_LEFT" | head -20 >&2
+    echo "PROTECTED now names boards/ccpa-imx6ul/stock/, so this sync would DELETE them. Do the one-time" >&2
+    echo "rename inside the mirror first and commit it (tools/sync_mirror.sh design note 6):" >&2
+    echo "  cd \"\$OCBM_MIRROR\" && mkdir -p boards/ccpa-imx6ul/stock" >&2
+    echo "  git ls-files $OLD_STOCK | while IFS= read -r f; do git mv \"\$f\" boards/ccpa-imx6ul/stock/; done" >&2
+    echo "  git commit -m \"Move the CCPA stock images from ccpa/backup/base/ to boards/ccpa-imx6ul/stock/\"" >&2
+    echo "Untracked files left under $OLD_STOCK/ must be moved or removed by hand." >&2
+    exit 2
+fi
 
 if [ "$DRY" = 0 ]; then
     # The licence files must be part of the published commit.
@@ -126,7 +160,7 @@ if [ -n "$UNTRACKED_IN_SRC" ]; then
     exit 1
 fi
 
-git commit -q -m "$SUBJECT" -m "Source: ccpa_custom @ $SRC_REV"
+git commit -q -m "$SUBJECT" -m "Source: ocbm @ $SRC_REV"
 echo "committed $(git rev-parse --short HEAD): $SUBJECT"
 echo "size: $(du -sh . | cut -f1) · tracked: $(git ls-files | wc -l | tr -d ' ') files"
 if [ "$PUSH" = 1 ]; then

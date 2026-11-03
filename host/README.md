@@ -1,7 +1,6 @@
 # host/ — host-side tools
 
-Tools and apps that run on the machine talking to the adapter — macOS, Linux, and (since 2026-08-14)
-Android/AAOS.
+Tools and apps that run on the machine talking to the adapter — macOS, Linux and Android/AAOS.
 
 | Path | What it is |
 |---|---|
@@ -11,8 +10,8 @@ Android/AAOS.
 | `aa-headunit/` | Minimal **Android Auto head-unit client** for bench-testing the AA projection protocol against a phone's own developer head-unit server — no Carlinkit box in the loop. See [`aa-headunit/README.md`](aa-headunit/README.md). |
 | `CallSim/` | **Fake phone calls** for Android Auto telephony testing — a self-managed Telecom `ConnectionService` whose calls Telecom, the dialer and gearhead treat as real. See [`CallSim/README.md`](CallSim/README.md). |
 | `mfi-probe/` | Host-side exerciser for `mfid`: points at the box over USB-NCM and confirms the coprocessor answers with a real certificate and signature. The direct analogue of `CH_MFI`, minus OCBM. |
-| `MacHost/` | the shipping **macOS host app** (Swift, Xcode project `carlink_macOS`) — drives **both CarPlay and Android Auto**: decrypts + decodes/renders the forward-encrypted A/V, input uplink, metadata, and app-driven SETUP (both transports since 2026-08-10). The OCBM reimplementation of the legacy riddlebox-firmware "Carlink macOS" app; renamed from `CarPlayHost/` 2026-09-08 since it is not CarPlay-only. See [`MacHost/HOSTAPP.md`](MacHost/HOSTAPP.md). |
-| `gm_ccpa/` | **Wireless CarPlay as an unprivileged AAOS app** on a 2024 Silverado (GM Info 3.7, API 32). The phone streams over the **vehicle's own hotspot**; the adapter is reduced to the Bluetooth radio and the MFi coprocessor, and carries no media. Device-proven end to end — pairing, HEVC 2400x960 hardware decode, audio, touch, drive-restricted UI and day/night. Merged in 2026-09-08 by `git subtree add`. See [`gm_ccpa/README.md`](gm_ccpa/README.md). |
+| `MacHost/` | the shipping **macOS host app** (Swift, Xcode project `carlink_macOS`) — drives **both CarPlay and Android Auto**: decrypts + decodes/renders the forward-encrypted A/V, input uplink, metadata, and app-driven SETUP (both transports). The OCBM reimplementation of the legacy riddlebox-firmware "Carlink macOS" app. See [`MacHost/HOSTAPP.md`](MacHost/HOSTAPP.md). |
+| `gm_ccpa/` | **Wireless CarPlay as an unprivileged AAOS app** on a 2024 Silverado (GM Info 3.7, API 32). The phone streams over the **vehicle's own hotspot**; the adapter is reduced to the Bluetooth radio and the MFi coprocessor, and carries no media. Device-proven end to end — pairing, HEVC 2400x960 hardware decode, audio, touch, drive-restricted UI and day/night. See [`gm_ccpa/README.md`](gm_ccpa/README.md). |
 | `CarlinkAndroid/` | the **AAOS head-unit host app** (Kotlin) for GM gminfo3.7 — full OCBM, wireless CarPlay over the adapter's own radios. A graft of `carlink_native_personal` (UI/media), `gm_ccpa/` (head-unit-proven OCBM + HEVC/AAC renderers) and new seam/decrypt code. See [`CarlinkAndroid/OCBMANDROID.md`](CarlinkAndroid/OCBMANDROID.md). |
 
 ## Build
@@ -31,3 +30,29 @@ The two "planned" tools landed as `ocbm-host/`:
   A/V / control).
 - the `ocbm-rescue` role is `ocbm-host console` — `MODE_SELECT { CONSOLE }` bridging a root PTY
   over the bulk pipe (no NCM/WiFi needed). See [`../docs/ops/01_RECOVERY.md`](../docs/ops/01_RECOVERY.md).
+
+## Requirements
+
+- An **iPhone**, and an active **Apple Developer Program membership** for the licensed CarPlay SDK
+  material the protocol work is checked against.
+- A **Mac with Xcode** to build the host app, or an AAOS head unit for the Android one.
+
+## Getting started
+
+| Step | Where |
+|---|---|
+| Run the macOS host app | Xcode project at `host/MacHost/carlink_macOS` — [`docs/host/00_MACOS_HOST_APP.md`](../docs/host/00_MACOS_HOST_APP.md) |
+
+## One protocol definition
+
+**One protocol definition.** `crates/ocbm-proto` is canonical and `tools/proto_check.py` verifies
+every client against it — the Swift client and both Kotlin clients (CarlinkAndroid, gm_ccpa), all
+in-tree, with no arguments. A value that disagrees is an error; a constant a client has not defined is a gap, and an
+error only for channels, `CT_*` opcodes and frame flags.
+
+## gm_ccpa in this tree
+
+**In-tree, not a sibling.** `host/gm_ccpa/` is a different architecture — wireless CarPlay as an
+unprivileged AAOS app, with the adapter reduced to the Bluetooth radio and the MFi coprocessor. Its `carplay-jni` takes
+`receiver`, `pairing` and `mfi` as cargo path deps; its `OcbmProto.kt` is its own file (forked from the CarlinkAndroid copy), kept honest by `tools/proto_check.py` against
+`crates/ocbm-proto`. Its app-level code is deliberately its own.

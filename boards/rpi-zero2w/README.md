@@ -1,6 +1,6 @@
 # Pi Zero 2 W — bring-up platform for an alternative OCBM box
 
-> **Roles and boards:** see the roles table in [../../README.md](../../README.md#roles-and-boards).
+> **Roles and boards:** see the roles table in [docs/ocbm/01_ROLES_AND_MFI_SOURCE.md](../../docs/ocbm/01_ROLES_AND_MFI_SOURCE.md#three-roles).
 
 Third board in this repo after the CPC200-CCPA (`boards/ccpa-imx6ul/`, `box/`) and the C2Air (`boards/c2air-v821b/`).
 **Raspberry Pi Zero 2 W**: BCM2710A1 (RP3A0), 4x Cortex-A53 @1 GHz, **512 MB**, CYW43438 radio,
@@ -29,7 +29,7 @@ one data-capable micro-USB (dwc2 OTG) plus one power-only micro-USB.
 Four of those are real work; two are free. Taking them in order of how much they constrain the design:
 
 1. **No MFi coprocessor. No session without one.** Ranked by what they cost:
-   - **Wire a genuine MFi 2.0C to I2C-1 (GPIO2/3) at `0x11`.** Costs no Rust: that bus and address
+   - **Wire a genuine MFi coprocessor (2.0 through 3.0) to I2C-1 (GPIO2/3) at `0x11`.** Costs no Rust: that bus and address
      are *already* the hardcoded target in `box/iap2d` and `crates/vendor/wireless/src/mfi_local.rs`.
    - **`CARPLAY_MFI_ADDR` -> `box/mfid` on an attached CCPA**, as the Pi 4 / AAOS port does
      (`docs/boards/00_PI_AAOS_PORT.md` §1). Proven, but it needs an IP path to that CCPA, and on a

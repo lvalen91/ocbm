@@ -10,9 +10,10 @@ Commits on `main` that day: `bd78cef` (licence and credit: `baseline/` is derive
 GPL-3.0-or-later; the rest of the repository is Unlicense), `b4fd149` (documentation corrections across the
 corpus), `c9fbbb9` (comments only, no code change), `6eb4e92` (`tools/sync_mirror.sh` now publishes
 `git archive HEAD`, has `--dry-run` and an explicit `--push`, and protects three kept baseline images under
-`ccpa/backup/base/` from `--delete`).
+`ccpa/backup/base/` from `--delete`; that folder moved to `boards/ccpa-imx6ul/stock/` on 2026-11-03, see
+`tools/README.md` for the one-time mirror rename).
 
-The publication mirror (`~/Downloads/github/ocbm`) holds one local sync commit that is not pushed. The
+The publication mirror (`$OCBM_MIRROR`, outside the repo) holds one local sync commit that is not pushed. The
 baseline project is judged ready for OCBM work (owner, 2026-10-28).
 
 Not part of those commits: the owner's in-flight uncommitted work (`crates/vendor/receiver/src/events.rs`,
@@ -23,7 +24,7 @@ Open as of this date, one line each (detail stays with the owning document):
 
 - Publication of the mirror: three already-published commits contain session-scratch paths and need a history
   scrub, then either a force-push or a plain push. Awaiting the owner's go.
-- Removal of the 36 session-trailer commits (see Settled) from ccpa_custom by a local rewrite. Last step;
+- Removal of the 36 session-trailer commits (see Settled) from ocbm by a local rewrite. Last step;
   it changes every cited commit hash.
 - NCM PID `1314:2d10` is decided but not in the host tables (`USBDeviceManager.swift`, `MessageTypes.kt`,
   the Android `usb_device_filter.xml`) nor in `baseline/common/usb-ids.conf`, which still sets
@@ -65,14 +66,14 @@ Open as of this date, one line each (detail stays with the owning document):
   credential was NOT a placeholder; it is removed from source — OD-7A — and the owner chose no rotation/scrub.) Assessed and accepted by the owner 2026-08-31, explicitly including the case where either
   repo gains a remote. No rotation, no history scrub. Three separate audits have flagged the key
   *name* without reading the value — pattern-matching on `wpa_passphrase` is not a finding.
-- **ccpa_custom history carries assistant-session trailers and conversation links from the gm_ccpa
+- **ocbm history carries assistant-session trailers and conversation links from the gm_ccpa
   subtree import, until a planned local history rewrite removes them.** (Corrected 2026-10-28: this entry
   said there were none, verified 2026-08-31. `host/gm_ccpa` was imported as a subtree on 2026-09-08
   (`b049810`) and brought 36 commits dated 2026-08-09 to 2026-08-14 that carry both a session trailer and
   a conversation link; `git log --all` on main finds them. The former sibling gm_ccpa repo no longer
   exists as a separate tree.) Owner decision 2026-10-28: the owner removes them with a later local rewrite
-  of ccpa_custom, which is not pushed anywhere. The publication mirror blocks them through its pre-push
-  hook. Never push ccpa_custom itself. Write neither pattern out literally in a doc — the hook scans
+  of ocbm, which is not pushed anywhere. The publication mirror blocks them through its pre-push
+  hook. Never push the working repository itself (only the mirror is published). Write neither pattern out literally in a doc — the hook scans
   added CONTENT as well as commit messages, so even a sentence quoting them will block the push.
   (The rewrite does not by itself resolve the gm_ccpa credential question in the item above; that stays
   the owner's recorded decision.)
@@ -1342,7 +1343,7 @@ still open is §4 of this file, not this list.
     (README §Status, 2026-08-11). *(corrected 2026-10-19: the fix is commit `9a5e38e` (2026-08-10,
     "stop refusing iOS's type-130 DataStream SETUP"), now `crates/vendor/receiver/src/session.rs:902`
     `if scid == 0 && matches!(ty, 100..=102 | 110 | 111)` — exists, `git cat-file -t` → commit. The
-    "validated 2026-08-11" half is UNVERIFIED (no archived evidence): `README.md` Status carries no
+    "validated 2026-08-11" half is UNVERIFIED (no archived evidence): the former top-level `README.md` Status (`git show a6d176c:README.md`) carries no
     2026-08-11 date or `decryptFail` figure (only the undated "metadata (NowPlaying, route and lane
     guidance, call state)" line), and no capture after 2026-08-10 is archived. The guard's introducing
     commit `5ce9d1c` resolves in no ref — it was squashed into `f88989d`.)* Regression evidence retained:

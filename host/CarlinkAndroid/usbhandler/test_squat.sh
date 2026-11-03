@@ -11,7 +11,8 @@ PKG="android.car.usb.handler"
 USER_ID="${USER_ID:-10}"          # override only to A/B the user-0-does-nothing claim
 TAG="UsbHandlerSquat"
 HERE="$(cd "$(dirname "$0")/.." && pwd)"   # host/CarlinkAndroid
-APK="$HOME/.cache/gradle-builds/carlink-android-ocbm/usbhandler/outputs/apk/debug/usbhandler-debug.apk"
+OCBM_CACHE="${OCBM_CACHE:-${TMPDIR:-/tmp}/ocbm-cache}"   # must match host/CarlinkAndroid/build.gradle.kts
+APK="${OCBM_CACHE%/}/gradle-builds/carlink-android-ocbm/usbhandler/outputs/apk/debug/usbhandler-debug.apk"
 
 echo "== build =="
 "$HERE/gradlew" -p "$HERE" :usbhandler:assembleDebug --console=plain

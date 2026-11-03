@@ -88,7 +88,7 @@ class VoiceRouter(
     private companion object {
         /**
          * AAC-ELD AudioSpecificConfig as the shipping fdk-aac encoder actually emits it
-         * (`ccpa_custom/docs/50`): SBR enabled by fdk auto-mode, frameLength 480. `:9003` carries RAW
+         * (`ocbm/docs/50`): SBR enabled by fdk auto-mode, frameLength 480. `:9003` carries RAW
          * access units with no ADTS header, so MediaCodec has to be handed this.
          */
         val ELD_CSD_16K_MONO = byteArrayOf(

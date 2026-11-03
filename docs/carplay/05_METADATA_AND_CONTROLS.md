@@ -468,7 +468,7 @@ message with a `...(+K B truncated)` marker (`iap2_core::metadata::log_route_gui
 The file is checked per route-guidance message, so `rm /tmp/carplay_rg_hex` disarms it without a restart; `/tmp` is
 tmpfs, so a reboot disarms it too. The lines land in the daemon's own log (`/tmp/carplayd_wl.log` wireless,
 `/tmp/carplayd.log` / `/tmp/iap2d.log` wired), which ocbmd tails onto CH_LOG (`ocbmd/src/main.rs` log-source table) into the
-app's box log (`~/Library/Logs/Carlink/box-*.log`). Bodies carry
+app's box log (`box-*.log` in the app's `Library/Logs/Carlink/` log directory, `FileLogger.swift`). Bodies carry
 road/destination text — arm it only for a capture.
 
 **What Apple's catalog gates behind selectors** (selector 3: sent since 2026-10-19 and verified, above; 4/5 not sent):
@@ -1117,7 +1117,7 @@ first run of the accept path, the key probe, the RCS reassembly buffer and the s
 Reference for two host-app windows: a **Metadata** viewer (what CarPlay can push to a wired accessory
 and over which channel) and a **Controls** window (clickable buttons that send HID reports / `/command`
 messages to the phone). Grounded read-only in Apple's **CarPlaySimulator** SDK, the machine-generated iAP2 `spec.rs`,
-the wire-verified `ncm_carplayd/research/WIRED_*` captures, and the live ccpa_custom / ncm_carplayd
+the wire-verified `ncm_carplayd/research/WIRED_*` captures, and the live ocbm / ncm_carplayd
 sources. Companion to **docs/carplay/03_SDK_GROUND_TRUTH.md** (SDK ground truth) — this doc drills into §7/§8/§9 for these two windows.
 
 Claims are **[E]** evidenced (string / exported symbol / extracted const bytes / wire capture cited) or
@@ -1125,7 +1125,7 @@ Claims are **[E]** evidenced (string / exported symbol / extracted const bytes /
 
 ### 0. Sources used (beyond docs/carplay/03_SDK_GROUND_TRUTH.md)
 - **CarPlaySDK binary** (arm64e): `…/CarPlaySimulator.devicekitplugin/Contents/Frameworks/CarPlaySDK.framework/Versions/A/CarPlaySDK` (6.6 MB). `strings`/`nm -gU`/`otool -tV`. Strings dumped to scratchpad `sdk_strings.txt`.
-- **iAP2 spec crate** (machine-generated from the plugin): `crates/vendor/iap2-core/src/spec.rs` (the live copy; an older one remains under `~/Downloads/github/carplayd`) — message IDs + Apple's own param-ID names.
+- **iAP2 spec crate** (machine-generated from the plugin): `crates/vendor/iap2-core/src/spec.rs` (the live copy; an older one remains in the `carplayd` PoC checkout, outside the repo) — message IDs + Apple's own param-ID names.
 - **Wire captures** (stock CCPA, byte-decoded): `ncm_carplayd/research/WIRED_METADATA_PLANE.md`, `WIRED_ALBUM_ART.md`, `WIRED_NAV_METADATA.md`.
 - **ios27 HID inventory:** `ncm_carplayd/research/ios27_sdk_inventory/11_hid_input.md`.
 - **Live code:** `box/carplayd/src/main.rs`, `box/iap2d/src/main.rs`; `ncm_carplayd/receiver_core/crates/receiver/src/{session.rs,events.rs,hid.rs,info.rs}`; sibling `carplayd/vendor/ncm_carplayd/.../src/{hid.rs,info.rs}`.
@@ -1173,7 +1173,7 @@ schemas below are **[E]** where the adjacent key strings sit next to the command
 | `setEnhancedSiriParams` | iOS→acc | `enhancedSiriParameters`: `bufferSizeMs`, `bufferAudioFormat`, `burstPeriodMs`, `voiceModelLanguage` | configure Siri mic buffering [E — adjacent keys] |
 | `setOEMLogConfiguration` / `handleLogArchiveRequest` | iOS→acc | log config | OEM log control [E] |
 
-**ccpa_custom status (anchors + verdict corrected 2026-08-16):** `receiver::session::AvSession::command()`
+**ocbm status (anchors + verdict corrected 2026-08-16):** `receiver::session::AvSession::command()`
 **logs every inbound `/command` type** and forwards the raw plist to the host over the `:9004` metadata
 seam (`META_CMD`) — the `[command] ← iPhone POST /command type='{ty}'` log, then
 `iap2_core::metadata::emit_command_plist(request_plist)`. *(The old line anchors are
@@ -1873,11 +1873,11 @@ as touch. No auto-repeat in the transmit path. Timing is not the cause.
 
 <!-- absorbed: ../carplay/05_METADATA_AND_CONTROLS.md -->
 
-**Status: REFERENCE.** Answers the standing question from docs/wireless/00_WIRELESS_CARPLAY.md: is ccpa_custom's wireless metadata
+**Status: REFERENCE.** Answers the standing question from docs/wireless/00_WIRELESS_CARPLAY.md: is ocbm's wireless metadata
 gap (NowPlaying/RouteGuidance/CallState never arriving, even after fixing the plist-casing bug and the
 missing `iAPChannel` SETUP gate) caused by needing **additional advertisement**, or **something else**?
 Researched by mining GM's real, shipping CINEMO-based CarPlay implementation (CT5 AAOS14, unobfuscated
-Java + native libs; Silverado AAOS12, existing corpus) — reference material only, not ccpa_custom code.
+Java + native libs; Silverado AAOS12, existing corpus) — reference material only, not ocbm code.
 
 **Short answer: not advertisement.** GM's real implementation needs no wireless-specific advertised
 capability or feature bit at all. GM's OWN design uses a genuinely separate, real iAP2-over-socket
@@ -1887,7 +1887,7 @@ mechanism does NOT work that way**: no second socket exists in Apple's stack eit
 payload flows, with no added framing, straight into a cross-framework call
 (`APAccTransportClientEndpointForwardData` → `CoreAccessoriesLibrary`'s `acc_transportClient_
 processIncomingData`) on the SAME already-connected AirPlay endpoint — architecturally much closer to
-what ccpa_custom already attempts than to GM's separate-socket design. **The real gap is therefore
+what ocbm already attempts than to GM's separate-socket design. **The real gap is therefore
 narrower than a missing transport**: it's the exact wire format/gating inside that one still-
 undecompiled function. See §4–5 for the precise, now-scoped open question.
 
@@ -1914,7 +1914,7 @@ undecompiled function. See §4–5 for the precise, now-scoped open question.
   `libNmeIAP.so` — a closed-SDK **license/SKU flag**, checked internally when Cinemo builds the iAP2
   Identify message per transport component. Not app-settable, not exposed via `/info` or any
   SETUP-response field, and not applicable to an independent Rust implementation — this is Cinemo's
-  own build-time licensing, not a protocol mechanism ccpa_custom is missing.
+  own build-time licensing, not a protocol mechanism ocbm is missing.
 - **The metadata subscription code itself is 100% transport-agnostic.** `RouteGuidance.onStart()`,
   `CommunicationManager.startUpdating()`, and `MediaManager.startMediaAccess()` each call their
   `Start*Updates()` iAP2 messages byte-for-byte identically regardless of whether the underlying
@@ -1922,7 +1922,7 @@ undecompiled function. See §4–5 for the precise, now-scoped open question.
   cumulative-ACK timeout for WiFi (300 vs 60, expected for a lossier transport) — nothing
   metadata-specific.
 
-**Conclusion of this section: if ccpa_custom is looking for an extra feature to advertise or declare,
+**Conclusion of this section: if ocbm is looking for an extra feature to advertise or declare,
 GM's real implementation proves there isn't one to find.** The gap is architectural, not a missing flag.
 
 ---
@@ -1930,7 +1930,7 @@ GM's real implementation proves there isn't one to find.** The gap is architectu
 ### 2. What GM DOES do — a real, separate iAP2 socket, not an AirPlay tunnel
 
 This is the key structural finding. GM's wireless CarPlay does **not** carry iAP2 messages tunneled
-inside AirPlay/RTSP commands (which is what ccpa_custom's current `iAPSendMessage`-based experiment
+inside AirPlay/RTSP commands (which is what ocbm's current `iAPSendMessage`-based experiment
 does). Instead:
 
 1. Cinemo's config registers a **dedicated WiFi iAP2 transport**:
@@ -1950,7 +1950,7 @@ does). Instead:
    works — metadata flows because a **real iAP2 protocol session** exists on that link, with its own
    Identify/message-id declaration, not because of anything advertised over AirPlay.
 
-**This is the structural piece ccpa_custom is missing.** The current wireless-metadata experiment
+**This is the structural piece ocbm is missing.** The current wireless-metadata experiment
 (docs/wireless/00_WIRELESS_CARPLAY.md) tunnels bare `msg_payload` bytes through AirPlay's `iAPSendMessage` command — essentially
 asking the AirPlay control channel to carry iAP2-shaped cargo without ever standing up a real iAP2
 link (identify, message-id declaration, SYN/ACK-equivalent) on the wireless side. GM's evidence
@@ -2005,7 +2005,7 @@ reasoning is dropped; this is everything from it that survives, plus why the res
 **Stands:**
 
 - **Apple uses no second iAP2-over-WiFi socket.** No `socket`/`connect`/`bind` call exists anywhere on
-  the path that carries this traffic — architecturally closer to ccpa_custom's approach than to GM's.
+  the path that carries this traffic — architecturally closer to ocbm's approach than to GM's.
 - **`carEndpoint_createiAPChannelIfNeeded` / `carEndpoint_sendCommandOverRCSChannel` ARE the
   mechanism** (RCS DataStream, stream type 130), confirmed on hardware from both ends 2026-07-25. A
   second decompilation pass had called them "dead code at the call-site level"; that retraction was
@@ -2064,7 +2064,7 @@ real generational change in GM/CINEMO's design.
 
 Unlike the original Silverado research (which relied entirely on the pre-existing `gminfo_resources`
 documentation corpus, never opening a native binary), this pass extracted Silverado's **real firmware**
-directly: `/Volumes/stuff/misc/research/GM_research/gm_aaos/2024_Silverado_ICE/firmware/update_packages/Y181/`.
+directly: the maintainer's GM firmware research archive (outside the repo), `2024_Silverado_ICE/firmware/update_packages/Y181/`.
 The delivery manifest identified `86331654` as the real Android system partition (a zip containing a
 plain ext2 image, already separately pre-extracted at `.../Y181/extractions/86331654`, 3.2GB) —
 confirmed via `debugfs -R "ls -l /"` to be the true `/system` (full `apex`/`app`/`priv-app`/`lib64`
@@ -2144,9 +2144,9 @@ protocol demands.
 
 Originally extracted to a session scratch directory under `/private/tmp` (gone; not re-derivable). The persistent
 copies (all 26 Silverado `libNme*.so`, `GMConnections.apk`, and its jadx decompile) live in
-`~/Documents/carlink/misc/Carplay WWDC/GM CarPlay Reference/` (alongside the CT5 material; see its `README.md`) and
-the repo mirror `reference/gm_cinemo/`. *(Corrected 2026-10-19: the earlier path `~/Downloads/Carplay WWDC/GM CarPlay
-Reference/` no longer exists; the `/private/tmp` scratch path is also gone.)*
+the maintainer's GM CarPlay reference collection, outside the repo (alongside the CT5 material; see its `README.md`) and
+the repo mirror `reference/gm_cinemo/`. *(Corrected 2026-10-19: the earlier "Carplay WWDC/GM CarPlay
+Reference" download folder no longer exists; the `/private/tmp` scratch path is also gone.)*
 
 ---
 
@@ -2159,7 +2159,7 @@ their central framing is obsolete. What they established, and what died with the
 **Stands.**
 
 - Two independent real-world references were mined — Apple's own stack and GM's production CINEMO
-  implementation across two vehicle generations. `ccpa_custom`'s core session philosophy
+  implementation across two vehicle generations. `ocbm`'s core session philosophy
   (pause-in-place, persistent pairing + ephemeral config, drain-health detection) already matched both
   independently.
 - The wireless-metadata failure was **not** an advertisement problem, and Apple does **not** use a

@@ -66,11 +66,11 @@ order.
 ## Build and run
 
 Gradle-free: `kotlinc → d8 → aapt2 → zipalign → apksigner`, plus a cargo cross-build for the JNI core.
-Needs the Android SDK + NDK. Build output goes to `~/.cache`, never into this tree — `~/Documents` is
-iCloud-synced and conflict copies poison build trees (`ccpa_custom/CLAUDE.md`). Every cargo call in
-`tools/test.sh` and `tools/build_apk.sh` sets `CARGO_TARGET_DIR` under `~/.cache/cargo-targets/`, and the
+Needs the Android SDK + NDK. Build output goes outside the working tree (`OCBM_CACHE`), never into it — a cloud-synced
+tree's conflict copies poison build trees (`ocbm/CLAUDE.md`). Every cargo call in
+`tools/test.sh` and `tools/build_apk.sh` sets `CARGO_TARGET_DIR` under `$OCBM_CACHE/cargo-targets/`, and the
 gate's first step (`tools/tree_artifact_guard.sh`) FAILS on any real `target`/`build`/`__pycache__`-style
-directory inside `host/gm_ccpa` or `crates/` (a symlink into `~/.cache` passes).
+directory inside `host/gm_ccpa` or `crates/` (a symlink out of the tree passes).
 
 ```bash
 bash tools/test.sh                 # Tier-0 gate: tree-artifact guard, cargo tests, JNI cross-build, 46 JVM test classes, docs budget, OCBM proto conformance
@@ -104,7 +104,7 @@ Full procedure, expected log lines and the troubleshooting table:
 
 ```
 netprobe_app/     the Kotlin app — ocbm/ · pair/ · av/ · logging/ · CarPlayRx · SessionCore · MainActivity (launcher)
-native/           the Rust core: JNI over ccpa_custom's receiver/pairing/mfi crates
+native/           the Rust core: JNI over ocbm's receiver/pairing/mfi crates
 tools/            build_apk.sh · test.sh · info_plist_*.py · ADB recon · capture
 docs/             see above
 audit/            adversarial review, cited as the authority for doc 11's R6 section
@@ -112,7 +112,7 @@ audit/            adversarial review, cited as the authority for doc 11's R6 sec
 
 ## Archive: evidence and golden APKs
 
-This project was merged into `ccpa_custom` on 2026-09-08 (`git subtree add`, history preserved). Two
+This project was merged into `ocbm` on 2026-09-08 (`git subtree add`, history preserved). Two
 things were deliberately left behind, taking the import from 368 MB to 876 KB:
 
 - **`evidence/`** — the on-device capture corpus backing every "device-proven" claim.

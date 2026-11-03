@@ -1,5 +1,5 @@
 #!/bin/sh
-# ccpa_custom: owned -- minimal NCM-appliance boot orchestrator (rewritten from stock;
+# ocbm: owned -- minimal NCM-appliance boot orchestrator (rewritten from stock;
 # all projection/vendor launches removed). Radios are on-demand (wlan_on/bt_on); NCM is
 # the only always-on link. Primary NCM arm is /script/custom_init.sh (early); the block
 # at the end is a fallback that runs only if custom_init did not pre-arm.

@@ -15,11 +15,11 @@ Apply that first, then this.
 ```sh
 # platform
 git clone https://github.com/lvalen91/RPi_AAOS16
-RPi_AAOS16/patches/apply.sh ~/aosp
-RPi_AAOS16/patches/build_kernel_rpi4.sh ~/aosp
+RPi_AAOS16/patches/apply.sh "$AOSP"   # $AOSP: your AOSP checkout, outside the repo
+RPi_AAOS16/patches/build_kernel_rpi4.sh "$AOSP"
 
 # then this project's bits
-git -C ~/aosp/device/brcm/rpi4 apply boards/rpi4-aaos/patches/device_brcm_rpi4/*.patch
+git -C "$AOSP/device/brcm/rpi4" apply boards/rpi4-aaos/patches/device_brcm_rpi4/*.patch
 ```
 
 ## What's in here

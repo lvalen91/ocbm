@@ -2,7 +2,7 @@
 
 **What this is.** Full CarPlay audio: media, phone calls, Siri, alerts, navigation and the microphone
 uplink. Derived from four parallel studies — the working Android stack in `carlink_native_personal`,
-the `ccpa_custom` receiver, its macOS host, and an audit of what this app does versus what it
+the `ocbm` receiver, its macOS host, and an audit of what this app does versus what it
 advertises. See [`12_OBSERVED_FLOW.md`](12_OBSERVED_FLOW.md) for the flow this plugs into.
 
 > ## CURRENT STATE (2026-10-08) — read this first; sections below are layered history
@@ -86,7 +86,7 @@ Media took **6 underruns in 843 frames** (§3 rule 2). All four are filed as row
 |---|---|
 | Media (AAC-LC 48 k stereo, `AacPlayer`) | **Device-proven**, 2026-08-05 working session |
 | Media pausing so the volume knob reaches `VOICE_COMMAND` during Siri | **Device-proven**, 2026-08-12 (117 knob steps measured; see §3) |
-| `atype` byte on `:9003` (box-side `tag_voice`) | Landed in `ccpa_custom` `forward.rs`; parsed by `VoiceRouter`. **Routing device-confirmed 2026-09-04**: Siri, call and nav each land audibly on the correct bus, so the `atype`→purpose split is right on hardware |
+| `atype` byte on `:9003` (box-side `tag_voice`) | Landed in `ocbm` `forward.rs`; parsed by `VoiceRouter`. **Routing device-confirmed 2026-09-04**: Siri, call and nav each land audibly on the correct bus, so the `atype`→purpose split is right on hardware |
 | Per-purpose sinks: CALL and NAV routing, AAC-ELD decode, silence-fill watchdog (`VoiceRouter.kt`) | **Owner-confirmed on the truck 2026-09-04** (no capture committed): Siri→`Voice`, Call→`Phone`/`Call`, Nav→`Navigation` each audible on the correct volume group. The **ALERT** sink is still unexercised. The energy-gated **ducking** IS now exercised (2026-09-09 capture) and is defective — see §3 Ducking |
 | AAC-ELD decode of the Siri downlink | **Device-proven 2026-09-09**: `[voice] siri: AAC-ELD 16000Hz 1ch -> AudioTrack(usage=16), decoder=c2.android.aac.decoder`. Note the decoder is SOFTWARE — this head unit has no hardware audio codec of any kind (§5) |
 | `VoiceRouter` AU delivery | **SUPERSEDED 2026-10-07 (v5.8 V1b) — `Sink.feed` no longer exists.** Was **DEFECTIVE, measured 2026-09-09**: `stopping — 249 AUs routed, 42 dropped` — 17 % of one Siri turn discarded by the `w == 0` branch in `Sink.feed`. Filed as A6 |
@@ -108,7 +108,7 @@ section previously read "design only, nothing implemented"; it no longer applies
 `:9003` carries every non-media stream, tagged:
 
 ```rust
-// ccpa_custom/crates/vendor/receiver/src/forward.rs — pub fn tag_voice
+// ocbm/crates/vendor/receiver/src/forward.rs — pub fn tag_voice
 pub fn tag_voice(au: &[u8], rate: u32, channels: u16, atype: u8) -> Vec<u8>
 // -> [rate u32 BE][ch u16 BE][atype u8][len u32 BE][AU]
 ```
@@ -248,7 +248,7 @@ the media track because another purpose started.
 
 `:9003` carries **raw AAC-ELD access units**, not ADTS — there is no self-describing header, so
 `MediaCodec` needs a hand-built `csd-0`. `VoiceRouter.eldCsd()` builds it from the encoder's real
-AudioSpecificConfig, recorded in `ccpa_custom/docs/ops/05_AUDITS.md (was docs/50:88-96`:)
+AudioSpecificConfig, recorded in `ocbm/docs/ops/05_AUDITS.md (was docs/50:88-96`:)
 
 ```
 csd-0 = f8 f0 31 2c 00 bc 00     // AAC-ELD, SBR enabled by fdk auto-mode, frameLength 480
@@ -617,8 +617,8 @@ failed` string and no longer contains the `` `mic-uplink-eld` not built `` bail-
 Recipe, for when it has to be rebuilt:
 
 ```bash
-NDK=~/Library/Android/sdk/ndk/30.0.15729638/toolchains/llvm/prebuilt/darwin-x86_64/bin
-cd ccpa_custom/scratchpad/fdk && tar xzf fdk-aac-2.0.3.tar.gz -C src-android --strip-components=1
+NDK=$ANDROID_HOME/ndk/30.0.15729638/toolchains/llvm/prebuilt/darwin-x86_64/bin
+cd ocbm/scratchpad/fdk && tar xzf fdk-aac-2.0.3.tar.gz -C src-android --strip-components=1
 cd src-android && ./configure --host=x86_64-linux-android \
   --prefix=../install-android-x86_64 --disable-shared --enable-static --with-pic \
   CC="$NDK/x86_64-linux-android32-clang" CXX="$NDK/x86_64-linux-android32-clang++" \
@@ -671,7 +671,7 @@ platform telemetry call is neutered, which is correct for a third-party app.
 
 **CORRECTED 2026-08-31 — the previous claim that `compatibility`/PCM is wired-only was wrong about
 what the box ADVERTISES.** `preset_wireless_8()` carries two `compatibility` entries unconditionally
-(`pub fn preset_wireless_8`, `ccpa_custom crates/vendor/receiver/src/info.rs`; was at :1008-1035, then
+(`pub fn preset_wireless_8`, `ocbm crates/vendor/receiver/src/info.rs`; was at :1008-1035, then
 :1404-1430 — re-anchored to the symbol 2026-09-10): type 100 PCM 16k-mono/48k-stereo and
 type 101 PCM 48k-stereo. There is no transport branch on that list, so they are offered on every
 wireless session.
@@ -699,7 +699,7 @@ worked, so neither this path nor the audio-focus path is confirmed for it.
 | The negotiated `audioType` per stream, box side | airplayd stderr → `[box:…]` in logcat | `[session] SETUP phase2 audio({ty}) … audioType={..} -> dataPort {..}` |
 | The sink the box chose per stream | airplayd stderr | `[audio] stream {ty} {codec} -> {label} :{port}` |
 
-Box-side lines are bare `eprintln!` in `ccpa_custom crates/vendor/receiver/src/session.rs` (the
+Box-side lines are bare `eprintln!` in `ocbm crates/vendor/receiver/src/session.rs` (the
 phase-2 line :935, not ~:889 — checked 2026-09-09; :886 is the unrelated ALT-screen(111) line) and
 `spawn_audio`; nothing gates them, and they reach this app's logcat through
 the `CH_FILE` box-log stream. A fourth line dumps the full stream dict for every audio-range type
@@ -736,7 +736,7 @@ one of the two historical `-16720` teardowns and the evidence for which advert c
 
 | # | Step | Gate | Status |
 |---|---|---|---|
-| **A1** | `atype` in `tag_voice` (`ccpa_custom`, box-side) | Byte arrives on `:9003`, matches SETUP's `audioType` | **Landed** |
+| **A1** | `atype` in `tag_voice` (`ocbm`, box-side) | Byte arrives on `:9003`, matches SETUP's `audioType` | **Landed** |
 | **A2** | Voice decoder: parse `:9003` tag, `MediaCodec audio/mp4a-latm` with the ELD `csd-0` | Siri audio audible on `bus2_voice_command_out` | **Truck-confirmed 2026-09-04** — Siri audible on `Voice`; media-pause side effect also proven (§3) |
 | **A3** | Per-usage sinks + one focus listener each + silence-fill + watchdog | Call audio on `bus4_call_out`; volume keys follow the active purpose | **Truck-confirmed 2026-09-04** for CALL and NAV routing; the ALERT sink is still unexercised |
 | **A4** | Ducking (energy-gated, 0.2) | A nav prompt ducks music and music returns | **Built**; nav audio routes correctly (2026-09-04) but the duck-and-return interplay is not separately truck-verified |
@@ -752,6 +752,6 @@ if it fails. Media, Siri, call and nav routing are owner-confirmed on the truck 
 
 `carlink_native_personal/app/src/main/kotlin/com/carlink/audio/` (DualStreamAudioManager,
 AudioRingBuffer, MicrophoneCaptureManager) ·
-`ccpa_custom/crates/vendor/receiver/src/{session,forward,uplink,info,stream}.rs` ·
-`ccpa_custom/host/MacHost/carlink_macOS/Audio/` · `ccpa_custom/docs/carplay/06_AV_PIPELINE.md` (audio formats), `docs/50`
+`ocbm/crates/vendor/receiver/src/{session,forward,uplink,info,stream}.rs` ·
+`ocbm/host/MacHost/carlink_macOS/Audio/` · `ocbm/docs/carplay/06_AV_PIPELINE.md` (audio formats), `docs/50`
 (ELD ASC) · this app's `av/{AacPlayer,VoiceRouter,MicUplink,CarPlayActivity}.kt`, `assets/info.bplist`.

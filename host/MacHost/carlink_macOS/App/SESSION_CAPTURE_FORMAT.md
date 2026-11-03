@@ -9,7 +9,7 @@
 > That takes with it the riddlebox `0x55AA55AA` message-type numbering the record layout is built on and
 > the AES-128-CBC adapter-info decode under "Device Information Blob" below. The committed model is OCBM
 > + forward-encrypted ChaCha20-Poly1305 A/V (see `../../HOSTAPP.md`); live diagnostics are `FileLogger`
-> (OSLogStore → `~/Library/Logs/Carlink/`) plus `StreamMetrics` / `StreamMetricsMonitor`. Retained as the
+> (OSLogStore → the app's `Library/Logs/Carlink/`) plus `StreamMetrics` / `StreamMetricsMonitor`. Retained as the
 > specification of already-captured `.clnk` files and as the starting point for anyone re-adding a
 > recorder against the OCBM path — do NOT read any of it as current app behaviour.
 
