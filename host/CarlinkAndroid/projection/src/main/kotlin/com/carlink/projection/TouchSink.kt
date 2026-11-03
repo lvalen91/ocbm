@@ -5,7 +5,7 @@ package com.carlink.projection
  *
  * Exists so the `MotionEvent` mapping is testable without a socket. That matters more than usual
  * here: the Pi has no touchscreen at all, so these tests are the only exercise the multi-touch path
- * gets until real hardware is attached (see `pi/docs/01_PROJECTION_APP_DESIGN.md` §5.3).
+ * gets until real hardware is attached (see `docs/boards/01_PROJECTION_APP_DESIGN.md` §5.3).
  */
 fun interface TouchSink {
     /**

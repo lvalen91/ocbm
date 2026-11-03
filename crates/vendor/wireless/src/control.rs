@@ -79,7 +79,7 @@ const CLIENT_TIMEOUT: Duration = Duration::from_secs(5);
 /// A request line longer than this is not a request we understand. Bounded before allocation.
 const MAX_REQUEST_BYTES: usize = 8 * 1024;
 
-/// `@<unix_ms> ` write-time stamp (docs/carplay/01_OCBM_PROTOCOL.md CH_LOG): the box.log tailer
+/// `@<unix_ms> ` write-time stamp (docs/ocbm/00_PROTOCOL.md CH_LOG): the box.log tailer
 /// parses this prefix and uses it instead of the millisecond it happened to READ the line at.
 fn log(m: &str) {
     println!("@{} [control] {m}", now_ms());

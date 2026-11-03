@@ -6,7 +6,7 @@
 //!   - `carplayd`  — the AirPlay/RTSP receiver (binds `[::]:5000`, so it accepts the wlan0 connection;
 //!     runs pair-verify/MFi/SETUP and forwards A/V over OCBM). Its pairing identity is fixed to match
 //!     rx-connect's advertised `deviceid`/`pi`/`features`.
-//!   - mDNS advertise/browse now runs INSIDE carplayd (ccpa/carplayd/src/discovery.rs, merged
+//!   - mDNS advertise/browse now runs INSIDE carplayd (box/carplayd/src/discovery.rs, merged
 //!     2026-09-08); this module only passes it `RX_IFACE`/`RX_ADDR`. Formerly `rx-connect`:
 //!     advertise `_airplay._tcp` on `wlan0` (`RX_ADDR` = the AP gateway) + browse
 //!     the phone's `_carplay-ctrl._tcp` + connect-out `GET /ctrl-int/1/connect`.

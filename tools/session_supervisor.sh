@@ -9,7 +9,7 @@
 #   host GONE   (0) -> TEARDOWN: kill carplayd -> HOLDING PATTERN (iap2d stays up).
 #
 # ocbmd supplies the one grace before it ever moves the flag: HEARTBEAT_GRACE=10s (beat loss), in
-# ccpa/ocbmd/src/main.rs; a blip inside it never reaches here. A clean CT_STOP gets NO grace (changed
+# box/ocbmd/src/main.rs; a blip inside it never reaches here. A clean CT_STOP gets NO grace (changed
 # 2026-09-03, was STOP_GRACE=5s) — it drops the flag at once so this loop runs a full teardown. Since
 # we sample at 1 Hz and act on EDGES, ocbmd holds that 0 for REARM_HOLD=2s before honouring a
 # re-SUBSCRIBE, so a quit->relaunch inside one tick cannot hide the GONE edge from us.
@@ -32,7 +32,7 @@ set -u
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH
 
 # S2 singleton guard: mirrors the mkdir test-and-set + PID-liveness reclaim idiom in
-# ccpa/rootfs/script/radio_hal.sh:84-99 (lock_take), so a second supervisor invocation (e.g. a
+# boards/ccpa-imx6ul/rootfs/script/radio_hal.sh:84-99 (lock_take), so a second supervisor invocation (e.g. a
 # stray manual relaunch) never runs concurrently with a live one and races it over /tmp state.
 _sup_lock=/tmp/.sup_lock
 while ! mkdir "$_sup_lock" 2>/dev/null; do
@@ -474,7 +474,7 @@ arm() {
   MB=
   [ -f /tmp/mainbuffered_test ] && MB="CARPLAY_MAINBUFFERED=1 CARPLAY_SETUP_DUMP=/tmp/setup_req"
   # ONE process now: carplayd starts its own mDNS advertise/browse thread after it binds :5000
-  # (ccpa/carplayd/src/discovery.rs). That ordering is why the separate launch is gone rather than
+  # (box/carplayd/src/discovery.rs). That ordering is why the separate launch is gone rather than
   # merely moved — rx-connect used to advertise before the RTSP port was listening.
   env OCBM_FWD_ENC=1 $CM $LT $MB setsid carplayd >>"$AL" 2>&1 &   # /usr/sbin/carplayd
   armed=1
@@ -600,14 +600,14 @@ restart_ocbmd_daemon() {
   # to a bare-name `setsid ocbmd`, so the old spelling had it start a second daemon ~5 s later.
   #
   # stderr -> /tmp/box.log, NOT /tmp/ocbmd.log (2026-09-05). ocbmd streams a fixed list of files to
-  # the host over CH_LOG (`LOG_SOURCES`, ccpa/ocbmd/src/main.rs) and /tmp/ocbmd.log is not on it,
+  # the host over CH_LOG (`LOG_SOURCES`, box/ocbmd/src/main.rs) and /tmp/ocbmd.log is not on it,
   # so every ocbmd relaunched from here was INVISIBLE to the app for the rest of its life: on
   # 2026-09-05 this L2 fired ("ocbmd wedged (alive mtime stale >=1min, gadget CONFIGURED, pid=71)"),
   # the fresh ocbmd deleted /tmp/carplay_cfg.yaml at startup, carplayd_wl (left running) served the
   # reconnecting phone from compiled defaults (1920x720, H.264) while the app believed 2400x960/HEVC
   # was in force — and the app log carried ZERO box lines for the two minutes that decided it,
   # because everything the new ocbmd said went to a file nobody tails. The inittab respawn path
-  # (ccpa/rootfs/script/run_ocbmd.sh) already appends to /tmp/box.log; this now matches it. `>>`
+  # (boards/ccpa-imx6ul/rootfs/script/run_ocbmd.sh) already appends to /tmp/box.log; this now matches it. `>>`
   # opens O_APPEND, which ocbmd's own box.log rotation relies on (see `log_rotate` there).
   setsid /usr/sbin/ocbmd >> /tmp/box.log 2>&1 &
   sleep 2
@@ -804,7 +804,7 @@ wireless_stack_up() {
 # *carplayd*.log and wrongly report it alive). Used by the stale-flag watchdog to tell a truly-dead
 # wireless session from a live one. (Over-reporting alive would only DELAY the watchdog, never mis-clear.)
 carplayd_alive() { pgrep -x carplayd >/dev/null 2>&1 || pgrep -x /usr/sbin/carplayd >/dev/null 2>&1; }
-# Pairing association model from the host YAML `pairing:` (default just_works — the proven CCPA posture).
+# Pairing association model from the host YAML `pairing:` (default just_works — the proven vendor-kernel posture).
 # `numeric_comparison` selects SSP DisplayYesNo → the iPhone + box both show a 6-digit code to match.
 # Passed to btd as BT_PAIRING_MODE (its ssp_agent reads the env).
 # `numeric_comparison_interactive` additionally sets BT_SSP_INTERACTIVE=1: the box waits for the
@@ -1193,7 +1193,7 @@ WIRELESS_RESTART_FLAG=/tmp/wireless_restart   # ocbmd touches this on the CCPA t
 # Retry window for a wireless_up held for wired Android Auto (see the retry block in the main loop).
 # The hold reads CLEAR exactly when no AA owner flag is set AND no AA-enabled Android phone is on the
 # bus. During aa-bridge's AOAP switch both are false at once: the owner flag is claimed only AFTER
-# prepare_accessory() returns (ccpa/aa-bridge/src/main.rs, the set_owner(WiredAa) after the
+# prepare_accessory() returns (box/aa-bridge/src/main.rs, the set_owner(WiredAa) after the
 # "armed while we prepared" re-checks), and after AOAP_START the phone is OFF the bus until it
 # re-enumerates as 18d1:2d0x. aa-bridge tolerates that absence for wait_for_accessory(12 s), polled
 # every 300 ms (main.rs `wait_for_accessory(Duration::from_secs(12))`) — so a slow but successful

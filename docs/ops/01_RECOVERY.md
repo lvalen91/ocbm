@@ -6,7 +6,7 @@ Getting a bricked or wedged box back, without touching the signed U-Boot. Scope:
 three flash parts: uboot, kernel, rootfs). The CCPA has no FEL and no U-Boot console. A firmware brick is
 permanent unless a SPI programmer is used (untested here) or a kernel-initramfs recovery boot is present
 (Tier 1b below). The C2Air is a different box (Allwinner V821): a button held at power-on enters FEL and the
-whole SPI NOR is rewritable over USB, so risky C2Air work has a recovery path the CCPA lacks (c2air/README.md).
+whole SPI NOR is rewritable over USB, so risky C2Air work has a recovery path the CCPA lacks (boards/c2air-v821b/README.md).
 
 ## Recovery procedures
 
@@ -43,7 +43,7 @@ the detailed flow was not re-read for this edit).
 
 ### OCBM `CONSOLE` mode
 
-A host-selected state, not a background channel (see [`../carplay/01_OCBM_PROTOCOL.md`](../carplay/01_OCBM_PROTOCOL.md)
+A host-selected state, not a background channel (see [`../ocbm/00_PROTOCOL.md`](../ocbm/00_PROTOCOL.md)
 § Modes). At connect the host sends `MODE_SELECT { CONSOLE }`; the box branches **before any
 projection machinery** and wires the accessory pipe straight to a root PTY (`/bin/sh`, root — the
 daemon already runs as root). The earlier the branch, the fewer subsystems it depends on, the more
@@ -61,7 +61,7 @@ mode). It works even if the main host app is broken, and `tools/ocbm_install.sh 
 for the first-boot dead-man confirm. *(Its log lines still carry the historical `[ocbm-rescue]` tag
 in `mode_console`.)* Nice-to-haves for cheap: a `resize` TLV (window size/`TERM`), multiple sessions via a
 session id in the CONSOLE payload. (Neither exists today; there is no `streamId` field anywhere in
-OCBM — see docs/carplay/01_OCBM_PROTOCOL.md §Self-describing streams.)
+OCBM — see docs/ocbm/00_PROTOCOL.md §Self-describing streams.)
 
 #### Access model (matches the stock firmware's existing open-access posture)
 

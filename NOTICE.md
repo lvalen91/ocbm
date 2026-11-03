@@ -113,7 +113,7 @@ license header.
 
 **libfdk-aac** (Fraunhofer FDK AAC Codec Library) — the AAC-ELD encoder for the CarPlay mic
 uplink links against it (`crates/vendor/eld-codec`, behind `receiver`'s `mic-uplink-eld` feature,
-which `ccpa/carplayd` enables by default). Its
+which `box/carplayd` enables by default). Its
 source is not included here and is built separately. Binaries you distribute that link it
 carry Fraunhofer's own license and notice requirements, which this dedication does not and
 cannot waive.

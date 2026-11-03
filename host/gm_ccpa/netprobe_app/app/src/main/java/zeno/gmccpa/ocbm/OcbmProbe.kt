@@ -901,7 +901,7 @@ class OcbmProbe(context: Context) {
                 // positive against a healthy idle daemon) and restarted it as pid 71, and our sign
                 // timed out at exactly 15 s. The replacement daemon then served CT_SUBSCRIBE and every
                 // later CH_MFI op without ever seeing a HELLO — `ocbmd`'s `handle()` gates neither on it
-                // (verified against ccpa/ocbmd/src/main.rs HEAD 2026-09-10) — so its `host_instance`
+                // (verified against box/ocbmd/src/main.rs HEAD 2026-09-10) — so its `host_instance`
                 // stayed `None` for the whole session, which silently disables the host-replacement
                 // detection the nonce exists for. The chip was fine; the daemon that had our request
                 // was gone. The gadget stays CONFIGURED across an L2 restart, so the claim and the read

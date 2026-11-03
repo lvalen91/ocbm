@@ -1,21 +1,21 @@
 [workspace]
 resolver = "2"
-members = ["crates/ocbm-proto", "crates/box-common", "crates/bt-common", "ccpa/ocbmd", "ccpa/iap2d", "ccpa/carplayd", "ccpa/aa-bridge", "ccpa/aa-wireless", "host/ocbm-host", "crates/vendor/wireless",
-    # NCM bring-up instruments (not shipped, not installed — see ccpa/mfid/src/main.rs).
-    "crates/mfi-wire", "ccpa/mfid", "host/mfi-probe",
+members = ["crates/ocbm-proto", "crates/box-common", "crates/bt-common", "box/ocbmd", "box/iap2d", "box/carplayd", "box/aa-bridge", "box/aa-wireless", "host/ocbm-host", "crates/vendor/wireless",
+    # NCM bring-up instruments (not shipped, not installed — see box/mfid/src/main.rs).
+    "crates/mfi-wire", "box/mfid", "host/mfi-probe",
     # Raspberry Pi target daemons (not shipped on the CCPA).
-    "pi/apdhcpd",
+    "boards/rpi4-aaos/apdhcpd",
     # C2Air (Allwinner V821, riscv32) board-specific code — not shipped on the CCPA, and deliberately
     # the ONLY C2Air-specific Rust: ocbmd/iap2d/carplayd build for riscv32 from the shared sources
-    # with no board-specific changes. See c2air/README.md.
-    "c2air/btattach"]
+    # with no board-specific changes. See boards/c2air-v821b/README.md.
+    "boards/c2air-v821b/btattach"]
 # Vendored external crates (copied in 2026-07-13 to make the project self-contained): carplayd's
 # receiver_core deps (from old/ncm_carplayd) + iap2d's carplay iAP2 core. Excluded from membership so
 # `--workspace` builds them only as path DEPENDENCIES with the features the project requests
 # (carplayd uses receiver default-features=false + ["mic-uplink", "local-mfi"] and enables
 # `receiver/mic-uplink-eld` through its own default feature, so the optional eld-codec /
 # static libfdk-aac IS built into carplayd — needs FDK_AAC_PREFIX; a deliberate pending-decision
-# flag point, see ccpa/carplayd/Cargo.toml).
+# flag point, see box/carplayd/Cargo.toml).
 exclude = [
     "crates/vendor/mfi", "crates/vendor/mfi-i2c-local", "crates/vendor/pairing", "crates/vendor/receiver",
     "crates/vendor/rtsp", "crates/vendor/eld-codec",

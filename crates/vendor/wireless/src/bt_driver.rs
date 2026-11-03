@@ -18,7 +18,7 @@ use carplay_iap2_core::{
     state::{self, Action, State},
 };
 // MFi comes from the box's LOCAL i2c chip (crate::mfi_local), NOT carplay_iap2_core::mfi (the PoC's
-// remote auth-service TCP client) — this box has the genuine MFi 2.0C on /dev/i2c-1 @0x11. See mfi_local.rs.
+// remote auth-service TCP client) — this box has the genuine MFi chip (2.0C on the CCPA) on /dev/i2c-1 @0x11. See mfi_local.rs.
 use crate::mfi_local as mfi;
 use std::fs::File;
 use std::io::{ErrorKind, Read, Write};
@@ -58,7 +58,7 @@ fn phase_for(st: State) -> u8 {
     }
 }
 
-/// `@<unix_ms> ` write-time stamp (docs/carplay/01_OCBM_PROTOCOL.md CH_LOG): the box.log tailer
+/// `@<unix_ms> ` write-time stamp (docs/ocbm/00_PROTOCOL.md CH_LOG): the box.log tailer
 /// parses this prefix and uses it instead of the millisecond it happened to READ the line at.
 fn log(m: &str) {
     println!("@{} [bt-driver] {m}", now_ms());

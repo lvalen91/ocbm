@@ -9,7 +9,7 @@
 //!
 //! ONE file, ONE schema, TWO readers with disjoint interests — deliberately not a second
 //! representation of the same config (a derived side-file would be a divergence waiting to happen,
-//! and would make ocbmd a config interpreter when it is defined as a dumb byte pipe, docs/carplay/01_OCBM_PROTOCOL.md).
+//! and would make ocbmd a config interpreter when it is defined as a dumb byte pipe, docs/ocbm/00_PROTOCOL.md).
 //!
 //! FOOTPRINT NOTE: serde + serde_yaml cost a MEASURED +66 KB packed / +132 KB unpacked on iap2d
 //! (armv7-musl release, UPX-3.96: 200,784 -> 268,160 B packed). An earlier minimal probe predicted

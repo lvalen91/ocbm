@@ -22,7 +22,7 @@ ground-truth-verified, not assumed.
 > and Bluetooth as modules and names the IW416 interface `mlan0` (mwifiex), not `wlan0`. A CCPA unit
 > probed 2026-10-28 is an NXP IW416 (SDIO 02df:9159, `mwifiex_sdio` + `btnxpuart`, Bluetooth 5.4).
 > Other CCPA units carry other radios (see [01_BT_AND_RADIO.md](01_BT_AND_RADIO.md)). The C2Air is a
-> different box (Allwinner V821 rv32, AIC8800D80 radio, MFi 3.x); see `c2air/README.md`.
+> different box (Allwinner V821 rv32, AIC8800D80 radio, MFi 3.x); see `boards/c2air-v821b/README.md`.
 
 ---
 
@@ -368,7 +368,7 @@ implementation plan, and a BT retry incident). Git history holds the full text.
 
 A sustained wireless session on a freshly-rebooted box, driven through the full CarPlay feature
 surface (BT pair → WiFi handoff → AirPlay/RTSP → OCBM → app), with a 1482 B VehicleConfig YAML pushed
-at SUBSCRIBE and **SSP Just-Works** pairing (`pairing code: cleared` — the proven CCPA posture).
+at SUBSCRIBE and **SSP Just-Works** pairing (`pairing code: cleared` — the proven vendor-kernel posture).
 
 - **Video: HEVC 1920×720**, `hvcC` parsed on the wire (VPS 24 B, SPS 48 B, PPS 7 B, nalLen 4).
   16,479 frames decoded, **0 failures**. Static-screen handling correct: an 8 s A/V idle with a live

@@ -313,7 +313,7 @@ phone-side budget.
 **But budget the pathological case.** The poll is bounded at 2.5 s by a wall-clock deadline, not by
 firmware — it exists because an older iteration-count loop was observed running ~7.1 s under chip NAK.
 **That deadline is box-side, not the app's:** `const SIGN_POLL_DEADLINE = Duration::from_millis(2500)`
-inside `Mfi::sign()` in `ccpa/ocbmd/src/main.rs` — `ocbmd`'s own I2C driver — reached from `handle_mfi`
+inside `Mfi::sign()` in `box/ocbmd/src/main.rs` — `ocbmd`'s own I2C driver — reached from `handle_mfi`
 via `self.mfi.as_ref().and_then(|m| m.sign(…))`. It is `ocbmd` polling its local I2C chip, on the box,
 underneath the relay. (`crates/vendor/mfi-i2c-local/src/lib.rs` `sign()` carries an identical
 `SIGN_POLL_DEADLINE`, but that crate serves `mfid` and the reference `carplayd` (through `receiver`'s

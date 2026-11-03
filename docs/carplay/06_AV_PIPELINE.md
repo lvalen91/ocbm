@@ -135,7 +135,7 @@ audio fidelity in the same breath, and has stayed silent since. **Across all fiv
 hi-res, bit depth, or sample rate.**
 
 > Do not read the `{codec: PCM|AAC-LC|AAC-ELD|Opus|DDP|QAAC|Atmos, …}` list in
-> [`../carplay/01_OCBM_PROTOCOL.md`](../carplay/01_OCBM_PROTOCOL.md) §"Self-describing streams" as a CarPlay capability claim.
+> [`../ocbm/00_PROTOCOL.md`](../ocbm/00_PROTOCOL.md) §"Self-describing streams" as a CarPlay capability claim.
 > It is an *OCBM extensibility* illustration — what our own stream descriptor could carry if a future
 > format existed. CarPlay does not negotiate DDP, QAAC, or Atmos.
 
@@ -315,7 +315,7 @@ for every audio stream** on a modern iOS client — verified live, including typ
 absent ⇒ true, and only an explicit `0`/`false`/`off`/empty selects the legacy on-box path). In this
 mode `spawn_audio` writes three message kinds to the sink, all length-prefixed `[u32 BE len][SEAM_MAGIC
 "SEAV" 4B][marker]` (magic added 2026-09-03, `len` counting it — same envelope shape as the video
-seams; see `../carplay/01_OCBM_PROTOCOL.md` for why) and all **scid-tagged** so concurrent streams
+seams; see `../ocbm/00_PROTOCOL.md` for why) and all **scid-tagged** so concurrent streams
 sharing one sink cannot clobber each other:
 
 - `0x00 SEAM_KEY` — `[key 32][scid 8 LE]`
@@ -350,7 +350,7 @@ voice silence.
 
 ### 3 · ocbmd — seam to USB
 
-`ccpa/ocbmd/src/main.rs` listens on the local A/V seams and maps port → channel from a fixed table:
+`box/ocbmd/src/main.rs` listens on the local A/V seams and maps port → channel from a fixed table:
 `9002 → CH_MEDIA_AUDIO (0x0021)`, `9003 → CH_ALT_AUDIO (0x0022)` (`9001/9005` are the video lanes).
 
 - **Both audio lanes share one out-queue** (`out_audio`) and are **never read-gated**. The
@@ -425,7 +425,7 @@ The uplink is the **input leg of the type-100 MainAudio stream** and dies with i
    the iPhone's port. Codec is transport-determined:
    - **wired** — raw **big-endian** PCM in fixed sample-count packets, no encoder (feature `mic-uplink`);
    - **wireless** — AAC-ELD via `crates/vendor/eld-codec` (libfdk-aac shim), feature
-     `mic-uplink-eld`. carplayd builds **both legs by default** (`ccpa/carplayd/Cargo.toml`:
+     `mic-uplink-eld`. carplayd builds **both legs by default** (`box/carplayd/Cargo.toml`:
      `default = ["mic-uplink-eld"]`, libfdk-aac statically linked; owner decision: stays default-on). The
      Raspberry Pi (aarch64) build opts out with `--no-default-features` and keeps only the wired PCM leg. 16 kHz
      mono produces ASC `f8f03000`, byte-identical to the iPhone's own `speechRecognition` stream
@@ -446,7 +446,7 @@ otherwise, and the only symptom is Siri hearing a pitch-shifted stream. `Project
 
 **Voice-lane codec is no longer assumed (client capability, 2026-09-18, box unchanged).** Every
 voice-sink stream — CarPlay Siri/telephony `SEAM_PKT` AAC-ELD as well as the Android-Auto-only
-`SEAM_PKT_PLAIN` HFP lane (`../carplay/01_OCBM_PROTOCOL.md` §Audio lanes) — used to be fed to a
+`SEAM_PKT_PLAIN` HFP lane (`../ocbm/00_PROTOCOL.md` §Audio lanes) — used to be fed to a
 hardcoded AAC-ELD decoder in `VoiceRouter`. The Android client now carries the codec through its
 internal voice tag (`ocbm/seam/VoiceTag.kt`) and branches: `CODEC_PCM` goes straight to the
 `AudioTrack` as S16LE (no `MediaCodec`), `CODEC_AAC_ELD` keeps the existing path, and anything else
@@ -454,7 +454,7 @@ is refused — the router drops it and warns once, naming the codec, **before** 
 or sink is touched, so an undecodable stream cannot hold a focus slot open on nothing. For CarPlay
 this is a robustness fix with no behavior change (the box still only ever sends AAC-ELD on that
 lane); for the Android-Auto HFP lane it is what makes `SEAM_PKT_PLAIN` PCM/mSBC audio playable at
-all — see `../carplay/01_OCBM_PROTOCOL.md` for the wire shape and why that lane is scoped to Android
+all — see `../ocbm/00_PROTOCOL.md` for the wire shape and why that lane is scoped to Android
 Auto, never CarPlay. Test-green (`AudioSeamPlainTest.kt`), **not hardware-verified** — no phone call
 has exercised either path on a device.
 
@@ -799,7 +799,7 @@ to 1920×720, the fix, and the on-hardware proof. From a 6-agent parse of the Ru
 live validation.
 
 ### Root cause — a hardcoded override (EVIDENCED, 5 of 6 agents)
-`~/Documents/carlink/ccpa_custom/ccpa/carplayd/src/main.rs` (the daemon the box actually runs)
+`~/Documents/carlink/ccpa_custom/box/carplayd/src/main.rs` (the daemon the box actually runs)
 constructs `DeviceConfig::default()` (1920×720) and then **overrides it to 800×480** before building `/info`:
 ```rust
 let mut dev = DeviceConfig::default();   // 1920×720 (`impl Default for DeviceConfig` in `crates/vendor/receiver/src/info.rs`)
@@ -821,7 +821,7 @@ The iPhone encodes exactly what `/info` advertises — **proven by the 1:1 match
 observed SPS 800×480.
 
 ### Ruled out (EVIDENCED)
-- **iAP2** carries no display geometry (identification 0x1D01, CarPlayStartSession — none). `ccpa/iap2d`.
+- **iAP2** carries no display geometry (identification 0x1D01, CarPlayStartSession — none). `box/iap2d`.
 - **AirPlay SETUP/RTSP** carries no dimensions — the box does not generate SPS/PPS; it receives the avcC
   (VideoConfig) from the iPhone's encoder and forwards it. `receiver/src/session.rs setup_phase2` (screen
   110 response = only `type` + `dataPort`).
@@ -1261,7 +1261,7 @@ implementation cost + teardown risk.
   image in the H.264 frame".
 
   **This matters for us more than it looks.** The box already forwards the WHOLE 128-byte header —
-  the SEAV frame is `[hdr 128B][body]` (`01_OCBM_PROTOCOL.md`), and the header is also the AEAD AAD
+  the SEAV frame is `[hdr 128B][body]` (`docs/ocbm/00_PROTOCOL.md`), and the header is also the AEAD AAD
   (`OCBM/OCBMAVDecrypt.swift`), so the host cannot avoid having it. `session.rs` `forward_screen` reads
   only `body_size` and `opcode` and forwards the rest verbatim. **The view-area rect is already on
   the wire and already reaching the app.** The macOS host now reads it (`OCBMAVDecrypt.swift`
@@ -1453,7 +1453,7 @@ unrecoverable, drop that frame and `forceKeyFrame` to repaint.**
 | Apple mechanism | Our implementation | Adheres / Deviates |
 |---|---|---|
 | Per-packet RTP **sequence number** | Per-**frame** `seq` (u64) in the box's forward wrapper | **Deviates (granularity), justified:** our decode + decrypt unit is the whole frame, and OCBM reassembles each frame reliably. The box no longer drops as policy — task #33 landed and it gates the seam read instead — so `seq` is not a drop-tracker: it is the **decrypt-counter resync** and the recovery marker after a seam teardown. That matters because the live loss mode is the 2 s `SO_SNDTIMEO` on the box→app seam write, which can tear a message mid-write — exactly why each forwarded message carries `SEAM_MAGIC` for the host to re-align on. Frame-level `seq` + `SEAM_MAGIC` detect the loss that remains; packet-level would be finer than our architecture needs. |
-| **Flow control** (limit outstanding) | Reliable forward + backpressure to the iPhone | **Adheres — LANDED** (task #33; the per-seam `gated` test in ocbmd's poll-build loop, `ccpa/ocbmd/src/main.rs`, `for (idx, (s, ch)) in d.av_conns.iter().enumerate()` → `let gated = match *ch`). Each video lane is limited to one outstanding frame: ocbmd stops reading that seam until its queue drains, blocking carplayd's screen thread, which stops it reading the iPhone's screen socket and closes the phone's TCP window. Two caveats: **video only** (audio is UDP-sourced and ungated, so no backpressure can reach its sender), and **bounded at ~2 s** by the seam's `SO_SNDTIMEO`, past which carplayd tears the seam down and requests a keyframe. That iOS responds by lowering its encode rate is the design expectation and is **not yet measured**. Apple flow-controls; the stock firmware sustained 4K@60 this way. |
+| **Flow control** (limit outstanding) | Reliable forward + backpressure to the iPhone | **Adheres — LANDED** (task #33; the per-seam `gated` test in ocbmd's poll-build loop, `box/ocbmd/src/main.rs`, `for (idx, (s, ch)) in d.av_conns.iter().enumerate()` → `let gated = match *ch`). Each video lane is limited to one outstanding frame: ocbmd stops reading that seam until its queue drains, blocking carplayd's screen thread, which stops it reading the iPhone's screen socket and closes the phone's TCP window. Two caveats: **video only** (audio is UDP-sourced and ungated, so no backpressure can reach its sender), and **bounded at ~2 s** by the seam's `SO_SNDTIMEO`, past which carplayd tears the seam down and requests a keyframe. That iOS responds by lowering its encode rate is the design expectation and is **not yet measured**. Apple flow-controls; the stock firmware sustained 4K@60 this way. |
 | **NACK retransmit** (recover the packet) | Deferred | **Deviates, justified:** retransmit needs a bidirectional low-latency NACK channel + a sender retransmit buffer — a large transport addition. Apple's own fallback for *unrecovered* loss is `forceKeyFrame`, which we implement. seq + keyframe = Apple's unrecovered-loss path. Retransmit is a documented follow-on. |
 | **forceKeyFrame** on unrecovered loss | Box relays a keyframe request when the host detects a gap (reuses `events::send_force_key_frame`) | **Adheres.** |
 | Loss tracking / logging | Box logs drops; host logs seq gaps | **Adheres.** |
@@ -1464,7 +1464,7 @@ unrecoverable, drop that frame and `forceKeyFrame` to repaint.**
   the encrypted event channel + keys). The box never decodes/buffers/caches — it sequences what it forwards.
 - **Box (ocbmd):** ~~forwards/drops at **whole-frame** boundaries… (parse the seam length prefix;
   commit-or-drop a whole frame, never mid-frame fragments)~~ — **NOT IMPLEMENTED, and superseded.** ocbmd
-  never parses a seam length prefix: its `Kind::AvConn` poll arm (`ccpa/ocbmd/src/main.rs`) reads raw
+  never parses a seam length prefix: its `Kind::AvConn` poll arm (`box/ocbmd/src/main.rs`) reads raw
   bytes into `avbuf` (a `MAX_PAYLOAD` = 64 KiB buffer) and emits each chunk as its own `F_SOM|F_EOM` OCBM
   frame, so it stays a dumb byte-forwarder. The torn-frame case is handled host-side by `SEAM_MAGIC`
   re-alignment instead (see item 3 below), which also survives a USB hiccup rather than only a
@@ -1755,9 +1755,9 @@ transport between them.**
   has the touch *emitter* but not the *ingest*.
   **CORRECTED 2026-08-16 — true when written, false now, and the gap is closed.** The feature gate moved:
   carplayd builds `receiver` with `default-features = false` plus its own default `mic-uplink-eld`
-  (`ccpa/carplayd/Cargo.toml`), which turns `mic-uplink` ON, so `uplink.rs` IS compiled in today. And the
+  (`box/carplayd/Cargo.toml`), which turns `mic-uplink` ON, so `uplink.rs` IS compiled in today. And the
   touch ingest never landed in `uplink.rs` at all: carplayd owns its own dependency-free HID seam that
-  binds `127.0.0.1:9110` directly (`ccpa/carplayd/src/main.rs`, log line `HID input ingest on
+  binds `127.0.0.1:9110` directly (`box/carplayd/src/main.rs`, log line `HID input ingest on
   127.0.0.1:9110 (task #20)`), exactly as §3 planned.
 
 #### Host — CarPlayView already reads local touch/trackpad input; it just goes nowhere
@@ -1777,7 +1777,7 @@ transport between them.**
 
 #### The gap (only this) — ALL FOUR CLOSED (2026-07-25, task #20)
 1. ~~No host→box **OCBM input channel**.~~ `CH_INPUT = 0x0030` + `INPUT_TOUCH` (`crates/ocbm-proto/src/lib.rs`).
-2. ~~No **ocbmd → carplayd** relay for input.~~ `INPUT_INGEST_ADDR = "127.0.0.1:9110"` (`ccpa/ocbmd/src/main.rs`).
+2. ~~No **ocbmd → carplayd** relay for input.~~ `INPUT_INGEST_ADDR = "127.0.0.1:9110"` (`box/ocbmd/src/main.rs`).
 3. ~~No **carplayd ingest** feeding `send_hid_report`.~~ carplayd's own `:9110` listener →
    `hid::touch_report_normalized` (scaled by the `DISPLAY_WH` cell that `load_device_config` sets) →
    `events::send_hid_report`.
@@ -1849,8 +1849,8 @@ transport (§4) is proven.
 
 ### 7. Touchpoints (files)
 - `crates/ocbm-proto/src/lib.rs` — `CH_INPUT` + sub-frame consts.
-- `ccpa/ocbmd/src/main.rs` — relay `CH_INPUT` → `127.0.0.1:9110`.
-- `ccpa/carplayd/src/main.rs` (+ small `input` fn) — ingest → `hid`/`events`; share `W,H` from `load_device_config`.
+- `box/ocbmd/src/main.rs` — relay `CH_INPUT` → `127.0.0.1:9110`.
+- `box/carplayd/src/main.rs` (+ small `input` fn) — ingest → `hid`/`events`; share `W,H` from `load_device_config`.
 - Host `OCBM/OCBMClient.swift` (send), `App/AppDelegate.swift` (delegate → OCBM), reuse `CarPlayView.swift` as-is.
 - Emitter unchanged: `receiver/hid.rs`, `receiver/events.rs`, `receiver/info.rs`.
 

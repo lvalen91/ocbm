@@ -1,14 +1,14 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
  * ocbm-accessory: serve the Android-accessory-style device node `/dev/usb_accessory` that ocbmd
- * (ccpa/ocbmd) opens, on a mainline kernel that has no accessory gadget function, using FunctionFS.
+ * (box/ocbmd) opens, on a mainline kernel that has no accessory gadget function, using FunctionFS.
  *
- * What ocbmd expects (ccpa/ocbmd/src/main.rs: ACC_DEV, the single read-write fd, O_NONBLOCK, poll
+ * What ocbmd expects (box/ocbmd/src/main.rs: ACC_DEV, the single read-write fd, O_NONBLOCK, poll
  * for POLLIN/POLLOUT, exit on EOF/EIO/POLLHUP): ONE bidirectional node that behaves like a stream of
  * OCBM frames. OCBM frames are self-delimiting (16-byte header with magic + length, ocbm-proto
  * `Reassembler` on both ends), so no transfer boundary has to survive the relay; what DOES matter on
  * the USB side is that every device->host transfer ends in a short packet, because the hosts read with
  * a fixed buffer and a bounded timeout and drop a transfer that times out (ocbm-host `recv`; the stock
- * firmware had to turn `accZLP=Y` on for the same reason, ccpa/rootfs/script/ocbm_boot.sh).
+ * firmware had to turn `accZLP=Y` on for the same reason, boards/ccpa-imx6ul/rootfs/script/ocbm_boot.sh).
  *
  * How: a pseudo-terminal pair in raw mode. ocbmd opens the slave through the symlink
  * /dev/usb_accessory; this program owns the master and the two FunctionFS bulk endpoint files and

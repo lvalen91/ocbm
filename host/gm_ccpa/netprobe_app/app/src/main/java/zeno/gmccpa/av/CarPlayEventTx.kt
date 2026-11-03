@@ -7,7 +7,8 @@ import java.util.concurrent.Executors
 /**
  * The ONE thread that writes accessory-initiated commands to the phone's event channel from the
  * media side: the transport keys ([CarPlayMediaBrowserService]) and the OD-9C MainAudio take /
- * give-back ([MainAudioHandover]). Plan v5.9 MED M5.
+ * give-back ([MainAudioHandover]). Plan v5.9 MED M5. Also the steering-wheel Siri tap
+ * ([zeno.gmccpa.assist.Assistant.forwardSiriTap]), which needs the same off-binder, ordered thread.
  *
  * One queue, not one per caller, because the ORDER matters: a MediaSession PLAY after an OD-9C take
  * queues the give-back first (CMBS.onPlay -> resume intent -> [MainAudioHandover.giveBack]) and the

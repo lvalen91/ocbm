@@ -146,7 +146,7 @@ final class OCBMClient: @unchecked Sendable {
         set { modeLock.lock(); lastProjMode = newValue; modeLock.unlock() }
     }
 
-    /// CCPA-tab responses (CH_MGMT). `onBoxInfo` delivers a parsed GET_INFO snapshot (nil = parse failed);
+    /// adapter-tab responses (CH_MGMT). `onBoxInfo` delivers a parsed GET_INFO snapshot (nil = parse failed);
     /// `onBoxAck` delivers an action result `(verb, status)` (status 0 = ok). Both on the read queue.
     var onBoxInfo: ((CCPAInfo?) -> Void)?
     var onBoxAck: ((UInt8, UInt8) -> Void)?
@@ -162,7 +162,7 @@ final class OCBMClient: @unchecked Sendable {
     /// Same emission discipline as `onBoxHealth`. Invoked on the transport read queue.
     var onPhoneIdent: ((PhoneIdent?) -> Void)?
 
-    /// Decoded CH_LOG entries — the box's universal log stream (docs/carplay/01_OCBM_PROTOCOL.md
+    /// Decoded CH_LOG entries — the box's universal log stream (docs/ocbm/00_PROTOCOL.md
     /// CH_LOG). Invoked on the transport read queue, in wire order; `BoxLogStore` is the consumer. A
     /// `seq` jump is synthesized as an extra `source: logSourceTailer` marker entry ahead of the entry
     /// that revealed the gap.
@@ -282,7 +282,7 @@ final class OCBMClient: @unchecked Sendable {
 
     /// Per-process, non-zero instance nonce sent in HELLO bytes 2..6 — mirrors `ocbm-host`'s
     /// `host_instance_nonce()` (`host/ocbm-host/src/main.rs:146-156`). Fixed for the process lifetime so
-    /// `ocbmd`'s `CT_HELLO` arm (`ccpa/ocbmd/src/main.rs:2446-2473`, `if inst != 0`) can detect a host
+    /// `ocbmd`'s `CT_HELLO` arm (`box/ocbmd/src/main.rs:2446-2473`, `if inst != 0`) can detect a host
     /// RELAUNCH (new nonce) vs. a retransmitted HELLO from the same host instance (same nonce). A
     /// permanent zero — the previous behavior — was a no-op for that replacement detection.
     /// `.random(in: 1...UInt32.max)` already excludes 0, so no extra floor is needed.
@@ -357,7 +357,7 @@ final class OCBMClient: @unchecked Sendable {
             // that date; the Android client has always sent CT_SETTIME here, the macOS client never did).
             sendSetTime()
             // Re-arm CH_LOG every fresh SUBSCRIBE — the box drops it to disabled on STOP/host-gone
-            // (docs/carplay/01_OCBM_PROTOCOL.md CH_LOG), so caching "already sent" here would leave the
+            // (docs/ocbm/00_PROTOCOL.md CH_LOG), so caching "already sent" here would leave the
             // stream dark after any re-subscribe (SEV_HOST_GONE, Settings ▸ Save, etc).
             if logStreamEnabled {
                 send(channel: OCBM.chCtrl, payload: OCBM.logCtl(enabled: true, capKB: logStreamCapKB))
@@ -368,7 +368,7 @@ final class OCBMClient: @unchecked Sendable {
     }
 
     /// CT_SETTIME: hand the box the host's wall clock (unix seconds, u64 LE). Sent on the caller's queue
-    /// right after SUBSCRIBE; the box acks `[0x05][secs][status]` (see docs/carplay/01_OCBM_PROTOCOL.md).
+    /// right after SUBSCRIBE; the box acks `[0x05][secs][status]` (see docs/ocbm/00_PROTOCOL.md).
     private func sendSetTime() {
         let secs = UInt64(Date().timeIntervalSince1970)
         var p: [UInt8] = [OCBM.ctSetTime]
@@ -999,7 +999,7 @@ final class OCBMClient: @unchecked Sendable {
             onProjectionMode?(mode, projModeSeq)
         case OCBM.ctBtPhase where payload.count >= 2:
             // [ctBtPhase][BTP_*] — Bluetooth/iAP2 handshake progress; advisory (never gate on
-            // ordering — docs/carplay/01_OCBM_PROTOCOL.md).
+            // ordering — docs/ocbm/00_PROTOCOL.md).
             let phase = payload[1]
             log.info("[box] bt phase: \(OCBM.btPhaseName(phase), privacy: .public)")
             onBtPhase?(phase)
@@ -1105,7 +1105,7 @@ final class OCBMClient: @unchecked Sendable {
         onBoxLog?(out)
     }
 
-    // MARK: - CH_MGMT (the "CCPA" tab)
+    // MARK: - CH_MGMT (the adapter/management tab)
 
     // NB: these hop to `queue` before `send` (whose `seq` mutation is actually guarded by `sendLock`,
     // not `queue`), exactly like sendTouch/sendCommand/etc — the hop is for ordering with the rest of

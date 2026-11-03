@@ -10,7 +10,7 @@ Design and transport live in [`00_ARCHITECTURE.md`](00_ARCHITECTURE.md); arbitra
 ### 1. Current state
 
 Android Auto runs end to end over OCBM/USB: the box switches the phone into AOAP and pumps the TLS
-byte stream over `CH_IP` to `ccpa/aa-bridge`; the macOS app terminates the AA session, decodes H.264
+byte stream over `CH_IP` to `box/aa-bridge`; the macOS app terminates the AA session, decodes H.264
 through the same VideoToolbox path CarPlay uses, plays all three audio sinks through the same engine,
 and sends input back on the AA input channel. The box selects AA on its own — no env var — and
 CarPlay/AA arbitration is settled ([`02_ARBITRATION.md`](02_ARBITRATION.md)).
@@ -265,7 +265,7 @@ Two findings forced it, and the second is the one that made it urgent:
   `SEAM_PKT_PLAIN 0x03` marker after one `SEAM_FORMAT` of *PCM / 8000 Hz / 1 ch / 16-bit /
   audio_type 1 (telephony)*. scid is fixed at `0x4846_5053_434F_0001` (`HFPSCO\x00\x01`). No new
   channel and no new lane: this is the voice sink CarPlay already uses.
-  See [`../carplay/01_OCBM_PROTOCOL.md`](../carplay/01_OCBM_PROTOCOL.md) for the marker.
+  See [`../ocbm/00_PROTOCOL.md`](../ocbm/00_PROTOCOL.md) for the marker.
 * **Uplink** (app → phone): the existing `CH_MIC` relay, unchanged. ocbmd already connects to
   carplayd's mic seam `127.0.0.1:9112` whenever a host is subscribed; during an AA session carplayd
   is not running, so `btd` LISTENS there itself, speaks the identical protocol

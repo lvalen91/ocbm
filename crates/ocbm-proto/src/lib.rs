@@ -13,7 +13,7 @@
 //!   off 12 seq     u32                          per-endpoint sequence (global across channels; debug only)
 //!   off 16 payload [length]
 //! ```
-//! See ../../docs/carplay/01_OCBM_PROTOCOL.md.
+//! See ../../docs/ocbm/00_PROTOCOL.md.
 
 pub const MAGIC: u32 = 0x4F43_424D;
 pub const HDR_LEN: usize = 16;
@@ -47,7 +47,7 @@ pub const CH_ALT_VIDEO: u16 = 0x0024; // box->host: the ALT / navigation (instru
 //   0x02 META_JSON    — payload = one JSON object {"kind":…} of iAP2 metadata (nowPlaying/routeGuidance/maneuver/callState/communications/recentCall/favorite/artworkReady) — from iap2d
 //   0x03 META_ARTWORK — payload = [artwork id u8][JPEG bytes] — album art via the iAP2 File-Transfer session
 //   0x04 META_CORNERMASK — payload = [u32 BE display_width_px][PNG bytes] — iOS's exact per-resolution topLeftCornerMask (docs/carplay/06_AV_PIPELINE.md); host renders the corner curve from it — from carplayd (receiver)
-pub const CH_MGMT: u16 = 0x0040; // box management (the app's "CCPA" tab). Request/response, see MGMT_* below.
+pub const CH_MGMT: u16 = 0x0040; // box management (the app's adapter/management tab). Request/response, see MGMT_* below.
 // CH_RTSP — the app-driven-SETUP relay seam (plan: app-driven SETUP, phase P1). ocbmd is a DUMB BYTE
 // PIPE on this channel: it chunks the box seam's bytes (carplayd relay listener, 127.0.0.1:9106) into
 // ≤64 KiB OCBM frames both ways; ALL message framing is endpoint-to-endpoint (carplayd ↔ host app),
@@ -328,7 +328,7 @@ pub const SEV_HOST_GONE: u8 = 0x02; // STOP, or heartbeat watchdog expired
 pub const SEV_PHONE_PRESENT: u8 = 0x03; // iPhone (05ac) on the adapter bus
 pub const SEV_PHONE_ABSENT: u8 = 0x04; // no iPhone on the adapter bus — plug one in
 
-// CH_MGMT sub-messages (the app's "CCPA" tab). First payload byte = verb. Host->box requests are the
+// CH_MGMT sub-messages (the app's adapter/management tab). First payload byte = verb. Host->box requests are the
 // low range; box->host responses are the 0x8x range.
 //   Host->box:
 pub const MGMT_GET_INFO: u8 = 0x01; // [MGMT_GET_INFO] -> box replies MGMT_INFO with a JSON snapshot
@@ -1071,7 +1071,7 @@ mod tests {
         for ch in [CH_CTRL, CH_MFI, CH_CONSOLE, CH_MGMT, CH_RTSP, CH_ECHO, CH_DISCARD] {
             assert_ne!(CH_LOG, ch);
         }
-        // CT_LOG_CTL extends the CT_* space to 0x1B; docs/carplay/01_OCBM_PROTOCOL.md quotes that range.
+        // CT_LOG_CTL extends the CT_* space to 0x1B; docs/ocbm/00_PROTOCOL.md quotes that range.
         assert_eq!(CT_LOG_CTL, 0x1B);
         assert_ne!(CT_LOG_CTL, CT_BOX_HEALTH);
         assert_eq!(LOG_F_DROPPED & LOG_F_TRUNCATED, 0);
@@ -1096,7 +1096,7 @@ mod tests {
 
     #[test]
     fn ct_box_health_does_not_collide_with_the_ctrl_space() {
-        // docs/carplay/01_OCBM_PROTOCOL.md "Self-describing streams" now says the CT_* space is 0x01-0x1A.
+        // docs/ocbm/00_PROTOCOL.md "Self-describing streams" now says the CT_* space is 0x01-0x1A.
         assert_eq!(CT_BOX_HEALTH, 0x1A);
         assert_ne!(CT_BOX_HEALTH, CT_PROJ_MODE);
         assert_ne!(CT_BOX_HEALTH, CT_BT_PHASE);

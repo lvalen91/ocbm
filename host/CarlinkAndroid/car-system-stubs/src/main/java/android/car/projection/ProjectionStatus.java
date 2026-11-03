@@ -27,7 +27,7 @@ import java.util.List;
  *
  * The state vocabulary maps cleanly onto this project's session model, which is worth noting
  * because it confirms the framework was designed for exactly the session-vs-foreground split
- * {@code pi/docs/01_PROJECTION_APP_DESIGN.md} §1 settled on: a projection app is expected to stay
+ * {@code docs/boards/01_PROJECTION_APP_DESIGN.md} §1 settled on: a projection app is expected to stay
  * ACTIVE while backgrounded, and AAOS has a distinct state to say so.
  */
 public class ProjectionStatus {

@@ -109,7 +109,7 @@ fn cmd_cert(addr: &str) -> Result<Vec<u8>, String> {
         cert.len(),
         started.elapsed().as_millis()
     );
-    // A genuine MFi 2.0C certificate is ~945 bytes of DER and starts with SEQUENCE (0x30).
+    // A genuine CCPA (2.0C) MFi certificate is ~945 bytes of DER and starts with SEQUENCE (0x30).
     if cert.first() != Some(&0x30) {
         println!("  WARNING: does not begin with DER SEQUENCE (0x30) — is this a real cert?");
     }

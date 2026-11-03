@@ -785,7 +785,7 @@ class OcbmClient(
         // HEARTBEAT_GRACE with the OLD nonce, ocbmd takes its "presence never dropped" arm on the
         // following SUBSCRIBE: no GONE->PRESENT edge, no wireless_up, stale radio state under a
         // bring-up that believes it is clean. A changed nonce takes the host_replaced arm instead and
-        // rearm_presence_silently forces the edge (ccpa/ocbmd/src/main.rs, CT_HELLO / SUBSCRIBE).
+        // rearm_presence_silently forces the edge (box/ocbmd/src/main.rs, CT_HELLO / SUBSCRIBE).
         val inst = hostInstance
         val label = HOST_LABEL.toByteArray(Charsets.UTF_8)
         val hi = ByteArray(6 + label.size)

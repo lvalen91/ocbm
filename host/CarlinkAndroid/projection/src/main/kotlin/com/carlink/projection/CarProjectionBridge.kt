@@ -12,7 +12,7 @@ import com.carlink.logging.ProbeLog
 /**
  * Binding to AAOS's own projection framework.
  *
- * `pi/docs/01_PROJECTION_APP_DESIGN.md` §4 is the reasoning; this implements the "adopt immediately"
+ * `docs/boards/01_PROJECTION_APP_DESIGN.md` §4 is the reasoning; this implements the "adopt immediately"
  * half — the parts that do **not** require the platform to own a radio, which on this Pi it does not
  * (`btd` drives `hci0` directly and `hostapd` runs outside the Wi-Fi framework).
  *

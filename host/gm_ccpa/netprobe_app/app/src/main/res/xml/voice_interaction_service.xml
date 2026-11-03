@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Steering-wheel Voice button -> Siri (zeno.gmccpa.assist.Assistant). All three attributes are what this
+     firmware's PermissionController AssistantRoleBehavior.isAssistantVoiceInteractionService requires for
+     the ASSISTANT role (sessionService AND recognitionService non-null, supportsAssist=true). Class names are
+     fully qualified: the install package (android.car.usb.handler) is not the class package. -->
+<voice-interaction-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:sessionService="zeno.gmccpa.assist.AssistantSessionService"
+    android:recognitionService="zeno.gmccpa.assist.AssistantRecognitionService"
+    android:supportsAssist="true" />

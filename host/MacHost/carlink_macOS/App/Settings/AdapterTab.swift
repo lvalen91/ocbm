@@ -69,7 +69,7 @@ enum DaemonDisplay {
     }
 }
 
-/// `CT_BOX_HEALTH` bitmask (`OCBM.bh*`), named per docs/carplay/01_OCBM_PROTOCOL.md.
+/// `CT_BOX_HEALTH` bitmask (`OCBM.bh*`), named per docs/ocbm/00_PROTOCOL.md.
 struct BoxHealth: OptionSet, Codable, Equatable {
     let rawValue: UInt8
     static let hciPresent = BoxHealth(rawValue: OCBM.bhHciPresent)
@@ -95,7 +95,7 @@ struct BoxHealth: OptionSet, Codable, Equatable {
 }
 
 /// `CT_BT_PHASE` value (`OCBM.btp*`). An unrecognised raw byte decodes to `nil` — advisory per
-/// docs/carplay/01_OCBM_PROTOCOL.md, never coerced to a known phase.
+/// docs/ocbm/00_PROTOCOL.md, never coerced to a known phase.
 enum BtPhase: UInt8, Codable {
     case idle = 0x00
     case linkUp = 0x01
@@ -135,7 +135,7 @@ final class CCPABridge: ObservableObject {
     // Live box state — mirrored 1:1 from OCBMClient's CT_BOX_HEALTH/CT_BT_PHASE/CT_PHONE_IDENT
     // callbacks. Deliberately NOT persisted across a session: `sessionEnded()` clears all three so a
     // reconnect never shows a phantom carry-over from the previous box/phone — a fresh CT_SUBSCRIBE
-    // always re-emits its own current values (docs/carplay/01_OCBM_PROTOCOL.md, "re-emitted after
+    // always re-emits its own current values (docs/ocbm/00_PROTOCOL.md, "re-emitted after
     // each CT_SUBSCRIBE").
     @Published var boxHealth: BoxHealth?
     @Published var boxHealthUpdated: Date?

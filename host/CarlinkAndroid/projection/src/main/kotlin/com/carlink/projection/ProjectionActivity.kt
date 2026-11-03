@@ -17,7 +17,7 @@ import com.carlink.logging.ProbeLog
 /**
  * The projection surface. A `SurfaceView` and input forwarding — nothing else.
  *
- * Per `pi/docs/01` §7.2 this is deliberately thin and cheap to create and destroy. It **attaches to**
+ * Per `docs/boards/01_PROJECTION_APP_DESIGN.md` §7.2 this is deliberately thin and cheap to create and destroy. It **attaches to**
  * a running session; it never starts or stops one. Everything durable — the seam, the key, the
  * decoder's parameter sets, audio — lives in [ProjectionService].
  *

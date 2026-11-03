@@ -16,7 +16,7 @@ Session behaviour, A/V and open items live in
 This is standard interoperability and accessory development: enabling the project's own host application
 to act as an Android Auto head unit for the device owner's own phone, over the owner's own CPC200-CCPA
 hardware, reusing the same OCBM transport already built for CarPlay. It is the direct analogue of the
-existing CarPlay path (`docs/carplay/00_ARCHITECTURE.md`, `docs/carplay/01_OCBM_PROTOCOL.md`): the box moves bytes, the host application implements the
+existing CarPlay path (`docs/carplay/00_ARCHITECTURE.md`, `docs/ocbm/00_PROTOCOL.md`): the box moves bytes, the host application implements the
 projection protocol. Android Auto is Google's documented head-unit protocol; the reference
 implementation used here is the widely-published open-source `aasdk`/`openauto` stack (GPLv3). All
 testing is against first-party developer tooling (Google's in-app head-unit server / Desktop Head Unit)
@@ -35,7 +35,7 @@ Two structural differences shape the whole design. Both are properties of the AA
 from the sources in §2, not choices.
 
 **1a. Session encryption is a single TLS record stream, not per-frame sealing.** OCBM's CarPlay media
-model (`docs/carplay/01_OCBM_PROTOCOL.md` §"Media transport") works because AirPlay seals each access unit independently with
+model (`docs/ocbm/00_PROTOCOL.md` §"Media transport") works because AirPlay seals each access unit independently with
 ChaCha20-Poly1305 and carries the nonce on the wire, so the box can forward ciphertext untouched and
 hand the host one ephemeral key. AA instead runs the entire session — control, video, audio, input,
 sensors — inside one TLS 1.2 connection. There is no per-frame key to hand off. Whoever terminates TLS
@@ -203,7 +203,7 @@ returns a surface that differs from the request; the negotiation side stops bein
 
 ### 6. Proposed OCBM additions (not implemented)
 
-Additive per the `../carplay/01_OCBM_PROTOCOL.md` extensibility rules — frozen envelope, no version
+Additive per the `../ocbm/00_PROTOCOL.md` extensibility rules — frozen envelope, no version
 bump. A `CH_AA` channel (proposed `0x0050`) for the opaque AA byte stream, and `CT_AA_*` lifecycle
 opcodes on CH_CTRL. Until they exist, AA rides `CH_IP` unchanged, which is what ships today.
 

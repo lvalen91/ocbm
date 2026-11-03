@@ -74,12 +74,12 @@ Two boards are targeted, and the same box-side code serves three roles.
 | Flash | three parts: U-Boot, kernel, rootfs | SPI NOR |
 | Recovery | none: no FEL, no U-Boot console. A firmware brick is permanent unless an SPI programmer is used, or a kernel-initramfs recovery boot is installed (`baseline/`) | a power-on button enters FEL, which can rewrite the whole SPI NOR over USB |
 | Units | primary OCBM target; most OCBM work done here | the owner has one unit; risky work is acceptable |
-| OCBM status | shipped path | not run on the new baseline; an earlier stock-firmware-based run (2026-08-17) is recorded in `c2air/README.md` |
+| OCBM status | shipped path | not run on the new baseline; an earlier stock-firmware-based run (2026-08-17) is recorded in `boards/c2air-v821b/README.md` |
 
 Roles:
 
 1. Full OCBM stack on a replacement box: the CCPA or the C2Air runs the OCBM box daemons (`ocbmd`, `iap2d`, `carplayd`; `btd` on the CCPA), and a host app (macOS or Android) claims it over USB.
-2. MFi source only: a CCPA in NCM mode serves cert/sign to another host over the opt-in remote path (`CARPLAY_MFI_ADDR`, `ccpa/mfid`, `crates/mfi-wire`). A Raspberry Pi 4 running an AAOS build and a Linux workstation each reached full CarPlay A/V streaming this way, using their own radios; the CCPA was used only for MFi. In the GM radio setup (`host/gm_ccpa`, AAOS) the CCPA is both the Bluetooth radio and the MFi provider.
+2. MFi source only: a CCPA in NCM mode serves cert/sign to another host over the opt-in remote path (`CARPLAY_MFI_ADDR`, `box/mfid`, `crates/mfi-wire`). A Raspberry Pi 4 running an AAOS build and a Linux workstation each reached full CarPlay A/V streaming this way, using their own radios; the CCPA was used only for MFi. In the GM radio setup (`host/gm_ccpa`, AAOS) the CCPA is both the Bluetooth radio and the MFi provider.
 3. Host apps: the macOS app and the Android (AAOS) app. The code is portable to other SBCs, with or without a local MFi chip; a future authorized SBC would carry a 3.0 chip. OCBM is MFi-version agnostic by intent.
 
 The project grew out of the earlier carplayd / ncm_carplayd project (the receiver crates under `crates/vendor` were imported 2026-07-13).
@@ -207,13 +207,13 @@ root, i.e. the sibling directory `~/Documents/carlink/old/`; it is not under `do
 different things there: eight are path-dependency-only (`Cargo.toml` `exclude`), while `wireless` is a
 full workspace member producing the shipped `btd` binary. **Corrected 2026-10-19: this list also named
 `rx-connect` as a vendored crate and a shipped binary. It no longer exists — the mDNS advertiser was
-merged into carplayd on 2026-09-08 (`ccpa/carplayd/src/discovery.rs` module doc, the "NO rx-connect line" note in `build.sh`) and
+merged into carplayd on 2026-09-08 (`box/carplayd/src/discovery.rs` module doc, the "NO rx-connect line" note in `build.sh`) and
 `crates/vendor/` has no `rx-connect` directory.** The first-party crates outside that set are
 `crates/ocbm-proto` (the OCBM wire protocol, shared by every daemon), `crates/mfi-wire`, and the shared
 helper crates `crates/box-common` and `crates/bt-common` (protocol-neutral levers/USB helpers split out
 when the Bluetooth binary was renamed `carplay-wireless` -> `btd`, also 2026-09-08).
 
-The box daemons in `ccpa/{ocbmd, carplayd, iap2d, mfid, aa-bridge, aa-wireless}` are **all Rust** — the earlier "keep the
+The box daemons in `box/{ocbmd, carplayd, iap2d, mfid, aa-bridge, aa-wireless}` are **all Rust** — the earlier "keep the
 low-level glue in C" plan (`../ops/00_BUILD_AND_DEPLOY.md` §"What the size plan got right, and what it did not"; corrected 2026-10-19,
 was cited as "§Recommendation", a heading that does not exist) was NOT taken: no C MFi bridge,
 no C iAP2/radio glue and no C L3/NCM bridge was ever written, and `find ccpa -name '*.c'` still
@@ -232,14 +232,14 @@ peripheral to the daemons (note `git ls-files '*.c'` alone misses the `.h` file)
 - `crates/vendor/eld-codec/csrc/eld_shim.c` (101; was 75) — the libfdk-aac AAC-ELD FFI shim, deliberately
   isolated so `receiver` can stay `#![forbid(unsafe_code)]` (`#![forbid(unsafe_code)]` in `crates/vendor/receiver/src/lib.rs`). Compiled by
   `eld-codec/build.rs` into `carplayd`.
-- `accessory_init/iap_role_switch.c` (45) — a raw-usbfs `USBDEVFS_CONTROL` issuing Apple's `0x51`
+- `boards/ccpa-imx6ul/tools/iap_role_switch.c` (45) — a raw-usbfs `USBDEVFS_CONTROL` issuing Apple's `0x51`
   host-role switch and exiting; libusb-free so it runs on the stripped appliance. **The one C binary
   we ship**: built by `build.sh` (`zig cc`, static armv7), installed to `/usr/bin` by
   `tools/install_fhs.sh` and by `tools/ocbm_install.sh`, and invoked on every wired bring-up by
   `tools/projection_up.sh` (which checks for its presence; `tools/session_supervisor.sh` runs
   `projection_up.sh`). **Corrected 2026-10-19: the previous text warned that `ocbm_install.sh --full`
   ships `projection_up.sh` but not this binary. That was fixed — `--full` now installs
-  `accessory_init/iap_role_switch.armv7` to `/usr/bin/iap_role_switch` (`tools/ocbm_install.sh` `--full` list), and
+  `boards/ccpa-imx6ul/tools/iap_role_switch.armv7` to `/usr/bin/iap_role_switch` (`tools/ocbm_install.sh` `--full` list), and
   `projection_up.sh` exits 2 with an explicit "BOX MISCONFIGURED" line if it is absent.** The binary must
   have been built first (`build.sh` skips it, non-fatally, when `zig` is missing).
 - `host/MacHost/carlink_macOS/USB/USBBridge.h` (117; was 115) — the macOS app's Swift bridging header:
@@ -248,7 +248,7 @@ peripheral to the daemons (note `git ls-files '*.c'` alone misses the `.h` file)
 - `host/accbench.c` (83) — host-side libusb throughput benchmark, source of the transport numbers in
   the Throughput section below. Hand-built per `host/README.md` (accbench section); `build.sh` never touches it.
 
-Not in-tree but linked in: `carplayd`'s default `mic-uplink-eld` feature (owner decision: stays default-on; the C2Air build uses `--no-default-features`, see `c2air/README.md`) statically links a
+Not in-tree but linked in: `carplayd`'s default `mic-uplink-eld` feature (owner decision: stays default-on; the C2Air build uses `--no-default-features`, see `boards/c2air-v821b/README.md`) statically links a
 cross-built **fdk-aac 2.0.3** (~840 C/C++ files) from `$FDK_AAC_PREFIX`, gitignored under
 `scratchpad/fdk/`. The gitignored `reference/` and `scratchpad/` trees are third-party and not
 counted here.

@@ -66,7 +66,7 @@ const ACCESSORY_BRAND: &str = "CarLink";
 // (arbiter_client falls back to standalone when the path is absent).
 const ARBITER_SOCK: &str = "/run/proj/arbiter.sock";
 
-/// `@<unix_ms> ` write-time stamp (docs/carplay/01_OCBM_PROTOCOL.md CH_LOG): the box.log tailer
+/// `@<unix_ms> ` write-time stamp (docs/ocbm/00_PROTOCOL.md CH_LOG): the box.log tailer
 /// parses this prefix and uses it instead of the millisecond it happened to READ the line at.
 fn log(m: &str) {
     println!("@{} [wireless] {m}", now_ms());
@@ -114,7 +114,7 @@ fn now_ms() -> u64 {
 
 /// Log `/tmp/radio_caps` once at start — chipset/driver identity is exactly the "which radio is
 /// this box" fact a troubleshooting session needs, and `radio_detect.sh` emits it as a flat
-/// `KEY=value` file (see `ccpa/rootfs/script/radio_detect.sh`). `RADIO_WLAN_MAC` / `RADIO_BT_MAC`
+/// `KEY=value` file (see `boards/ccpa-imx6ul/rootfs/script/radio_detect.sh`). `RADIO_WLAN_MAC` / `RADIO_BT_MAC`
 /// are real MACs, so those two values are redacted — no PII in the log stream — everything else
 /// (chip, fw tree, insmod lines, interface names) is not.
 fn log_radio_caps() {
@@ -190,7 +190,7 @@ fn aa_ap_params() -> aa_wireless::wpp::ApParams {
         // the stock box's own working AA session reports `securityMode: 8`. Not 24 — that is a value
         // from a different, superseded enum, and would make the phone drop the whole message.
         // FIELD-PROVEN 8 = WPA2_PERSONAL (stock box capture + the 24/WPA2_ENTERPRISE attempt that
-        // never associated) — see ccpa/aa-wireless/src/proto.rs and docs/androidauto/03_WIRELESS.md.
+        // never associated) — see box/aa-wireless/src/proto.rs and docs/androidauto/03_WIRELESS.md.
         security_mode: aa_wireless::proto::SecurityMode::WPA2_PERSONAL,
         access_point_type: aa_wireless::proto::AccessPointType::STATIC,
         ip_address: crate::av::AP_IP.to_string(),

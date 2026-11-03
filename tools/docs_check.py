@@ -22,7 +22,7 @@ from pathlib import Path
 
 DOCS = Path(__file__).resolve().parent.parent / "docs"
 MAX_PER_CATEGORY = 10
-CATEGORIES = ("carplay", "androidauto", "wireless", "host", "ops")
+CATEGORIES = ("carplay", "androidauto", "wireless", "host", "ops", "ocbm", "boards")
 STATUS_RE = re.compile(r"^> \*\*STATUS:\*\* (CURRENT|HISTORICAL RECORD|SUPERSEDED-BY-\S+)\b", re.M)
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)#]+)(?:#[^)]*)?\)")
 

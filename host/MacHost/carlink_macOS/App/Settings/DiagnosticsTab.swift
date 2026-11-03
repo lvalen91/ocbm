@@ -28,7 +28,7 @@ import SwiftUI
 
 /// "Stream box log to this app" + cap — persisted directly in UserDefaults (its own keys, not the
 /// `VehicleConfigModel.prefix` namespace) because this does not ride the YAML pushed at SUBSCRIBE: the
-/// box arms/disarms CH_LOG purely from `CT_LOG_CTL` on CH_CTRL (docs/carplay/01_OCBM_PROTOCOL.md
+/// box arms/disarms CH_LOG purely from `CT_LOG_CTL` on CH_CTRL (docs/ocbm/00_PROTOCOL.md
 /// CH_LOG). Default ON / 256 KB matches the box's own CT_LOG_CTL default (cap 0 ⇒ 256 KB).
 @MainActor
 final class BoxLogSettings: ObservableObject {

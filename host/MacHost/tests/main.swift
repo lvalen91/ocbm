@@ -248,7 +248,7 @@ do {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// CH_LOG — parseLogEntries / logCtl (docs/carplay/01_OCBM_PROTOCOL.md CH_LOG)
+// CH_LOG — parseLogEntries / logCtl (docs/ocbm/00_PROTOCOL.md CH_LOG)
 // ════════════════════════════════════════════════════════════════════════════
 
 /// Build one wire-format CH_LOG entry: [source][flags][seq u16 LE][unix_ms u64 LE][len u16 LE][text].

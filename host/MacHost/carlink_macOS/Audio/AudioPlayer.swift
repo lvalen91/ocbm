@@ -87,7 +87,7 @@ final class AudioPlayer: @unchecked Sendable {
     private static let voiceActivityPeak: Int32 = 800
     private let state = Mutex(PlayerState())
 
-    /// Bounded playback backlog (docs/carplay/01_OCBM_PROTOCOL.md): every scheduled buffer increments its node's queued-duration
+    /// Bounded playback backlog (docs/ocbm/00_PROTOCOL.md): every scheduled buffer increments its node's queued-duration
     /// counter; the `.dataConsumed` completion decrements it. A node already holding more than its cap
     /// DROPS the incoming packet — without a cap the player is a lossless unbounded queue and clock drift
     /// (~50 ppm) grows it ~4 ms/min. The cap is per NODE; the DEPTH splits by stream class, because

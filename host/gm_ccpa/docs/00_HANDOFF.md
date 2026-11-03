@@ -1,7 +1,7 @@
 # SESSION HANDOFF — gm_ccpa (resume here)
 
 **Last updated: 2026-10-08, with in-place corrections through 2026-10-28** (new top block; everything from "START HERE (2026-09-10)" down is the 2026-09-10 snapshot, corrected in place where a claim became false). This is the "where we left off" doc, kept short on purpose (see
-[Document policy](#document-policy) below). For what the system **is**, read
+[Document policy](#4-document-policy) below). For what the system **is**, read
 [`04_SYSTEM_MODEL.md`](04_SYSTEM_MODEL.md) — canonical, outranks every architecture blurb elsewhere.
 Then [`05_SESSION_FLOW.md`](05_SESSION_FLOW.md) (wire-level session buildup, read §8 before writing any
 protocol code), then `evidence/session_2026-08-05/WORKING_SESSION.md`
@@ -107,7 +107,7 @@ underruns. **Filter with two greps, not one**: `grep NETPROBE` for our narrative
 anchor line exists to make that PID filter constructible. Recipe in
 [`06_BRINGUP_RUNBOOK.md`](06_BRINGUP_RUNBOOK.md) §8.3.
 
-**6. `crates/` and `ccpa/` Rust is STATIC — do not change it** (owner, 2026-09-10). It is proven on
+**6. `crates/` and `box/` Rust is STATIC — do not change it** (owner, 2026-09-10). It is proven on
 the box and in the macOS host and this app is one of three consumers. Where the honest fix is
 upstream, record it and solve it in Kotlin or not at all. N17 is now blocked by this rather than
 merely open; A11 landed Kotlin-only because of it.
@@ -381,7 +381,7 @@ Universal fallback: reinstall the golden APK (**corrected 2026-10-08:** needs `u
 **Hotspot credentials (corrected 2026-10-08).** This note used to call the head-unit credential prefilled in
 `Ui.kt` a "deliberate placeholder". Per plan v5.7 OD-7A it was a real SSID/passphrase pair, present in git history
 (local only; the repo has no remote) and once in a doc. Owner decision 2026-10-07: no rotation, no history scrub;
-the compiled-in defaults are removed (blank first run + dialog). `ccpa_custom pi/evidence/hostapd_5g.conf` stays
+the compiled-in defaults are removed (blank first run + dialog). `ccpa_custom boards/rpi4-aaos/evidence/hostapd_5g.conf` stays
 an accepted bench placeholder (2026-08-31). The docs no longer print the SSID or passphrase.
 
 

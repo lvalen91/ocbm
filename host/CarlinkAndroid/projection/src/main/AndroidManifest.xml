@@ -5,14 +5,14 @@
     <!-- ===================================================================================
          CarPlay projection system app for AAOS on the Raspberry Pi 4.
 
-         Design: pi/docs/01_PROJECTION_APP_DESIGN.md
-         Stack underneath: pi/docs/00_PI_AAOS_PORT.md
+         Design: docs/boards/01_PROJECTION_APP_DESIGN.md
+         Stack underneath: docs/boards/00_PI_AAOS_PORT.md
 
          This is a PRIVILEGED app. The android.car.permission.* and MANAGE_ACTIVITY_TASKS
          permissions below are signature|privileged and are NOT granted by declaring them
          here — they need the allowlist in privapp-permissions-com.carlink.projection.xml
          installed to /system/etc/permissions and the APK in /system/priv-app. See
-         pi/tools/install_projection_app.sh.
+         boards/rpi4-aaos/tools/install_projection_app.sh.
 
          Without the allowlist the app still installs and runs: the AAOS integration
          degrades (no projection status, no steering-wheel keys) and everything on the

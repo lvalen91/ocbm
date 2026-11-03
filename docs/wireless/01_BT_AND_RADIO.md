@@ -24,7 +24,7 @@ baseline loads the radio stack as modules and names the IW416 interface `mlan0`.
 `btnxpuart`, verified on hardware), the RTL8822CS and the RTL8822BS (`baseline/README.md` §2.5). It has no
 Broadcom, RTL8733BS or SD8987 mapping. A CCPA unit probed 2026-10-28 is an NXP IW416 (SDIO 02df:9159,
 `mwifiex_sdio` + `btnxpuart`, Bluetooth 5.4). The C2Air is a different box (Allwinner V821 rv32, AIC8800D80
-Wi-Fi/BT, Bluetooth reports AIC8820 5.4, MFi 3.x); its bring-up is in `c2air/README.md`, not here.
+Wi-Fi/BT, Bluetooth reports AIC8820 5.4, MFi 3.x); its bring-up is in `boards/c2air-v821b/README.md`, not here.
 The Raspberry Pi / AAOS port and a Linux workstation have reached full CarPlay A/V with a CCPA in NCM mode
 as the MFi source only (own Bluetooth and Wi-Fi radios, light testing); none of the radio HAL applies to
 them.
@@ -114,7 +114,7 @@ which is NCM's own address, then repoints the DHCP pool onto the management subn
 
 ### 4. The two scripts
 
-#### `ccpa/rootfs/script/radio_detect.sh` — read-only, emits `/tmp/radio_caps`
+#### `boards/ccpa-imx6ul/rootfs/script/radio_detect.sh` — read-only, emits `/tmp/radio_caps`
 
 Two phases, because the useful facts split cleanly by cost:
 
@@ -181,7 +181,7 @@ line or the one above), never by matching raw opcodes, which would be a chipset 
 Verified against every branch of the stock 2025.10 `attach_bluetooth.sh` and against the owned
 rewrite; an unknown SDIO id refuses both lines.
 
-#### `ccpa/rootfs/script/radio_hal.sh` — the seam
+#### `boards/ccpa-imx6ul/rootfs/script/radio_hal.sh` — the seam
 
 Verbs `probe | status | wifi_ap_on | wifi_ap_off | bt_on | bt_off | sco_on`.
 Exit `0` converged now · `1` ran and failed · `2` already converged · `3` unsupported on this
@@ -482,7 +482,7 @@ the box cannot be reached by Bluetooth for the *next* session.
   before, `btd` named it after the SoC serial)* — a
   live bug on IW416 too, since `/sys/class/net/wlan0/address` is absent whenever the driver is
   unloaded, which under on-demand radios is most of the time). *(The hardcoded Raspberry Pi BT MAC that
-  was listed here is fixed: `bt_driver.rs` `accessory_bt_mac()` reads sysfs, 2026-09-03.)* **Added 2026-08-16:** that same chain is why §6c's "one box, one name" is
+  was listed here is fixed: `bt_driver.rs` `accessory_bt_mac()` reads sysfs, 2026-09-03.)* **Fallback marker, 2026-11-02 (reorganisation phase 1c):** a box with none of the three hardware-id sources readable hashes the fixed marker `box-fallback` (`FALLBACK_HWID` in `box_identity.rs`; it was `ccpa-fallback` before). Only the AirPlay `deviceid`, the HomeKit `pi` and the Ed25519 accessory seed derive from it (the BT name, SSID and iAP2 accessory name use the MAC/serial suffix instead), so such a box got a new identity once and its iPhone re-pairs once; every box with a readable id is unchanged (golden-vector tests in `box_identity.rs`). **Added 2026-08-16:** that same chain is why §6c's "one box, one name" is
   **not yet achieved**. `/etc/carplay_ident` is read only by `radio_hal.sh` and `radio_ap_up.sh`;
   `btd` (`main.rs` → `bt_bringup::bring_up`), `bt_on.sh` and `ocbmd`'s `bt_name_from()`
   each derive independently, and because the supervisor execs `btd` *after*
@@ -676,7 +676,7 @@ Evidence gathered at the time:
 
 ### Root cause
 
-`ccpa/rootfs/script/attach_bluetooth.sh`'s `attach_bt()` ended with:
+`boards/ccpa-imx6ul/rootfs/script/attach_bluetooth.sh`'s `attach_bt()` ended with:
 
 ```sh
 hcitool -i hci0 cmd 0x03 0x0003
@@ -732,7 +732,7 @@ BLE power) — strong evidence it was a cargo-culted leftover rather than intent
 
 ### The fix
 
-1. **`ccpa/rootfs/script/attach_bluetooth.sh`** — removed the trailing raw HCI_Reset entirely. Added
+1. **`boards/ccpa-imx6ul/rootfs/script/attach_bluetooth.sh`** — removed the trailing raw HCI_Reset entirely. Added
    `hciconfig hci0 down` + `up` after the `hciconfig hci0 reset` in the MAC-programming branch, since
    that reset has the same defect. (Bonus: the `up` makes the kernel re-read BD_ADDR, so
    `/sys/class/bluetooth/hci0/address` now reflects a freshly programmed MAC instead of a stale cache.)
@@ -845,7 +845,7 @@ every unrecognized event. Now:
   unit: it records a pending confirm `{bdaddr, addr_type, deadline = now + 55 s}`
   (`PAIR_CONFIRM_WAIT_SECS`, inside `PAIRING_HOLD_SECS` so the connect hold is still open when the
   answer lands) and replies to nothing until the macOS app sends `CT_PAIR_CONFIRM` (`0x1C`,
-  `[accept u8]`, docs/carplay/01_OCBM_PROTOCOL.md) → ocbmd → btd's control port
+  `[accept u8]`, docs/ocbm/00_PROTOCOL.md) → ocbmd → btd's control port
   (`127.0.0.1:9115`, `{"cmd":"pair_answer","accept":true|false}`, `control.rs`). Pair →
   `OP_USER_CONFIRM_REPLY`; Cancel or no answer in 55 s → `OP_USER_CONFIRM_NEG_REPLY`, raising
   `/tmp/pair_rejected` and clearing the code so the connect hold aborts and the reconnect driver
@@ -916,7 +916,7 @@ This document covers the blocker. The same batch also fixed, from a 12-agent cod
 <!-- absorbed: ../wireless/01_BT_AND_RADIO.md -->
 
 STATUS: SHIPPED 2026-07-24. Written 2026-07-25 — the code comments in
-`ccpa/rootfs/script/attach_bluetooth.sh` and `bt_on.sh` referenced "docs/wireless/01_BT_AND_RADIO.md" from the day they were
+`boards/ccpa-imx6ul/rootfs/script/attach_bluetooth.sh` and `bt_on.sh` referenced "docs/wireless/01_BT_AND_RADIO.md" from the day they were
 written, but the document was never actually created (flagged as a loose end in a 2026-07-24 session note). This closes that.
 
 Both fixes are in the box's **shell bring-up scripts**, not in any Rust daemon. They are pre-existing

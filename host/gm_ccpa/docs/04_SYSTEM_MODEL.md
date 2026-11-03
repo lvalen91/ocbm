@@ -117,7 +117,7 @@ dormant `UsbAttachActivity`.)
 
 The box's `CT_BOX_HEALTH` (`0x1A`) report carries per-subsystem readiness bits, including
 `BH_HCI_PRESENT` (bit 0), which the box sets from `HCIGETDEVINFO` on a raw HCI socket — the same ioctl
-`hciconfig` uses to print `UP RUNNING` (ioctl in `fn hci0_up`, `ccpa_custom/ccpa/ocbmd/src/main.rs`; the bit is set
+`hciconfig` uses to print `UP RUNNING` (ioctl in `fn hci0_up`, `ccpa_custom/box/ocbmd/src/main.rs`; the bit is set
 in `box_health_tick`; corrected 2026-09-09, previously cited `:789-839`, which is `LogTail`/`CH_LOG` rotation code).
 This is the
 signal the app's lifecycle layer (§4b) uses to know the box's radios actually came up, not just that
@@ -575,6 +575,20 @@ the first refusal an E, repeats at I (C-F1 variant B, owner-approved 2026-10-08;
 once and media played unfocused over the call for the rest of the session). Bench-pending.
 Voice dead code (D010/D019) was removed. Bench-pending: whether iOS pauses on the take and whether a HID PLAY
 alone resumes it (plan B-MED-9).
+
+**Voice-interaction assistant (wheel Voice key -> Siri, 2026-10-26, NOT bench-verified).** The app declares a
+`VoiceInteractionService` + session service + a stub `RecognitionService` with no intent-filter, so it never joins
+the speech-recognizer list (`AndroidManifest.xml:256-282`, `res/xml/voice_interaction_service.xml`,
+`assist/Assistant.kt:69,96,143`). Inert until the app holds `android.app.role.ASSISTANT`, which is not requestable
+in-app and is granted over adb (`cmd role add-role-holder --user 10`; status logged at startup,
+`MainActivity.kt:101`, `Assistant.kt:41`). Once held, GM's `GMCarInputService` routes a wheel Voice SHORT press to
+`AssistUtils.showSessionForActiveService`, i.e. `AssistantSession.onShow` (`Assistant.kt:111`). That queues
+`NativeCore.siriTap` on the `cp-event-tx` executor (`Assistant.kt:55-62`), which sends `requestSiri` siriAction 2
+then 3 only once the CarPlay session has started (`NativeCore.kt:140`, `carplay-jni/src/lib.rs:918`; -1 = not
+started, nothing sent), then `hide()`/`finish()`. No call-state branching: iOS decides (`AssistOutcome.kt:12`).
+Not delivered by this path: the hangup key (164 reaches only AudioService, though it closes an open voice
+session) and the call key (5 may reach a focused activity, unmeasured). Procedure and bench checks:
+`06_BRINGUP_RUNBOOK.md` §4 "Steering-wheel Voice button -> Siri" (L191, hangup/call keys L262-).
 
 **Media card and launcher tile (v5.9 MED).** `NowPlayingMerge` treats now-playing as a delta stream: a title change
 no longer blanks artist/album/art (`av/NowPlayingMerge.kt:1-30`). `CarPlayMediaBrowserService` is selectable while

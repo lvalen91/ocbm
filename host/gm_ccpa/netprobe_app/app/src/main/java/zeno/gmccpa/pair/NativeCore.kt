@@ -11,13 +11,21 @@ package zeno.gmccpa.pair
  */
 object NativeCore {
 
-    val available: Boolean by lazy {
+    private val availableLazy = lazy {
         try { System.loadLibrary("carplayjni"); true }
         catch (t: Throwable) {
             zeno.gmccpa.ProbeLog.sub("jni").e("libcarplayjni.so not loadable: ${t.message}")
             false
         }
     }
+    val available: Boolean by availableLazy
+
+    /**
+     * True only if something in this process ALREADY loaded the library. Unlike [available] it never
+     * loads it (loading starts the `:9112` mic listener), so a caller with no session of its own — the
+     * assistant session, whose process the system binds at boot — can ask without side effects.
+     */
+    val loaded: Boolean get() = availableLazy.isInitialized() && availableLazy.value
 
     /**
      * Create a native control server and return its **generation handle** (0 = failure). The handle
@@ -113,6 +121,26 @@ object NativeCore {
      * `VehicleStateWatcher`'s executor, false between sessions.
      */
     fun setNightMode(night: Boolean): Boolean = available && nativeSetNightMode(night)
+
+    /** [siriTap] results besides the bitmask (bit0 = buttondown written, bit1 = buttonup written). */
+    object SiriTap {
+        const val NOT_STARTED = -1 // no CarPlay session past RECORD: nothing sent
+        const val PANIC = -2
+        const val NO_CORE = -3     // library never loaded in this process (no session), or stale .so
+        const val BOTH = 3
+    }
+
+    /**
+     * One Siri-button TAP to the phone: `requestSiri` buttondown(2) then buttonup(3), gated on the
+     * session having started (native `nativeSiriTap`). Never loads the library ([loaded], not
+     * [available]): with no session in this process there is no one to send to.
+     *
+     * BLOCKING on the event-channel mutex — only from [zeno.gmccpa.av.CarPlayEventTx].
+     */
+    fun siriTap(): Int {
+        if (!loaded) return SiriTap.NO_CORE
+        return try { nativeSiriTap() } catch (_: UnsatisfiedLinkError) { SiriTap.NO_CORE }
+    }
 
     /**
      * Plan v5.9 MED M5 / OD-9C: take MainAudio from the phone after a PERMANENT media focus loss, the
@@ -219,6 +247,7 @@ object NativeCore {
     private external fun nativeMediaButton(index: Int): Boolean
     private external fun nativeSetLimitedUI(limit: Boolean): Boolean
     private external fun nativeSetNightMode(night: Boolean): Boolean
+    private external fun nativeSiriTap(): Int
     private external fun nativeTakeMainAudio(): Boolean
     private external fun nativeReleaseMainAudio(): Int
     private external fun nativeForceKeyFrame(): Boolean

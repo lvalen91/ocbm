@@ -1,7 +1,7 @@
 package zeno.gmccpa.ocbm
 
 /**
- * Reads the adapter's Bluetooth name out of the MGMT_INFO JSON (ocbmd `mgmt_info`, ccpa/ocbmd
+ * Reads the adapter's Bluetooth name out of the MGMT_INFO JSON (ocbmd `mgmt_info`, box/ocbmd
  * src/main.rs: `"name":"CarLink-xxxx"`, built by `bt_name_from`). Pure (no android.*, no org.json —
  * android.jar's org.json is a stub on the host JVM), so the host JUnit tests run this exact code.
  *

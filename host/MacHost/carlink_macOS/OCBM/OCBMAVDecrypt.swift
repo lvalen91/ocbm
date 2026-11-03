@@ -167,7 +167,7 @@ final class OCBMAVDecrypt: @unchecked Sendable {
     private static let maxVideoMessage = 16 * 1024 * 1024
     /// L5: after this many bytes discarded WITHOUT a single SEAM_MAGIC ever appearing, say so. That is
     /// the signature of a box running `OCBM_FWD_ENC=0` (the mode `gm_ccpa` ships,
-    /// docs/carplay/01_OCBM_PROTOCOL.md): its video seam is `[u32 BE len][Annex-B]` — no magic, marker,
+    /// docs/ocbm/00_PROTOCOL.md): its video seam is `[u32 BE len][Annex-B]` — no magic, marker,
     /// key or seq — which is wire-incompatible with this host and has NO discriminator on the wire.
     private static let noMagicWarnBytes = 4 * 1024 * 1024
     private var lastVideoSeq: UInt64 = 0

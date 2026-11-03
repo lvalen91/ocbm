@@ -147,7 +147,7 @@ reclaim, start a NEW session); **Disconnect Phone must end the phone's session o
 wireless**. Every control now sends what its label says, or is disabled with the reason. Box-side
 TODOs are in [docs/ops/04_OPEN_ITEMS.md](../../docs/ops/04_OPEN_ITEMS.md) ("Host-app controls
 waiting on box verbs") and the proposed verbs in
-[docs/carplay/01_OCBM_PROTOCOL.md](../../docs/carplay/01_OCBM_PROTOCOL.md) ("Proposed MGMT verbs").
+[docs/ocbm/00_PROTOCOL.md](../../docs/ocbm/00_PROTOCOL.md) ("Proposed MGMT verbs").
 
 | Control | What it sends now | Evidence |
 |---|---|---|
@@ -1245,7 +1245,7 @@ Siri (16 k mono) from alt-audio/nav (48 k stereo).
 
 **AA is not reachable with this app today, and not because of formats.** The box's `PM_WIRED_AA`
 (`aa-bridge` AOAP pump) hands the AA *protocol* to the host over `CH_IP` (`IP_OPEN 127.0.0.1:5277`,
-`ccpa/aa-bridge/src/appport.rs`): the head-unit side of Android Auto — the gearhead handshake, service
+`box/aa-bridge/src/appport.rs`): the head-unit side of Android Auto — the gearhead handshake, service
 discovery, media/video channel setup — runs in the host app. The macOS host has that stack; `:app`
 has none (`CH_IP` appears only as a constant in `OcbmProto.kt`). Until an AA client exists here, the AA
 rows above are unreachable regardless of decoder coverage. The decode/playback layer built for CarPlay

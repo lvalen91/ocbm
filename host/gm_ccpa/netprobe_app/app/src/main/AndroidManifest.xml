@@ -253,6 +253,33 @@
             <meta-data android:name="com.gm.homescreen.visibility" android:value="HIDDEN" />
         </service>
 
+        <!-- Steering-wheel Voice button -> Siri (2026-10-26): the app as the Android default assistant
+             (android.app.role.ASSISTANT, granted over adb — docs/06 §4 "Steering-wheel Voice button").
+             GMCarInputService turns a short press into a VoiceInteractionSession in the active assistant;
+             zeno.gmccpa.assist.Assistant sends one CarPlay Siri tap and finishes. BIND_VOICE_INTERACTION is
+             signature: only system_server can bind these. No ACTION_ASSIST activity: this firmware's
+             AssistantRoleBehavior qualifies the package on the service alone, and an activity-only holder
+             never gets a session. Inert until the role is granted. -->
+        <service
+            android:name="zeno.gmccpa.assist.AssistantService"
+            android:permission="android.permission.BIND_VOICE_INTERACTION"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.service.voice.VoiceInteractionService" />
+            </intent-filter>
+            <meta-data android:name="android.voice_interaction"
+                android:resource="@xml/voice_interaction_service" />
+        </service>
+        <service
+            android:name="zeno.gmccpa.assist.AssistantSessionService"
+            android:permission="android.permission.BIND_VOICE_INTERACTION"
+            android:exported="true" />
+        <!-- Required by name in the metadata above; no intent-filter so it never joins the system
+             speech-recognizer list. -->
+        <service
+            android:name="zeno.gmccpa.assist.AssistantRecognitionService"
+            android:exported="false" />
+
         <!-- Declares the app to AAOS as a media app; see res/xml/automotive_app_desc.xml. -->
         <meta-data
             android:name="com.android.automotive"

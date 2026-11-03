@@ -80,7 +80,7 @@ enum class RedactionCategory { WPA_PSK, MAC_ADDRESS, IPV4, VIN, LONG_DIGITS, LAT
  *    verdict, not a value (`SessionSummary.SerialOutcome`), and `serial=<null>` / `serial=<Security…`
  *    are explanations: those tokens are exempt, everything else after the key is replaced.
  * 10. **BOX_NAME** — `CarLink-xxxx`: the adapter's Bluetooth name is derived from the last four hex
- *    digits of its Wi-Fi MAC (ocbmd `bt_name_from`, `ccpa/ocbmd/src/main.rs`), i.e. two octets of an
+ *    digits of its Wi-Fi MAC (ocbmd `bt_name_from`, `box/ocbmd/src/main.rs`), i.e. two octets of an
  *    address the MAC rule would otherwise redact whole. Caught as its own category so a reader can
  *    still correlate "the same adapter" across one export.
  *

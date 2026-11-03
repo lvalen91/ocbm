@@ -22,7 +22,7 @@ or **[I]** inferred. Every fact links to its discovery location.
 - **YAML VehicleConfig templates (10):** `<plugin>/Contents/Resources/VehicleConfigs/Configs/*.yaml` → copied to `reference/carplay_sdk/apple_vehicleconfigs/`.
 - **VDC (nav telemetry) schema:** `<plugin>/Contents/Frameworks/CarPlaySDK.framework/Versions/A/Resources/VDCSchema-External.json` + instance `<plugin>/Contents/Resources/VehicleConfigs/VehicleDataConfigs/Navigation/Navigation.vdc.json` → `reference/carplay_sdk/apple_vdc/`.
 - **Retained reference notes (scratchpad):** `sdk_strings.txt`, `sim_strings.txt`, `all.txt`, `hidparse.py`, `cfstr.py`.
-- **Project mapping targets:** `crates/vendor/receiver/src/info.rs` (`build_info`), `.../session.rs`, `.../events.rs`, `.../hid.rs`, `.../uplink.rs` (the pre-vendoring `ncm_carplayd/receiver_core` tree is gone); `ccpa_custom/ccpa/carplayd/src/main.rs`.
+- **Project mapping targets:** `crates/vendor/receiver/src/info.rs` (`build_info`), `.../session.rs`, `.../events.rs`, `.../hid.rs`, `.../uplink.rs` (the pre-vendoring `ncm_carplayd/receiver_core` tree is gone); `ccpa_custom/box/carplayd/src/main.rs`.
 
 ### 1. Two layers: authoring (YAML) vs wire (`/info`)
 Apple's simulator loads a **`VehicleConfig` YAML** (authoring) and *translates* it into the on-wire AirPlay
@@ -581,7 +581,7 @@ UI, and a set of missing optional features the Simulator exposes.
 
 ### FIXED this session
 
-> **corrected 2026-10-19 — SUPERSEDED.** `send_request_ui_url` / `send_stop_ui_url` no longer exist (`grep` over `events.rs` and `ccpa/carplayd/src/main.rs`: only `send_request_ui()` :1118, `send_show_ui(stream_id,url)` :1154, `send_stop_ui(stream_id)` :1177). The cluster-content path was changed 2026-07-30 to `showUI`/`stopUI` keyed by `params.uuid`, because `requestUI` carries no uuid and `stopUI` ignores a url (`ccpa/carplayd/src/main.rs:1192-1203`). The finding below (url nests under `params`) is historical; do not act on it.
+> **corrected 2026-10-19 — SUPERSEDED.** `send_request_ui_url` / `send_stop_ui_url` no longer exist (`grep` over `events.rs` and `box/carplayd/src/main.rs`: only `send_request_ui()` :1118, `send_show_ui(stream_id,url)` :1154, `send_stop_ui(stream_id)` :1177). The cluster-content path was changed 2026-07-30 to `showUI`/`stopUI` keyed by `params.uuid`, because `requestUI` carries no uuid and `stopUI` ignores a url (`box/carplayd/src/main.rs:1192-1203`). The finding below (url nests under `params`) is historical; do not act on it.
 
 **requestUI / stopUI `url` was at the top level; Apple nests it under `params`.**
 `send_request_ui_url` / `send_stop_ui_url` (`events.rs`) emitted `{type, url}`. The SDK sender
@@ -673,7 +673,7 @@ framing: fixing each required *both* correcting the id and enabling the feed.
    - **Not proven (OCBM box):** id 13 as raw wire bytes — the iPhone-side capture dropped the 0x5202/0x5204 burst
      frames, so the evidence is the box parser's JSON. The hex lever (flag file `/tmp/carplay_rg_hex` /
      env `CARPLAY_RG_HEX`, `log_route_guidance_hex` in `crates/vendor/iap2-core/src/metadata.rs`, called from `crates/vendor/receiver/src/events.rs` and
-     `ccpa/iap2d/src/main.rs`) is built but left off. One exit, one route; no off-ramp
+     `box/iap2d/src/main.rs`) is built but left off. One exit, one route; no off-ramp
      (type 8/22/23) maneuver tested; NEXT MANEUVER card rendering of exit text not observed. Logs and
      screenshots contain route data and are NOT archived: UNVERIFIED (no archived evidence).
    - **Selectors 4/5 (ids 21+):** 25 wire 0x5201 frames had ids 0..20 only while carkitd's pre-wire
@@ -723,7 +723,7 @@ Box `/info` emission + parser + app re-emit are landing 2026-09-05, unverified o
 > senders). Symbols and gating: [../ops/06_CORRECTIONS_LEDGER.md](../ops/06_CORRECTIONS_LEDGER.md) `R-26-2`.
 
 - ~~**Cluster "Show" flags** — … exact wire encoding needs one capture to pin.~~ **LANDED** (the
-  ledger's R-26-2 still lists it as open — stale there). `ccpa/carplayd/src/main.rs:60 cluster_url()`
+  ledger's R-26-2 still lists it as open — stale there). `box/carplayd/src/main.rs:60 cluster_url()`
   appends `?showSpeedLimit=user|no&showCompass=user|no&showETA=yes|no&maneuverLayout=` to the map and
   Navigation-App surfaces (instructioncard stays bare); `NAV_APPEARANCE` flags (`main.rs:51`) are set by
   OCBM `cmdNavAppearance 0x0B` (`OCBMFraming.swift:262-268`). Encoding vocabulary comes from the
@@ -731,9 +731,9 @@ Box `/info` emission + parser + app re-emit are landing 2026-09-05, unverified o
   `vehicle_config.rs:749-756`.
 - ~~**Telephony control**~~ **PARTLY LANDED.** HID uid 5 telephony (Answer/End/Flash/Mute/DTMF) is driven
   from the host (`ControlsWindow.swift:295 telephony()`), gated on `hidConfig.telephonyButtonsSupport`
-  (`ccpa/carplayd/src/main.rs:789`). Favorites/Recents are now rendered (`MetadataWindow.swift`, from
+  (`box/carplayd/src/main.rs:789`). Favorites/Recents are now rendered (`MetadataWindow.swift`, from
   0x4171). The iAP2 call-control cluster 0x415A-0x4161 is DECLARED in param 6 (`message.rs:127-146`) but
-  no sender exists anywhere in `crates/` or `ccpa/` (grep for `MSG_ACCEPT_CALL` etc. finds only
+  no sender exists anywhere in `crates/` or `box/` (grep for `MSG_ACCEPT_CALL` etc. finds only
   `spec.rs`/`message.rs`) — declaration only, "never wire-captured" per `message.rs:133`.
 - ~~**Lane guidance** display (no fields, no pane).~~ **LANDED.** `metadata.rs:1172 lane_guidance()` ->
   host `nav.lanes` -> "Lanes" card (`MetadataWindow.swift:1052`; `Lane` struct :172).
@@ -759,7 +759,7 @@ Box `/info` emission + parser + app re-emit are landing 2026-09-05, unverified o
 - Alt-display `maxFPS 60` vs capture `30`, physical dims `0/0` vs `304/76` — inert extra keys.
 - ~~Rust receiver `AudioCodec` enum lacks OPUS (bit 28-30 misdecodes to AAC-ELD)~~ — **FIXED; noted 2026-08-16.** `session.rs`'s `AudioCodec` has an `Opus` variant and `decode_audio_format` maps bits 28/29/30 to Opus 16k/24k/48k mono; `info.rs` carries the matching `opus_16k_mono`/`opus_24k_mono`/`opus_48k_mono` tokens (docs/carplay/06_AV_PIPELINE.md). Still only reachable on wireless; PCM-only on the wired path remains correct.
 - ~~`send_request_siri_action` … the code sends 1/2 … do not change the working values~~ — **INVERTED,
-  CORRECTED 2026-08-16. Do not act on the struck text.** The code now sends **2/3** (`ccpa/carplayd/src/main.rs`, the `CMD_SIRI_DOWN`/`CMD_SIRI_UP` arms),
+  CORRECTED 2026-08-16. Do not act on the struck text.** The code now sends **2/3** (`box/carplayd/src/main.rs`, the `CMD_SIRI_DOWN`/`CMD_SIRI_UP` arms),
   changed deliberately on 2026-07-31: R14G17 `AirPlayCommon.h:1366-1369` gives 0 n/a · 1 prewarm ·
   2 buttondown · 3 buttonup, and a device log records `Siri Action - 2` then `- 3` on a real
   press/release. 1/2 was off by one (1 = prewarm). The "confirmed working on-device" evidence covered

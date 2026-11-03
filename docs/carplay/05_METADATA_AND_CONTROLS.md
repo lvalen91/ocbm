@@ -1128,7 +1128,7 @@ Claims are **[E]** evidenced (string / exported symbol / extracted const bytes /
 - **iAP2 spec crate** (machine-generated from the plugin): `crates/vendor/iap2-core/src/spec.rs` (the live copy; an older one remains under `~/Downloads/github/carplayd`) — message IDs + Apple's own param-ID names.
 - **Wire captures** (stock CCPA, byte-decoded): `ncm_carplayd/research/WIRED_METADATA_PLANE.md`, `WIRED_ALBUM_ART.md`, `WIRED_NAV_METADATA.md`.
 - **ios27 HID inventory:** `ncm_carplayd/research/ios27_sdk_inventory/11_hid_input.md`.
-- **Live code:** `ccpa/carplayd/src/main.rs`, `ccpa/iap2d/src/main.rs`; `ncm_carplayd/receiver_core/crates/receiver/src/{session.rs,events.rs,hid.rs,info.rs}`; sibling `carplayd/vendor/ncm_carplayd/.../src/{hid.rs,info.rs}`.
+- **Live code:** `box/carplayd/src/main.rs`, `box/iap2d/src/main.rs`; `ncm_carplayd/receiver_core/crates/receiver/src/{session.rs,events.rs,hid.rs,info.rs}`; sibling `carplayd/vendor/ncm_carplayd/.../src/{hid.rs,info.rs}`.
 
 ---
 

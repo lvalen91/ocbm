@@ -9,9 +9,9 @@ The shipping host application: decode, UI, settings/YAML authoring, and the SDK 
 gained dynamic per-source colours, backfill-entry dimming and a Hide-history filter
 (`App/BoxLogWindow.swift`, `App/BoxLogStore.swift`); the pairing-code panel gained **Pair**/**Cancel**
 buttons, shown only when interactive numeric-comparison pairing is on (`docs/wireless/01_BT_AND_RADIO.md`);
-and the CCPA tab gained a confirmed **Enter NCM** action plus a `carlink://box/enter-ncm` URL handler
+and the adapter/management tab gained a confirmed **Enter NCM** action plus a `carlink://box/enter-ncm` URL handler
 (`open -a <app> carlink://box/enter-ncm`, `App/AppDelegate.swift`). Wire-level detail for all of these is
-in `docs/carplay/01_OCBM_PROTOCOL.md` and `docs/wireless/01_BT_AND_RADIO.md`, not here.
+in `docs/ocbm/00_PROTOCOL.md` and `docs/wireless/01_BT_AND_RADIO.md`, not here.
 
 ## Host app — SDK audit and plan
 
@@ -139,7 +139,7 @@ the frame-cap fix lets the recovery keyframes actually land. Together they are t
 - **Audio**: the 24 kHz mic rate shipped (`MicCapture.startCapture(sampleRate:channels:)` takes the
   box-negotiated rate, no hardcode). The audio seam now resets on a box-signalled `F_NEW_SOURCE` frame
   flag and resyncs on `SEAM_MAGIC` so a producer swap can't desync the decrypt counter (2026-09-03; see
-  `docs/carplay/01_OCBM_PROTOCOL.md`). Still open: watch long-session A/V clock drift (add a rate-matched
+  `docs/ocbm/00_PROTOCOL.md`). Still open: watch long-session A/V clock drift (add a rate-matched
   ring buffer if it appears — not a full jitter buffer). Set decoder color attachments (709/601-4/sRGB)
   as cheap insurance.
 - **OCBM cleanups**: the header `seq` is written-but-never-read (dead/footgun) and the "fragmentable"/SOM-EOM
@@ -236,7 +236,7 @@ renderers consume it:
 **Tabs** (460×620): **Vehicle** (the neutral profile; sections Identity & branding, Display,
 Appearance, Driving, Vehicle, Input, Audio, Data feeds), **Adapter** (wireless radios, hot hand-over,
 pairing, Wi-Fi access point, Android Auto projection, app-driven SETUP, then the live box state that was
-the CCPA tab), **Diagnostics** (the Box Log stream toggle + cap — the Adapter tab does NOT duplicate
+the adapter/management tab), **Diagnostics** (the Box Log stream toggle + cap — the Adapter tab does NOT duplicate
 it; DESIGN.md §1 claimed both until the 2026-09-05 correction). Each feature renders as: neutral
 control → one badge per projection (supported / limited / unsupported) → per-protocol explanation rows
 → badged sub-groups for protocol-exclusive keys → a value note when the current value has one. Protocol

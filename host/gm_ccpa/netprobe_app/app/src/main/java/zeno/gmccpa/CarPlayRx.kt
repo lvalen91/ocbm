@@ -142,7 +142,7 @@ class CarPlayRx(
      * The SAME device id, decimal. This asymmetry is deliberate and is the thing that was broken:
      * TXT `deviceid` and /info `deviceID` carry the colon MAC, but the
      * `AirPlay-Receiver-Device-ID` HTTP header carries a DECIMAL uint64 (`mac_to_dec` in
-     * `ccpa/carplayd/src/discovery.rs`).
+     * `box/carplayd/src/discovery.rs`).
      * Sending the MAC string makes iOS parse it base-10 as 0, look up "receiver 0" among the peers
      * it has browsed, find nothing, and have nothing to dial back to — which is exactly the
      * accepted-connection / no-reply / no-inbound symptom.
@@ -564,7 +564,7 @@ class CarPlayRx(
         // and our own record landed 16 ms later. Advertising and dialing together is a race we lose.
         //
         // carplayd never hits this because its discovery thread registers the advert (`mdns.register`,
-        // `fn run` in `ccpa/carplayd/src/discovery.rs`) BEFORE it browses (`mdns.browse`, three lines
+        // `fn run` in `box/carplayd/src/discovery.rs`) BEFORE it browses (`mdns.browse`, three lines
         // later), and on the box the advert has been live for the whole AP lifetime before the phone
         // even associates. So: advertise first, let iOS index it, only then dial.
         //
@@ -849,7 +849,7 @@ class CarPlayRx(
         }
     }
 
-    /** The TXT set, byte-identical to carplayd's (`fn run` in `ccpa/carplayd/src/discovery.rs`, the `("deviceid", …)…("srcvers", …)` tuple list). */
+    /** The TXT set, byte-identical to carplayd's (`fn run` in `box/carplayd/src/discovery.rs`, the `("deviceid", …)…("srcvers", …)` tuple list). */
     private fun txtRecord(): Map<String, String> = txtRecordFor(deviceId, pi)
 
     // ---- the outbound nudge -----------------------------------------------------------------------
@@ -858,7 +858,7 @@ class CarPlayRx(
      * The iPhone's `_carplay-ctrl` port CHANGES every session (58028 -> 58095 -> 58241 observed), and
      * NsdManager happily answers a resolve from its cache — so a single resolve at startup dials a
      * dead port forever (5s timeouts while the phone is off-network, then ECONNREFUSED once it is
-     * back). carplayd's discovery loop (`ccpa/carplayd/src/discovery.rs`) never hits this because
+     * back). carplayd's discovery loop (`box/carplayd/src/discovery.rs`) never hits this because
      * mdns-sd delivers a fresh ServiceResolved on every
      * re-announce. Restarting discovery is the only way to force NsdManager to re-resolve, so do it
      * on a cadence until the phone actually dials us back.
@@ -904,7 +904,7 @@ class CarPlayRx(
             // Do NOT clear lastDial here. Doing so cancelled the cooldown entirely, so every 12s
             // restart spawned another retry loop on top of the ones still running — up to a dozen
             // concurrent dialers hammering one phone port. carplayd's discovery loop dedups (the
-            // `dialed` set in `ccpa/carplayd/src/discovery.rs`) and only clears on ServiceRemoved.
+            // `dialed` set in `box/carplayd/src/discovery.rs`) and only clears on ServiceRemoved.
             browse.stop { try { nsd?.stopServiceDiscovery(it) } catch (_: Throwable) {} }
             try { Thread.sleep(600) } catch (_: InterruptedException) { return }
             browseForPhone()
@@ -1147,7 +1147,7 @@ class CarPlayRx(
             }
         }
         if (!running.get()) { stoppedMidDial("advert settle"); return null }
-        // carplayd's connect-out (`ccpa/carplayd/src/discovery.rs`) retries up to 10x at 1s and only
+        // carplayd's connect-out (`box/carplayd/src/discovery.rs`) retries up to 10x at 1s and only
         // marks a peer dialed on success. The phone
         // holds a 30s assertion on the connect command, so an early dial is simply wasted.
         // THE WIRE IS THE AUTHORITY; NsdManager is only the discovery trigger.
@@ -1264,7 +1264,7 @@ class CarPlayRx(
                     // form rather than inventing an address.
                     "[${host.hostAddress?.substringBefore('%') ?: host.hostName}]:$peerPort"
                 else "${host.hostAddress}:$peerPort"
-                // Header set and order mirror carplayd's connect-out (`ccpa/carplayd/src/discovery.rs`)
+                // Header set and order mirror carplayd's connect-out (`box/carplayd/src/discovery.rs`)
                 // exactly. No CSeq: this is plain HTTP, not
                 // RTSP, and no reference sends one.
                 val req = buildString {
@@ -1278,7 +1278,7 @@ class CarPlayRx(
                 log.i(">> GET /ctrl-int/1/connect -> ${host.hostAddress}:$peerPort  (device-id=$deviceIdDec decimal)")
                 val ins = BufferedInputStream(s.getInputStream())
                 val status = readLine(ins)
-                // Match carplayd's `connect_out` response handling (`ccpa/carplayd/src/discovery.rs`) exactly: an empty response, a read
+                // Match carplayd's `connect_out` response handling (`box/carplayd/src/discovery.rs`) exactly: an empty response, a read
                 // timeout, or an unparseable status line is TENTATIVELY ACCEPTED — the phone may open
                 // RTSP asynchronously without answering. Only an explicit non-2xx is a refusal.
                 // Scoring silence as failure turned the most likely real outcome into nine more dials.

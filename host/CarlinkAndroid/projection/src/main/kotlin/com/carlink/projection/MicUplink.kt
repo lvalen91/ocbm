@@ -33,7 +33,7 @@ import java.util.concurrent.atomic.AtomicLong
  * ```
  *
  * `airplayd`'s encoder is only present when it was built with `mic-uplink-eld` (see
- * `pi/tools/build_fdk_aac_arm64.sh`); without it the box logs *"negotiated but `mic-uplink-eld` not
+ * `boards/rpi4-aaos/tools/build_fdk_aac_arm64.sh`); without it the box logs *"negotiated but `mic-uplink-eld` not
  * built"* and drops what we send.
  *
  * ## Capture is gated in principle, CONTINUOUS in practice
@@ -61,7 +61,7 @@ import java.util.concurrent.atomic.AtomicLong
  * An earlier version of this doc asserted that `ro.boot.audio.tinyalsa.simulate_input=true` made
  * `AudioRecord` return generated silence on this build, and that the uplink therefore could not
  * work. **That was wrong** — measured on device, capture reaches -4 dBFS peak on speech. The
- * retraction is `pi/docs/02` §1. Do not reintroduce that diagnosis; if the mic is genuinely dead
+ * retraction is in `docs/boards/04_IMAGE_REBUILD_GUIDE.md` ("Measured notes"). Do not reintroduce that diagnosis; if the mic is genuinely dead
  * here, the level line will say so and the cause is something else.
  */
 class MicUplink(
@@ -386,7 +386,7 @@ class MicUplink(
         if (peak > levelPeak) levelPeak = peak
         if (maxZeroRun > levelMaxZeroRun) levelMaxZeroRun = maxZeroRun
 
-        // The uplink is armed at stream SETUP and (per pi/docs/02 §1a) never disarmed, so "once per
+        // The uplink is armed at stream SETUP and (per docs/boards/04_IMAGE_REBUILD_GUIDE.md, "Measured notes") never disarmed, so "once per
         // second" would be one INFO line per second for the entire session. Report the first few
         // windows — which is what a bring-up session actually needs — then only on a state change.
         if (levelSamples < LEVEL_WINDOW_SAMPLES) return

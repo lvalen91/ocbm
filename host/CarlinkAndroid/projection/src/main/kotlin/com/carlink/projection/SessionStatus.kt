@@ -11,7 +11,7 @@ import kotlinx.coroutines.flow.update
  *
  * ## The three-state model the UI is built on
  *
- * `pi/docs/01_PROJECTION_APP_DESIGN.md` §1 settled that the tile brings projection forward rather
+ * `docs/boards/01_PROJECTION_APP_DESIGN.md` §1 settled that the tile brings projection forward rather
  * than restarting it, and that means the session and the foreground are **independent**:
  *
  *  - no session          → the device screen offers connect / add device

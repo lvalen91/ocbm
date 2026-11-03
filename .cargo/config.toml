@@ -30,12 +30,12 @@ rustflags = ["-C", "target-cpu=cortex-a7"]
 # Raspberry Pi / AAOS port. The Pi runs Android, so its binaries are aarch64-linux-android — NOT
 # aarch64-unknown-linux-gnu, and the difference is not cosmetic: `target_os` is "android", which is
 # what silently broke cloexec.rs (it was gated on target_os = "linux", fell through to the macOS
-# branch, and leaked every Bluetooth socket into the detached daemons). See pi/docs/00 §4.
+# branch, and leaked every Bluetooth socket into the detached daemons). See docs/boards/00_PI_AAOS_PORT.md §4.
 #
 # API 34 rather than the platform's own 36: nothing here uses a post-34 libc symbol, and linking to
 # the lowest level that works keeps the binaries usable on an older image without a rebuild.
 #
-# The NDK path is not hardcoded — pi/tools/build_pi_binaries.sh resolves it and exports the linker,
+# The NDK path is not hardcoded — boards/rpi4-aaos/tools/build_pi_binaries.sh resolves it and exports the linker,
 # so this section only has to exist for `cargo build --target aarch64-linux-android` to be a normal
 # thing to type. If you build by hand, export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER yourself.
 # C2Air (Allwinner V821, riscv32). THIS FLAG IS LOAD-BEARING — without it the box crashes.

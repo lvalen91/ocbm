@@ -96,7 +96,7 @@ pub fn adts_from_aac_lc(au: &[u8], rate: u32, channels: u8) -> Option<Vec<u8>> {
 /// cannot adjust.
 ///
 /// WIRE CHANGE: this inserts one byte between `ch` and `len` versus the original 10-byte header.
-/// Consumers must be updated in the same change. Spec: `docs/carplay/01_OCBM_PROTOCOL.md`
+/// Consumers must be updated in the same change. Spec: `docs/ocbm/00_PROTOCOL.md`
 /// ("The `:9003` voice seam tag"). The Android consumer lives in the sibling gm_ccpa repo.
 pub fn tag_voice(au: &[u8], rate: u32, channels: u16, atype: u8) -> Vec<u8> {
     let mut v = Vec::with_capacity(11 + au.len());

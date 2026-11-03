@@ -2,7 +2,7 @@
 //!
 //! **The live part of this crate is `sap` (MFi-SAP) and the `MfiSigner` trait in `auth_client`.**
 //! Production MFi is direct local I2C to the coprocessor — see carplayd's `LocalMfiSigner`,
-//! `crates/vendor/mfi-i2c-local`, `crates/vendor/wireless/src/mfi_local.rs` and `ccpa/iap2d`.
+//! `crates/vendor/mfi-i2c-local`, `crates/vendor/wireless/src/mfi_local.rs` and `box/iap2d`.
 //!
 //! The request/response framing helpers below (`build_get_certificate`, `build_sign`,
 //! `parse_response_header`) are **dead code**: they spoke to a remote `ncm_carplayd` auth service over

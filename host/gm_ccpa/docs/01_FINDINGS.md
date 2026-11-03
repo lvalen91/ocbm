@@ -265,10 +265,10 @@ not implement it), and per-connection `build_info(&load_device_config())` (this 
 and the `build_info` comment block in `JNI_OnLoad` (both `native/carplay-jni/src/lib.rs`).
 
 **Scope corrected 2026-09-09.** These are gaps in THIS app only, not in the reference. The native
-`carplayd` daemon implements all three: `fn arm_keepalive` (`ccpa/carplayd/src/main.rs`, called per
+`carplayd` daemon implements all three: `fn arm_keepalive` (`box/carplayd/src/main.rs`, called per
 control connection in `run_pairing_server`), `fn start_input_listener` (same file; binds `127.0.0.1:9110`,
 started from `main()` before the accept loop), and `pub fn build_info` (`crates/vendor/receiver/src/info.rs`)
-with `fn load_device_config` (`ccpa/carplayd/src/main.rs`) called per control connection in
+with `fn load_device_config` (`box/carplayd/src/main.rs`) called per control connection in
 `run_pairing_server`. An earlier pass on 2026-09-09 entered these as flatly "not implemented", which
 was wrong about the reference; the rows now read correctly. They are tracked as rows N13-N15 in
 `11_HARDENING_PLAN.md` — N13 IMPLEMENTED 2026-10-06 (pending on-device acceptance), N14-N15 OPEN (the
@@ -278,7 +278,7 @@ was wrong about the reference; the rows now read correctly. They are tracked as 
 in the `CarPlayRx.handleNative` comment block (`CarPlayRx.kt`, search `arm_keepalive`) carried the same
 error and needed a source fix. It was fixed in `8cadba4`: the block now says "both are real gaps"
 scoped to the Kotlin path, and cites rows N13–N16 of `11_HARDENING_PLAN.md` plus `fn arm_keepalive`
-(`ccpa/carplayd/src/main.rs`) by symbol. Row N16 records it LANDED. (2026-10-06: the block itself is
+(`box/carplayd/src/main.rs`) by symbol. Row N16 records it LANDED. (2026-10-06: the block itself is
 now removed — both gaps it named were implemented in v5.5.) The former text follows for
 history only —
 still needs a source fix.

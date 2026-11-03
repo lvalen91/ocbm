@@ -83,8 +83,9 @@ pub(crate) fn mark_session_started(started: bool) {
     SESSION_STARTED.store(started, Ordering::Release);
 }
 
-/// Is it valid to open the iAP2 tunnel yet?
-pub(crate) fn session_started() -> bool {
+/// Is it valid to open the iAP2 tunnel yet? `pub` (was `pub(crate)`) so gm_ccpa's JNI can apply
+/// the same Apple gate to its steering-wheel `requestSiri` (`carplay-jni` `nativeSiriTap`).
+pub fn session_started() -> bool {
     SESSION_STARTED.load(Ordering::Acquire)
 }
 

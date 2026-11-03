@@ -85,5 +85,8 @@ zeno.gmccpa.av.NalScanTest                         # F-C2 bounded NAL scan (buff
 zeno.gmccpa.av.ModesChangedTest                    # A11 decode over the stored capture
 zeno.gmccpa.InfoTxtEqualityTest                    # docs/11 5.12: TXT <-> /info identity
 
+# --- 2026-10-26 steering-wheel Voice -> Siri (Opus, single implementer) ---
+zeno.gmccpa.assist.AssistOutcomeTest              # tap result / showFlags log wording
+
 # --- 2026-10-29 C2 bridge watch (Fable, single implementer) ---
 zeno.gmccpa.MdnsResponderBridgeTest               # self-hosted advert follows br0: BridgeWatch.decide, refreshIfChanged, boundTo

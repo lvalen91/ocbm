@@ -35,7 +35,7 @@ enum OCBM {
     static let ipData: UInt8 = 0x02       // data = stream bytes
     static let ipClose: UInt8 = 0x03      // no data
     static let chMic: UInt16 = 0x0031     // host->box mic uplink PCM (S16LE @ negotiated rate); box RTP-uplinks to iPhone
-    static let chMgmt: UInt16 = 0x0040    // box management (the "CCPA" tab): request/response, see mgmt* below
+    static let chMgmt: UInt16 = 0x0040    // box management (the adapter/management tab): request/response, see mgmt* below
     static let chRtsp: UInt16 = 0x0041    // app-driven SETUP control relay (plan P3) — box<->host RTSP/SETUP seam
     static let chLog: UInt16 = 0x0042     // box->host: the box's universal log stream (/tmp/box.log), see LogEntry below
 
@@ -341,7 +341,7 @@ enum OCBM {
         }
     }
 
-    /// Human-readable name for a `btp*` phase (logging only; per docs/carplay/01_OCBM_PROTOCOL.md
+    /// Human-readable name for a `btp*` phase (logging only; per docs/ocbm/00_PROTOCOL.md
     /// this is advisory — an unrecognised value is reported verbatim, never coerced to IDLE).
     static func btPhaseName(_ phase: UInt8) -> String {
         switch phase {

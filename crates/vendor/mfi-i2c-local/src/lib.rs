@@ -1,4 +1,4 @@
-//! mfi-i2c-local — MFi 2.0C authentication over the box's LOCAL I2C chip (`/dev/i2c-1 @0x11`).
+//! mfi-i2c-local — MFi authentication (2.0C on the CCPA) over the box's LOCAL I2C chip (`/dev/i2c-1 @0x11`).
 //!
 //! A standalone crate (not a module inside `receiver` or `mfi`) purely because both of those crates
 //! carry `#![forbid(unsafe_code)]`, and this is unavoidably `unsafe` (raw ioctl/i2c). This is a direct
@@ -96,7 +96,7 @@ impl MfiLock {
             );
             return Err(MfiError::LockUnavailable);
         }
-        // BOUNDED acquire (LOCK_NB + deadline), matching `ccpa/carplayd/src/main.rs`'s own `MfiLock`
+        // BOUNDED acquire (LOCK_NB + deadline), matching `box/carplayd/src/main.rs`'s own `MfiLock`
         // and `iap2d`'s. This was the only one of the chip users (five code paths; four at the time) still taking an UNBOUNDED
         // `LOCK_EX`, and it is called from `iap_tunnel::execute` with the global SESSION guard held —
         // so a wedged holder stalled the DataStream reader, and with it every inbound iAP2 frame, plus

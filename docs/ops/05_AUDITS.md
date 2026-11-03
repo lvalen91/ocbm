@@ -604,11 +604,11 @@ No memory-safety defect (no leak, double-free, data race) survived verification.
 ### HIGH
 
 > Path note (2026-10-28): citations in this section named files without their directory and with the line
-> numbers of the 2026-07 tree. Full paths used below: `ccpa/ocbmd/src/main.rs`, `ccpa/carplayd/src/main.rs`,
+> numbers of the 2026-07 tree. Full paths used below: `box/ocbmd/src/main.rs`, `box/carplayd/src/main.rs`,
 > `crates/vendor/receiver/src/{session,uplink}.rs`, `crates/vendor/iap2-core/src/metadata.rs`,
 > `host/MacHost/carlink_macOS/{App,USB}/...`. Line numbers are historical; find the code by symbol.
 
-#### H1 — Video cut-out ROOT CAUSE: shared A/V queue couples the streams  `ccpa/ocbmd/src/main.rs` (read-gate on `out_av`) [CONFIRMED coupling / SUSPECTED exact-fps]
+#### H1 — Video cut-out ROOT CAUSE: shared A/V queue couples the streams  `box/ocbmd/src/main.rs` (read-gate on `out_av`) [CONFIRMED coupling / SUSPECTED exact-fps]
 The read-gate `if matches!(ch, CH_VIDEO|CH_ALT_VIDEO) && !out_av.is_empty() { continue }` keys on a
 **single shared FIFO** (`out_av`) carrying CH_VIDEO + CH_ALT_VIDEO + CH_MEDIA_AUDIO + CH_ALT_AUDIO.
 So the main 4K video seam is not read whenever ANY byte from the cluster or audio is still queued. The
@@ -636,12 +636,12 @@ be re-wired?** (Live call state IS shown in the MetadataStore Phone pane; Now-Pl
 
 ### MEDIUM
 
-- **M-a** `ccpa/ocbmd/src/main.rs` (`av_conns`) [CONFIRMED shift] — `av_conns.retain()+push()` during the same
+- **M-a** `box/ocbmd/src/main.rs` (`av_conns`) [CONFIRMED shift] — `av_conns.retain()+push()` during the same
   dispatch pass shifts pre-captured `AvConn(idx)` → same-wake re-accept can frame one stream's bytes
   onto the wrong OCBM channel (e.g. 4K bytes as CH_ALT_VIDEO). Overlaps the :9005 reconnect path.
-- **M-b** `ccpa/ocbmd/src/main.rs` (`drain_q`) [CONFIRMED] — `drain_q` uses `q.drain(0..w)` (O(n) front-shift) → O(n²)
+- **M-b** `box/ocbmd/src/main.rs` (`drain_q`) [CONFIRMED] — `drain_q` uses `q.drain(0..w)` (O(n) front-shift) → O(n²)
   draining a 4K-frame `out_av` on the ARM box. (rx path was fixed with a cursor; tx wasn't.)
-- **M-c** `ccpa/carplayd/src/main.rs` (`CARPLAY_ALT_W/H` handling) [CONFIRMED] — `CARPLAY_ALT_W/H` set but **never cleared** on any
+- **M-c** `box/carplayd/src/main.rs` (`CARPLAY_ALT_W/H` handling) [CONFIRMED] — `CARPLAY_ALT_W/H` set but **never cleared** on any
   path (else/parse-fail/no-config). Stale cluster dims from a prior connection leak into the next →
   wrong cluster resolution advertised to iOS.
 - **M-d** `AppDelegate.swift` [CONFIRMED] — **window-title state machine broken** ("stuck at
@@ -668,11 +668,11 @@ be re-wired?** (Live call state IS shown in the MetadataStore Phone pane; Now-Pl
 ---
 
 ### LOW — behavioral / robustness (selected; ~15 total)
-- `ccpa/carplayd/src/main.rs` — `NAV_FORWARD` not reset on session teardown → a `CMD_NAV_START` then disconnect
+- `box/carplayd/src/main.rs` — `NAV_FORWARD` not reset on session teardown → a `CMD_NAV_START` then disconnect
   leaves the next session forwarding the cluster from the start [CONFIRMED]. `INPUT_NAV` sent to uid-3
   unconditionally regardless of `CARPLAY_DPAD` → silent no-op when D-pad off [CONFIRMED]. Media-btn
   index not range-validated [CONFIRMED].
-- `ccpa/ocbmd/src/main.rs` — `av_backpressured` set once never reset; `forward_input` claims non-blocking but
+- `box/ocbmd/src/main.rs` — `av_backpressured` set once never reset; `forward_input` claims non-blocking but
   the socket is blocking (can stall the poll loop); `CT_SRC` srcbench blocks the loop up to 30s; `eth`
   AF_PACKET socket / CH_IP `conns` leak across sessions [all CONFIRMED].
 - `crates/vendor/iap2-core/src/metadata.rs` — RouteGuidance param id 24 mislabeled (maps ArrivalBatteryLevel to

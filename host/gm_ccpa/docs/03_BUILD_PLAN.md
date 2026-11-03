@@ -93,7 +93,7 @@ which is why the role flag (§11 B3) is load-bearing rather than cosmetic.
   where the server sits.
 - **`ControlServer` is generic over MFi.** `mfi::auth_client::MfiSigner`
   (`crates/vendor/mfi/src/auth_client.rs`) is two methods: `copy_certificate()` and
-  `create_signature(digest)`. `struct LocalMfiSigner` (on-box chip, `ccpa/carplayd/src/main.rs`) implements it
+  `create_signature(digest)`. `struct LocalMfiSigner` (on-box chip, `box/carplayd/src/main.rs`) implements it
   against `/dev/i2c-1`.
 - **`MfiAuthClient` no longer exists** (removed as audit Fix #19 — corrected 2026-09-09, was
   previously described here as dead code worth copying). `crates/vendor/mfi/src/auth_client.rs` now
@@ -348,7 +348,7 @@ value. **Device-proven** — the phone leads with `pair-verify` instead of `pair
 ### Track B — gated on hardware (COMPLETE — see §1–§2 of the runbook)
 
 **B0. Flash a spare CCPA adapter** to the OCBM state (PID 2d00, `ocbmd` + `wireless`;
-`ccpa_custom/tools/ocbm_boot.sh` + `install_fhs.sh`).
+`ccpa_custom/boards/ccpa-imx6ul/rootfs/script/ocbm_boot.sh` + `install_fhs.sh`).
 
 **B1. USB claim + OCBM client.** `UsbManager` claim of `0x1314:0x2d00`, interface 0, bulk endpoints
 discovered by walking the interface (IN `0x81` / OUT `0x01` — device-measured; do not hardcode), no AOA

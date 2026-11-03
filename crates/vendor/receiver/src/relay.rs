@@ -9,7 +9,7 @@
 //! functionally untouched.
 //!
 //! TRANSPORT: carplayd LISTENS here on `127.0.0.1:9106` (9110 = HID, 9112 = mic — both taken) and
-//! ocbmd connects OUT to us, exactly the mic-seam mechanics (`ccpa/ocbmd` `ensure_rtsp_seam`). ocbmd
+//! ocbmd connects OUT to us, exactly the mic-seam mechanics (`box/ocbmd` `ensure_rtsp_seam`). ocbmd
 //! is a dumb byte pipe: it chunks seam bytes into ≤64 KiB OCBM frames both ways, so ALL message
 //! framing here is endpoint-to-endpoint (this file ↔ the host app), which sidesteps OCBM's
 //! MAX_PAYLOAD (64 KiB) < the RTSP MAX_BODY (256 KiB).

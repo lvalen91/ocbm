@@ -649,7 +649,7 @@ pub(crate) fn build_ident_info_excluding_with_policy(
     // CONTENT IS APP-PUSHED since C-1 (docs/carplay/04_CAPABILITIES_AND_CONFIG.md C6). What this block emits comes from `identity`, and
     // the DEFAULT `identity` is `VehicleIdentity::baseline()` — EngineType=Gasoline and nothing else,
     // i.e. byte-for-byte the historical emission when no identity is pushed. iap2d passes the
-    // app-pushed identity (C-3, see `build_ident_info_with` call sites in `ccpa/iap2d/src/main.rs`);
+    // app-pushed identity (C-3, see `build_ident_info_with` call sites in `box/iap2d/src/main.rs`);
     // the tunnel and BT drivers still pass the baseline. `baseline_param20_is_byte_pinned` is the
     // golden fixture guarding the baseline path.
     //

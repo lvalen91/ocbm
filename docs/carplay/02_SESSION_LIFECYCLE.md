@@ -5,7 +5,7 @@
 **Scope.** Chip sizes and chip behaviour quoted here are CCPA-only (MFi 2.0C). OCBM is MFi-version
 agnostic. The C2Air (Allwinner V821B) is a different box whose chip differs (DeviceVersion 0x07,
 64-byte ECDSA signature); OCBM has not been run on the C2Air's new baseline, and an earlier run on a
-stock-firmware-based C2Air image (2026-08-17) is recorded in `c2air/README.md`. This document
+stock-firmware-based C2Air image (2026-08-17) is recorded in `boards/c2air-v821b/README.md`. This document
 describes the CCPA.
 
 **Contents:** the lifecycle model → hardening → real-world comparison → start ordering → the app-driven SETUP relay → session management as it stands. Historical captures and the peer-wipe postmortem are kept at the end as evidence.
@@ -502,7 +502,7 @@ detect ≈ KEEPIDLE + KEEPCNT × KEEPINTVL = 3 + 3×3 = 12 s,  not 3 × 3 = 9 s
 ```
 
 Apple's comment omits the initial idle wait. **Our own implementer independently computed the same ~12 s**
-— `ccpa/carplayd/src/main.rs` (`arm_keepalive`'s doc comment) documents "detected in ~12 s" while citing Apple's
+— `box/carplayd/src/main.rs` (`arm_keepalive`'s doc comment) documents "detected in ~12 s" while citing Apple's
 `SocketSetKeepAlive(sock, kAirPlayDataTimeoutSecs/10, 3)`. Our code is right; the guide's 9 is the outlier.
 
 **`kAirPlayDataTimeoutSecs = 30`** (`AirPlayCommon.h:101`) → `server->timeoutDataSecs`
@@ -658,7 +658,7 @@ Do not confuse `_sessionUpdatesQueue_handleStopUIWithParameters:` (`:92`) with s
 |---|---|
 | `sessionManagementInfo` + `stopSessionReasons` in `/info` response | Present, gated on `CARPLAY_SESSION_MGMT` (`info.rs`, the `sessionManagementInfo` block), reasons `[0,1,2,3,4]`. **But see §5.3 — the message and direction are now in doubt.** |
 | `sessionManagement` echo in SETUP `enabledFeatures` | Present (`session.rs`, `setup_phase2`'s `enabledFeatures` build), verified to be the **same literal lever** `CARPLAY_SESSION_MGMT`, a spawn-scoped var (listed in the `levers.rs` module doc) set by the spawn-env list in `wireless/av.rs` |
-| Inbound `POST /command type="stopSession"` handler | **MISSING — the real gap.** Verified exhaustively across `crates/`, `ccpa/`, ocbmd, carplayd and the macOS app. `session.rs`'s `fn command` branches only on `modesChanged` plus the iAP tunnel; everything else falls through to logging and `empty_plist_dict()`. `relay.rs`'s `RemoteSession::command` is a pass-through to the host. The host's `MetadataWindow.swift` (`.sessionLifecycle` case) categorises `stopSession` as `.sessionLifecycle` **for display only**. |
+| Inbound `POST /command type="stopSession"` handler | **MISSING — the real gap.** Verified exhaustively across `crates/`, `box/`, ocbmd, carplayd and the macOS app. `session.rs`'s `fn command` branches only on `modesChanged` plus the iAP tunnel; everything else falls through to logging and `empty_plist_dict()`. `relay.rs`'s `RemoteSession::command` is a pass-through to the host. The host's `MetadataWindow.swift` (`.sessionLifecycle` case) categorises `stopSession` as `.sessionLifecycle` **for display only**. |
 | `disconnectReason` plumbing to the supervisor | Missing (follows from the above) |
 | ~~`teardownSession`/`teardownCompleted` async handshake~~ | **Row withdrawn** — §5.5: no accessory-side handshake exists |
 | `isRemoteControlOnly` SETUP key | Not handled. Now the most interesting item: it is a real, promotable session type (§5.4), i.e. a *protocol-native* holding pattern where ours is improvised |
@@ -842,7 +842,7 @@ that would carry it is exactly what just died.
   advertised** and SETUP-phase2/RECORD is refused → **no A/V produced**. The iPhone sees a connected head
   unit (not a cold disconnect); CarPlay simply isn't running. This is the correct no-host resting state —
   cheap, and it avoids the expensive re-enumeration/re-pair on the next host arrival.
-- **ARMED.** A host app has SUBSCRIBEd and pushed its config; carplayd's in-process discovery thread advertises `_airplay._tcp` (*CORRECTED 2026-10-19: this was the separate `rx-connect` binary until it was merged into carplayd on 2026-09-08 — `ccpa/carplayd/src/discovery.rs`, `build.sh:57`*);
+- **ARMED.** A host app has SUBSCRIBEd and pushed its config; carplayd's in-process discovery thread advertises `_airplay._tcp` (*CORRECTED 2026-10-19: this was the separate `rx-connect` binary until it was merged into carplayd on 2026-09-08 — `box/carplayd/src/discovery.rs`, `build.sh:57`*);
   carplayd permits the full session.
 - **STREAMING.** iPhone connected, A/V forwarded to the host (encrypted; see `docs/carplay/00_ARCHITECTURE.md`/HANDOFF).
 - **RECOVERING (conceptual; 10 s grace).** *A model, not a coded state* — ocbmd holds no state enum, only
@@ -863,7 +863,7 @@ that would carry it is exactly what just died.
   (accessory still up, head unit still "present"). NOT a cold disconnect. Host reappears later →
   re-advertise → CarPlay relaunches from the warm accessory state.
 
-There is now **one grace**, in `ccpa/ocbmd/src/main.rs`: **`HEARTBEAT_GRACE = 10 s`** covers a host that
+There is now **one grace**, in `box/ocbmd/src/main.rs`: **`HEARTBEAT_GRACE = 10 s`** covers a host that
 stops beating — crash, wedge, App Nap, USB stall. A *clean* `CT_STOP` gets none (changed 2026-09-03):
 a host that closes is telling the box the session is over, so it tears down at once via the same
 `go_idle` routine. The `STOP_GRACE = 5 s` warm-reuse hold this section used to describe is **gone** —
@@ -1113,11 +1113,11 @@ config/pairing changes through quiesce → mutate-at-idle → clean restart.
 - **Observability:** supervisor-written `/tmp/carplay_state` (`phase` + flap counters +
   `health=STUCK reason=…` verdict), uptime-prefixed log lines, a **count-bounded** transition ring (the
   current blind byte-tail truncation discards the flap *onset*), and a `carplay-status` reader.
-- **Supervision floor — SHIPPED (task #28):** `ccpa/rootfs/etc/inittab` now carries
+- **Supervision floor — SHIPPED (task #28):** `boards/ccpa-imx6ul/rootfs/etc/inittab` now carries
   `::respawn:/script/run_ocbmd.sh` and `::respawn:/script/run_supervisor.sh` alongside the UART console,
   and the supervisor health-checks `carplayd` + `rx-connect` + `iap2d`, not just carplayd *(2026-10-19: rx-connect is now a carplayd thread, so its death is carplayd's death — see the `build.sh` comment on the merge)*.
   **CORRECTED 2026-08-16 — the drifted-copy item is CLOSED, and the drift now runs the other way.** BOTH
-  `ccpa/rootfs/script/ocbm_boot.sh` and `tools/ocbm_boot.sh` launch the supervisor from the identical
+  `boards/ccpa-imx6ul/rootfs/script/ocbm_boot.sh` and `tools/ocbm_boot.sh` (deleted 2026-11-02 as a stale duplicate) launch the supervisor from the identical
   line 31 (`[ -x /script/session_supervisor.sh ] && setsid /script/session_supervisor.sh …`), and have
   done so as far back as this repo's git history reaches (2026-07-25), so whether the rootfs copy ever
   lacked it is no longer verifiable — treat the item as fixed, not as wrong. Today the rootfs copy is the
@@ -1739,7 +1739,7 @@ gone, non-200 — falls back to the in-hand local response, so the phone never s
 error.
 
 **Status: default ON, both transports.** Wired flipped 2026-08-09 (`ba1df2a`), wireless 2026-08-10.
-Selection gate: `levers::appsetup() && relay::seam_up()` (`ccpa/carplayd/src/main.rs`,
+Selection gate: `levers::appsetup() && relay::seam_up()` (`box/carplayd/src/main.rs`,
 `SessionDelegate`). Box-driven `AvSession` remains the selectable sticky fallback. `wireless` survives
 only as an argument to `RemoteSession::new` and as RS_OPEN flags bit 0.
 

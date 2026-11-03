@@ -4,7 +4,7 @@
 # 0x11 (board.env MFI_I2C_BUS / MFI_I2C_ADDR: the &i2c2 controller on the UART5 pads). It reads two
 # registers whose meaning this project has proven on the chip, with the same access the project's
 # daemons use (crates/vendor/mfi-i2c-local/src/lib.rs i2c_rd: one transaction, register-address write +
-# repeated-start read, 5 tries 5 ms apart; ccpa/carplayd/src/main.rs device_version):
+# repeated-start read, 5 tries 5 ms apart; box/carplayd/src/main.rs device_version):
 #   0x00  DeviceVersion, 1 byte (0x03 on the IW416 unit)
 #   0x30  accessory certificate length, 2 bytes big-endian
 # The register-address byte is a pointer write, not a register write; no control register (0x10) is

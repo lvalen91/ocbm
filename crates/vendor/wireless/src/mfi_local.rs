@@ -1,11 +1,11 @@
-//! mfi_local.rs — MFi 2.0C authentication over the box's LOCAL I2C chip (`/dev/i2c-1 @0x11`).
+//! mfi_local.rs — MFi authentication (2.0C on the CCPA) over the box's LOCAL I2C chip (`/dev/i2c-1 @0x11`).
 //!
 //! The ported `bt_driver` originally called `carplay_iap2_core::mfi`, which is an auth-service TCP client
 //! (`192.168.50.2:5290`) — the PoC's way of borrowing a *remote* CCPA's MFi chip because the Pi had
-//! none. On a CCPA the genuine MFi 2.0C coprocessor sits on `/dev/i2c-1 @0x11` and is
-//! driven directly, exactly as the wired `iap2d` daemon does (`ccpa/iap2d/src/main.rs`). (A host without
+//! none. On a CCPA the genuine MFi coprocessor (a 2.0C) sits on `/dev/i2c-1 @0x11` and is
+//! driven directly, exactly as the wired `iap2d` daemon does (`box/iap2d/src/main.rs`). (A host without
 //! a chip of its own, such as the Pi 4 / AAOS port, sets `CARPLAY_MFI_ADDR` and reaches a CCPA's chip
-//! through `ccpa/mfid` instead; see `REMOTE_ADDR_ENV` below and `crates/mfi-wire`.) This module
+//! through `box/mfid` instead; see `REMOTE_ADDR_ENV` below and `crates/mfi-wire`.) This module
 //! is that same proven direct-I2C cert-copy + challenge-sign, exposing `cert()`/`sign()` with the
 //! same signatures the auth-service module had, so `bt_driver` swaps backends with a two-line change.
 //!
@@ -73,7 +73,7 @@ impl MfiLock {
         if fd < 0 {
             return None;
         }
-        // BOUNDED acquire (LOCK_NB + deadline), matching `ccpa/carplayd/src/main.rs`'s `MfiLock` and
+        // BOUNDED acquire (LOCK_NB + deadline), matching `box/carplayd/src/main.rs`'s `MfiLock` and
         // `mfi-i2c-local`'s: a wedged holder must not block this caller forever. The legitimate worst
         // case is the sign path's ~2.1s poll x 3 retries ~= 6.3s, so 10s is a real ceiling.
         const DEADLINE: Duration = Duration::from_secs(10);
@@ -335,7 +335,7 @@ pub fn sign(chal: &[u8]) -> Option<Vec<u8>> {
     while poll_start.elapsed() < SIGN_POLL_DEADLINE {
         let mut st = [0u8; 1];
         // Poll control-register 0x10 bit 4 = "signature ready" — byte-identical to the DEVICE-VERIFIED
-        // wired iap2d path (ccpa/iap2d/src/main.rs:120). QC #124 flagged this as accepting non-ready
+        // wired iap2d path (box/iap2d/src/main.rs:120). QC #124 flagged this as accepting non-ready
         // codes, but a stricter predicate would DIVERGE from the proven reference with no MFi-2.0C
         // register spec to ground it, risking a regression to working auth. The result is instead
         // validated downstream: a spurious "ready" yields a bogus 0x11 length that the `n == 0 || n >

@@ -37,7 +37,7 @@ for the session, as stock does. Known nits, harmless so far: our field-less `Wif
 after unexpected start request").
 
 
-Decision, 2026-09-01 (corrected in place 2026-09-01 after step 1 landed): **`ccpa/aa-wireless` is a
+Decision, 2026-09-01 (corrected in place 2026-09-01 after step 1 landed): **`box/aa-wireless` is a
 LIBRARY, not a daemon** — it has no `main.rs` and no `[[bin]]`, and is served by the existing
 `btd` daemon. It could not be its own process: `sdp_server` binds L2CAP PSM 1 with no
 `SO_REUSEADDR`, so a second SDP-serving daemon gets `EADDRINUSE` and is never advertised (§6b).
@@ -46,7 +46,7 @@ LIBRARY, not a daemon** — it has no `main.rs` and no `[[bin]]`, and is served 
 
 | Piece | Where | State |
 |---|---|---|
-| Bootstrap framing + the seven messages | `ccpa/aa-wireless/src/proto.rs`, `wpp.rs` | **built, 30 unit tests** |
+| Bootstrap framing + the seven messages | `box/aa-wireless/src/proto.rs`, `wpp.rs` | **built, 30 unit tests** |
 | Bootstrap state machine | `wpp::Bootstrap` | **built**, transport-free and host-testable |
 | `ProjectionOwner::WirelessAa` (`"wireless-aa"` → `PM_WIRELESS_AA`) | `crates/box-common/src/flags.rs` | **built** |
 | Owner claim / stand-down | `aa-wireless/src/lib.rs` (`claim_owner`/`release_owner_if_ours`), called from `crates/vendor/wireless/src/main.rs` | **built** |
@@ -54,7 +54,7 @@ LIBRARY, not a daemon** — it has no `main.rs` and no `[[bin]]`, and is served 
 | AA SDP record + RFCOMM accept (channel 4) | `crates/bt-common/src/sdp_server.rs`, `crates/vendor/wireless/src/main.rs` | **built** (steps 3-4 below) — and §2f confirms this IS the direction: the phone dials us |
 | Headset gate: HFP-HF + HSP-HS records, AG search, AT SLC client | `crates/bt-common/src/sdp_record.rs` (`HandsFreeRecord`/`HeadsetRecord`), `sdp_server.rs`, `crates/vendor/wireless/src/hfp_hf.rs`, `sdp_client.rs`, `reconnect.rs` (`attempt_headset`) | **built 2026-09-04**, 30 host tests; the precondition the phone waits on (§6b, §6d) |
 | AP bring-up | `radio_ap_up.sh` / `wifi_handoff::read_hostapd_ap_config` | **built** (reused from CarPlay; 5 GHz AP in the §1 baseline) |
-| OCBM `CH_IP` pump | `ccpa/aa-bridge/src/wireless.rs` + `pump.rs` + `appport.rs`, armed by `aa-bridge --wireless` | **built 2026-09-04**, 13 host tests; see §6c |
+| OCBM `CH_IP` pump | `box/aa-bridge/src/wireless.rs` + `pump.rs` + `appport.rs`, armed by `aa-bridge --wireless` | **built 2026-09-04**, 13 host tests; see §6c |
 
 There are no `--selftest` / `--listen` flags: those belonged to the standalone binary that step 1
 removed. `run_bootstrap` takes any `Read + Write`, so the codec, the sequence and the whole bootstrap
@@ -810,7 +810,7 @@ redacted above; it is still in this file's git history.)
 The half §2f leaves after the phone associates: something has to answer the endpoint the bootstrap
 advertised. It is `aa-bridge`, given a second arm.
 
-**Where.** `ccpa/aa-bridge/src/wireless.rs` (listener, owner policy, TCP<->TCP session),
+**Where.** `box/aa-bridge/src/wireless.rs` (listener, owner policy, TCP<->TCP session),
 `pump.rs` (the copy loop and the claim decision — pure, host-tested), `appport.rs` (the single
 acceptor for the app side). `main.rs` gained a `--wireless` flag and the resident loop; the AOAP
 code in it is unchanged. `tools/session_supervisor.sh` gained `arm_aa_wireless` (called from

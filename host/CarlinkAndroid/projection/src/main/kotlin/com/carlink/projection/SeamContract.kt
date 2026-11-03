@@ -12,7 +12,7 @@ package com.carlink.projection
  * The A/V ports are **listened on by us**: `airplayd`'s `forward_screen` / `forward_to_sink` call
  * `TcpStream::connect_timeout(127.0.0.1:<port>)` and retry forever, so if nothing is listening the
  * frames are simply dropped and the session looks healthy from the phone's side. That is exactly the
- * state `pi/docs/00_PI_AAOS_PORT.md` describes as "session established and streaming, nothing on
+ * state `docs/boards/00_PI_AAOS_PORT.md` describes as "session established and streaming, nothing on
  * screen": every layer below worked and no process had ever bound :9001.
  *
  * The input port is the other way round — `airplayd` listens on :9110 and we connect.

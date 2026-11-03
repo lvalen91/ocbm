@@ -1267,7 +1267,7 @@ class CarlinkManager(
      * as part of the forget, which drops a live wireless session). An UNBONDED record — one the app
      * remembers but the box holds no link key for — is a LOCAL history delete only: the box has
      * nothing to forget, and its FORGET_DEVICE handler unconditionally restarts wireless
-     * (`ccpa/ocbmd/src/main.rs`, the `MGMT_FORGET_DEVICE` arm), so sending it would bounce the
+     * (`box/ocbmd/src/main.rs`, the `MGMT_FORGET_DEVICE` arm), so sending it would bounce the
      * radios for nothing.
      */
     fun forgetDevice(btMac: String) {

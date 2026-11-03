@@ -24,7 +24,7 @@
 //! # Backend selection
 //!
 //! Chosen by `BT_HCI_BACKEND`:
-//!   * `hciconfig` (**default**) — the original shell-out. Keeps the proven CCPA path byte-for-byte.
+//!   * `hciconfig` (**default**) — the original shell-out. Keeps the proven vendor-kernel path byte-for-byte.
 //!   * `native` — this module. What the Raspberry Pi port uses.
 //!
 //! Defaulting to the old behaviour is deliberate: the CCPA path is device-proven and this module has

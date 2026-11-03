@@ -3,7 +3,7 @@
 //!   ocbm-host hello   [vid pid]                  handshake (HELLO -> HELLO_ACK)
 //!   ocbm-host echo    [vid pid] [secs] [xfer]    ECHO round-trip throughput
 //!   ocbm-host rtt     [vid pid] [secs]           ECHO round-trip LATENCY percentiles (per payload size)
-//!   ocbm-host mfi     [vid pid]                  genuine MFi 2.0C cert + signature
+//!   ocbm-host mfi     [vid pid]                  genuine MFi cert + signature
 //!   ocbm-host console [vid pid]                  MODE_SELECT CONSOLE -> root-shell bridge
 //!   ocbm-host settime [vid pid]                  push host wall clock -> box (no RTC battery)
 //!   ocbm-host ncm     [vid pid]                  CH_MGMT ENTER_NCM -> box reboots into USB-NCM maintenance
@@ -145,7 +145,7 @@ fn open(vid: u16, pid: u16) -> Link {
 }
 
 /// This process's HOST INSTANCE NONCE — `CT_HELLO` bytes 2..6 (`ocbm_proto::CT_HELLO`,
-/// docs/carplay/01_OCBM_PROTOCOL.md). The box compares it across reattaches to tell a relaunched
+/// docs/ocbm/00_PROTOCOL.md). The box compares it across reattaches to tell a relaunched
 /// host from the same host reconnecting, so it must be stable for the life of the process and
 /// differ between runs; 0 means "not supplied", hence the `max(1)`. It is NOT a capability word —
 /// there is no host->box capability field, and sending one here (this used to send `0x13`) made

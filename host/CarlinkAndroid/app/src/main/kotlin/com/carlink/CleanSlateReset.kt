@@ -11,7 +11,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Order, and why each step is where it is:
  *
  *  1. [Steps.stopSession] — `CT_STOP`, close the OCBM client, release the USB interface. The box
- *     answers CT_STOP with an IMMEDIATE `go_idle` (`ccpa/ocbmd/src/main.rs`, `fn go_idle`): it
+ *     answers CT_STOP with an IMMEDIATE `go_idle` (`box/ocbmd/src/main.rs`, `fn go_idle`): it
  *     drops `present` + `subscribed` and writes `/tmp/host_present=0`. Nothing more reaches the
  *     host after that — every box→host mirror (`proj_mode_tick`, `phone_tick`, `bt_phase_tick`)
  *     is gated on `subscribed`, and the transport is closed anyway. So there is NO box-reported
@@ -26,7 +26,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  *    consumed up to 1 s after CT_STOP.
  *  - On that edge it runs `wireless_down` (`:1201-1203` → `:1014`): a DETACHED `setsid` block —
  *    SIGTERM btd, `sleep 1` (`:1092`), SIGKILL, then `radio_hal.sh wifi_ap_off` (bounded by a
- *    25 × 0.2 s = 5 s hostapd-exit wait, `ccpa/rootfs/script/radio_hal.sh:470`) and `bt_off`.
+ *    25 × 0.2 s = 5 s hostapd-exit wait, `boards/ccpa-imx6ul/rootfs/script/radio_hal.sh:470`) and `bt_off`.
  *  - Then `teardown` (`:1386` → `:479`) → `kill_session` (`:291`): SIGTERM carplayd, `sleep 1`
  *    (`:302`), SIGKILL (`:303`), `release_carplay_owner` (`:304`). Synchronous inside the tick, so
  *    projection is released ≤ 2 s after CT_STOP.

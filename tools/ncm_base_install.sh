@@ -132,7 +132,7 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OVERLAY="$REPO/ccpa/rootfs"
+OVERLAY="$REPO/boards/ccpa-imx6ul/rootfs"
 BOXSH="$REPO/tools/boxsh.py"
 
 BOX="192.168.50.2"

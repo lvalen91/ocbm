@@ -13,7 +13,7 @@
 #   2. rsync --delete keeps the mirror free of stale files (the 66-document consolidation was not
 #      reflected in the mirror until deletions were synced). rsync protects excluded paths from
 #      --delete, so anything excluded that already sits in the mirror is removed explicitly below.
-#   3. Four files are deliberately KEPT PUBLISHED although they are no longer tracked here
+#   3. Three files are deliberately KEPT PUBLISHED although they are no longer tracked here
 #      (owner decision 2026-10-28): the baseline rootfs images under ccpa/backup/base/. They embed
 #      device credentials and are already public in the mirror's history; they are protected from
 #      --delete and are not added, changed or removed by this script.

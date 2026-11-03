@@ -97,6 +97,8 @@ class MainActivity : Activity() {
         // the only key that attributes this process's ~250 framework lines per session (CCodec,
         // MediaCodec, BufferQueueProducer, …) in a whole-OS capture. See ProbeLog.identity.
         ProbeLog.identity(this)
+        // Once per process: is the app the default assistant (steering-wheel Voice -> Siri)?
+        zeno.gmccpa.assist.Assistant.logStatusOnce(applicationContext, "launcher")
         // Capture was only ever started from BootReceiver, the USB trampoline and the scope menu —
         // never from here, so a launcher start recorded nothing at all and the drive-ready process
         // had no logcap-pump thread. start() is idempotent and self-reaping, so calling it on every

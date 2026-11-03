@@ -148,6 +148,11 @@ F=$W/flash
 rm -rf "$F"
 mkdir -p "$F/sys" "$F/dev" "$F/lib" "$F/etc" "$F/run"
 . "$HERE/arm-imx6ul/board.env"
+# board.env's MFI_SOURCE is declarative metadata (nothing reads it at runtime); this only catches a typo.
+case "${MFI_SOURCE:-}" in
+    local-i2c|remote-mfid|host-provided|none) pass "board.env MFI_SOURCE is a known value (${MFI_SOURCE})" ;;
+    *) fail "board.env MFI_SOURCE is a known value" "got '${MFI_SOURCE:-}'" ;;
+esac
 # The helpers source fixed paths on the unit; the copies here point them into $F.
 for f in flash-kernel flash-rootfs flash-lib.sh; do
     sed -e "s|/lib/baseline/|$F/lib/|g" -e "s|/etc/baseline/|$F/etc/|g" -e "s|/run/flash-|$F/run/flash-|g" \

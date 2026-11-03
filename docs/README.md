@@ -1,5 +1,9 @@
 # Documentation map
 
+> **Roles and boards:** the three roles (replacement-firmware box, CCPA as peripheral, host apps) and the
+> board matrix are in [../README.md](../README.md#roles-and-boards). CCPA is the Carlinkit CPC200-CCPA family only;
+> C2Air is a separate box and the Pi ports are not CCPA variants.
+
 **One topic, one file. Correct it in place.** Adding a new dated document instead of fixing the
 owning one is what produced the 66-file corpus this replaced (consolidated 2026-08-31); the
 originals live in git history and in the `ccpa_custom_2026-08-31` backup.
@@ -19,7 +23,6 @@ Rules that keep it that way:
 | File | Owns |
 |---|---|
 | [00_ARCHITECTURE.md](carplay/00_ARCHITECTURE.md) | vision, the box/host split, USB/NCM transport |
-| [01_OCBM_PROTOCOL.md](carplay/01_OCBM_PROTOCOL.md) | the OCBM envelope, channel ids, seam framing, backpressure — **projection-agnostic**: it carries Android Auto too |
 | [02_SESSION_LIFECYCLE.md](carplay/02_SESSION_LIFECYCLE.md) | session states, start ordering, the app-driven SETUP relay, teardown |
 | [03_SDK_GROUND_TRUTH.md](carplay/03_SDK_GROUND_TRUTH.md) | what Apple's licensed SDK says; conformance and Simulator verification |
 | [04_CAPABILITIES_AND_CONFIG.md](carplay/04_CAPABILITIES_AND_CONFIG.md) | app-driven doctrine, the YAML VehicleConfig framework, field glossary, capability dossiers |
@@ -65,10 +68,26 @@ Rules that keep it that way:
 | [08_FUTURE_TASKS.md](ops/08_FUTURE_TASKS.md) | owner-directed planned work that is not a defect (settings redesign, AA metadata services, mSBC) |
 | ops/captures/ | raw session captures kept as evidence |
 
+## ocbm/ — the OCBM protocol and roles
+
+| File | Owns |
+|---|---|
+| [00_PROTOCOL.md](ocbm/00_PROTOCOL.md) | the OCBM envelope, channel ids, seam framing, backpressure — **projection-agnostic**: it carries Android Auto too (moved from `carplay/01_OCBM_PROTOCOL.md` on 2026-11-02) |
+| [01_ROLES_AND_MFI_SOURCE.md](ocbm/01_ROLES_AND_MFI_SOURCE.md) | the three roles, the boards, the MFi-source model (MFi 2.0 through 3.0) |
+
+## boards/ — board ports outside the CCPA
+
+| File | Owns |
+|---|---|
+| [00_PI_AAOS_PORT.md](boards/00_PI_AAOS_PORT.md) | Raspberry Pi 4 + AAOS port (moved from `pi/docs/` on 2026-11-02) |
+| [01_PROJECTION_APP_DESIGN.md](boards/01_PROJECTION_APP_DESIGN.md) | the AAOS projection app design |
+| [03_BRINGUP_RUNBOOK.md](boards/03_BRINGUP_RUNBOOK.md) | cold bring-up of the Pi (historical record) |
+| [04_IMAGE_REBUILD_GUIDE.md](boards/04_IMAGE_REBUILD_GUIDE.md) | what to change in the AOSP tree, by component |
+
 ## Where the old numbers went
 
 `docs/56` → carplay/04 · `docs/45`, `docs/47`, `docs/20_METADATA` → carplay/05 · `docs/13`,
 `docs/43`, `docs/49` → carplay/03 · `docs/27`, `docs/62`, `docs/23`, `docs/52` → carplay/06 ·
 `docs/20_WIRELESS`, `docs/29–39` → wireless/00 · `docs/40`, `docs/41`, `docs/51`, `docs/57` →
 wireless/01 · `docs/60` → androidauto/00+01, `docs/61` → androidauto/02 (both moved out of host/02 on 2026-08-31 when Android Auto got its own category) · `docs/25`, `docs/48`, `docs/50` → ops/05 ·
-`REVISIONS.md` → ops/06. Full map: the `<!-- absorbed: … -->` marker at the head of every section.
+`REVISIONS.md` → ops/06. The former `proto/` stub README (a pointer) was removed on 2026-11-02; the canonical codec is `crates/ocbm-proto`. Full map: the `<!-- absorbed: … -->` marker at the head of every section.

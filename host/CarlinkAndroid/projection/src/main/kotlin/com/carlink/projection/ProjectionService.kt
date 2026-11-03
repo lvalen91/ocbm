@@ -27,7 +27,7 @@ import kotlinx.coroutines.launch
  *
  * ## Why the session lives here and not in the Activity
  *
- * This is the single most important structural decision in the app, and `pi/docs/01` §7.1 argues it
+ * This is the single most important structural decision in the app, and `docs/boards/01_PROJECTION_APP_DESIGN.md` §7.1 argues it
  * from the OEM references: GM's `GMCarPlay` is a *service* holding `MANAGE_ACTIVITY_TASKS`, and
  * "return to CarPlay" is `moveTaskToFront` on an existing task — never a relaunch.
  *

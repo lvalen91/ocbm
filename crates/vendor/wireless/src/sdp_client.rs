@@ -58,7 +58,7 @@ struct SockaddrL2 {
     l2_bdaddr_type: u8,
 }
 
-/// `@<unix_ms> ` write-time stamp (docs/carplay/01_OCBM_PROTOCOL.md CH_LOG): the box.log tailer
+/// `@<unix_ms> ` write-time stamp (docs/ocbm/00_PROTOCOL.md CH_LOG): the box.log tailer
 /// parses this prefix and uses it instead of the millisecond it happened to READ the line at.
 fn log(m: &str) {
     println!("@{} [sdp-client] {m}", now_ms());

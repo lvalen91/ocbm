@@ -330,7 +330,7 @@ fn clear_pairing_code() {
     let _ = std::fs::remove_file(PAIRING_CODE_FLAG);
 }
 
-/// `@<unix_ms> ` write-time stamp (docs/carplay/01_OCBM_PROTOCOL.md CH_LOG): the box.log tailer
+/// `@<unix_ms> ` write-time stamp (docs/ocbm/00_PROTOCOL.md CH_LOG): the box.log tailer
 /// parses this prefix and uses it instead of the millisecond it happened to READ the line at.
 fn log(m: &str) {
     println!("@{} [ssp-agent] {m}", now_ms());
@@ -775,7 +775,7 @@ pub fn run(
             log("numeric confirms: our side is confirmed immediately; the user compares and confirms on the phone");
         }
     } else {
-        log("pairing mode: Just-Works (NoInputNoOutput) — no code (proven CCPA default)");
+        log("pairing mode: Just-Works (NoInputNoOutput) — no code (proven vendor-kernel default)");
     }
     log("pairing agent running");
     let mut confirm_tracker = ConfirmTracker::new();

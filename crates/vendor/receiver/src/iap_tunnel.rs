@@ -47,7 +47,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-/// `@<unix_ms> ` write-time stamp (docs/carplay/01_OCBM_PROTOCOL.md CH_LOG): the box.log tailer
+/// `@<unix_ms> ` write-time stamp (docs/ocbm/00_PROTOCOL.md CH_LOG): the box.log tailer
 /// parses this prefix and uses it instead of the millisecond it happened to READ the line at.
 fn log(m: &str) {
     println!("@{} [iap-tunnel] {m}", now_ms());
@@ -420,7 +420,7 @@ fn handle_established(sess: &mut Session, data: &[u8]) {
 
     if rx.sess == 2 {
         // File Transfer session — album artwork (docs/20 §1.2). Ported verbatim in behaviour from the
-        // wired `iap2d` path (`ccpa/iap2d/src/main.rs:357-371`), which is the proven implementation.
+        // wired `iap2d` path (`box/iap2d/src/main.rs:357-371`), which is the proven implementation.
         //
         // The trailing payload-checksum byte MUST be stripped here. Control messages self-bound via
         // their `[40 40][total]` header so the extra byte is inert for them — a raw file-transfer

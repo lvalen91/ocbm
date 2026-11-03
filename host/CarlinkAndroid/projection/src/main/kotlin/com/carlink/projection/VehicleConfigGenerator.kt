@@ -28,7 +28,7 @@ import java.io.File
  *
  * The config must be written **before anything arms**. Arming is first-arm-wins per process:
  * `airplayd` is spawned per session so it picks up a regenerated config on the next session, but a
- * long-lived process will not. Hence the boot sequence in `pi/docs/01_PROJECTION_APP_DESIGN.md` §5.1
+ * long-lived process will not. Hence the boot sequence in `docs/boards/01_PROJECTION_APP_DESIGN.md` §5.1
  * — detect display, generate config, *then* bring up BT + Wi-Fi.
  *
  * ## What is deliberately not emitted

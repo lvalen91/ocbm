@@ -9,7 +9,7 @@
 
 /// The gateway address the box's own SoftAP serves on the WLAN interface.
 ///
-/// Field-confirmed three ways: `ccpa/rootfs/script/start_bluetooth_wifi.sh` (`WLANIP`), the AirPlay
+/// Field-confirmed three ways: `boards/ccpa-imx6ul/rootfs/script/start_bluetooth_wifi.sh` (`WLANIP`), the AirPlay
 /// receiver bind in `crates/vendor/wireless/src/av.rs`, and the stock CCPA's own working wireless
 /// Android Auto capture (`ip: 192.168.43.1`). NOT `192.168.4.1`, which an earlier cut used.
 ///

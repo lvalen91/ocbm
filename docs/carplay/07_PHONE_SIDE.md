@@ -67,12 +67,12 @@ once Identified, `projection_up.sh` is idempotent and re-SUBSCRIBEs re-arm witho
 Reuses carplayd's transport-agnostic `carplay-iap2-core` (link framing + auth/identify state machine
 + TLV builders + spec, all from Apple's CarPlaySimulator.devicekitplugin). Only the transport differs
 from carplayd: a single `/dev/android_iap2` fd instead of FunctionFS ep1/ep2, and `host_configured()`
-reads `android_usb` state. **MFi auth is done on the LOCAL i2c chip** (`/dev/i2c-1 @0x11`) — `iap2d` drives the chip directly (`ccpa/iap2d/src/main.rs`: `G_I2C`, `i2c_rd`, `mfi_cert`, `mfi_sign`).
-*(corrected 2026-10-19: this sentence cited a carplayd `mfi.rs` NCM bridge at <ADAPTER_IP>:5290 as "deliberately not used". No `mfi.rs` exists in the tree — the dead TCP client to the stock `ncm_carplayd` auth service was removed as audit Fix #19 (CLAUDE.md, "Authorization & scope"); carplayd now signs through `LocalMfiSigner` in `ccpa/carplayd/src/main.rs` — on the CCPA that is the local chip; only when `CARPLAY_MFI_ADDR` is set (Raspberry Pi / AAOS port, `mfi_wire::client::addr` in `crates/mfi-wire/src/lib.rs`, dispatch in `LocalMfiSigner`) does it go to the opt-in `ccpa/mfid` TCP oracle, which is not the removed `mfi.rs` client. The stale `mfi.rs` mention also survives in a code comment in the `ccpa/iap2d/src/main.rs` module doc, not edited here.)*
+reads `android_usb` state. **MFi auth is done on the LOCAL i2c chip** (`/dev/i2c-1 @0x11`) — `iap2d` drives the chip directly (`box/iap2d/src/main.rs`: `G_I2C`, `i2c_rd`, `mfi_cert`, `mfi_sign`).
+*(corrected 2026-10-19: this sentence cited a carplayd `mfi.rs` NCM bridge at <ADAPTER_IP>:5290 as "deliberately not used". No `mfi.rs` exists in the tree — the dead TCP client to the stock `ncm_carplayd` auth service was removed as audit Fix #19 (CLAUDE.md, "Authorization & scope"); carplayd now signs through `LocalMfiSigner` in `box/carplayd/src/main.rs` — on the CCPA that is the local chip; only when `CARPLAY_MFI_ADDR` is set (Raspberry Pi / AAOS port, `mfi_wire::client::addr` in `crates/mfi-wire/src/lib.rs`, dispatch in `LocalMfiSigner`) does it go to the opt-in `box/mfid` TCP oracle, which is not the removed `mfi.rs` client. The stale `mfi.rs` mention also survives in a code comment in the `box/iap2d/src/main.rs` module doc, not edited here.)*
 
 > **⚠️ UPDATED 2026-08-16 — "this setup has no NCM" no longer holds repo-wide.** It still holds for
 > THIS wired CCPA path: `iap2d` drives the local chip and speaks no NCM. But the repo now also carries
-> an opt-in MFi-over-NCM bridge (`ccpa/mfid` + `crates/mfi-wire`, gated on `CARPLAY_MFI_ADDR`) for the
+> an opt-in MFi-over-NCM bridge (`box/mfid` + `crates/mfi-wire`, gated on `CARPLAY_MFI_ADDR`) for the
 > Pi / NCM bring-up boxes; with that variable unset — the CCPA's own case — the local i2c path is
 > byte-for-byte unchanged. Full reasoning: [../ops/06_CORRECTIONS_LEDGER.md](../ops/06_CORRECTIONS_LEDGER.md) `R-07-1`.
 

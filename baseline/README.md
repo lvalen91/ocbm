@@ -264,7 +264,7 @@ One file, read by `common/shared/net-up` in both the recovery initramfs and the 
   compatibility with the existing host apps and shared tooling. The clean alternative is a
   pid.codes allocation under VID 0x1209; with the single `usb-ids.conf` that is a one-file change.
 - Consequence of 0x1314:0x1520: apps that speak the Carlinkit protocol match it (carlink_native filters
-  0x1520/0x1521, `ccpa/rootfs/script/ocbm_boot.sh:44-47`; the macOS app lists 0x1520 as legacy,
+  0x1520/0x1521, `boards/ccpa-imx6ul/rootfs/script/ocbm_boot.sh:44-47`; the macOS app lists 0x1520 as legacy,
   `USBDeviceManager.swift:53-55`). The stock NCM CFW had the same identity; how those apps behave
   against a pure NCM gadget is UNVERIFIED. `riddle_default.conf` lists USBPID 1521
   (`CPC200-CCPA_resources/custom/docs/README.md:366-367`); that is the vendor's default config, not
@@ -380,7 +380,7 @@ UNTESTED, not built).
   modular builds rcS first loads the storage stack (`usb-mount --modules`).
 - **LEDs** (§2.7): `led [red|blue on|off|blink|heartbeat]`.
 - **MFi coprocessor**: `mfi-probe` (read-only): DeviceVersion (reg 0x00, 1 B; 0x03 on the IW416 unit
-  per `ccpa/carplayd/src/main.rs`) and the certificate length (reg 0x30, 2 B BE), with the access the
+  per `box/carplayd/src/main.rs`) and the certificate length (reg 0x30, 2 B BE), with the access the
   project's daemons use (register write + repeated-start read, 5 tries 5 ms apart,
   `crates/vendor/mfi-i2c-local/src/lib.rs`) under `/tmp/carplay_mfi.lock`. No control register, no
   challenge, no signing. The lock step polls `flock -n` up to ~10 s (BusyBox has no `flock -w`): in the
@@ -527,7 +527,7 @@ there is no wireless interface or HCI device.
 
 ### 2.8 OCBM mode (revision 6, 2026-10-30; relay host → device fix in revision 7; the boot default since revision 8): `usb-mode`
 
-**What ocbmd needs and what the kernel has.** `ccpa/ocbmd` (`ACC_DEV`, `main.rs`) opens ONE read-write node,
+**What ocbmd needs and what the kernel has.** `box/ocbmd` (`ACC_DEV`, `main.rs`) opens ONE read-write node,
 `/dev/usb_accessory`, sets it `O_NONBLOCK`, polls it for `POLLIN`/`POLLOUT` on its single-threaded loop, and
 exits for respawn on `EOF`/`EIO`/`POLLHUP` ("USB transport gone"). On the stock firmware that node is the
 Android accessory gadget function (`g_android_accessory`); mainline has no such function. The only mainline way
@@ -557,7 +557,7 @@ path; a FIFO is one-way; a CUSE device would need FUSE in the kernel and a FUSE 
 reassembler, fed from arbitrary read sizes by ocbmd `main.rs` and `host/ocbm-host` alike), so the pty's
 re-chunking is harmless. What the hosts DO depend on is that every device → host transfer **ends in a short
 packet**: `ocbm-host` reads 16,384 B with a 100 ms timeout and drops a transfer that times out, and the stock
-firmware had to set `accZLP=Y` for the same reason (`ccpa/rootfs/script/ocbm_boot.sh`). FunctionFS adds no ZLP
+firmware had to set `accZLP=Y` for the same reason (`boards/ccpa-imx6ul/rootfs/script/ocbm_boot.sh`). FunctionFS adds no ZLP
 on its own (`f_fs.c` sets `req->zero` only on ep0), so the relay writes **a zero-length request after any
 transfer whose length is a multiple of wMaxPacketSize** (read per `ENABLE` through
 `FUNCTIONFS_ENDPOINT_DESC`, 512 at high speed) when no more bytes are already waiting (a 16,384-B chunk
@@ -722,6 +722,8 @@ baseline/
   arm-imx6ul/              CCPA only
     board.env              toolchain prefix, flash facts (0x302fd8/0x303080 note), chip-ID source, UDC
                            match, LEDs, MFi bus/address, radio MMC host
+                           + declarative OCBM_ROLES / MFI_SOURCE / MFI_CHIP / TARGET_TRIPLE (2026-11-02; metadata,
+                           nothing reads them at runtime; selftest.sh only checks MFI_SOURCE)
     kernel/*.fragment      base (strict), base-optional (warn), radio-modules, usb-host,
                            usb-vfat-builtin, exfat-builtin
     dts/                   imx6ull-ccpa-baseline.dts, imx6ull-ccpa-usbhost.dtsi, radio-*.dtsi,
@@ -871,6 +873,8 @@ superseded by revision 7. Revision 7 (2026-10-30): `…/20261030/rev7/` (`rootfs
 images `ocbm-overlay-full-20261030T2119Z.img` (on the unit) and `ocbm-overlay-minimal-20261030T2013Z.img` (+ `.sha256`), `logs/`:
 `build8-rootfs.log`, `selftest8b.log`, `selftest8c.log`, `hostapd.log`, `qemu-rootfs8.log`); on the unit (§7.0e). Overlay
 images are rebuilt by `tools/ocbm_overlay.sh` into `~/.cache/carlink-artifacts/ocbm-overlay/`.
+
+> **Paths as of 2026-11-02:** `ccpa/rootfs` is now `boards/ccpa-imx6ul/rootfs`; `ccpa/overlay` is `boards/ccpa-imx6ul/overlay`; `ccpa/<daemon>` (ocbmd, iap2d, carplayd, mfid, aa-bridge, aa-wireless) is `box/<daemon>`; `accessory_init/` is `boards/ccpa-imx6ul/tools/`. The records below (§7.0c-§7.0f) keep the paths they were written with.
 
 ### 7.0f OCBM overlay `20261031T0111Z` (2026-10-30): wireless liveness; overlay-only; FLASHED and VERIFIED on the IW416 unit
 

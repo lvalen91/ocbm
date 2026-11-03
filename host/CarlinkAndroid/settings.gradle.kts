@@ -20,9 +20,9 @@ dependencyResolutionManagement {
 rootProject.name = "carlink-android-ocbm"
 include(":app")
 
-// The Raspberry Pi / AAOS projection system app (pi/docs/01_PROJECTION_APP_DESIGN.md).
+// The Raspberry Pi / AAOS projection system app (docs/boards/01_PROJECTION_APP_DESIGN.md).
 //
-// It lives in THIS Gradle build rather than under `pi/` as a standalone project for one reason:
+// It lives in THIS Gradle build rather than under `boards/rpi4-aaos/` as a standalone project for one reason:
 // it shares the forward-encrypted A/V seam and the decoders with :app by source directory, so
 // there is exactly ONE copy of SeamCrypto/VideoSeam/AudioSeam/HevcRenderer/AacPlayer. Those files
 // carry byte-exact framing and ChaCha20-Poly1305 details that were confirmed against Apple's

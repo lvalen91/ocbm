@@ -177,7 +177,7 @@ final class BoxLogStore: Sendable {
         // Mirror every line into the app's OWN combined-timeline log, via os.Logger so FileLogger's
         // existing `com.carlink.*` poller captures it — no second write path, no drift between "the
         // session log" and "the combined log". The box's wall clock is host-set at HELLO
-        // (SETTIME, docs/carplay/01_OCBM_PROTOCOL.md), so `[box/<sourceName>]`-prefixed lines interleave sanely
+        // (SETTIME, docs/ocbm/00_PROTOCOL.md), so `[box/<sourceName>]`-prefixed lines interleave sanely
         // with the app's own entries even though FileLogger stamps its OWN call-time, not `unix_ms`.
         for l in lines {
             Self.bridgeLogger.info("\(l.text, privacy: .public)")

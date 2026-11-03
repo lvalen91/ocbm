@@ -148,7 +148,7 @@ wait_ncm() {  # wait for the NCM control channel to answer
 # executable, so the projection stack is genuinely optional and CONSOLE/FILE work without it.
 manifest() {
   echo "$ARM/ocbmd|/usr/sbin/ocbmd|755"
-  echo "$REPO/ccpa/rootfs/script/ocbm_boot.sh|/script/ocbm_boot.sh|755"
+  echo "$REPO/boards/ccpa-imx6ul/rootfs/script/ocbm_boot.sh|/script/ocbm_boot.sh|755"
   echo "$REPO/tools/run_ocbmd.sh|/script/run_ocbmd.sh|755"
   if [ "$FULL" = 1 ]; then
     # The radio seam MUST ship with session_supervisor.sh, because the supervisor's four radio
@@ -157,9 +157,9 @@ manifest() {
     # head-unit app, where the adapter IS the Bluetooth radio and the MFi coprocessor) that is a
     # total failure, not a degraded one. The baseline installs these too; shipping them here
     # covers a box converted before the seam existed.
-    echo "$REPO/ccpa/rootfs/script/radio_detect.sh|/script/radio_detect.sh|755"
-    echo "$REPO/ccpa/rootfs/script/radio_hal.sh|/script/radio_hal.sh|755"
-    echo "$REPO/ccpa/rootfs/script/radio_ap_up.sh|/script/radio_ap_up.sh|755"
+    echo "$REPO/boards/ccpa-imx6ul/rootfs/script/radio_detect.sh|/script/radio_detect.sh|755"
+    echo "$REPO/boards/ccpa-imx6ul/rootfs/script/radio_hal.sh|/script/radio_hal.sh|755"
+    echo "$REPO/boards/ccpa-imx6ul/rootfs/script/radio_ap_up.sh|/script/radio_ap_up.sh|755"
     echo "$ARM/iap2d|/usr/sbin/iap2d|755"
     echo "$ARM/carplayd|/usr/sbin/carplayd|755"
     echo "$ARM/btd|/usr/sbin/btd|755"
@@ -171,7 +171,7 @@ manifest() {
     # cost a bench session on 2026-08-27 before the box log named it ("iap_role_switch: not found").
     # The supervisor then counts each attempt as a projection failure and climbs the escalation
     # ladder, so a missing 20 KB binary ends at a self-reboot.
-    echo "$REPO/accessory_init/iap_role_switch.armv7|/usr/bin/iap_role_switch|755"
+    echo "$REPO/boards/ccpa-imx6ul/tools/iap_role_switch.armv7|/usr/bin/iap_role_switch|755"
     echo "$REPO/tools/session_supervisor.sh|/script/session_supervisor.sh|755"
     echo "$REPO/tools/projection_up.sh|/script/projection_up.sh|755"
     echo "$REPO/tools/phone_reset.sh|/script/phone_reset.sh|755"

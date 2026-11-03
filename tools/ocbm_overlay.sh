@@ -11,7 +11,7 @@
 #   payload:          gzip'd ustar archive, unpacked at /opt/ocbm:
 #                       bin/ocbmd-launch          the command the baseline's relay spawns (required)
 #                       bin/ocbmd [btd carplayd]  target/armv7-unknown-linux-musleabihf/release
-#                       etc/rc.ocbm etc/*.conf    ccpa/overlay/etc (boot hook, AP templates)
+#                       etc/rc.ocbm etc/*.conf    boards/ccpa-imx6ul/overlay/etc (boot hook, AP templates)
 #                       script/*                  --full: the stock supervisor + radio seam, unmodified copies
 #                       etc/MANIFEST              sha256 of every file above
 #
@@ -27,7 +27,7 @@ set -euo pipefail
 export LC_ALL=C COPYFILE_DISABLE=1
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ARM="$REPO/target/armv7-unknown-linux-musleabihf/release"
-OV="$REPO/ccpa/overlay"
+OV="$REPO/boards/ccpa-imx6ul/overlay"
 PROFILE=full
 OUT=""
 REGION=4587520 # board.env OVERLAY_SIZE (0x460000)
@@ -64,7 +64,7 @@ if [ "$PROFILE" = full ]; then
   put "$REPO/tools/session_supervisor.sh" "$R/script/session_supervisor.sh" 755
   put "$REPO/tools/projection_up.sh" "$R/script/projection_up.sh" 755
   for s in radio_detect.sh radio_hal.sh radio_ap_up.sh; do
-    put "$REPO/ccpa/rootfs/script/$s" "$R/script/$s" 755
+    put "$REPO/boards/ccpa-imx6ul/rootfs/script/$s" "$R/script/$s" 755
   done
 fi
 for s in "$R"/script/*.sh "$R/etc/rc.ocbm" "$R/bin/ocbmd-launch"; do

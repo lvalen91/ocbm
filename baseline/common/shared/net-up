@@ -100,7 +100,7 @@ if [ "$MODE" = ncm ]; then
 fi
 if [ "$MODE" = ocbm ]; then
     # A pure accessory device: class at the interface (0xFF/0xFF/0x00 in ocbm-accessory's descriptors),
-    # as the stock g_android_accessory gadget (ccpa/rootfs/script/ocbm_boot.sh).
+    # as the stock g_android_accessory gadget (boards/ccpa-imx6ul/rootfs/script/ocbm_boot.sh).
     for a in bDeviceClass bDeviceSubClass bDeviceProtocol; do echo 0x00 > "$G/$a"; done
     # functionfs instance name = the part after "ffs."; the descriptors must be written (ocbm-accessory
     # does that, ep1/ep2 appear) BEFORE the UDC is bound, or the bind fails.

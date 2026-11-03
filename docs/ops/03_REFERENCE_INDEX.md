@@ -249,14 +249,14 @@ things it never defines. Treat a WWDC mention as a *pointer* to look in §A/§C,
 **There is a working non-CCPA host running this accessory stack.** A Raspberry Pi 4 on AAOS 16
 (arm64) runs `btd` + `carplayd` natively (carplayd carries the mDNS advertiser since the 2026-09-08 `rx-connect` merge), providing **both radios
 itself** — its own Bluetooth and its own 5 GHz SoftAP — with the CCPA reduced to the **MFi
-coprocessor only**, reached over USB-NCM (`CARPLAY_MFI_ADDR` → `ccpa/mfid`). A Linux workstation using its own
+coprocessor only**, reached over USB-NCM (`CARPLAY_MFI_ADDR` → `box/mfid`). A Linux workstation using its own
 motherboard radios reached full CarPlay A/V the same way (owner report; CCPA used only for MFi over NCM; no
 record in this tree was checked). These Pi 4 and workstation runs are light tests with the CCPA as MFi source,
 not a product path. Device-proven end to
 end against an iPhone on iOS 27: pairing, iAP2, MFi auth, the `0x5702`/`0x5703` handoff, DHCP,
 pair-verify, MFi-SAP auth-setup, RECORD and the screen stream.
 
-→ **`pi/docs/00_PI_AAOS_PORT.md`**
+→ **`docs/boards/00_PI_AAOS_PORT.md`**
 
 Read it before assuming anything in this tree is CCPA-specific, and before re-deriving any of:
 
@@ -280,7 +280,7 @@ Required AAOS *image* changes are recorded outside this repo, in
 2026-08-16 (`/Volumes/` holds only `Macintosh HD`, `Recovery` and the Time Machine local-snapshots
 mount). Mount `stuff` before following this pointer; unmounted, it reads as a missing file rather than
 an absent one.**
-*Re-checked 2026-10-19: `stuff` IS mounted now (`/Volumes/stuff`); the in-repo copy of the same findings is the "Measured notes" section of `pi/docs/04_IMAGE_REBUILD_GUIDE.md`. The external `os-corrections-2026-08-16.md` is present there.*
+*Re-checked 2026-10-19: `stuff` IS mounted now (`/Volumes/stuff`); the in-repo copy of the same findings is the "Measured notes" section of `docs/boards/04_IMAGE_REBUILD_GUIDE.md`. The external `os-corrections-2026-08-16.md` is present there.*
 
 ### F. Android Auto — the Desktop Head Unit is the authority (owner directive, 2026-08-25)
 
@@ -367,7 +367,7 @@ wireless rollout, or 4K/HDR named for Android Auto. Everything above 1080p, the 
 
 Our implementations to diff against: `host/aa-headunit/` (the Rust reference client) and
 `host/MacHost/carlink_macOS/AA/` (the Swift engine that ships in the app). The box side carries no
-AA protocol at all — `ccpa/aa-bridge` is an AOAP byte pump (`docs/androidauto/00_ARCHITECTURE.md`, `docs/androidauto/00_ARCHITECTURE.md`).
+AA protocol at all — `box/aa-bridge` is an AOAP byte pump (`docs/androidauto/00_ARCHITECTURE.md`, `docs/androidauto/00_ARCHITECTURE.md`).
 
 ### Note on the real-time cyber safeguard
 

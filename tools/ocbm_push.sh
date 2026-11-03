@@ -85,7 +85,7 @@ check_supervisor_deps() {
     echo "[ocbm-push] never comes up. This is docs/ops/06_CORRECTIONS_LEDGER.md R-20W-5, found the hard way."
     echo "[ocbm-push]"
     echo "[ocbm-push] Push these too, or use tools/ocbm_install.sh --full:"
-    for f in $missing; do echo "[ocbm-push]     tools/ocbm_push.sh ccpa/rootfs/script/$f /script/$f 755"; done
+    for f in $missing; do echo "[ocbm-push]     tools/ocbm_push.sh boards/ccpa-imx6ul/rootfs/script/$f /script/$f 755"; done
     echo "[ocbm-push] =========================================================================="
     echo ""
     return 1

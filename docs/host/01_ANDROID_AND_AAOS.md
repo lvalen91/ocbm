@@ -12,7 +12,7 @@ The Android projection app and the AAOS integration points.
   vehicle's own hotspot carries the session. Its own docs are `host/gm_ccpa/docs/` (start at
   `00_HANDOFF.md`). Most of the USB-permission history below was written for this app.
 - `host/CarlinkAndroid` `:projection` (`com.carlink.projection`), the Raspberry Pi 4 AAOS system app
-  (`pi/docs/01_PROJECTION_APP_DESIGN.md`). A Pi 4 AAOS image and a Linux workstation have reached full
+  (`docs/boards/01_PROJECTION_APP_DESIGN.md`). A Pi 4 AAOS image and a Linux workstation have reached full
   CarPlay A/V (light testing) with a CCPA in NCM mode used only as the MFi source; the host there uses its
   own Bluetooth and Wi-Fi radios, so none of the OCBM USB handling below applies to it.
 

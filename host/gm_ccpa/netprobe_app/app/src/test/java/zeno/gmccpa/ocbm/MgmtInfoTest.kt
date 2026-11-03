@@ -6,7 +6,7 @@ import org.junit.Test
 
 /** Wave 3: the adapter's Bluetooth name out of MGMT_INFO. Synthetic values only. */
 class MgmtInfoTest {
-    /** The exact key order/shape ocbmd's mgmt_info format! emits (ccpa/ocbmd/src/main.rs). */
+    /** The exact key order/shape ocbmd's mgmt_info format! emits (box/ocbmd/src/main.rs). */
     private fun info(name: String, hostName: String = "gm_ccpa netprobe") =
         "{\"bt_mac\":\"00:11:22:33:44:55\",\"wifi_mac\":\"00:11:22:33:44:66\",\"serial\":\"SYNTH0001\"," +
         "\"name\":\"$name\",\"uptime_s\":12,\"rootfs_pct\":40,\"rootfs_free_kb\":1000,\"ssp\":true,\"hci_up\":true," +

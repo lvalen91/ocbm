@@ -76,7 +76,7 @@ has two readings, deliberately different:
   deletes it, both mid-drive, and host departure stays the debounced `host_gone_confirmed` /
   `HOST_GONE_POLLS` decision — so an ocbmd restart ends a live AA session no faster than before.
 Both readings are `box_common::cfg::AaGate` (`Launch` / `StandDown`). Every Rust site names its kind
-as a constant — aa-bridge in `ccpa/aa-bridge/src/gates.rs` (site table + tests), btd as
+as a constant — aa-bridge in `box/aa-bridge/src/gates.rs` (site table + tests), btd as
 `SDP_RECORD_GATE` / `CH4_ACCEPT_GATE` in `crates/vendor/wireless/src/main.rs` — and unit tests pin
 each one, so swapping a site's reading fails the suite. The exceptions are aa-bridge's two claim
 re-checks in `run_wired_arm` (after `prepare_accessory`, and the unclaimed-client claim), which call

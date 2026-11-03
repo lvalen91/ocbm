@@ -763,7 +763,7 @@ pub extern "system" fn Java_zeno_gmccpa_pair_NativeCore_nativeAvIdleMs(
 ///
 /// `nx`/`ny` are normalized 0.0–1.0 in the advertised display geometry; `phase` follows the OCBM
 /// vocabulary (0 = DOWN, 1 = MOVE, 2 = UP). For that vocabulary this is identical to
-/// `handle_input_frame` (`fn handle_input_frame`, `ccpa/carplayd/src/main.rs`). It deliberately DIVERGES out-of-vocabulary: the
+/// `handle_input_frame` (`fn handle_input_frame`, `box/carplayd/src/main.rs`). It deliberately DIVERGES out-of-vocabulary: the
 /// reference maps any unknown phase to tip-DOWN, this maps it to tip-UP. Android has ACTION_CANCEL
 /// upstream, and a stuck tip turns the next tap into a drag, so unknown fails toward release.
 /// Returns false between sessions (no event channel), which is not an error.
@@ -845,7 +845,7 @@ pub extern "system" fn Java_zeno_gmccpa_pair_NativeCore_nativeMediaButton(
 /// the reason it is safe to toggle repeatedly inside a live session.
 ///
 /// The macOS host drives the same receiver function over OCBM (`CMD_LIMITED_UI_ON`/`_OFF`, dispatched
-/// in `ccpa/carplayd/src/main.rs`) because there the receiver is a separate process on the box. Here
+/// in `box/carplayd/src/main.rs`) because there the receiver is a separate process on the box. Here
 /// the receiver is in-process behind this JNI boundary, so the box is not involved at all and no OCBM
 /// opcode is needed.
 ///
@@ -889,6 +889,45 @@ pub extern "system" fn Java_zeno_gmccpa_pair_NativeCore_nativeSetNightMode(
 ) -> jni::sys::jboolean {
     std::panic::catch_unwind(|| u8::from(receiver::events::send_set_night_mode(night != 0)))
         .unwrap_or(0)
+}
+
+/// Steering-wheel Voice button → Siri: one TAP of the Siri button, `requestSiri{siriAction:2}`
+/// (buttondown) then `requestSiri{siriAction:3}` (buttonup), via
+/// [`receiver::events::send_request_siri_action`] — the same pair carplayd sends for
+/// `CMD_SIRI_DOWN`/`CMD_SIRI_UP` (`box/carplayd/src/main.rs:1167-1168`) and MacHost's `siriPress()`
+/// (`ControlsWindow.swift:343`). This matches stock GM CarPlay (CT5 Cinemo) ONLY for the release
+/// half of a short press with no call and no Siri turn active and no built-in voice recognition:
+/// `VRStateMachine` "Make up a BUTTON DOWN for short press" → `ResourceManager.sendKey` →
+/// `RequestSiriWithLatency(2, 0)` then `(3, 0)` (jadx `ResourceManager.java:3073-3085`). Stock
+/// otherwise differs: key-down sends a prewarm `RequestSiriWithLatency(1)`; by `VRStateMachine`
+/// state a short press sends NONE (no built-in VR): 2 then 3, NONE (built-in VR): 3 only,
+/// ACCESSORY: 3 only, CONTROLLER: 2 only, INSPEECH: nothing; and during any CarPlay call stock
+/// swallows voice presses (`ResourceManager.java:2889-2905`). This always sends 2 then 3 — a
+/// disclosed difference: the owner chose no call-state or Siri-state branching, iOS decides what the
+/// request means. The app only ever sees the RELEASED short press (an AAOS VoiceInteractionSession),
+/// so neither the prewarm nor a hold can be modelled.
+///
+/// Gated on [`receiver::events::session_started`], Apple's `sessionStarted` rule for every
+/// accessory-initiated command (`AirPlayReceiverSession.c:825`): before RECORD completes nothing is
+/// sent. The release is sent even if the press failed, as in `nativeMediaButton` — a held Siri
+/// button is worse than a dropped tap.
+///
+/// Returns -1 = session not started (nothing sent), -2 = panic, else bit0 = buttondown written,
+/// bit1 = buttonup written (3 = both). BLOCKING on the global event mutex — off the binder/UI thread.
+#[no_mangle]
+pub extern "system" fn Java_zeno_gmccpa_pair_NativeCore_nativeSiriTap(
+    _env: JNIEnv,
+    _class: JClass,
+) -> jni::sys::jint {
+    std::panic::catch_unwind(|| {
+        if !receiver::events::session_started() {
+            return -1;
+        }
+        let down = receiver::events::send_request_siri_action(2);
+        let up = receiver::events::send_request_siri_action(3);
+        i32::from(down) | (i32::from(up) << 1)
+    })
+    .unwrap_or(-2)
 }
 
 /// Plan v5.9 MED M5 / OD-9C (owner: stock-style) — take MainAudio from the phone after the head unit's

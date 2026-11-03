@@ -5,7 +5,7 @@
 // AIR FRAMES, and `btd` forwards each read verbatim as SEAM_PKT_PLAIN under a
 // SEAM_FORMAT of codec 4 (`OCBM.seamCodecMsbc`, `ocbm-proto::SEAM_CODEC_MSBC`). Decoding is the
 // host's job in both directions: downlink (57-byte frames -> 16 kHz PCM) and uplink (mic PCM ->
-// 57-byte frames the box writes straight to the SCO socket). See docs/carplay/01_OCBM_PROTOCOL.md.
+// 57-byte frames the box writes straight to the SCO socket). See docs/ocbm/00_PROTOCOL.md.
 //
 // WHAT mSBC IS: plain SBC (A2DP 1.3 spec §12.4 "SBC frame format", §12.6 "SBC encoder/decoder")
 // with every parameter frozen by HFP 1.6 §5.7.4 / Erratum 2409:

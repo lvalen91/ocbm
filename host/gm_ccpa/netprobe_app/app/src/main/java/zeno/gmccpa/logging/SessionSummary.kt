@@ -308,7 +308,7 @@ object SessionSummary {
         if (json.isEmpty()) "none" else runCatching { JSONObject(json).optString(key, "none") }.getOrDefault("none")
 
     /** `MGMT_INFO`'s `"devices":[...]` is a flat array of MAC strings (`ocbmd::box_info_json`), not
-     *  objects — see `ccpa_custom/ccpa/ocbmd/src/main.rs`. Null return means "no snapshot taken", which
+     *  objects — see `ccpa_custom/box/ocbmd/src/main.rs`. Null return means "no snapshot taken", which
      *  is distinct from "snapshot taken, zero bonded devices". */
     private fun bondedList(json: String?): List<String>? {
         if (json.isNullOrEmpty()) return null

@@ -60,7 +60,7 @@ Open as of this date, one line each (detail stays with the owning document):
 
 ## Settled — do not re-raise
 
-- **`pi/evidence/hostapd_5g.conf` carries a `wpa_passphrase`, and that is accepted.** The value in
+- **`boards/rpi4-aaos/evidence/hostapd_5g.conf` carries a `wpa_passphrase`, and that is accepted.** The value in
   it is a deliberate placeholder for a bench AP and protects nothing. (Corrected 2026-10-08: gm_ccpa's head-unit
   credential was NOT a placeholder; it is removed from source — OD-7A — and the owner chose no rotation/scrub.) Assessed and accepted by the owner 2026-08-31, explicitly including the case where either
   repo gains a remote. No rotation, no history scrub. Three separate audits have flagged the key
@@ -88,9 +88,9 @@ reasoning and the wire evidence stay where they already are, and nothing here su
 closes anything.
 
 **Other open lists, not duplicated here:** `baseline/README.md` section 7 (the mainline-kernel
-baseline image: open items, measurements, verification); `pi/docs/00_PI_AAOS_PORT.md` section 6 and
-`pi/docs/03_BRINGUP_RUNBOOK.md` section 5 ("What is NOT done", the Raspberry Pi / AAOS port); and, for
-the C2Air (a different box: Allwinner V821, riscv32), `c2air/README.md` and `c2air/docs/`, plus the C2Air research
+baseline image: open items, measurements, verification); `docs/boards/00_PI_AAOS_PORT.md` section 6 and
+`docs/boards/03_BRINGUP_RUNBOOK.md` section 5 ("What is NOT done", the Raspberry Pi / AAOS port); and, for
+the C2Air (a different box: Allwinner V821, riscv32), `boards/c2air-v821b/README.md` and `boards/c2air-v821b/docs/`, plus the C2Air research
 repo's `docs/kernel.md` section 9 (that repo is outside this tree and its path was not located on
 2026-10-28, so the section is UNVERIFIED from here).
 
@@ -120,8 +120,8 @@ canonical control, box-autonomous page-on-boot) are **not** open items and are n
 
 > *(2026-10-28: this block pointed at a "Phase 4" catalogue of ten code defects that does not exist in
 > this file. Of the three it named: the missing `iap_role_switch` install is CLOSED —
-> `tools/ocbm_install.sh` manifest now lists `accessory_init/iap_role_switch.armv7` -> `/usr/bin/iap_role_switch`;
-> the CT_HELLO `out_console` resync and `ccpa/rootfs/script/custom_init.sh` still calling
+> `tools/ocbm_install.sh` manifest now lists `boards/ccpa-imx6ul/tools/iap_role_switch.armv7` -> `/usr/bin/iap_role_switch`;
+> the CT_HELLO `out_console` resync and `boards/ccpa-imx6ul/rootfs/script/custom_init.sh` still calling
 > `/script/start_bluetooth_wifi.sh` (a call that exists, `custom_init.sh`) were not re-evaluated and are
 > UNVERIFIED. The other seven defects were never listed anywhere recoverable.)*
 
@@ -158,10 +158,10 @@ canonical control, box-autonomous page-on-boot) are **not** open items and are n
   app side landed in `host/CarlinkAndroid`, see OCBMANDROID.md "Settings → OCBM action mappings").**
   The app hooks exist and are capability-gated; NOTHING below is implemented box-side, and no verb
   id is assigned — the proposed shapes are in
-  [../carplay/01_OCBM_PROTOCOL.md](../carplay/01_OCBM_PROTOCOL.md) ("Proposed MGMT verbs").
+  [../ocbm/00_PROTOCOL.md](../ocbm/00_PROTOCOL.md) ("Proposed MGMT verbs").
   1. **`MGMT_DISCONNECT_PHONE`, transport-aware, plus a capability bit.** Problem: the app's
      Disconnect Phone has no honest verb to send — OCBM's six MGMT verbs are
-     the `MGMT_*` constants in `crates/ocbm-proto/src/lib.rs`, dispatched by `handle_mgmt` in `ccpa/ocbmd/src/main.rs`; the
+     the `MGMT_*` constants in `crates/ocbm-proto/src/lib.rs`, dispatched by `handle_mgmt` in `box/ocbmd/src/main.rs`; the
      Android button used to send `MGMT_RESTART_WIRELESS` in disguise (nothing for a wired phone, a
      whole-stack bounce for a wireless one). Proposed semantics — WIRED: end the CarPlay session and
      soft-detach / re-attach the phone-facing USB gadget so iOS sees an unplug (the un-CONFIGURED
@@ -182,7 +182,7 @@ canonical control, box-autonomous page-on-boot) are **not** open items and are n
      cards are information-only until this exists. Evidence: btd's control port already has
      `{"cmd":"connect","address":..}` (`crates/vendor/wireless/src/control.rs`, `handle_request` `"connect"` arm)
      next to the `pair_answer` verb (its `"pair_answer"` arm) that ocbmd already relays (`send_pair_answer`,
-     `ccpa/ocbmd/src/main.rs`) — the MGMT relay is the only missing piece. Semantics: forward
+     `box/ocbmd/src/main.rs`) — the MGMT relay is the only missing piece. Semantics: forward
      to btd, `MGMT_ACK` 1 when the MAC is not bonded. App hook waiting: re-add
      `CarlinkManager.connectToDevice(mac)` → `mgmtAction(MGMT_CONNECT_DEVICE, mac)` and the card's
      `onTap`. Acceptance: two bonded phones in range, tap B → `BT_PHASE LINK_UP` →
@@ -259,11 +259,11 @@ canonical control, box-autonomous page-on-boot) are **not** open items and are n
   Source: `docs/ops/05_AUDITS.md` §"Also deferred", `docs/wireless/01_BT_AND_RADIO.md` §3. Verified open 2026-08-16:
   `grep -rn "CT_INPUT_NACK\|INPUT_NACK" crates ccpa host` → zero hits.
 
-- **`av_dropped` / `lo_dropped` are stderr-only.** The app's CCPA tab polls `MGMT_GET_INFO`, so the
+- **`av_dropped` / `lo_dropped` are stderr-only.** The app's adapter/management tab polls `MGMT_GET_INFO`, so the
   two backpressure counters that matter most for diagnosing A/V loss are invisible to the only UI
   that polls the box.
   Source: `docs/carplay/02_SESSION_LIFECYCLE.md` §3. Verified open 2026-08-16:
-  `grep -n "fn box_info_json" -A45 ccpa/ocbmd/src/main.rs` → neither counter is in the emitted JSON.
+  `grep -n "fn box_info_json" -A45 box/ocbmd/src/main.rs` → neither counter is in the emitted JSON.
 
 - **`wireless_down` may orphan the bring-up's forked children — PARTLY STALE (2026-10-28).** The
   teardown branches `pkill` only `btd`, `carplayd` and the `btmon` bench lever (`rx-connect` was merged
@@ -303,7 +303,7 @@ canonical control, box-autonomous page-on-boot) are **not** open items and are n
 - **The `carplayd → :9001 → ocbmd` forward path is still local TCP loopback.** The copy elimination
   (unix socket / `splice`) that the 4K@60 track lists as "next" has not started.
   Source: `docs/host/00_MACOS_HOST_APP.md` §"4K@60 optimization track" item 4. Verified open 2026-08-16:
-  `grep -n "TcpListener\|UnixListener" ccpa/ocbmd/src/main.rs` → all five A/V seams are
+  `grep -n "TcpListener\|UnixListener" box/ocbmd/src/main.rs` → all five A/V seams are
   `TcpListener::bind(("127.0.0.1", port))`; no `UnixListener`, no `splice`.
 
 ---
@@ -435,7 +435,7 @@ canonical control, box-autonomous page-on-boot) are **not** open items and are n
 - **Video lanes are fixed and capped at two.** `altVideoStreams[]` parses as an array but only its
   first entry is used, and the video seam's key message carries an `scid` the host discards; a third
   stream would need new channel ids or scid tagging. Audio has no such limit.
-  Source: `docs/carplay/01_OCBM_PROTOCOL.md` §"What is genuinely not supported (open item)". Verified open 2026-08-16:
+  Source: `docs/ocbm/00_PROTOCOL.md` §"What is genuinely not supported (open item)". Verified open 2026-08-16:
   `grep -n "CH_VIDEO\|CH_ALT_VIDEO" crates/ocbm-proto/src/lib.rs` → exactly two video channels.
 
 - **Accessory-side NMEA/GPS is parse-only.** The box decodes the phone's `StartLocationInformation`
@@ -445,7 +445,7 @@ canonical control, box-autonomous page-on-boot) are **not** open items and are n
   `crates/vendor/metadata/src/location.rs` (a parser); no emitter.
 
 - **App-owned CarPlay pairing peer store.** Today `carplayd`'s `DiskPeers`
-  (`ccpa/carplayd/src/main.rs` ~:342-439) persists `id → Ed25519 LTPK` on box flash, and
+  (`box/carplayd/src/main.rs` ~:342-439) persists `id → Ed25519 LTPK` on box flash, and
   `PeerSaver::save_peer` (`crates/vendor/pairing/src/setup.rs` ~:29-30) is infallible because
   pairing is already cryptographically complete when it runs. Owner decision (2026-09-02): the
   host app owns the store, per app install (macOS `UserDefaults`-class storage; Android app
@@ -526,14 +526,14 @@ canonical control, box-autonomous page-on-boot) are **not** open items and are n
     the 0x5202 frames and id 13 was seen as raw wire bytes, R-49-13 — so the drop is not universal; cause on the OCBM test still unknown.)*
 
 - **C-3 — RESOLVED 2026-09-01: `iap2d` now passes the app-pushed vehicle identity on the wire.**
-  `ccpa/iap2d/src/main.rs` calls `message::build_ident_info_with` (`Action::SendIdentify`) and
+  `box/iap2d/src/main.rs` calls `message::build_ident_info_with` (`Action::SendIdentify`) and
   `build_ident_info_excluding_with` (`Action::RetryIdentify`) with the app-pushed
   `vehicle_identity()` (docs/carplay/04_CAPABILITIES_AND_CONFIG.md C-3). `iap2d` still passes
   `message::accessory_name("CarLink")` at both Identify sites — that half of the original claim
   stands; only the tunnel and BT drivers still pass the baseline identity.
   Source: `docs/carplay/04_CAPABILITIES_AND_CONFIG.md` §3 row C, the former "§4" of this file (no longer exists). Verified open 2026-09-01:
-  `grep -rn "build_ident_info_with" crates ccpa` → hits both `ccpa/iap2d/src/main.rs` call sites
-  plus a `#[test]` in `config.rs`; `grep -n "accessory_name" ccpa/iap2d/src/main.rs` → two
+  `grep -rn "build_ident_info_with" crates box boards/ccpa-imx6ul` → hits both `box/iap2d/src/main.rs` call sites
+  plus a `#[test]` in `config.rs`; `grep -n "accessory_name" box/iap2d/src/main.rs` → two
   hardcoded call sites, unchanged.
 
 - **C-4 — `features.rs` structurally cannot express vehicle status, which blocks C-5 (param 21).**
@@ -645,7 +645,7 @@ canonical control, box-autonomous page-on-boot) are **not** open items and are n
   that branch's literal `var=value` assignments. Emitting the raw text instead is the documented
   silent-false-success failure (docs/wireless/01_BT_AND_RADIO.md §6d).
   Source: `docs/wireless/01_BT_AND_RADIO.md` §7. Verified open 2026-08-16:
-  `grep -n "safe_cmd" -A8 ccpa/rootfs/script/radio_detect.sh` → the refusal is still
+  `grep -n "safe_cmd" -A8 boards/ccpa-imx6ul/rootfs/script/radio_detect.sh` → the refusal is still
   `case "$_c" in *'$'*|*'`'*|…) echo "" ;;`, which blanks any vendor line carrying an unexpanded
   variable; no closed-form Broadcom/NXP mapping has been added beside it.
 
@@ -654,14 +654,14 @@ canonical control, box-autonomous page-on-boot) are **not** open items and are n
   only on 0xc822. On Broadcom, `wlan0` does not exist until explicitly created on top of `sta0`, and
   no Broadcom hardware is available to this project.
   Source: `docs/wireless/01_BT_AND_RADIO.md` §7, and §5's hardware-validated results (RTL8822CS only). Verified open
-  2026-08-16: `grep -n "c822" ccpa/rootfs/script/radio_detect.sh` → `0xc822) CHIP=realtek_rtl8822cs`
+  2026-08-16: `grep -n "c822" boards/ccpa-imx6ul/rootfs/script/radio_detect.sh` → `0xc822) CHIP=realtek_rtl8822cs`
   is the id §5 validated; this is a hardware-coverage gap, so no grep can close it.
 
 - **`RADIO_BT_PRELOAD_CMD` is consumed by `radio_hal.sh` but never emitted by `radio_detect.sh`.** A
   mapped-path unit needing `fw_loader_linux` before BT attach would silently never run it. Moot while
   IW416 resolves to the `owned` backend, latent otherwise.
   Source: `docs/wireless/01_BT_AND_RADIO.md` §7. Verified open 2026-08-16:
-  `grep -rn "RADIO_BT_PRELOAD_CMD" ccpa/ tools/ pi/` → three hits, all in `radio_hal.sh`; zero in
+  `grep -rn "RADIO_BT_PRELOAD_CMD" box/ boards/ccpa-imx6ul/ tools/ boards/rpi4-aaos/` → three hits, all in `radio_hal.sh`; zero in
   `radio_detect.sh`.
 
 - **"One box, one name" is not achieved — the Rust side never reads `/etc/carplay_ident` and still
@@ -671,7 +671,7 @@ canonical control, box-autonomous page-on-boot) are **not** open items and are n
   diverge too, not just the prefixes.
   Source: `docs/wireless/01_BT_AND_RADIO.md` §6c/§7, `R-57-1`. Verified open 2026-08-16:
   `grep -rn "carplay_ident" ccpa crates tools pi host` → four hits, all in
-  `radio_hal.sh`/`radio_ap_up.sh`, none in Rust; `grep -n "wlan0" crates/vendor/wireless/src/av.rs crates/vendor/wireless/src/box_identity.rs crates/vendor/iap2-core/src/message.rs ccpa/ocbmd/src/main.rs`
+  `radio_hal.sh`/`radio_ap_up.sh`, none in Rust; `grep -n "wlan0" crates/vendor/wireless/src/av.rs crates/vendor/wireless/src/box_identity.rs crates/vendor/iap2-core/src/message.rs box/ocbmd/src/main.rs`
   → `const WLAN_IFACE: &str = "wlan0"` plus three `/sys/class/net/wlan0/address` reads.
 
 - **There is no reversible radio verification GATE in the baseline, run while still on NCM — ACCEPTED
@@ -778,7 +778,7 @@ canonical control, box-autonomous page-on-boot) are **not** open items and are n
   own local response doubles as the oracle; the host copies `dataPort`/`controlPort` verbatim and
   passes non-authorable types straight through. This is the one genuinely-open clause left in this file's
   "Open design items".
-  Source: `docs/ops/04_OPEN_ITEMS.md` §"Open design items", `docs/carplay/01_OCBM_PROTOCOL.md` §"RTSP channel". Verified open 2026-08-16:
+  Source: `docs/ops/04_OPEN_ITEMS.md` §"Open design items", `docs/ocbm/00_PROTOCOL.md` §"RTSP channel". Verified open 2026-08-16:
   `grep -n "Pre-bind + oracle" -A4 crates/vendor/receiver/src/relay.rs`;
   `grep -n "copyPort" host/MacHost/carlink_macOS/OCBM/AirPlaySetupSession.swift`.
 
@@ -805,7 +805,7 @@ canonical control, box-autonomous page-on-boot) are **not** open items and are n
   Distinct from the `SEAM_MAGIC` per-video-frame `u64` seq, which *is* read. Still the dead-field
   footgun the audit flagged.
   Source: `docs/host/00_MACOS_HOST_APP.md` Tier 4 OCBM cleanup. Verified open 2026-08-16:
-  `grep -rn "\.seq" --include="*.rs" crates/ocbm-proto ccpa/ocbmd host/ocbm-host | grep -v "self.seq\|seq: "`
+  `grep -rn "\.seq" --include="*.rs" crates/ocbm-proto box/ocbmd host/ocbm-host | grep -v "self.seq\|seq: "`
   → one hit, a unit assertion.
 
 - **The SOM/EOM single-frame contract is neither asserted on the host nor implemented as coalescing.**
@@ -899,11 +899,7 @@ canonical control, box-autonomous page-on-boot) are **not** open items and are n
   all readers; `grep -n "carplayd" tools/session_supervisor.sh` → the spawn env is
   `OCBM_FWD_ENC=1 $CM $LT $MB`.
 
-- **`tools/ocbm_boot.sh` is 104 lines behind `ccpa/rootfs/script/ocbm_boot.sh` (138 vs 34 on 2026-10-28; was 110 vs 34).** The rootfs copy
-  carries the first-boot dead-man and the NCM failover watchdog; the `tools/` copy has neither. Not a
-  deployment hazard today — the installer places the rootfs copy — but the stale duplicate remains.
-  Source: `docs/carplay/02_SESSION_LIFECYCLE.md` §"Supporting layers" ("Reconcile toward the rootfs copy, never away from it").
-  Verified open 2026-08-16: `wc -l ccpa/rootfs/script/ocbm_boot.sh tools/ocbm_boot.sh` → 110 vs 34.
+- **`tools/ocbm_boot.sh` stale duplicate — CLOSED 2026-11-02:** the file was deleted in the reorganisation (phase 1); `boards/ccpa-imx6ul/rootfs/script/ocbm_boot.sh` is the only copy.
 
 - **`carplay-status.sh` — the reader for the `/tmp/carplay_state` verdict — is not installed by the
   current installer.** The supervisor writes the verdict and tells you to "Read it with
@@ -921,9 +917,9 @@ canonical control, box-autonomous page-on-boot) are **not** open items and are n
   replaced. **This is a deliberate development posture** (telnetd is the documented rollback channel)
   and therefore an owner decision, not a defect — recorded so it is a decision and not an oversight.
   Source: `docs/ops/05_AUDITS.md` §7 ("Outside the review's scope, for the owner"). Verified open 2026-08-16:
-  `grep -n "wpa_passphrase" ccpa/rootfs/script/radio_ap_up.sh` → the guard is `[ "${#PSK}" -lt 8 ]`;
-  `cat ccpa/rootfs/etc/init.d/rcS` → `busybox telnetd -l /bin/sh -p 23 &`;
-  `grep -rn "ap_isolate" ccpa/` → no matches.
+  `grep -n "wpa_passphrase" boards/ccpa-imx6ul/rootfs/script/radio_ap_up.sh` → the guard is `[ "${#PSK}" -lt 8 ]`;
+  `cat boards/ccpa-imx6ul/rootfs/etc/init.d/rcS` → `busybox telnetd -l /bin/sh -p 23 &`;
+  `grep -rn "ap_isolate" box/ boards/ccpa-imx6ul/` → no matches.
 
 ---
 
@@ -966,9 +962,9 @@ claim this index exists to remove.
 
 **Moved here from "Open items" by the 2026-10-28 audit (code and git evidence):**
 
-- **`connect_seam` is numeric-only.** `connect_seam` in `ccpa/ocbmd/src/main.rs` parses a `SocketAddr` and its
+- **`connect_seam` is numeric-only.** `connect_seam` in `box/ocbmd/src/main.rs` parses a `SocketAddr` and its
   doc comment reads "Literal addresses ONLY". Introduced in `949112b` (2026-09-03).
-  Verified: `git log -S'Literal addresses ONLY' -- ccpa/ocbmd/src/main.rs`.
+  Verified: `git log -S'Literal addresses ONLY' -- box/ocbmd/src/main.rs`.
 - **W9 and the "hardcoded Raspberry Pi BT MAC" are closed in code.** `ACCESSORY_BT_MAC` no longer exists;
   `accessory_bt_mac()` in `crates/vendor/wireless/src/bt_driver.rs` reads this unit's own
   `/sys/class/bluetooth/<hci>/address` once and falls back to a locally-administered placeholder, so a
@@ -998,7 +994,7 @@ claim this index exists to remove.
   ordering guarantee"). Verified: `grep -n "assumeIsolated\|cross-task ordering" host/MacHost/carlink_macOS/App/MetadataWindow.swift`.
 - **`OCBMAudioStreamFormat.bits` is read** (`OCBMAVBridge.swift`, `Int(fmt.bits) / 8`).
   Verified: `grep -rn "fmt.bits" host/MacHost/carlink_macOS/OCBM/`.
-- **`ocbm_install.sh` installs `iap_role_switch`** (the manifest lists `accessory_init/iap_role_switch.armv7` ->
+- **`ocbm_install.sh` installs `iap_role_switch`** (the manifest lists `boards/ccpa-imx6ul/tools/iap_role_switch.armv7` ->
   `/usr/bin/iap_role_switch`). Verified: `grep -n "iap_role_switch" tools/ocbm_install.sh`.
 
 **From this file's own tracking (previously listed above under "Box daemons"):**
@@ -1020,11 +1016,11 @@ claim this index exists to remove.
 - **`ProtocolSessionRecorder` closed by deletion**, not by arming.
   Verified: `find host -name 'ProtocolSessionRecorder*'` → no matches.
 - **The staged box deploy of the video fix happened** and was hardware-validated 2026-08-01.
-  Verified: `grep -n "struct OutQueue\|out_video" ccpa/ocbmd/src/main.rs`.
+  Verified: `grep -n "struct OutQueue\|out_video" box/ocbmd/src/main.rs`.
 - **M-k stereo PCM uplink RTP timestamp fixed** — the advance is per-channel sample-frames on both
   codec arms. Verified: `grep -n "SAMPLE-FRAMES\|per_ch" crates/vendor/receiver/src/uplink.rs`.
 - **Three ocbmd LOWs fixed** — blocking `forward_input`, the 30 s `CT_SRC` srcbench, and the CH_IP
-  `conns` leak across sessions. Verified: `grep -n "fn forward_input" -A20 ccpa/ocbmd/src/main.rs`
+  `conns` leak across sessions. Verified: `grep -n "fn forward_input" -A20 box/ocbmd/src/main.rs`
   and the `conns.clear()` calls on both teardown paths.
 - **`net.rs` no longer tears down after one pre-A/V read timeout** — the `WouldBlock` arm consults an
   A/V-activity backstop. Verified:
@@ -1072,10 +1068,10 @@ claim this index exists to remove.
   the ledger records it either way. Verified: `grep -rn "av_idle_ms" --include="*.rs" .`.
 - **The 24 kHz mic rate SHIPPED on both ends** — the box negotiates AAC-ELD and OPUS 24 k mono and the
   host takes the box-negotiated rate rather than hardcoding 16 k.
-  Verified: `grep -rn "24000" --include="*.rs" crates/vendor/receiver ccpa/carplayd`;
+  Verified: `grep -rn "24000" --include="*.rs" crates/vendor/receiver box/carplayd`;
   `grep -rn "startCapture(" host/MacHost/carlink_macOS --include="*.swift"`.
 - **Backpressure-not-drop is in the tree**, not "BUILT … staged" — per-stream out-queues, video gated
-  on its own backlog, audio never gated. Verified: `grep -n -i "backpressure\|never gated" ccpa/ocbmd/src/main.rs`.
+  on its own backlog, audio never gated. Verified: `grep -n -i "backpressure\|never gated" box/ocbmd/src/main.rs`.
 - **The knob/telephony descriptors, `lane_guidance` and param 30 all shipped**, so `R-06-1`'s
   remaining-work list is itself partly stale. Verified:
   `grep -n "fn knob_descriptor\|fn telephony_descriptor" crates/vendor/receiver/src/info.rs`;
@@ -1083,7 +1079,7 @@ claim this index exists to remove.
   `grep -n "ident_info_wireless_transport_declares_route_guidance_param30" crates/vendor/iap2-core/src/message.rs`.
 - **AltVideo shipped in full** — `CH_ALT_VIDEO 0x24`, seam `:9005`, dedicated host decoder and window
   — although `docs/host/00_MACOS_HOST_APP.md` Tier 4 still bundles it into one open bullet with VDC and NMEA GPS.
-  Verified: `grep -rn "CH_ALT_VIDEO" crates/ ccpa/ host/MacHost`.
+  Verified: `grep -rn "CH_ALT_VIDEO" crates/ box/ host/MacHost`.
 - **This file's other two "Open design items" are genuinely resolved** — the `receiver_core` rootfs
   footprint (≈3.8 MiB measured) and the SETUP-relay latency (p99 2.36 ms, GO). Neither carries a
   surviving "Still open" clause; only media-port coordination does.
@@ -1113,7 +1109,7 @@ claim this index exists to remove.
   Verified: `grep -n "helloAcked\|HELLO_ACK" host/MacHost/carlink_macOS/OCBM/OCBMClient.swift`.
 - **The wireless research's "Still open" items 1 and 3 are closed** — the Bonjour responder on `wlan0`
   ships in `carplayd` (was `rx-connect`; that crate no longer exists), and the link-key store reuses `carplay_peers.bin`. Verified:
-  `grep -n "_airplay._tcp" ccpa/carplayd/src/discovery.rs`;
+  `grep -n "_airplay._tcp" box/carplayd/src/discovery.rs`;
   `grep -rn "carplay_peers" --include="*.rs" crates ccpa`.
 - **docs/wireless/01_BT_AND_RADIO.md's radio re-gating is CLOSED** (`R-51-3`) — the guard sits on `wireless_up` itself, and the
   two call-site strategies that failed must not be retried.
@@ -1213,7 +1209,7 @@ Listed with exactly what was tried. None of these can be settled by reading the 
 ### Proven (on hardware)
 
 *(Scope, 2026-10-28: unless a line says otherwise, these are CPC200-CCPA results — NXP i.MX6UL, ARMv7.
-The C2Air (Allwinner V821, riscv32) and the Pi / AAOS port are tracked in `c2air/` and `pi/docs/`. OCBM has
+The C2Air (Allwinner V821, riscv32) and the Pi / AAOS port are tracked in `boards/c2air-v821b/` and `docs/boards/`. OCBM has
 not been run on the C2Air's new baseline image.)*
 
 - **OCBM transport** — `/dev/usb_accessory` bulk (VID `0x1314` PID `0x2d00`, IF0, EP IN `0x81` / OUT
@@ -1230,7 +1226,7 @@ not been run on the C2Air's new baseline image.)*
   **VIDEO/MEDIA_AUDIO** `0x20`/`0x21` (encrypted A/V forward), **ALT_AUDIO** `0x22` (voice sink,
   seam `:9003`), **METADATA** `0x23` (seam `:9004`), **ALT_VIDEO** `0x24` (cluster screen, seam
   `:9005`), **INPUT** `0x30` (HID uplink), **MIC** `0x31` (mic uplink), **MGMT** `0x40` (box
-  management / the app's "CCPA" tab), **RTSP** `0x41` (app-driven SETUP relay, seam `:9106`), ECHO
+  management / the app's adapter/management tab), **RTSP** `0x41` (app-driven SETUP relay, seam `:9106`), ECHO
   `0xFF`, DISCARD `0x0FFF`. `CT_SETTIME` clock-sync verified. Authoritative constants:
   `crates/ocbm-proto/src/lib.rs`.
 - **Root + deploy** — open telnet/SSH over USB-NCM (no password set as shipped; no keys or certificates), UART console (persistent 115200), SPI programmer, live
@@ -1250,12 +1246,12 @@ not been run on the C2Air's new baseline image.)*
   signature), driven from userspace by five users (`iap2d`, `btd`, the receiver's AirPlay-tunnel handshake,
   `carplayd`'s `LocalMfiSigner`, and `ocbmd`'s `CH_MFI` relay), all serialised on `/tmp/carplay_mfi.lock`.
   With `CARPLAY_MFI_ADDR` set, three of them instead reach a CCPA acting as an MFi oracle over USB-NCM
-  (`ccpa/mfid`); a Raspberry Pi 4 AAOS host and a Linux workstation reached full CarPlay A/V that way. The
+  (`box/mfid`); a Raspberry Pi 4 AAOS host and a Linux workstation reached full CarPlay A/V that way. The
   C2Air's chip reads DeviceVersion 0x07 (608 B certificate, 64 B ECDSA signature).
 - **Phone-side iAP2 handshake — reaches Identified** against a real iPhone (SYN-ACK → cert/0xAA01 →
   sign/0xAA03 → 0xAA05 → 0x1D01 → 0x1D02), and holds the link. Unblocked by the `link.rs::parse`
   coalesced-read fix.
-- **Adapter pairing + key derivation** — `ccpa/carplayd` on `ncm0` completes pair-setup/pair-verify +
+- **Adapter pairing + key derivation** — `box/carplayd` on `ncm0` completes pair-setup/pair-verify +
   MFi-SAP (local chip) and derives the ChaCha20 session key against a real iPhone. **Disk-backed
   PeerStore** (`/etc/carplay_peers.bin`) persists pairing — a known device reconnects pair-verify-only.
 - **Forward-encrypted A/V** — the box forwards the **encrypted** video + audio + hands the per-stream
@@ -1274,7 +1270,7 @@ not been run on the C2Air's new baseline image.)*
 
 1. ~~OCBM v1 framed multiplexer + channels~~ **DONE.**
 2. ~~Phone-side iAP2 handshake to Identified~~ **DONE.**
-3. ~~**Adapter pairing path.**~~ **DONE.** `ccpa/carplayd` reuses receiver_core's `ControlServer`
+3. ~~**Adapter pairing path.**~~ **DONE.** `box/carplayd` reuses receiver_core's `ControlServer`
    (pair-setup/verify + `/info`) + `pairing`/`rtsp`/`mfi`, backed by a `LocalMfiSigner` on the local i2c
    chip. Full pair-setup → pair-verify → MFi-SAP → ChaCha20 session key ran end-to-end against a real
    iPhone; mDNS `_airplay._tcp` on `ncm0` via `rx-connect` (since 2026-09-08 a thread inside `carplayd`). **Disk-backed PeerStore**
@@ -1358,14 +1354,14 @@ still open is §4 of this file, not this list.
 - ~~OCBM media framing: how encrypted stream payloads + the key handoff are carried.~~ **RESOLVED** —
   per-stream channels each carry a key handoff then raw encrypted frames; validated 0-failure host-side
   decrypt. (The video lanes additionally carry `SEAM_MAGIC` + a `u64 LE seq`, and the key is re-handed on
-  every seam reconnect — see docs/carplay/01_OCBM_PROTOCOL.md §"Media transport" for the byte-exact framing.)
+  every seam reconnect — see docs/ocbm/00_PROTOCOL.md §"Media transport" for the byte-exact framing.)
   ~~Still open: minimal RTSP framing the box relays vs the app parses (the SETUP box↔app boundary, incl.
   media-port coordination), once SETUP moves app-side (step 8).~~ **RESOLVED 2026-08-16 for the framing
   half** — it shipped with step 8: `CH_RTSP 0x0041` carrying the v1 `RS_OPEN`/`RS_REQ`/`RS_RESP`/
   `RS_CLOSE`/`RS_ERR` sub-frames (`crates/ocbm-proto/src/lib.rs`, constants authoritative in
-  `receiver::relay`; wire spec in docs/carplay/01_OCBM_PROTOCOL.md §"RTSP channel (`0x0041`)"). **Still open: media-port
+  `receiver::relay`; wire spec in docs/ocbm/00_PROTOCOL.md §"RTSP channel (`0x0041`)"). **Still open: media-port
   coordination only** — the box pre-binds and its local response doubles as the oracle, so the app
-  cannot yet choose the media ports (docs/carplay/01_OCBM_PROTOCOL.md §"RTSP channel" / §"Media transport").
+  cannot yet choose the media ports (docs/ocbm/00_PROTOCOL.md §"RTSP channel" / §"Media transport").
 - ~~`receiver_core` footprint on the 6 MB rootfs (crypto crates; run-from-tmp; size-opt/UPX) — measure
   the armv7-musl build (see [`../ops/00_BUILD_AND_DEPLOY.md`](../ops/00_BUILD_AND_DEPLOY.md)).~~ **RESOLVED** — measured
   2026-07-10 and re-measured 2026-08-16: the pairing/session path cross-compiles clean, and the whole
@@ -1472,7 +1468,7 @@ NEW open items:
   2026-08-10; it also cited the wrong step — app-driven SETUP is step **8**, step 6 is nav voice/mic).
   When `appsetup() && seam_up()` is false the box drives SETUP locally from the app-pushed config
   (the `else` arm of the `levers::appsetup() && receiver::relay::seam_up()` gate in
-  `ccpa/carplayd/src/main.rs` — grep the condition, not a line number; that file moves often);
+  `box/carplayd/src/main.rs` — grep the condition, not a line number; that file moves often);
   pushing `appDrivenSetup: false` forces it (corrected 2026-10-19: this said `CARPLAY_APP_SETUP=0`
   forces it; that env is no-config-only since D2 and no longer beats a pushed config). Historical note: if app-driven SETUP (step 8) had added too much
   latency and risk session stability, fall back to having the **adapter drive the SETUP negotiation
@@ -1749,3 +1745,5 @@ suspected, that is the run to complete.
    lies between `480x800` (lockout) and `720x1280` (renders). Bisect both orientations at 4K, then
    decide whether the product floor stays a constant or becomes panel-relative. Do item 7 first — a
    bisect run on a detector that cannot see a lockout produces a confidently wrong number.
+
+**`:projection` Gradle module (2026-11-02, Q32): does not compile at baseline; left as is.** `:projection:compileDebugKotlin` failed on the two dangling `shared/com/carlink/av/{AacPlayer,HevcRenderer}.kt` symlinks, and with them removed it fails on unresolved references (`ProjectionSeamServer.kt:6-7` import both; `VoiceRouter.kt` lacks `VoiceTag`, `AudioDecoders`, `MsbcTelephonyDecoder`, `TransientFocusPolicy`); not fixed in the reorganisation and not one of its gates.

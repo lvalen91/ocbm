@@ -10,7 +10,7 @@ import java.util.Set;
  * <h2>Why this file exists</h2>
  *
  * The projection framework is the sanctioned integration surface for a projection receiver app
- * (see {@code pi/docs/01_PROJECTION_APP_DESIGN.md} §4), but every one of its members is
+ * (see {@code docs/boards/01_PROJECTION_APP_DESIGN.md} §4), but every one of its members is
  * {@code @SystemApi} and therefore <b>stripped from the public SDK stub</b>: the
  * {@code android.car.jar} shipped in {@code platforms/android-37.0/optional/} contains
  * {@code CarUxRestrictions} but no {@code CarProjectionManager} at all. There is no public

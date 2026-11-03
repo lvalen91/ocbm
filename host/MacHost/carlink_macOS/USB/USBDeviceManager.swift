@@ -59,13 +59,13 @@ let kSupportedDevices: [USBDeviceID] = [
     // (ocbm-host takes them as arguments), and reusing the CCPA's would make the two boxes
     // indistinguishable to this table. Verified 2026-08-17 on the stock-firmware-based image (HELLO_ACK
     // caps=0x3f, MFi cert + signature, and a root console, all over this id pair); not yet on the new
-    // baseline. See c2air/README.md.
+    // baseline. See boards/c2air-v821b/README.md.
     USBDeviceID(vendorID: 0x1f3a, productID: 0xace2), // C2Air V821 — OCBM accessory
 ]
 
 // 07-M2: legacy riddlebox PIDs only — resetDevicesOnLaunch's USBDeviceReEnumerate is the stock
 // firmware's "return to phase 0" kick. On an OCBM box a host-initiated re-enumerate is a bus-level
-// disconnect/reconnect from the gadget's perspective, and ocbmd's own source (ccpa/ocbmd, accessory-fd teardown handling; the old main.rs:3065-3069 cite had drifted)
+// disconnect/reconnect from the gadget's perspective, and ocbmd's own source (box/ocbmd, accessory-fd teardown handling; the old main.rs:3065-3069 cite had drifted)
 // says only a real cable/gadget teardown HUPs its accessory fd — so this forces an ocbmd
 // exit-and-respawn plus this function's 3s sleep on every launch and every transport-lost recovery,
 // for no benefit (the OCBM box needs no watchdog kick). The OCBM PIDs rely on the existing
