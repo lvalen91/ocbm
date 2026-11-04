@@ -101,7 +101,7 @@ enum FieldInfo {
     // entries were cut; 4 were already short enough to leave alone. The full ORIGINAL text of every
     // cut string, its shortened replacement, and a per-key fact-preservation note live in ONE place —
     // DESIGN.md §11.11 — rather than duplicated in a comment here, per this project's single-source-
-    // of-truth rule for corrections (CLAUDE.md "Documentation rule"). Evidence notes, refuted-value
+    // of-truth rule for corrections (CLAUDE.md "Repository rules", docs bullet). Evidence notes, refuted-value
     // notes and the inert marker (FeatureMatrix.swift / the `inertMarker` constant above) are EXEMPT
     // and were not touched by this pass.
     private static let descriptions: [String: String] = [

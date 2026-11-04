@@ -166,7 +166,7 @@ canonical control, box-autonomous page-on-boot) are **not** open items and are n
      Android button used to send `MGMT_RESTART_WIRELESS` in disguise (nothing for a wired phone, a
      whole-stack bounce for a wireless one). Proposed semantics — WIRED: end the CarPlay session and
      soft-detach / re-attach the phone-facing USB gadget so iOS sees an unplug (the un-CONFIGURED
-     edge `iap2d` already exits on, per CLAUDE.md's wired-tier note; `projection_up` respawns it);
+     edge `iap2d` already exits on, per docs/carplay/05_METADATA_AND_CONTROLS.md §5.2; `projection_up` respawns it);
      WIRELESS: drop that phone's BT ACL + Wi-Fi session WITHOUT `wireless_down` (btd's control port
      already addresses one phone, the protocol header of `crates/vendor/wireless/src/control.rs`); BOTH: a reconnect
      hold-off so the phone does not re-page at once, `MGMT_ACK` 0/1, and a `CAP_*` bit in

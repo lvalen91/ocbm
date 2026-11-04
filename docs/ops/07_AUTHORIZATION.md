@@ -23,10 +23,10 @@ on hardware the developer owns, talking to the developer's own iPhone.
   accessory program intends. The software **never emulates, clones, extracts, forges, or bypasses**
   it. The MFi private key never leaves the chip.
 - **Boot stack:** the HAB-signed U-Boot is treated as fixed platform firmware and is **never
-  modified** (only its 64 KB env block is ever erased). The stock kernel stays the default; the
-  separate `baseline/` track replaces it with a mainline kernel through the vendor U-Boot's own staging
-  mechanism (owner decision 2026-10-20, CLAUDE.md). *(Corrected 2026-10-20: this said the kernel is
-  never modified.)*
+  modified** (only its 64 KB env block is ever erased). The kernel is not frozen (owner decision): the stock
+  3.14.52 kernel stays the default on production units, and the separate `baseline/` track replaces it with a
+  mainline kernel through the vendor U-Boot's own staging mechanism, by the refuse-gated procedure in
+  `baseline/README.md` §5.
 - **Apple SDK material** referenced here is licensed first-party material accessed under the owner's
   Developer Program membership — not reverse-engineered.
 

@@ -479,7 +479,7 @@ pub fn table(now_playing_body: fn() -> Vec<u8>, route_guidance_body: fn() -> Vec
             // `also: [0xAD03]` — RequestAppDiscoveryAppIcons (Accessory). ADDED 2026-07-30.
             //
             // We declare 0xAD04 AppDiscoveryAppIcon as RECEIVED (param 7) but had never declared its
-            // sender 0xAD03 in param 6. That is exactly the shape of declaration rule 2 in CLAUDE.md
+            // sender 0xAD03 in param 6. That is exactly the shape of declaration rule 2 in docs/carplay/05_METADATA_AND_CONTROLS.md §5.6
             // — "a receive must not be declared without its send
             // (`OptionalMsgNotValidWithoutRequiredMsgs`)" — the same class of error as the missing
             // Stop ids that cost three sessions (docs/carplay/05_METADATA_AND_CONTROLS.md §5.6). Apple's own CarPlay Simulator

@@ -68,7 +68,7 @@ and `receiver::info`'s comment still says the same. **It is not** — it is the 
 implements. Apple's enum is larger, and the bits it omits are not gaps in the protocol.*
 
 Source: `AppleCarPlay/Sources/AirPlayCommon.h` lines 335–368 in the licensed R14G17 drop —
-**34 defines, top bit 32.** (Path updated 2026-08-16 to the copy CLAUDE.md designates,
+**34 defines, top bit 32.** (Path: the copy docs/carplay/02_SESSION_LIFECYCLE.md §1 designates,
 `$OCBM_CARPLAY_SDK/reference/apple_carplay_sdk_R14G17/AppleCarPlay/Sources/AirPlayCommon.h`.
 The originally-cited second copy of `reference/…` is NOT gone — it still exists on the maintainer's machine,
 outside the repo, and is byte-identical over this range; it is simply no longer
@@ -100,7 +100,7 @@ extractable with `strings`). Diffed against R14G17:
 *(Path rooted 2026-08-16 — it was written bundle-relative, and the Additional-Tools-for-Xcode image it was
 originally read from is no longer mounted; the bundle itself was copied to a "Carplay WWDC" download folder (gone as of 2026-10-19; now the copy `$OCBM_CARPLAY_SIMULATOR` names)
 and is indexed in [`../ops/03_REFERENCE_INDEX.md`](../ops/03_REFERENCE_INDEX.md) §D. Xcode's
-`CarPlaySimulator.devicekitplugin` ships its OWN, separate copy of `CarPlaySDK.framework` — per CLAUDE.md's
+`CarPlaySimulator.devicekitplugin` ships its OWN, separate copy of `CarPlaySDK.framework` — per docs/carplay/02_SESSION_LIFECYCLE.md's
 order of authority §1 — so do not treat the two as interchangeable when quoting a `strings` extraction.)*
 
 - **`AAC-ELD/32000/1` was added.** This is the provenance of the otherwise-unexplained **bit 43**

@@ -47,6 +47,17 @@ How the box binaries are built, what they cost in flash/RAM, and how they are pu
     passthrough claim on the adapter (vendor id `0x1314`), and a second instance fights it for the
     claim. Reshape the running device with `wm size` / `wm density` instead of booting a second AVD.
 
+### Build output location
+
+Build output and caches never live in the working tree. A checkout can sit in a cloud-synced folder (the
+maintainer's is in iCloud "Desktop & Documents"), and sync drops conflict copies (`classes 2.jar`, `Foo$Bar 2.dex`)
+into build trees, which toolchains then consume as real inputs: nondeterministic duplicate-class failures that a
+clean fixes only until sync catches up. Point every build system's output outside the tree (`CARGO_TARGET_DIR`,
+`$OCBM_CACHE`, which scripts default to `${TMPDIR:-/tmp}/ocbm-cache`, or `mktemp -d` under `/tmp`) and ignore it in
+`.gitignore` too, so nothing reaches a commit or the mirror. Those ignore patterns are slashless (`apk`, not `apk/`):
+a trailing slash matches directories only, and these paths are often symlinks into the cache. `.gitignore` also drops
+sync conflict copies (`* [0-9].*`, `* [0-9]`).
+
 Rust size profile (`Cargo.toml`) — size-first everywhere **except** the per-frame hot paths:
 ```toml
 [profile.release]

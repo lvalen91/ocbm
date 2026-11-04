@@ -4,7 +4,7 @@
 //! `OnceLock`, so arming it inside the unit-test binary would leak into every sibling test there.
 //! A Cargo integration test gets its own process, which is what makes a real arm safe to exercise —
 //! and the claims below (tier reaches all three axes, pushed beats the bench levers, a pushed skip
-//! REPLACES rather than concatenates, first-arm-wins) are asserted in docs/carplay/05_METADATA_AND_CONTROLS.md §5.2, CLAUDE.md and
+//! REPLACES rather than concatenates, first-arm-wins) are asserted in docs/carplay/05_METADATA_AND_CONTROLS.md §5.2 and
 //! `MetadataConfig`'s doc comment, so they need a test that fails if a future refactor reverses them.
 
 use carplay_iap2_core::config::Iap2Config;

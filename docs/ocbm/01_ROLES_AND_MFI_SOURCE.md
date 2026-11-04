@@ -35,7 +35,7 @@ MFi chip version is not assumed (CCPA 2.0C, C2Air 3.x, future SBCs 3.0).
 
 | Value | Meaning |
 |---|---|
-| `local-i2c` | chip on `/dev/i2c-1@0x11`, serialised on `/tmp/carplay_mfi.lock` (`mfi_local.rs`, `LocalMfiSigner`, `mfi-i2c-local`, ocbmd `CH_MFI`) |
+| `local-i2c` | chip on `/dev/i2c-1@0x11`, serialised on `/tmp/carplay_mfi.lock` (`iap2d`, `mfi_local.rs`, `LocalMfiSigner`, `mfi-i2c-local`, ocbmd `CH_MFI`) |
 | `remote-mfid` | TCP `MFI1` to `mfid` on a chip-bearing CCPA via `CARPLAY_MFI_ADDR` |
 | `host-provided` | the host app relays cert/sign over OCBM `CH_MFI` (gm_ccpa uses this arrangement from the app side) |
 | `none` | not implemented. With `CARPLAY_MFI_ADDR` unset the daemons attempt local I2C and fail if no chip is present; there is no explicit refusal state (`crates/mfi-wire/src/lib.rs` `ADDR_ENV`, `crates/vendor/wireless/src/mfi_local.rs` `REMOTE_ADDR_ENV`) |
@@ -50,3 +50,24 @@ one variant. Measured so far: CCPA bench unit 2.0C (945 B certificate, 128-byte 
 certificate, 64-byte ECDSA signature); future SBCs expected 3.0. Whether a 3.x chip accepts the 20-byte SHA-1
 digest the MFi-SAP paths produce, and whether it uses the 2.0C register map, is **unverified**. This selection is
 configuration, not new box code (owner, 2026-08-10 "dumb box" directive).
+
+### Chip users
+
+Five code paths drive the chip: wired `box/iap2d`; `btd`'s `crates/vendor/wireless/src/mfi_local.rs`;
+`crates/vendor/mfi-i2c-local/` (the receiver's AirPlay-tunnel handshake); carplayd's `LocalMfiSigner`
+(`box/carplayd/src/main.rs`); and ocbmd's `CH_MFI` handler (`box/ocbmd/src/main.rs`, `fn handle_mfi`), which serves
+cert/sign to the host app over OCBM. `box/mfid` also opens the chip, to serve remote hosts. `LocalMfiSigner` is the
+box implementation of the `MfiSigner` trait (`crates/vendor/mfi/src/auth_client.rs`) that the MFi-SAP server
+(`crates/vendor/mfi/src/sap.rs`) calls; gm_ccpa's `RemoteMfiSigner` (`host/gm_ccpa/native/carplay-jni/src/lib.rs`)
+implements it by relaying to ocbmd `CH_MFI`. Every path forwards the phone's challenge to the coprocessor and returns
+the chip's own signed response; none implements the crypto. Every cert/sign transaction serialises on
+`/tmp/carplay_mfi.lock`. No path calls Carlinkit's `ncm_carplayd` auth service; there is no client for it and no
+`mfi.rs`.
+
+**Remote path (`CARPLAY_MFI_ADDR`).** Opt-in, for the light-tested non-CCPA hosts of R2. When it is set, three chip
+users (`mfi_local.rs`, `LocalMfiSigner`, `mfi-i2c-local`) send cert/sign over TCP (`MFI1`) to `box/mfid` on a
+chip-bearing CCPA instead of touching local I2C; `iap2d` and ocbmd `CH_MFI` stay local. The session host then has no
+coprocessor of its own and the CCPA is an MFi oracle over USB-NCM. `crates/mfi-wire` (the `MFI1` framing and the
+blocking client) is therefore a shared library linked into production crates, not a test artifact. `box/mfid` is
+staged to `/tmp` and installed by nothing (`tools/run_mfid.sh`); `host/mfi-probe` is its host-side exerciser. With
+`CARPLAY_MFI_ADDR` unset the local-I2C path is byte-for-byte unchanged: the remote path is additive.

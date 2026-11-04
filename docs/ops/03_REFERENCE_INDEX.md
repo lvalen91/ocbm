@@ -44,7 +44,7 @@ Which external source answers which kind of question, and how to reach it.
 
 ### ▶ CONSULT ORDER (owner directive, REORDERED 2026-08-10 — ordered by CURRENCY)
 
-Authoritative list in CLAUDE.md and docs/carplay/02_SESSION_LIFECYCLE.md. Short form, and it is the order to actually work in:
+Full list with its rationale: docs/carplay/02_SESSION_LIFECYCLE.md §1 (CLAUDE.md carries a pointer form). Short form, and it is the order to actually work in:
 
 | # | source | why here |
 |---|---|---|
@@ -59,8 +59,9 @@ Authoritative list in CLAUDE.md and docs/carplay/02_SESSION_LIFECYCLE.md. Short 
 bundling let a 2017 drop's silence read as an answer. Four features this project actually needed are
 invisible in it and fully described in `CarPlaySDK.framework`: the RCS DataStream (type 130) and its
 seven client types, `MainBuffered` audio, the Enhanced-Siri `AuxIn`/`AuxOut` uplink, and the SETUP
-feature-intersection gate. The 2026-07-25 breakthrough came from exactly that escalation — the
-reorder makes it the default path instead of the recovery path.
+feature-intersection gate; it also covers Identify params 21/22 and 30. The 2026-07-25 breakthrough came from
+exactly that escalation — the reorder makes it the default path instead of the recovery path, and the "disassembly is
+the last resort" rule below does not block it.
 
 ### Why this document exists
 
@@ -299,7 +300,7 @@ Read it before assuming anything in this tree is CCPA-specific, and before re-de
   and it must be raw HCI rather than mgmt because mgmt synthesises EIR and cannot express the
   CarPlay marker UUID.
 * There are several independent MFi chip users in this tree, not one; the current list and the MFi-SAP
-  trait they satisfy are in CLAUDE.md (Authorization & scope). The software is MFi-version agnostic: the
+  trait are in [../ocbm/01_ROLES_AND_MFI_SOURCE.md](../ocbm/01_ROLES_AND_MFI_SOURCE.md) (Chip users). The software is MFi-version agnostic: the
   CCPA benches carry MFi 2.0C (128-byte RSA), the C2Air reports 3.x (64-byte ECDSA), and any future
   authorized SBC would use MFi 3.0.
 * Four Android-specific traps that cost real debugging time (`target_os` is `"android"` not

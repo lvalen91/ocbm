@@ -1,11 +1,11 @@
 # OCBM
 
-Open-source CarPlay and Android Auto projection for the Carlinkit CPC200-CCPA and other boxes.
+OCBM is an open, modular protocol that carries CarPlay (iPhone) and Android Auto (Android)
+between a phone-facing adapter and a host that decodes and renders. It is not tied to one vendor,
+chip or OS: the same protocol runs on different adapters, boards and host platforms.
 
-A phone connects to a small adapter in the car, and the car gets CarPlay (iPhone) or Android Auto
-(Android). OCBM replaces the adapter's closed userspace with open, Rust-first code and pairs it
-with a host app, on a Mac or an Android Automotive head unit, that decodes and renders. Both
-protocols ride one open transport, also called OCBM.
+This repo holds the protocol, an open Rust-first userspace for the Carlinkit CPC200-CCPA (and
+other boards), and host apps for a Mac or an Android Automotive head unit.
 
 > **License:** Unlicense (public domain), except baseline/ which is derived from LIVI and is
 > GPL-3.0-or-later; see [NOTICE.md](NOTICE.md). Based on LIVI by Lasse Heitgres (https://github.com/f-io/LIVI)
@@ -14,9 +14,9 @@ protocols ride one open transport, also called OCBM.
 
 ## Scope
 
-OCBM began as an open replacement for the closed protocol in Carlinkit's adapter firmware. It has
-since grown into a modular, universal protocol. It is not limited to Carlinkit adapters and can be
-adapted to other hardware and operating systems.
+OCBM began as an open replacement for the closed protocol in Carlinkit's adapter firmware, and
+has grown into a universal one. Carlinkit adapters are one supported target among several; the
+protocol can be adapted to other hardware and operating systems.
 
 ## What is here
 

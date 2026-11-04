@@ -304,7 +304,7 @@ CARPLAY_METADATA=proven|extended|all|rx-only     # environment
 CARPLAY_METADATA_SKIP=power,destination          # environment equivalent of skip=
 ```
 
-The file is read **unconditionally** — `file_setting()` is always called. Only the tier *word* loses to `CARPLAY_METADATA`; the `skip=` lists **concatenate**. *(Corrected 2026-08-16; CLAUDE.md states this correctly.)* `/tmp` is tmpfs on the box, so a reboot always
+The file is read **unconditionally** — `file_setting()` is always called. Only the tier *word* loses to `CARPLAY_METADATA`; the `skip=` lists **concatenate**, so the file's `skip=` applies even when `CARPLAY_METADATA` sets the tier. `/tmp` is tmpfs on the box, so a reboot always
 returns to the compiled default — an experiment cannot strand a working session. **Re-arm after any box
 reboot** with `echo extended > /tmp/carplay_metadata`.
 
@@ -324,8 +324,10 @@ carplayd is spawned per session, so the AirPlayTunnel arm picks up a new tier on
 iap2d is long-lived and survives app teardown, so the WIRED arm changes only when iap2d restarts —
 a phone unplug/replug (the gadget goes un-CONFIGURED, iap2d exits, `projection_up.sh` respawns it),
 NOT an app reconnect. A differing push against an already-armed process logs
-`pushed metadata tier … IGNORED`. The BT-time Identify is unreachable from the pushed tier at all
-(its params 6/7 are a hardcoded list in `message.rs`). The `skip` list from a pushed config REPLACES the bench lists rather than
+`pushed metadata tier … IGNORED`. The pushed tier governs the WIRED and AirPlayTunnel Identifies only. The BT-time
+Identify is unreachable from it: its params 6/7 are a hardcoded list in `message.rs`'s `TransportComponent::Wireless`
+arm that never consults the policy, so the byte-pin (§5.3) is structural. Do not wire the tier into that arm to "fix
+the inconsistency". The `skip` list from a pushed config REPLACES the bench lists rather than
 concatenating: app intent must not be silently mixed with stale on-box experiment state.
 
 **gm_ccpa pushes no tier.** The gm_ccpa app runs the receiver in-process (`carplay-jni`) with a static `/info` and `CARPLAY_WIRELESS_METADATA=1`; no `metadata:` section is pushed and no `arm_metadata_policy` call exists under `host/gm_ccpa`, so its tunnel Identify uses the compiled/env/file default (`proven`). **UNVERIFIED** beyond that code search: no run has confirmed the declared tier on that host.
@@ -378,7 +380,8 @@ one-off telephony pane. Unmapped kinds still land in the category's event list, 
 #### 5.6 Declaration rules iOS enforces
 
 Learned from the device, not inferred. Rule 1 is structural in `features.rs` (the `Trigger` type makes an
-unpaired Start a deliberate, evidence-carrying `UnpairedStart` — `0x4154` is the only one — and
+unpaired Start a deliberate, evidence-carrying `UnpairedStart` — `0x4154` is the only one, guarded by
+`unpaired_starts_are_exactly_the_documented_exceptions` — and
 `every_start_is_paired_with_apples_own_stop` checks the Stop is Apple's own); rule 2 is enforced by rider
 dependencies (`Trigger::RidesOn`) plus the test `no_receive_is_declared_without_its_send`; rule 3 is a test
 assertion (`subscribe_tier_never_exceeds_the_declared_send_tier`); rule 4 (consent) is not encoded at all and is

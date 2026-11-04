@@ -1109,7 +1109,7 @@ already implements. The host app tooltip conflated the two.
   the two-site declaration arc (`/info` + SETUP `enabledFeatures` echo), the lever-gated
   byte-identical-by-default discipline, and the `accessoryd`-over-USB acceptance proof. Every advertise-tier
   capability above (rows 1-3, plus the advertise halves of the rest) copies this arc.
-- **CLAUDE.md Identify-declaration rules apply to the iAP2 items** (row 4b EV telematics, param 20 /
+- **The Identify-declaration rules (05_METADATA_AND_CONTROLS.md §5.6) apply to the iAP2 items** (row 4b EV telematics, param 20 /
   `features.rs`): a `Start*` must be declared with its `Stop*`; a receive must not be declared without its
   send; a subscribe for an id param 6 does not declare is silently ignored. Params 6/7 and the subscribe
   sequence are GENERATED from `features.rs` — never hand-edit one of the three independently (see also

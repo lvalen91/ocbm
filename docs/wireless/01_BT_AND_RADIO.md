@@ -271,6 +271,14 @@ consistent with the vendor's BT wait being on `wlan0`.
 lands; the radio platform is a property of the *converted unit*, not of OCBM. OCBM merely
 consumes it.
 
+**The seam is installed on purpose.** Chipset-specific bring-up, drivers and firmware are never installed from the
+repo overlay (those are the IW416 baseline's; each unit keeps its own). `radio_detect.sh`, `radio_hal.sh` and
+`radio_ap_up.sh` are the sanctioned exception and ARE installed (the `ncm_base_install.sh` boot path, and
+`ocbm_install.sh --full`): they carry no firmware path, no module name and no attach-helper invocation, and resolve
+a unit's bring-up at runtime from that unit's own dispatcher, so they cannot put one chip's bring-up on another
+chip's board. `is_radio()` matches `radio_*`, so they are protected from deletion too. Removing them from an
+install list to "restore compliance" leaves every non-IW416 unit with callers naming scripts it does not have.
+
 But `ocbm_install.sh --full` ships `session_supervisor.sh`, which is the HAL's *caller*. So the
 OCBM installer must **assert** the seam exists on the target rather than assume it — which is
 exactly the manifest cross-reference check §7 lists: for every shipped `*.sh`, extract its

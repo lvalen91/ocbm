@@ -17,7 +17,7 @@ match product id `2d00`, not the vendor alone.
 **Other hosts of the same box.** A Raspberry Pi 4 (AAOS) and a Linux workstation have each run full
 CarPlay A/V with a CCPA in NCM mode used only as the MFi source (cert/sign over `crates/mfi-wire`,
 `CARPLAY_MFI_ADDR`, `box/mfid`); the host runs its own radios and does not speak OCBM. That path is
-not specified here; see `CLAUDE.md` (remote MFi path).
+not specified here; see [01_ROLES_AND_MFI_SOURCE.md](01_ROLES_AND_MFI_SOURCE.md) (Chip users, remote path).
 
 **OCBM is projection-agnostic.** It carries CarPlay and Android Auto over the same envelope — CarPlay
 A/V on its own channels, Android Auto as the phone's own byte stream over `CH_IP` — and the channel
