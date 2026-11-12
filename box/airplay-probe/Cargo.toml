@@ -1,0 +1,55 @@
+[package]
+name = "airplay-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Bench instrument (never shipped, never in the overlay): advertises a NON-car AirPlay receiver and logs what an iPhone sends to it. Answers MFi auth-setup with the on-board coprocessor (owner-authorized, auth-setup path only); implements no FairPlay."
+
+# Standalone on purpose: an empty [workspace] keeps this out of the root workspace, so
+# `tools/run_tests.sh`, `./build.sh` and the overlay build never see it. Build with
+# CARGO_TARGET_DIR pointing outside the tree; probe_ctl.sh runs it on the box from /tmp.
+[workspace]
+
+[dependencies]
+# The ONLY crypto in this binary is what these existing crates already contain.
+pairing = { path = "../../crates/vendor/pairing" }
+rtsp = { path = "../../crates/vendor/rtsp" }
+# MFi-SAP (/auth-setup): the crate's own server-side state machine, and the box's local-I2C chip
+# access + shared /tmp/carplay_mfi.lock. Neither implements crypto or the I2C sequence here.
+mfi = { path = "../../crates/vendor/mfi" }
+mfi-i2c-local = { path = "../../crates/vendor/mfi-i2c-local" }
+mdns-sd = "0.11"
+plist = "1"
+libc = "0.2"
+
+# HOST-ONLY capture checker (`cargo run --features capcheck --bin capcheck -- x.bin x.meta`). Optional
+# so the box build never compiles the receiver crate; capcheck calls the receiver's own stream code
+# to test whether a capture authenticates under the layout OCBM already implements.
+receiver = { path = "../../crates/vendor/receiver", default-features = false, optional = true }
+chacha20poly1305 = { version = "0.10", optional = true }
+# The one parser of the opcode-1 codec configuration body (`ocbm_proto::seam::video_config`), shared
+# with `ocbm-host airplay`. No dependencies of its own.
+ocbm-proto = { path = "../../crates/ocbm-proto", optional = true }
+
+[features]
+capcheck = ["dep:receiver", "dep:chacha20poly1305", "dep:ocbm-proto"]
+
+[[bin]]
+name = "airplay-probe"
+path = "src/main.rs"
+
+[[bin]]
+name = "capcheck"
+path = "src/bin/capcheck.rs"
+required-features = ["capcheck"]
+
+# Tests only: the controller side of pair-verify, to prove the advertised pk is the signing key.
+# Same versions the pairing crate already pulls in; nothing new enters the box binary.
+[dev-dependencies]
+ed25519-dalek = "2"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+
+# No panic=abort: a panic in one connection thread must not take the probe (and its log) down.
+[profile.release]
+opt-level = "s"
+strip = true

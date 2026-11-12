@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/ocbm-proto", "crates/box-common", "crates/bt-common", "box/ocbmd", "box/iap2d", "box/carplayd", "box/aa-bridge", "box/aa-wireless", "host/ocbm-host", "crates/vendor/wireless",
+members = ["crates/ocbm-proto", "crates/box-common", "crates/bt-common", "box/ocbmd", "box/iap2d", "box/carplayd", "box/airplayd", "box/aa-bridge", "box/aa-wireless", "host/ocbm-host", "crates/vendor/wireless",
     # NCM bring-up instruments (not shipped, not installed — see box/mfid/src/main.rs).
     "crates/mfi-wire", "box/mfid", "host/mfi-probe",
     # Raspberry Pi target daemons (not shipped on the CCPA).

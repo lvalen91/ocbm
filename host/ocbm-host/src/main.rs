@@ -25,9 +25,15 @@
 //!                                               local response, and send the host-authored bytes.
 //!                                               --mute-once: drop the FIRST RS_REQ (author/send nothing) to
 //!                                               exercise the box's timeout → sticky-local fallback.
+//!   ocbm-host airplay --ssid S --psk P [--name N] --out DIR [...]
+//!                                               AirPlay-only mode (airplay.rs): select the mode with the AP
+//!                                               credentials, capture and decrypt the tunnelled streams
+//!                                               into DIR/video.h264, audio.aac, events.log. `airplay` alone
+//!                                               prints its options.
 //!   Also dispatched (see the match in main; arguments vary): ip, srcbench, sinkbench, av, avdec, session.
 //! Every connection also auto-pushes the host clock right after HELLO.
 
+mod airplay;
 mod setup_driver;
 
 use ocbm_proto as p;
@@ -161,6 +167,16 @@ fn host_instance_nonce() -> u32 {
     })
 }
 
+/// `<first 12 hex digits of content_id> <state>`; a zero id (no etc/BUNDLE, or an unusable one) prints as `-`.
+fn bundle_summary(id: &[u8; p::BUNDLE_ID_LEN], state: u8) -> String {
+    let short = if id.iter().all(|&b| b == 0) {
+        "-".to_string()
+    } else {
+        id[..6].iter().map(|b| format!("{b:02x}")).collect()
+    };
+    format!("{short} {}", p::bundle_state_name(state))
+}
+
 fn do_hello(link: &mut Link) {
     let mut hi = [0u8; 6];
     hi[0] = p::CT_HELLO;
@@ -196,6 +212,19 @@ fn do_hello(link: &mut Link) {
                     caps,
                     if l >= 7 { out[6] } else { 0 }
                 );
+                // The bundle tail (ocbm-proto HELLO_ACK_*): absent from an older ocbmd, which is not an error.
+                if let Some((id, state)) = p::hello_ack_bundle(&out[..l]) {
+                    println!("bundle: {}", bundle_summary(&id, state));
+                }
+                // The mode tail: present from an ocbmd that knows AirPlay-only mode.
+                if let Some((ap, sess)) = p::hello_ack_airplay(&out[..l]) {
+                    println!(
+                        "airplay-only mode: {} (ap={} session={})",
+                        if caps & p::CAP_AIRPLAY != 0 { "supported" } else { "not installed" },
+                        p::airplay_ap_name(ap),
+                        p::airplay_session_name(sess)
+                    );
+                }
                 return;
             }
             stale += 1; // leftover frame from a prior session — keep draining toward the ACK
@@ -1581,6 +1610,17 @@ fn mode_sinkbench(link: &mut Link, secs: u64, xfer: usize) {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mode = args.get(1).map(String::as_str).unwrap_or("hello");
+    if mode == "airplay" {
+        // AirPlay-only mode (docs/ocbm/02_AIRPLAY_ONLY_MODE.md): its own flag syntax, not the positional one.
+        let o = airplay::Opts::parse(&args[2..]).unwrap_or_else(|e| {
+            eprintln!("{e}\n{}", airplay::USAGE);
+            std::process::exit(2)
+        });
+        let mut link = open(o.vid, o.pid);
+        do_hello(&mut link);
+        push_time(&mut link);
+        std::process::exit(airplay::run(&mut link, &o));
+    }
     let vid = u16::from_str_radix(args.get(2).map(String::as_str).unwrap_or("1314"), 16)
         .unwrap_or(0x1314);
     let pid = u16::from_str_radix(args.get(3).map(String::as_str).unwrap_or("2d00"), 16)
@@ -1724,5 +1764,22 @@ mod tests {
             )
             .unwrap();
         assert_eq!(pt, au, "host audio decrypt must recover the original AU");
+    }
+
+    #[test]
+    fn hello_bundle_line_reads_the_tail_and_an_older_box_has_none() {
+        use super::{bundle_summary, p};
+        // A 7-byte ACK (an older ocbmd): no tail, so no bundle line.
+        let mut ack = [p::CT_HELLO_ACK, p::VERSION, 0x3b, 0, 0, 0, p::MODE_PROJECTION].to_vec();
+        assert!(p::hello_ack_bundle(&ack).is_none());
+        ack.extend_from_slice(&[0u8; 33]);
+        let (id, state) = p::hello_ack_bundle(&ack).unwrap();
+        assert_eq!(bundle_summary(&id, state), "- absent");
+        ack[7..13].copy_from_slice(&[0x75, 0xe7, 0xc1, 0xc0, 0xca, 0x73]);
+        ack[39] = p::BUNDLE_MIXED;
+        let (id, state) = p::hello_ack_bundle(&ack).unwrap();
+        assert_eq!(bundle_summary(&id, state), "75e7c1c0ca73 mixed");
+        // A state from a newer box still prints.
+        assert_eq!(bundle_summary(&id, 9), "75e7c1c0ca73 unknown");
     }
 }

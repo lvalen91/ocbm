@@ -30,6 +30,9 @@ run "receiver (box: local-mfi)" cargo test --manifest-path crates/vendor/receive
   --no-default-features --features local-mfi --quiet
 run "ocbm-proto" cargo test -p ocbm-proto --quiet
 run "ocbmd"      cargo test -p ocbmd --quiet
+# airplayd (AirPlay-only mode receiver): the whole control path and the tunnel onto the seams, driven
+# over loopback by a controller built from the pairing/rtsp crates (box/airplayd/src/tests.rs).
+run "airplayd"   cargo test -p airplayd --quiet
 run "iap2d"      cargo test -p iap2d --quiet
 # These are excluded from the workspace too, and were missing from this script until 2026-07-29 —
 # 103 further passing tests, including `btd`, which is one of the four SHIPPED box
@@ -89,6 +92,8 @@ run "ocbm-host"  cargo test -p ocbm-host --quiet
 # this script is Rust-only and must still be runnable without Xcode installed.
 if command -v xcrun >/dev/null 2>&1 && xcrun --find swiftc >/dev/null 2>&1; then
   run "host/MacHost (Swift)" bash host/MacHost/tests/run_tests.sh
+  # The AirPlay Test Host (AirPlay-only mode client): same kind of harness, its own sources.
+  run "host/MacHost/AirPlayTestHost (Swift)" bash host/MacHost/AirPlayTestHost/tests/run_tests.sh
 else
   echo "=== host/MacHost (Swift) — SKIPPED (xcrun/swiftc not found)"
 fi

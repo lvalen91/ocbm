@@ -10,15 +10,17 @@
 #   4096-byte header: "OCBM-OVERLAY 1\n" "payload_bytes=<n>\n" "payload_sha256=<hex>\n" "version=<text>\n", NUL pad
 #   payload:          gzip'd ustar archive, unpacked at /opt/ocbm:
 #                       bin/ocbmd-launch          the command the baseline's relay spawns (required)
-#                       bin/ocbmd [btd carplayd]  target/armv7-unknown-linux-musleabihf/release
+#                       bin/ocbmd [btd carplayd airplayd]  target/armv7-unknown-linux-musleabihf/release
 #                       etc/rc.ocbm etc/*.conf    boards/ccpa-imx6ul/overlay/etc (boot hook, AP templates)
 #                       script/*                  --full: the stock supervisor + radio seam, unmodified copies
-#                       etc/MANIFEST              sha256 of every file above
+#                       etc/BUNDLE                bundle identity: commit, dirty flag, profile, content_id (read by ocbmd)
+#                       etc/MANIFEST              sha256 of every file above (BUNDLE included)
 #
 # usage: tools/ocbm_overlay.sh [--minimal|--full] [--out FILE]
 #   --minimal  ocbmd only (link, MFi, console, file, log, settime, heartbeat): the Stage-A image
 #   --full     (default) + btd, carplayd, session_supervisor.sh, projection_up.sh, radio_detect.sh,
-#              radio_hal.sh, radio_ap_up.sh: the app-driven wireless stack (Stage B)
+#              radio_hal.sh, radio_ap_up.sh: the app-driven wireless stack (Stage B); + airplayd and
+#              airplay_mode.sh: AirPlay-only mode (docs/ocbm/02_AIRPLAY_ONLY_MODE.md)
 # Output: $OCBM_CACHE/carlink-artifacts/ocbm-overlay/ocbm-overlay-<profile>-<stamp>.img (+ .sha256); OCBM_CACHE
 # defaults to ${TMPDIR:-/tmp}/ocbm-cache. Never inside the working tree (CLAUDE.md). Install on the unit (rootfs, any USB mode): get the file into /tmp (UART:
 # baseline/common/tools/uart_xmodem_send.py into `rx`; NCM: scp -O), then
@@ -64,6 +66,10 @@ if [ "$PROFILE" = full ]; then
   put "$ARM/carplayd" "$R/bin/carplayd" 755
   put "$REPO/tools/session_supervisor.sh" "$R/script/session_supervisor.sh" 755
   put "$REPO/tools/projection_up.sh" "$R/script/projection_up.sh" 755
+  # AirPlay-only mode (MODE_AIRPLAY): the receiver and the mode script the supervisor runs. The baseline
+  # rootfs has no /usr/sbin link for airplayd, so the script finds it in /opt/ocbm/bin.
+  put "$ARM/airplayd" "$R/bin/airplayd" 755
+  put "$REPO/tools/airplay_mode.sh" "$R/script/airplay_mode.sh" 755
   for s in radio_detect.sh radio_hal.sh radio_ap_up.sh; do
     put "$REPO/boards/ccpa-imx6ul/rootfs/script/$s" "$R/script/$s" 755
   done
@@ -74,10 +80,21 @@ for s in "$R"/script/*.sh "$R/etc/rc.ocbm" "$R/bin/ocbmd-launch"; do
 done
 # a detached `sh -c` block whose own text matches its `pkill -f "[x]yz"` kills itself (2026-10-30)
 python3 -I "$REPO/tools/pkill_selfmatch_check.py" "$R"/script/*.sh "$R/etc/rc.ocbm" || { echo "self-matching pkill in a packed script" >&2; exit 1; }
-for b in "$R"/bin/ocbmd "$R"/bin/btd "$R"/bin/carplayd; do
+for b in "$R"/bin/ocbmd "$R"/bin/btd "$R"/bin/carplayd "$R"/bin/airplayd; do
   [ -f "$b" ] || continue
   file "$b" | grep -q 'ARM, EABI5' || { echo "not an armv7 binary: $b ($(file -b "$b"))" >&2; exit 1; }
 done
+# BUNDLE: the identity of this OCBM set as a whole (what ocbmd reports to the host; never compiled into a binary).
+# content_id = sha256 over the per-file hashes of everything except BUNDLE and MANIFEST, so it does not depend on
+# the stamp or on the gzip/tar framing; the payload sha256 lives in the image header (it cannot be inside itself).
+GIT=$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo nogit)
+DIRTY=0
+# tracked changes only: untracked scratch files do not change what was built
+[ -n "$(git -C "$REPO" status --porcelain --untracked-files=no 2>/dev/null | head -1)" ] && DIRTY=1
+CID=$(cd "$R" && find . -type f | sort | xargs shasum -a 256 | sed 's|  \./|  |' | shasum -a 256 | cut -d' ' -f1)
+printf 'bundle_format=1\ncommit=%s\ndirty=%s\nprofile=%s\nbuilt=%s\ncontent_id=%s\n' \
+  "$GIT" "$DIRTY" "$PROFILE" "$STAMP" "$CID" > "$R/etc/BUNDLE"
+chmod 644 "$R/etc/BUNDLE"
 (cd "$R" && find . -type f ! -name MANIFEST | sort | xargs shasum -a 256 | sed 's|  \./|  |') > "$R/etc/MANIFEST"
 find "$R" -exec touch -h -t 202610300000 {} +
 
@@ -86,8 +103,7 @@ tar --format ustar --no-recursion --uid 0 --gid 0 --uname root --gname root --no
   -cf "$W/payload.tar" -C "$R" -T "$W/list"
 gzip -9 -n -c "$W/payload.tar" > "$W/payload.tgz"
 
-GIT=$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo nogit)
-[ -n "$(git -C "$REPO" status --porcelain 2>/dev/null | head -1)" ] && GIT="$GIT-dirty"
+[ "$DIRTY" = 1 ] && GIT="$GIT-dirty"
 OMD5=$(md5 -q "$R/bin/ocbmd" 2>/dev/null || md5sum "$R/bin/ocbmd" | cut -c1-32)
 VERSION="$PROFILE $STAMP $GIT ocbmd-md5=${OMD5:0:12}"
 PBYTES=$(wc -c < "$W/payload.tgz" | tr -d ' ')

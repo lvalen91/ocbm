@@ -1166,8 +1166,8 @@ wl_prune_teardowns() {
 # already-pending deferral keeps its own deadline.
 wl_up_or_defer() {
   wl_prune_teardowns
-  if [ -n "$wl_down_pids" ]; then
-    echo "[sup] ${1:-bring-up} while the last wireless teardown is still running -> deferring wireless_up behind it"
+  if [ -n "$wl_down_pids" ] || airplay_busy; then
+    echo "[sup] ${1:-bring-up} while the last wireless teardown (or AirPlay-only mode's) is still running -> deferring wireless_up behind it"
     [ -n "$wireless_rebring_at" ] || wireless_rebring_at=$(now)
     # Does the parked bring-up owe an A2 restore if it is wired-suppressed when it fires? Only if
     # it would NOT be suppressed had it run right now (wireless_up's first choke point): then a
@@ -1185,6 +1185,109 @@ wl_up_or_defer() {
     _wl_defer_restore=0
     wireless_up
   fi
+}
+
+# ---- AirPlay-only mode (OCBM MODE_AIRPLAY, docs/ocbm/02_AIRPLAY_ONLY_MODE.md) ---------------------------
+# A second, mutually exclusive use of the box, selected by the host app: ocbmd writes the request to
+# /tmp/airplay_mode.cfg (gen=, ssid=, psk=, name=, ...) and removes it when the host leaves the mode or
+# goes away. ocbmd keeps /tmp/host_present at 0 for as long as the file exists (it ends a projection
+# session before writing it, and a CT_SUBSCRIBE removes it before presence can rise), so everything
+# above and below in this file runs its ordinary host-GONE path while the mode is on: the CarPlay
+# machinery needs no "AirPlay" case. This tick only adds the mode's own bring-up and teardown:
+#   request appears -> the CarPlay stack must be down (carplayd, iap2d, btd, its AP), then
+#                      /script/airplay_mode.sh up   (AP with the host's credentials via the radio seam, airplayd)
+#   request changes -> down, then up with the new one
+#   request gone    -> /script/airplay_mode.sh down (registered in wl_down_pids, so a CarPlay bring-up on
+#                      the same edge waits behind it exactly as it waits behind wireless_down)
+# One up/down at a time; a failed AP bring-up is retried every 10 s; a dead airplayd is restarted.
+AIRPLAY_CFG=/tmp/airplay_mode.cfg
+AIRPLAY_APF=/tmp/airplay_ap
+# What is applied right now ("" = the mode is off). Adopted from the state file so a respawned
+# supervisor neither restarts a running AirPlay session nor leaves a stale one up.
+airplay_gen=$(sed -n 's/^gen=//p' "$AIRPLAY_APF" 2>/dev/null | head -1)
+airplay_pid=""        # the airplay_mode.sh still running, if any
+airplay_cleared=0     # 1 once this entry has asked the CarPlay stack to stop
+airplay_wait=0        # ticks spent waiting for it
+airplay_retry_at=0    # uptime of the next AP retry (0 = none pending)
+airplay_dead=0        # consecutive ticks with the AP up and no airplayd
+airplay_warned=0
+# True from the moment a request is applied until its teardown has FINISHED: no CarPlay bring-up (wireless
+# stack or wired arm) may start inside that window. wl_up_or_defer and the deferred handler wait on it.
+airplay_busy() {
+  [ -n "$airplay_gen" ] && return 0
+  [ -n "$airplay_pid" ] && kill -0 "$airplay_pid" 2>/dev/null
+}
+airplay_run() {  # $1 = up | down | receiver
+  setsid sh /script/airplay_mode.sh "$1" </dev/null >/dev/null 2>&1 &
+  airplay_pid=$!
+}
+airplay_tick() {
+  _ag=$(sed -n 's/^gen=//p' "$AIRPLAY_CFG" 2>/dev/null | head -1)
+  [ -z "$_ag" ] && [ -z "$airplay_gen" ] && return 0   # not in the mode, none requested: the usual case
+  if [ -n "$airplay_pid" ]; then
+    kill -0 "$airplay_pid" 2>/dev/null && return 0
+    airplay_pid=""
+  fi
+  if [ -n "$airplay_gen" ] && [ "$_ag" != "$airplay_gen" ]; then
+    if [ -n "$_ag" ]; then echo "[sup] AirPlay-only mode: a new request replaces the applied one -> receiver + AP down first"
+    else echo "[sup] AirPlay-only mode: request withdrawn -> receiver + AP down, AP config restored"; fi
+    airplay_run down
+    wl_down_pids="$wl_down_pids $airplay_pid"
+    airplay_gen=""; airplay_cleared=0; airplay_wait=0; airplay_retry_at=0; airplay_dead=0
+    return 0
+  fi
+  if [ -z "$airplay_gen" ]; then
+    # Entering. A PREVIOUS tick must have seen presence down: its 1->0 edge is what runs the CarPlay
+    # teardown (this tick runs before the edges), and a second one beside it would race it for the radio.
+    [ "${last_p:-0}" = 1 ] && return 0
+    if [ ! -f /script/airplay_mode.sh ]; then
+      [ "$airplay_warned" = 0 ] && echo "[sup] AirPlay-only mode requested but /script/airplay_mode.sh is not installed -> ignored"
+      airplay_warned=1
+      return 0
+    fi
+    if [ "$airplay_cleared" = 0 ]; then
+      airplay_cleared=1; airplay_wait=0
+      echo "[sup] AirPlay-only mode requested (gen $_ag) -> CarPlay stack must be down first (carplayd, iap2d, btd, AP)"
+      [ "$armed" = 1 ] && teardown
+      pkill -x iap2d 2>/dev/null    # the wired holding pattern ends too; projection_up restarts it on the next arm
+      wl_prune_teardowns
+      [ -z "$wl_down_pids" ] && wireless_down "AirPlay-only mode"
+    fi
+    wl_prune_teardowns
+    if { [ -n "$wl_down_pids" ] || carplayd_alive || wireless_running; } && [ "$airplay_wait" -lt 15 ]; then
+      airplay_wait=$((airplay_wait + 1))
+      return 0
+    fi
+    [ "$airplay_wait" -ge 15 ] && echo "[sup] AirPlay-only mode: the CarPlay stack is still not down after 15 s -> going on"
+    echo "[sup] AirPlay-only mode: AP + receiver up (gen $_ag)"
+    airplay_run up
+    airplay_gen="$_ag"; airplay_dead=0; airplay_retry_at=0
+    return 0
+  fi
+  # Steady state: the applied request is the wanted one.
+  _aps=$(sed -n 's/^ap=//p' "$AIRPLAY_APF" 2>/dev/null | head -1)
+  if [ "$_aps" = 2 ] && pgrep -x hostapd >/dev/null 2>&1; then
+    airplay_retry_at=0
+    if pidof airplayd >/dev/null 2>&1; then
+      airplay_dead=0
+    else
+      airplay_dead=$((airplay_dead + 1))
+      if [ "$airplay_dead" -ge 3 ]; then
+        echo "[sup] AirPlay-only mode: airplayd is not running -> restarting it"
+        airplay_run receiver
+        airplay_dead=0
+      fi
+    fi
+  elif radio_off; then
+    : # CT_RADIO off took the radios down on purpose: no retry until the host lifts it
+  elif [ "$airplay_retry_at" = 0 ]; then
+    airplay_retry_at=$(( $(now) + 10 ))
+    echo "[sup] AirPlay-only mode: the AP is not up (state ${_aps:-none}) -> retry in 10 s"
+  elif [ "$(now)" -ge "$airplay_retry_at" ]; then
+    airplay_retry_at=0
+    airplay_run up
+  fi
+  return 0
 }
 
 write_healthy 0
@@ -1235,7 +1338,15 @@ last_r=0                # tracks the CT_RADIO inhibit flag across ticks (docs/ca
 # last_p="" and never sees a 1->0 edge, so a crash between GONE and teardown would strand radios
 # ON with no app. If the app is absent but any radio state is up, reconcile once now. No-op on a
 # clean boot (boot chain raises no radios).
-if [ "$(cat "$FLAG" 2>/dev/null)" != 1 ]; then
+# A power cut during AirPlay-only mode (stock layout: /etc is flash) leaves that mode's SSID and passphrase
+# in /etc/hostapd.conf with the pristine copy beside it. Put it back before any CarPlay bring-up can
+# hand those credentials to a phone in 0x5703.
+if [ -z "$airplay_gen" ] && [ ! -f "$AIRPLAY_CFG" ] && [ -f /etc/hostapd.conf.pre_airplay ]; then
+  mv /etc/hostapd.conf.pre_airplay /etc/hostapd.conf && echo "[sup] restored /etc/hostapd.conf (AirPlay-only mode ended without its teardown)"
+fi
+# (Not while AirPlay-only mode is on or being left: that AP is airplay_tick's, which adopted its state
+# above and takes it down itself when the request is gone.)
+if [ "$(cat "$FLAG" 2>/dev/null)" != 1 ] && [ -z "$airplay_gen" ] && [ ! -f "$AIRPLAY_CFG" ]; then
   if wireless_running || pgrep -x hostapd >/dev/null 2>&1 || hciconfig hci0 2>/dev/null | grep -q "UP"; then
     echo "[sup] startup reconciliation: app absent but radio state up -> wireless_down (stranded by a prior crash)"
     wireless_down
@@ -1246,6 +1357,14 @@ while :; do
   # Read presence, acting only on a DEFINITE 0/1 — an empty/partial read (or missing file) keeps the
   # last state rather than flapping. (ocbmd writes the flag atomically, so this is defensive.)
   p=$(cat "$FLAG" 2>/dev/null)
+
+  # AirPlay-only mode (host-selected, mutually exclusive with everything below). FIRST in the tick, before
+  # the presence edges: when the host goes from AirPlay-only back to projection, ocbmd removes the request
+  # and then raises presence, and the AP teardown started here must already be in flight (airplay_busy)
+  # when the 0->1 edge below asks for the CarPlay stack, or that bring-up would find the AirPlay AP
+  # "already converged" and then lose it to the teardown. Entering waits for the opposite order: it
+  # starts only once a PREVIOUS tick has handled the 1->0 edge (last_p), i.e. after the CarPlay teardown.
+  airplay_tick
 
   # docs/wireless/00_WIRELESS_CARPLAY.md #1.3 (extended, review finding 2026-07-24): `wireless_down`'s own branch already resets
   # saw_paired/saw_record/healthy when IT tears a wireless session down — but a wireless session can
@@ -1297,7 +1416,11 @@ while :; do
   if [ -n "$wireless_rebring_at" ] && [ "$(now)" -ge "$wireless_rebring_at" ]; then
     # Hold while a teardown shell is still running (its bt_off has not finished) —
     # unless it has overrun the cap, then say so and go anyway rather than never bringing up.
-    if [ -z "$wl_down_pids" ] || [ "$(now)" -ge $(( wireless_rebring_at + WL_DOWN_WAIT_MAX_S )) ]; then
+    # ...and never while AirPlay-only mode still holds the AP (airplay_busy), which is not a hung bt_off
+    # to give up on after 10 s: its teardown kills hostapd. Bounded all the same, at 30 s.
+    if airplay_busy && [ "$(now)" -lt $(( wireless_rebring_at + 30 )) ]; then
+      :
+    elif [ -z "$wl_down_pids" ] || [ "$(now)" -ge $(( wireless_rebring_at + WL_DOWN_WAIT_MAX_S )) ]; then
       [ -n "$wl_down_pids" ] && echo "[sup] wireless teardown still running ${WL_DOWN_WAIT_MAX_S}s past the deferred bring-up -> not waiting any longer"
       wireless_rebring_at=""
       # Hand wireless_up the parked bring-up's restore obligation (wl_up_or_defer); consumed here
@@ -1514,7 +1637,9 @@ while :; do
           fi
         fi
       fi
-      if aa_owns_session; then
+      if airplay_busy; then
+        : # AirPlay-only mode is still coming down (host went back to projection): arm on a later tick
+      elif aa_owns_session; then
         # Android Auto owns ci_hdrc.0 right now (aa-bridge holds a live AOAP link + the wired-aa owner
         # flag). Hands off entirely: no projection_up, no arm(), no escalation — aa-bridge self-manages
         # its session and the step-1 guards already suppress kill_session/escalate. (docs/androidauto/02_ARBITRATION.md.)

@@ -4,8 +4,9 @@
 #
 # The mirror is its own git repo with a GitHub remote, outside this repo; its path comes from
 # OCBM_MIRROR, which is REQUIRED (no default: exits 2 when unset). Its root IS this
-# repo's content, no wrapper directory. It keeps its own history and gets one commit per sync, whose
-# message names the source commit.
+# repo's content, no wrapper directory. It keeps its own history and gets one commit per sync. The
+# message describes the change: the subject is a brief human-written description (REQUIRED, exits 2
+# without one); the body lists the source commit subjects since the previous sync plus the source revision.
 #
 # Design (2026-10-28):
 #   1. The source is `git archive HEAD`, not the working tree. Uncommitted edits, untracked local
@@ -38,7 +39,7 @@
 #      SHA256SUMS, manifest.txt, rootfs.files.txt, mtd0.bin, mtd1.bin), which the next sync then
 #      overwrites from HEAD. Then check with --dry-run that no "*deleting" line names a protected file.
 #
-# Usage: tools/sync_mirror.sh [--dry-run] [--push] ["commit subject"]
+# Usage: tools/sync_mirror.sh [--dry-run] [--push] "commit subject"
 #   --dry-run  list what rsync would create, update and delete; change nothing
 #   --push     after committing, push origin main (the mirror's pre-push hook refuses session references)
 set -euo pipefail
@@ -57,7 +58,18 @@ SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 [ -n "${OCBM_MIRROR:-}" ] || { echo "FATAL: set OCBM_MIRROR to the publication mirror checkout" >&2; exit 2; }
 DST="$OCBM_MIRROR"
 SRC_REV="$(git -C "$SRC" rev-parse HEAD)"
-SUBJECT="${SUBJECT:-sync: mirror ocbm @ ${SRC_REV:0:7}}"
+# Describe the sync by the source commits it carries: everything since the last "Source: ... @ <sha>"
+# recorded in the mirror's history (falls back to the newest commit alone if that sha is unknown here).
+PREV="$(git -C "$OCBM_MIRROR" log -50 --format=%b 2>/dev/null | sed -n 's/^Source: [a-z_]* @ \([0-9a-f]\{40\}\)$/\1/p' | head -1)"
+if [ -n "$PREV" ] && git -C "$SRC" cat-file -e "$PREV^{commit}" 2>/dev/null; then RANGE="$PREV..$SRC_REV"; else RANGE="-1 $SRC_REV"; fi
+CHANGES="$(git -C "$SRC" log --reverse --format='- %s' $RANGE)"
+if [ -z "$SUBJECT" ] && [ "$DRY" = 0 ]; then
+    echo "FATAL: give a short, human-readable description of what changed as the commit subject, e.g." >&2
+    echo "  tools/sync_mirror.sh --push \"Lead the README with the protocol; shorten CLAUDE.md\"" >&2
+    echo "Source commits since the last sync (for reference):" >&2
+    printf '%s\n' "${CHANGES:-- (none)}" >&2
+    exit 2
+fi
 
 [ -d "$DST/.git" ] || { echo "FATAL: no git repo at $DST" >&2; exit 1; }
 
@@ -160,7 +172,7 @@ if [ -n "$UNTRACKED_IN_SRC" ]; then
     exit 1
 fi
 
-git commit -q -m "$SUBJECT" -m "Source: ocbm @ $SRC_REV"
+git commit -q -m "$SUBJECT" -m "${CHANGES:-- (no source commits in range)}" -m "Source: ocbm @ $SRC_REV"
 echo "committed $(git rev-parse --short HEAD): $SUBJECT"
 echo "size: $(du -sh . | cut -f1) · tracked: $(git ls-files | wc -l | tr -d ' ') files"
 if [ "$PUSH" = 1 ]; then

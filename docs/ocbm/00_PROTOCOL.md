@@ -144,8 +144,9 @@ instead of silent.
 
 ```
 host → box:  HELLO   { ocbm_version, host_instance_nonce }
-box  → host: HELLO_ACK { ocbm_version, box_caps, active_mode }
-host → box:  MODE_SELECT { mode }        (only when the host wants a non-default mode)
+box  → host: HELLO_ACK { ocbm_version, box_caps, active_mode, bundle_id, bundle_state, airplay_ap, airplay_session }
+host → box:  MODE_SELECT { mode, mode parameters }   (only when the host wants a non-default mode)
+box  → host: MODE_ACK { mode, status }               (for MODE_AIRPLAY and MODE_PROJECTION; not for MODE_CONSOLE)
 ```
 
 - `HELLO_ACK`'s `box_caps` mirrors CarPlay's own negotiation (see Extensibility) so the two ends
@@ -163,6 +164,7 @@ host → box:  MODE_SELECT { mode }        (only when the host wants a non-defau
   | `0x08` | `CAP_IP` | `CH_IP` stream-mux (always set) |
   | `0x10` | `CAP_FILE` | `CH_FILE` push / pull (always set) |
   | `0x20` | `CAP_ETH` | `CH_ETH` raw-frame bridge (always set) |
+  | `0x40` | `CAP_AIRPLAY` | the box can run `MODE_AIRPLAY`. **Conditional:** set when `/script/airplay_mode.sh` is installed (the full overlay since 2026-11-12) |
 - **Optional host label** (added 2026-08-27). Anything after the nonce in `CT_HELLO` is an optional
   UTF-8 label naming *what kind* of host this is — the box serves several (a GM head-unit app using it
   as a BT+MFi bridge, an Android Auto host driving `aa-bridge` over `CH_IP`, bench tooling) and its
@@ -171,14 +173,41 @@ host → box:  MODE_SELECT { mode }        (only when the host wants a non-defau
   `host_name`. Purely diagnostic — nothing gates on it, and an absent label reads exactly as before.
   Additive in both directions: the box already ignored bytes past the nonce, and an older box still
   does.
+- **Bundle identity** (added 2026-11-11). `HELLO_ACK` payload bytes 7..39 are the `content_id` of the OCBM
+  bundle the box runs: the sha256 in `/opt/ocbm/etc/BUNDLE`, which `tools/ocbm_overlay.sh` writes into every
+  overlay, as 32 raw bytes (zero when there is none). Byte 39 is its state (`BUNDLE_*` in `ocbm-proto`):
+
+  | Value | Name | Meaning |
+  |---|---|---|
+  | 0 | `absent` | no `etc/BUNDLE`: an install older than it, or the stock layout. The id is zero. Not an error |
+  | 1 | `ok` | checked at boot: every `etc/MANIFEST` line verifies, `etc/BUNDLE` among them, and the MANIFEST is the one `content_id` was computed from |
+  | 2 | `mixed` | checked: BUNDLE and MANIFEST agree with each other, another listed file differs or is missing (a binary pushed by hand). The id no longer describes everything that runs |
+  | 3 | `corrupt` | BUNDLE or MANIFEST is unusable, or one is not the file the other describes. The id is BUNDLE's `content_id` when it parses, else zero |
+  | 4 | `unchecked` | BUNDLE was read and there is no check result: the id is a claim, not a finding |
+
+  The check is `rc.ocbm start` (`sha256sum -c etc/MANIFEST` in `/opt/ocbm`, once per boot), which leaves one
+  word in `/run/ocbm/bundle.state`. ocbmd checks nothing itself: it reads both files at run time on every
+  `HELLO` and `MGMT_GET_INFO` (the identity is never compiled into a binary) and never reports `ok` without
+  that word. Integrity only, sha256 with no signature: it tells a set that is not the one that was built, not
+  who built it, and it does not see a file added to `/opt/ocbm` or replaced after the check ran.
+  `MGMT_INFO` carries the same as `"bundle":{"commit","dirty","profile","built","content_id","state"}`:
+  `content_id` is 64 lowercase hex digits or `""`, `state` is the name above, `dirty` is `true` unless BUNDLE
+  says `dirty=0` (and `false` when absent). Additive: every host reads `HELLO_ACK` by offset with a minimum
+  length, so the longer ACK parses as before; read the tail only when the payload has 40 bytes, and expect
+  later fields to be appended after byte 39.
+- **Mode tail** (added 2026-11-12). `HELLO_ACK` byte 40 = `AIRPLAY_AP_*`, byte 41 = `AIRPLAY_SESSION_*` (the
+  values of `CT_AIRPLAY_STATE`, below), both zero outside AirPlay-only mode. The payload is now 42 bytes
+  (`HELLO_ACK_MODE_LEN`); `HELLO_ACK_LEN` stays 40, the length that carries the bundle tail, so a reader that
+  tests for it is unaffected. Read the two bytes only when the payload has 42 (`ocbm_proto::hello_ack_airplay`).
 - `mode` is host-selected. **Branch as early as possible** — before any projection machinery —
   so a rescue mode shares almost no fate with the CarPlay stack. As implemented, the box answers
   `HELLO` immediately, so `HELLO_ACK`'s `active_mode` reports the mode in force *at HELLO time* —
   `PROJECTION` on a fresh link, `CONSOLE` only if an earlier `MODE_SELECT` on this same ocbmd already
   switched it (the PTY outlives a host detach; it is dropped only when the console shell exits).
-  It is **not** an acknowledgement of your own `MODE_SELECT`, which is a separate handler arm that
-  never answers on CH_CTRL — its only reply is the `[ocbmd] CONSOLE attached (root)` banner on
-  `CH_CONSOLE`.
+  `AIRPLAY` when AirPlay-only mode is in force (it takes precedence over a live console PTY in this byte).
+  It is **not** an acknowledgement of your own `MODE_SELECT`. `MODE_CONSOLE` is never answered on CH_CTRL:
+  its only reply is the `[ocbmd] CONSOLE attached (root)` banner on `CH_CONSOLE`. `MODE_AIRPLAY` and
+  `MODE_PROJECTION` are answered with `CT_MODE_ACK` (added 2026-11-12).
 
 ### CTRL message types (first payload byte on CH_CTRL = `0x0000`)
 
@@ -189,8 +218,10 @@ host → box:  MODE_SELECT { mode }        (only when the host wants a non-defau
 | Byte | Message | Direction | Payload after the type byte |
 |---|---|---|---|
 | `0x01` | `HELLO` | host→box | `[ver u8][instance u32 LE]` — the trailing u32 is the host **instance nonce**, not caps. See the note below the table |
-| `0x02` | `HELLO_ACK` | box→host | `[ver u8][caps u32 LE][active_mode u8]` |
-| `0x03` | `MODE_SELECT` | host→box | `[mode u8]` |
+| `0x02` | `HELLO_ACK` | box→host | `[ver u8][caps u32 LE][active_mode u8][bundle content_id 32 B][bundle_state u8][airplay_ap u8][airplay_session u8]` — 42 bytes; a box older than 2026-11-12 sends the first 40, one older than 2026-11-11 the first 7. See *Bundle identity* and *Mode tail* above |
+| `0x03` | `MODE_SELECT` | host→box | `[mode u8]`, then the mode's parameters: none for `MODE_PROJECTION 0x00` and `MODE_CONSOLE 0x01`; the `AIRPLAY_REQ_*` TLVs for `MODE_AIRPLAY 0x02` (see *AirPlay-only mode*) |
+| `0x1D` | `CT_MODE_ACK` | box→host | `[mode u8][status u8]` — the answer to a `MODE_SELECT` of `MODE_AIRPLAY` or `MODE_PROJECTION` (added 2026-11-12). Status `MODE_ACK_OK 0` = accepted, the switch is in progress (for AirPlay, progress follows as `CT_AIRPLAY_STATE`); `MODE_ACK_BAD_PARAMS 1` = the request did not parse or a field is out of range, nothing changed; `MODE_ACK_UNSUPPORTED 2` = this box cannot run the mode, nothing changed |
+| `0x1E` | `CT_AIRPLAY_STATE` | box→host | `[ap u8][session u8][last_end u8]` — AirPlay-only mode state, sent on **change** while the mode is active, once right after the `CT_MODE_ACK`, again after each `HELLO`, and once as `00 00 00` when the mode is left for any reason. `ap`: `AIRPLAY_AP_DOWN 0` / `STARTING 1` / `UP 2` / `FAILED 3`. `session`: `AIRPLAY_SESSION_NONE 0` (no receiver) / `WAITING 1` (advertised, waiting for a sender) / `CONNECTED 2` (a sender set a session up) / `STREAMING 3` (a media stream is set up). `last_end`, how the most recent session ended: `AIRPLAY_END_NONE 0` / `TEARDOWN 1` (the sender's session `TEARDOWN`: the user) / `PEER_CLOSED 2` (control connection closed without one) / `ERROR 3` |
 | `0x04` | `SRC` | host→box | `[ms u32 LE]` — box floods CH_ECHO for a downlink benchmark. The flood blocks ocbmd's single-threaded poll, so the box **clamps `ms` to `HEARTBEAT_GRACE/2` (5 s)** and refreshes `last_hb` when it ends (`Daemon::handle`, the `CT_SRC` arm). An unclamped bench past the grace used to make `presence_tick` see a stale `last_hb`, declare the host GONE and destroy the live session — a host asking for 30 s gets 5 s, not an error |
 | `0x05` | `SETTIME` | host→box | `[unix_seconds u64 LE]`; box `settimeofday()`s, then acks `[0x05][unix_seconds u64 LE][status u8]` (`0`=applied, `1`=failed) | (2026-09-03: the macOS client now sends it right after every SUBSCRIBE — until then only the Android client did, and a box that booted unsynced logged every line, read-time and write-time stamped alike, as 2020-01-02)
 | `0x06` | `CT_ETH_START` | host→box | `[iface bytes?]` — box bridges that netdev (default `ncm0`) onto CH_ETH |
@@ -428,11 +459,115 @@ clock source for the deployed design; NTP is a fallback for the rare connected c
 |---|---|
 | `PROJECTION` *(default)* | Full CarPlay path (committed model: box does pairing → forwards encrypted A/V + session key; app decrypts/decodes) |
 | `CONSOLE` | Wire the accessory pipe straight to a root PTY; **no** MFi/radios/receiver. See [`../ops/01_RECOVERY.md`](../ops/01_RECOVERY.md) |
+| `AIRPLAY` (`0x02`, 2026-11-12) | Plain AirPlay receiver instead of CarPlay (audio + screen mirroring, offline), on an AP whose SSID and passphrase the host supplies. Mutually exclusive with `PROJECTION`. Wire: *AirPlay-only mode* below; the AirPlay protocol itself: [02_AIRPLAY_ONLY_MODE.md](02_AIRPLAY_ONLY_MODE.md) |
 | `FIRMWARE_UPDATE` *(future)* | Self-hosted flasher — push a new rootfs/`mtd2` over the same pipe |
 | `LOG_DUMP` / `FACTORY_TEST` *(future)* | Diagnostics |
 
 Default is `PROJECTION`, so a stock/unknown host never lands in a shell by accident; only our host
 explicitly requests `CONSOLE`. New modes are pure additions — no rewrite.
+
+### AirPlay-only mode (`MODE_AIRPLAY 0x02`, added 2026-11-12)
+
+The box side is `box/airplayd` (the receiver), `tools/airplay_mode.sh` (AP + receiver up/down, installed as
+`/script/airplay_mode.sh`) and `airplay_tick` in `tools/session_supervisor.sh`; the reference host is
+`ocbm-host airplay`; a macOS test host that decodes and plays the tunnel is `host/MacHost/AirPlayTestHost/`
+([../host/00_MACOS_HOST_APP.md](../host/00_MACOS_HOST_APP.md); verified live with a real iPhone 2026-11-12). Constants and the request codec are in `crates/ocbm-proto`
+(`AirplayRequest`, `seam`).
+**HEVC (commit 78867b3):** with the flag and a display above 1080p the phone sends HEVC; the tunnel is unchanged (opcode 0 and 1 are forwarded verbatim) and the host reads the codec from the opcode-1 body. Verified on the box with a synthetic HEVC sender; not yet with a real iPhone ([02_AIRPLAY_ONLY_MODE.md](02_AIRPLAY_ONLY_MODE.md) §3, §4.10).
+**Bench status:** unit and loopback tests, and an end-to-end run on a CCPA with a synthetic sender (real
+chip, real link, real media: 300/300 video frames and 864/864 audio packets decrypted on the host). With a
+real iPhone (2026-11-12): through `ocbm-host airplay`, video 4421/4421 frames and audio 3355 + 115 packets
+decrypted with 0 failures, ended by `TEARDOWN`, the box back in projection; through the macOS AirPlay Test
+Host, mirroring (H.264 and type 96 audio) and Music-only (type 103) decoded and played live. Detail and the
+numbers: [02_AIRPLAY_ONLY_MODE.md](02_AIRPLAY_ONLY_MODE.md) §3.
+
+**Request.** `[CT_MODE_SELECT 0x03][MODE_AIRPLAY 0x02]` followed by TLVs `[tag u8][len u8][value]`, in any
+order; an unknown tag is skipped, a known tag with a bad value refuses the whole request.
+
+| Tag | Name | Value |
+|---|---|---|
+| `0x01` | `AIRPLAY_REQ_SSID` | **required.** The AP's SSID, verbatim: 1..32 bytes UTF-8, no control characters |
+| `0x02` | `AIRPLAY_REQ_PSK` | **required.** The WPA2 passphrase: 8..63 printable ASCII (`0x20`..`0x7E`) |
+| `0x03` | `AIRPLAY_REQ_NAME` | The advertised receiver name: 1..63 bytes UTF-8, no control characters. Absent = the SSID |
+| `0x04` | `AIRPLAY_REQ_CHANNEL` | `[channel u8]`, 1..14 or 36..165. Absent or 0 = the box template's channel (36) |
+| `0x05` | `AIRPLAY_REQ_DISPLAY` | exactly 5 bytes `[width u16 LE][height u16 LE][max_fps u8]`: the host panel the phone renders for (`/info` `displays[0]`). Width and height 320..7680, max_fps 1..120, else `MODE_ACK` status 1 (before commit 78867b3: 16..8192). Absent = 1920 x 1080 at 30, the measured configuration |
+| `0x06` | `AIRPLAY_REQ_FLAGS` | `[flags u8]`, optional. Bit 0 `AIRPLAY_FLAG_HEVC` = advertise feature bit 42 (`SupportsScreenMultiCodec`): with a display larger than 1080p the iPhone then mirrors in HEVC (opcode-1 body = an `hvc1` sample entry carrying `hvcC`), otherwise H.264. The box reads the first byte only, ignores unknown bits (a host sends them as 0) and treats an empty value as 0. A request without the TLV is byte-identical to the layout before it existed |
+
+Example (SSID `My AP`, passphrase `password1`, name `Car`, channel 36, 1280 x 720 at 60):
+`03 02 | 01 05 "My AP" | 02 09 "password1" | 03 03 "Car" | 04 01 24 | 05 05 00 05 D0 02 3C`. The same with 3840 x 2160 at 60 and HEVC ends `05 05 00 0F 70 08 3C | 06 01 01`.
+
+**Lifecycle.**
+- The box answers `CT_MODE_ACK [0x02][status]`, then `CT_AIRPLAY_STATE` (first `ap=STARTING`). With
+  `MODE_ACK_OK` it ends any projection session exactly as `CT_STOP` would (the host sees `SEV_HOST_GONE`;
+  per-session state such as `CT_LOG_CTL` resets, so arm logs after the ack), stops carplayd, iap2d and btd,
+  raises the AP through the radio seam with exactly the requested SSID and passphrase, and starts `airplayd`.
+  `ap=UP session=WAITING` means the receiver is advertised (`_airplay._tcp`) and a phone may join the AP.
+  Measured on a CCPA: 6 s from request to `ap=UP`.
+- **Heartbeat.** The host sends `CT_HEARTBEAT` about once a second, as in projection. No heartbeat for
+  10 s (`HEARTBEAT_GRACE`) leaves the mode. There is no `CT_SUBSCRIBE` in this mode and `/tmp/host_present`
+  stays 0.
+- **Leaving.** `CT_MODE_SELECT [MODE_PROJECTION]` (acked), `CT_STOP`, a `CT_SUBSCRIBE` (projection wins: the
+  mode is left first), heartbeat loss, or an ocbmd restart. The receiver sends its mDNS goodbye, the AP goes
+  down, `/etc/hostapd.conf` is put back as it was, and the host gets `CT_AIRPLAY_STATE 00 00 00`.
+- A second `MODE_SELECT AIRPLAY` replaces the first: AP and receiver come down and up with the new values.
+- A `HELLO` from a new host does not end the mode: the ACK says `active_mode = AIRPLAY` with the two state
+  bytes, and that host has one grace period to start beating or select another mode.
+- `MGMT_INFO` carries `"mode":"projection"|"console"|"airplay"` and `"airplay":{"active":true,"ap":…,
+  "session":…,"last_end":…,"ssid":…,"name":…,"hevc":bool,"display":"WxH@F"}` (a missing `hevc`/`display` key means an older `ocbmd`; the state names above; `{"active":false,"supported":bool}`
+  outside the mode). The passphrase is in neither, nor in any log.
+
+**The tunnel.** `airplayd` terminates only the control side (pairing, MFi `auth-setup` through the on-board
+coprocessor, RTSP). Media crosses OCBM still encrypted, on the existing lanes with the existing seam
+messages (*Media transport* below); the box decrypts nothing. What is specific to this mode:
+
+| AirPlay stream | Lane | Key in the key message | Notes |
+|---|---|---|---|
+| type 110, screen (TCP) | `CH_VIDEO` | HKDF-SHA512(pairing secret, `"DataStream-Salt"` + scid, `"DataStream-Output-Encryption-Key"`), derived on the box | One frame message per screen frame, every opcode. `seq` = the number of opcode-0 frames before it on this data connection: the nonce counter. Opcode 1 (plaintext avcC, once at stream start) and opcode 5 (plaintext statistics) carry the current `seq` and do not advance it |
+| type 96, realtime audio (UDP) | `CH_MEDIA_AUDIO` | the same HKDF rule with this stream's scid | `SEAM_PKT` = the datagram verbatim. **The box forwards the first copy of each RTP sequence number** (the phone sends every packet three times; window of 64) |
+| type 103, buffered audio (TCP) | `CH_MEDIA_AUDIO` | `shk` from the stream's SETUP, verbatim | `SEAM_PKT` = one packet without its `u16` length prefix: `[RTP 12][ciphertext][tag 16][nonce 8]`, RTP sequence in bytes 1..4 (24 bits). The phone sends ahead of real time (up to the 8 MiB `audioBufferSize`) |
+
+- The pairing secret never leaves the box: the host gets per-stream 32-byte keys only. scid = the SETUP's
+  `streamConnectionID` as an unsigned 64-bit value.
+- **A new key at every SETUP.** Each stream SETUP is a new scid and a new `SEAM_KEY` (audio: followed by
+  `SEAM_FORMAT`) before its first packet. A type-96 stream can end and a new one start mid-session; a
+  mirroring session can start without audio. On the video lane a key message also marks a new data
+  connection: restart the decoder state and expect `seq` from 0.
+- `SEAM_FORMAT` for these streams: `codec` 1 (AAC-LC) for SETUP `ct 4`, 2 for `ct 8`, 0 for `ct 1`, else
+  `SEAM_CODEC_UNKNOWN 255`; `rate` = SETUP `sr` (44100 when absent, as type 103 names none); `ch` 2; `bits` 0;
+  `audio_type` 0. The payload after decrypt is one **raw AAC access unit** (no ADTS); a 0-byte unit occurs.
+- Host decrypt (verified rules, `host/ocbm-host/src/airplay.rs`): video opcode 0 = ChaCha20-Poly1305, nonce
+  `00 00 00 00 ‖ seq u64 LE` from the wire, AAD = the 128-byte header, body = ciphertext ‖ tag, plaintext =
+  length-prefixed NAL units (length size from the avcC). Audio = nonce `00 00 00 00 ‖` the packet's last 8
+  bytes, AAD = RTP bytes 4..12, ciphertext ‖ tag = bytes 12..len-8.
+- **Seam reconnects.** `airplayd` keeps one connection per lane. When it has to reconnect (ocbmd restarted),
+  the first frame carries `F_NEW_SOURCE` and the seam starts with every live stream's key, format and the
+  last avcC frame again, so a host is never left keyless. Video frames are not replayed.
+- **Flow control.** `CH_VIDEO` is lossless: ocbmd stops reading the seam while the host is behind, airplayd
+  blocks, and the phone's TCP slows its encoder. `CH_MEDIA_AUDIO` is not gated: a host that falls 1 MiB
+  behind loses whole OCBM frames (resync on `SEAM_MAGIC`).
+
+**Events** ride `CH_METADATA` as `META_JSON` objects `{"kind":"airplay","ev":…}`, plus `META_ARTWORK`
+(`[0x00][JPEG]`) for cover art. Integers are exact and may exceed 2^53 (scid, clock ids): parse them as
+unsigned 64-bit. The lanes are queued separately from `CH_METADATA`, so key both by scid and accept either
+arriving first; a lane alone is enough to decrypt and decode.
+
+| `ev` | Members | Sent when |
+|---|---|---|
+| `session` | `state` (`waiting`/`connected`/`streaming`), `reason` (`none`/`teardown`/`peer-closed`/`error`) | the session state changes (the same values as `CT_AIRPLAY_STATE`) |
+| `sender` | `name`, `model`, `osName`, `osVersion`, `deviceID`, `timing` (`NTP` = mirroring / `PTP` = audio), `mirroring` (bool), `address` | the session SETUP |
+| `stream` | `state:"start"`, `lane` (`video`/`audio`), `scid`, `setup` (the stream SETUP's scalar keys as sent: `type`, `ct`, `audioFormat`, `spf`, `sr`, `latencyMs`, `latencyMin`, `latencyMax`, `redundantAudio`, … never key material) | a stream SETUP, before its reply |
+| `stream` | `state:"stop"`, `type`, `scid`, `reason` (`teardown`/`session teardown`/`session end`), `messages`, `bytes`, `dropped` | the stream's TEARDOWN or the session's end |
+| `stream` | `state:"unsupported"`, `setup` | a stream type other than 110/96/103 was requested (not tunnelled) |
+| `volume` | `db` (0 = full, -30 = slider at 0, -144 = mute) | `SET_PARAMETER volume` |
+| `progress` | `start`, `current`, `end` (RTP times) | `SET_PARAMETER progress` |
+| `track` | `title`, `artist`, `album`, `genre`, `durationMs` (those present) | DMAP track info |
+| `artwork` | `bytes` (0 = cleared) | cover art; the JPEG follows as `META_ARTWORK` |
+| `anchor` | the `SETRATEANCHORTIME` plist's scalars (`rate`, `rtpTime`, `networkTimeSecs`, `networkTimeFrac`, `networkTimeTimelineID`) | buffered-audio playout anchor |
+| `flush` | the `FLUSHBUFFERED` plist's scalars (`flushUntilSeq`, `flushUntilTS`, …) | buffered-audio flush |
+| `sync` | `type` 96, `scid`, `first`, `rtpPlay`, `netSecs`, `netFrac`, `rtpNow` (the 20-byte control-port packet's fields) | about once a second per type-96 stream |
+
+Not in this version: host→box volume or remote control, NTP/PTP clock samples (the box binds the ports and
+answers nothing), a keyframe request (AirPlay mirroring sent one IDR per session in the measurements).
 
 ## Channels (v1)
 
@@ -496,7 +631,9 @@ included). Two messages:
 
 `hdr` is the plaintext `AirPlayScreenHeader`: `bodySize u32 LE @0`, `opcode u8 @4`, sync-sample
 (keyframe) flag `hdr[5] & 0x10`. **opcode 1 = VideoConfig — `body` is plaintext avcC/hvcC: do not
-decrypt it and do not advance the counter.** opcode 0 = VideoFrame: nonce = `[0,0,0,0]‖seq_le64`
+decrypt it and do not advance the counter.** (In plain AirPlay mirroring the phone also sends opcode 5, a
+plaintext binary-plist statistics message about once per second; it is not encrypted and does not advance
+the counter either: [02_AIRPLAY_ONLY_MODE.md](02_AIRPLAY_ONLY_MODE.md) §4.6, 2026-11-12.) opcode 0 = VideoFrame: nonce = `[0,0,0,0]‖seq_le64`
 **taken from the wire `seq` field**, AAD = the whole 128-B `hdr`, ciphertext‖tag = `body`. `seq` is the
 iPhone's own per-VideoFrame nonce counter and advances on opcode-0 messages only; the box advances it
 even for cluster frames it gates away, so **a host that increments a local counter instead of reading
@@ -508,6 +645,8 @@ even for cluster frames it gates away, so **a host that increments a local count
 **Audio lanes** (seam framing v2). Envelope `[u32 BE len][SEAM_MAGIC "SEAV" 4B][marker u8]…` — the
 SAME envelope as the video lanes, `len` counting the magic — with every message scid-tagged so
 concurrent streams sharing the voice sink (telephony + alert) cannot clobber each other:
+(The markers, `SEAM_MAGIC`, the `SEAM_CODEC_*` values and the `META_*` markers are constants in
+`crates/ocbm-proto` since 2026-11-12, and `ocbm_proto::seam` builds and parses every message below.)
 - `SEAM_KEY    0x00` — `[len=45]["SEAV"][0x00][key.output 32B][scid u64 LE]`  *(scid TRAILS the key here)*
 - `SEAM_PKT    0x01` — `[len=13+pkt]["SEAV"][0x01][scid u64 LE][raw encrypted RTP datagram]`
 - `SEAM_FORMAT 0x02` — `[len=21]["SEAV"][0x02][scid u64 LE][codec u8][rate u32 LE][ch u8][bits u8][audio_type u8]`

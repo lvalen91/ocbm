@@ -17,6 +17,8 @@ enum AdapterInfoPresenter {
         var boxHealth: BoxHealth?
         var btPhase: BtPhase?
         var phoneIdent: PhoneIdent?
+        /// `CCPABridge.bundleSummary`: the HELLO_ACK identity and/or the snapshot's `bundle`.
+        var bundle: BoxBundleSummary?
     }
 
     /// Present as a sheet on the given window (nil = modal).
@@ -119,6 +121,27 @@ enum AdapterInfoPresenter {
             field("Phone name", ident.name)
         } else {
             field("Phone", nil)
+        }
+
+        // The OCBM bundle the box runs. Ahead of the snapshot guard: the HELLO_ACK alone supplies id and
+        // state. A fault state is upper-cased and a dirty build gets its own flagged line, so neither
+        // can be read past in a plain-text copy.
+        section("Bundle")
+        if let b = s.bundle {
+            field("Content ID", b.shortID)
+            if !b.contentID.isEmpty { field("Content ID (full)", b.contentID) }
+            field("State", b.stateLine)
+            if b.state.severity == .fault {
+                lines.append("  ✗ BUNDLE \(b.state.displayName): \(b.state.detail)")
+            }
+            if b.dirty == true {
+                lines.append("  ✗ DIRTY BUILD: built with uncommitted changes")
+            }
+            field("Commit", b.commit)
+            field("Profile", b.profile)
+            field("Built", b.built)
+        } else {
+            field("Bundle", "not reported (box older than bundle identity)")
         }
 
         guard let info = s.info else {

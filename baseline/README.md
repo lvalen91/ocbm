@@ -641,6 +641,15 @@ app links and initializes it with no manual step.
   runs from flash, and a half-written, overgrown or damaged overlay is never used (the boot is NCM instead). The
   archive must hold `bin/ocbmd-launch` (what the relay spawns); its `etc/rc.ocbm` is optional (`start`: once, bounded
   to 30 s; `service`: the long-running part, run by init).
+- **Bundle identity** (`etc/BUNDLE`, `etc/MANIFEST`; written by `tools/ocbm_overlay.sh`). `BUNDLE` is `key=value`
+  lines naming the set as a whole: `bundle_format=1`, `commit`, `dirty` (0|1: tracked changes in the tree it was
+  built from), `profile`, `built`, and `content_id`, the sha256 over the per-file sha256 lines of everything except
+  BUNDLE and MANIFEST. `MANIFEST` is the sha256 of every file, BUNDLE included. `rc.ocbm start` checks the unpacked
+  set against them (`sha256sum -c etc/MANIFEST`, the rootfs BusyBox; MANIFEST minus its BUNDLE line must hash to
+  `content_id`) and writes `ok`, `mixed` or `corrupt` into `/run/ocbm/bundle.state`; ocbmd reads BUNDLE and that
+  word at run time and reports them to the host (HELLO_ACK, MGMT_INFO: `docs/ocbm/00_PROTOCOL.md`, Bundle
+  identity). Informational and never fatal: what gates loading is the payload sha256 above. An overlay without
+  BUNDLE reads as `absent`.
 - **Boot sequence** (rcS, after `persist load`): `usb-mode boot` → the persisted default is not `ncm` →
   `ocbm-overlay start` (verify, unpack, `rc.ocbm start`: a RAM copy of `/etc` bind-mounted over it, because the stock
   scripts and daemons write `/etc/hostapd.conf`, `/etc/carplay/`, `/etc/carplay_peers.bin`; the bond and peer stores
@@ -854,8 +863,8 @@ libblkid the recipe does not build (§7).
 
 ## 7. OPEN ITEMS / MEASUREMENTS / VERIFICATION
 
-**Artefact map (owner-local, NOT in git; added 2026-10-20).** Build outputs, QEMU logs and test harnesses of the
-2026-10-20 session are under `/Volumes/stuff/virtual-machines/ccpa-baseline-build/20261020/` (point-in-time location,
+**Artefact map (owner-local, NOT in git; added 2026-10-20; `<BUILD_ARCHIVE>` is the owner's local build-archive directory).** Build outputs, QEMU logs and test harnesses of the
+2026-10-20 session are under `<BUILD_ARCHIVE>/20261020/` (point-in-time location,
 check live): `rev2/` (`default`, `default-nossh`, `nousb`, `recovery-usb-vfat`, `logs`), `rev3/` (`default`, `logs`,
 `test-harness`), `rev4/default/` (the rootfs-only image, `rootfs.img` sha256 `cbfd4d39…513d`), `rev5/` (`default` = the
 kernel images, `logs`, `test-harness`). The top-level `default/`, `recovery-usb/`, `recovery-usb-exfat/`, `usb-host/`
@@ -864,7 +873,7 @@ unit is only what §7.0c-§7.0f say (rootfs revision 8 `a5435446…96c1` + the O
 kernel revision 6 written as `5d982485…70ba`, reads `3462874a…7efb` after U-Boot's conversion). (Corrected 2026-10-30: this
 said rootfs revision 4 `cbfd4d39…513d`, kernel revision 5 `35dfb1a5…c871e`, true until the revision-6 flash; then rootfs
 revision 7 `ecdfcd13…bbd6`, true until the revision-8 flash; then overlay `63c36a68…2bef`, true until the §7.0f write.)
-Revision 6 (2026-10-30): `/Volumes/stuff/virtual-machines/ccpa-baseline-build/20261030/rev6/` (the four `.zimg` + `.sha256`,
+Revision 6 (2026-10-30): `<BUILD_ARCHIVE>/20261030/rev6/` (the four `.zimg` + `.sha256`,
 `rootfs.img` + `.sha256`, `kernel.config`, `rev5.config`, `ocbm-accessory`, the test-only `usb_f_fs-test-rev5.ko`, `logs/`:
 kernel and rootfs build logs, the full self-test log, the module build log); its kernel is on the unit, its rootfs was
 superseded by revision 7. Revision 7 (2026-10-30): `…/20261030/rev7/` (`rootfs.img` + `.sha256`, `ocbm-accessory`, `logs/`:
@@ -1374,7 +1383,7 @@ file mtimes and release stamp changed, and the version object): XZ noise (§7). 
 `usb@2184000` `vbus-supply` → it. QEMU `mcimx6ul-evk`, `-iw416` image: recovery shell reached in 2.3 s;
 `/sys/class/regulator`: `usb_otg1_vbus enabled` (bound to `reg-fixed-voltage`), `wlan disabled`; ci_hdrc.0
 EHCI host started; `flash-rootfs`/`flash-kernel --dry-run` usage paths as in revision 3. Copies, logs and
-the harness: `/Volumes/stuff/virtual-machines/ccpa-baseline-build/20261020/rev5/`.
+the harness: `<BUILD_ARCHIVE>/20261020/rev5/`.
 
 **Flashed and verified on the IW416 unit (2026-10-20/21).** Before the flash (revision-2 kernel, revision-4
 rootfs): driving GPIO1_IO07 high by sysfs made the female port enumerate a FAT32 stick (sda1); GPIO1_IO06 did
@@ -1406,7 +1415,7 @@ Rev 4 = rev 3 sources at ccpa_custom `9dc14d8`; the only difference is `bt-scan`
 Built in the `ccpa-build` VM Debian chroot, `build.sh rootfs` only (`TOP=/work/build3`); the kernel was not
 rebuilt or reflashed (the kernel partition kept revision 2's image until revision 5). `rootfs.img` 3,506,176 B (same size as
 revision 3; 9,469,952 B free), sha256 `cbfd4d3943a1352ff2ef279f4800ed5efb2def933a2d1f884f425fd4705e513d`; the image's
-`usr/sbin/bt-scan` equals the tree file. Copy: `/Volumes/stuff/virtual-machines/ccpa-baseline-build/20261020/rev4/default/rootfs.img`.
+`usr/sbin/bt-scan` equals the tree file. Copy: `<BUILD_ARCHIVE>/20261020/rev4/default/rootfs.img`.
 Flashed on the IW416 unit from recovery (`reboot-recovery`, `scp -O` to `/tmp`, `flash-rootfs`: wrote and
 verified mtd3, bootstate cleared, rc=0; reboot): the unit returned at its NCM address with the new
 `/etc/baseline-release`. Hardware: `radio up` then `bt-scan` reported that LE was off (settings "powered
@@ -1421,7 +1430,7 @@ Built from a clean `$TOP` (`/work/build3` in the Debian chroot of the `ccpa-buil
 tarballs copied in, the new ones fetched by `build.sh fetch`, every sha256 checked), gcc 14.2.0
 `arm-linux-gnueabihf-`, `JOBS=4`: `fetch userspace`, then `kernel rootfs`; the `rootfs` step was re-run
 twice after script edits (the image below is the last); `measure` was not re-run (kernel config
-unchanged). Images, logs, test harness: `/Volumes/stuff/virtual-machines/ccpa-baseline-build/20261020/rev3/`.
+unchanged). Images, logs, test harness: `<BUILD_ARCHIVE>/20261020/rev3/`.
 
 | | revision 2 | revision 3 |
 |---|---:|---:|
@@ -1513,7 +1522,7 @@ MEASURED 2026-10-20, revision 2 (clean build from an empty `$TOP` except the pin
 7.2.10 + patches 0001-0004, gcc 14.2.0 `arm-linux-gnueabihf-`, `RADIO_MODULES=1 RADIO_FW=1`:
 `fetch userspace measure kernel rootfs`, run time and `JOBS` unrecorded; the rootfs was rebuilt from the final
 tree after two comment/style fixes in `radio` (the rootfs tests below ran on that final image); build logs, images and test logs in
-`/Volumes/stuff/virtual-machines/ccpa-baseline-build/20261020/rev2/`):
+`<BUILD_ARCHIVE>/20261020/rev2/`):
 
 | Kernel image (zImage + appended DTB, cap 0x302fd8 = 3,157,976 B) | zImage | DTB | total | spare |
 |---|---:|---:|---:|---:|

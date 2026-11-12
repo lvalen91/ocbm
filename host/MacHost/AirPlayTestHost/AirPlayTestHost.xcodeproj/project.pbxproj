@@ -1,0 +1,502 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		04791AC47BB99C0BC053047E /* USBDeviceManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10BE535DC08B9D07F1E83C49 /* USBDeviceManager.swift */; };
+		16BA8EC9FD564E10EF8DC24C /* SessionController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C248F4A8CB1621ECA8003EE /* SessionController.swift */; };
+		17E1D08C61EA9CD9CDFBE2D2 /* AudioPlayoutQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5C4AD93DA90454819F711AE /* AudioPlayoutQueue.swift */; };
+		1F4C833057D1BDE3CEB8DE17 /* InputTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC675660C03F739309DA1B58 /* InputTypes.swift */; };
+		2FF7359494A6DA176ED9A501 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 229E23AEC91C7B93DFDBF837 /* ContentView.swift */; };
+		333D9F90EB410F4D7049D0CF /* AirPlayTestHostApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3D775B6329B1A5FD6C1C9B1 /* AirPlayTestHostApp.swift */; };
+		3A58465F39A35D8878FF991C /* VideoTiming.swift in Sources */ = {isa = PBXBuildFile; fileRef = D28906C07D52FA8458B16E25 /* VideoTiming.swift */; };
+		3B395A2F60939B6278F062D1 /* OCBMAVDecrypt.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C9FE6229B0957ACF3D8DD1B /* OCBMAVDecrypt.swift */; };
+		3B851246FA84B9167241BE14 /* VehicleProfile.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23C383F626B01E999D638FAA /* VehicleProfile.swift */; };
+		41F2510D03ADAA4492E87DA8 /* FramePresenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29D9267289D3A9B0E20A2512 /* FramePresenter.swift */; };
+		4D7348358DFDEB3184D6BDC4 /* AVCCFastPath.swift in Sources */ = {isa = PBXBuildFile; fileRef = E99619ED90D8A712CF462814 /* AVCCFastPath.swift */; };
+		5F7CE6B984AFC92F114C298F /* AirPlayModeWire.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C350822AD0C059E863C314B /* AirPlayModeWire.swift */; };
+		61857EEA69A0F3C40EC0733F /* OCBMClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDB08250206061CED735FF1C /* OCBMClient.swift */; };
+		6F615A475FEC0E0C6B2D6618 /* AirPlayEvents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 07D0E25A558DF47164AF4FA9 /* AirPlayEvents.swift */; };
+		6FC92D087FE046A071CA3E67 /* SyntheticBox.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7480E009D68383F1F6357BB /* SyntheticBox.swift */; };
+		7B8AC1B92562645FB2F245C1 /* VehicleConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4ED801E0B69109D86E5D8F57 /* VehicleConfig.swift */; };
+		7D2FE02EF1E2CC3EA88AB748 /* AirPlayModeClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1259109536755D4E1E439D5 /* AirPlayModeClient.swift */; };
+		86B4B90C2822B413CC1B336B /* VideoSurface.swift in Sources */ = {isa = PBXBuildFile; fileRef = D974FE6954590159BE6219A3 /* VideoSurface.swift */; };
+		8BAEF34D6FBE90AE0B05A98E /* SessionFailureTracker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6297F5350DFD38DE76DA74AB /* SessionFailureTracker.swift */; };
+		9F1B45C7F1E8E3F76B79367C /* StreamMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98AA4F396FC8C4B279EAF1BE /* StreamMetrics.swift */; };
+		A1B0801349AD0607EA1C7947 /* MirrorVideoConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68534273D911CB34FB79F853 /* MirrorVideoConfig.swift */; };
+		A2AAA8756E57AE6E87979D32 /* BoxLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = 67528006CDFB9079F40DFDB4 /* BoxLink.swift */; };
+		A41ECD1FB4E8A7A7E82BD6BA /* MediaPipeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D3C191A56D3648D1B74DBCD /* MediaPipeline.swift */; };
+		A62EC22408C060618EE15B6E /* StatusModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 602EE40E2D7FE3F8B326833C /* StatusModels.swift */; };
+		A8394DE5537563221247F60A /* AirPlayAudioPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0AAB077A7185C4FE161D2A7E /* AirPlayAudioPlayer.swift */; };
+		A93C2311AC60B5393A5F2750 /* AudioPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A713F14EDBBF4A12AAA78CE5 /* AudioPlayer.swift */; };
+		AD0437A8FCCBB2D680D01725 /* OCBMFraming.swift in Sources */ = {isa = PBXBuildFile; fileRef = B285C83090B16D530DD9F9A4 /* OCBMFraming.swift */; };
+		B44422B9FF7B96A2627F247F /* TunnelFixture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4500D7AFF108DFBB8B3F56F8 /* TunnelFixture.swift */; };
+		B77DB03CCC54D3F3F84FBADC /* AirPlayTunnel.swift in Sources */ = {isa = PBXBuildFile; fileRef = E494DBF4EEEB13494B486EDC /* AirPlayTunnel.swift */; };
+		C43674ECC3436120344FAC9D /* USBBoxLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = AEC9EDF932A770B428BC0315 /* USBBoxLink.swift */; };
+		CD895C31207FA0FAA8A4A6EE /* SeamReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = EEC6A92026F7A6191AD7880C /* SeamReader.swift */; };
+		D02AD608745DD043FF77EE50 /* AirPlayModeSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 292F0A00FBF43F54CD3BC12A /* AirPlayModeSession.swift */; };
+		D52FD5F583415C8CC2B30CCE /* MirrorVideoDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1EE6A71CDB22B8BA9054428 /* MirrorVideoDecoder.swift */; };
+		DAE6833086BA8E42DA66D232 /* SyntheticLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1814010871618A2DEB290B0 /* SyntheticLink.swift */; };
+		E5C8C4C530C077D1883ECC56 /* USBTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 128412E9D1E8B9AEB1334F90 /* USBTransport.swift */; };
+		FD98176138C287E852E7669E /* ConfigIntegrity.swift in Sources */ = {isa = PBXBuildFile; fileRef = CDE6DFE9D44A00C41AB1AC5E /* ConfigIntegrity.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		0155A2560D2BF9C899D102F7 /* USBBridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = USBBridge.h; path = ../carlink_macOS/USB/USBBridge.h; sourceTree = "<group>"; };
+		07D0E25A558DF47164AF4FA9 /* AirPlayEvents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirPlayEvents.swift; sourceTree = "<group>"; };
+		0AAB077A7185C4FE161D2A7E /* AirPlayAudioPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirPlayAudioPlayer.swift; sourceTree = "<group>"; };
+		10BE535DC08B9D07F1E83C49 /* USBDeviceManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = USBDeviceManager.swift; path = ../carlink_macOS/USB/USBDeviceManager.swift; sourceTree = "<group>"; };
+		128412E9D1E8B9AEB1334F90 /* USBTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = USBTransport.swift; path = ../carlink_macOS/USB/USBTransport.swift; sourceTree = "<group>"; };
+		229E23AEC91C7B93DFDBF837 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		23C383F626B01E999D638FAA /* VehicleProfile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = VehicleProfile.swift; path = ../carlink_macOS/App/Settings/VehicleProfile.swift; sourceTree = "<group>"; };
+		292F0A00FBF43F54CD3BC12A /* AirPlayModeSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirPlayModeSession.swift; sourceTree = "<group>"; };
+		29D9267289D3A9B0E20A2512 /* FramePresenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FramePresenter.swift; sourceTree = "<group>"; };
+		3D3C191A56D3648D1B74DBCD /* MediaPipeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaPipeline.swift; sourceTree = "<group>"; };
+		4500D7AFF108DFBB8B3F56F8 /* TunnelFixture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelFixture.swift; sourceTree = "<group>"; };
+		4C248F4A8CB1621ECA8003EE /* SessionController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionController.swift; sourceTree = "<group>"; };
+		4ED801E0B69109D86E5D8F57 /* VehicleConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = VehicleConfig.swift; path = ../carlink_macOS/App/VehicleConfig.swift; sourceTree = "<group>"; };
+		5C350822AD0C059E863C314B /* AirPlayModeWire.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirPlayModeWire.swift; sourceTree = "<group>"; };
+		5C9FE6229B0957ACF3D8DD1B /* OCBMAVDecrypt.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = OCBMAVDecrypt.swift; path = ../carlink_macOS/OCBM/OCBMAVDecrypt.swift; sourceTree = "<group>"; };
+		602EE40E2D7FE3F8B326833C /* StatusModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusModels.swift; sourceTree = "<group>"; };
+		6297F5350DFD38DE76DA74AB /* SessionFailureTracker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SessionFailureTracker.swift; path = ../carlink_macOS/OCBM/SessionFailureTracker.swift; sourceTree = "<group>"; };
+		67528006CDFB9079F40DFDB4 /* BoxLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoxLink.swift; sourceTree = "<group>"; };
+		68534273D911CB34FB79F853 /* MirrorVideoConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MirrorVideoConfig.swift; sourceTree = "<group>"; };
+		98AA4F396FC8C4B279EAF1BE /* StreamMetrics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = StreamMetrics.swift; path = ../carlink_macOS/OCBM/StreamMetrics.swift; sourceTree = "<group>"; };
+		A713F14EDBBF4A12AAA78CE5 /* AudioPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AudioPlayer.swift; path = ../carlink_macOS/Audio/AudioPlayer.swift; sourceTree = "<group>"; };
+		AC675660C03F739309DA1B58 /* InputTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = InputTypes.swift; path = ../carlink_macOS/App/InputTypes.swift; sourceTree = "<group>"; };
+		AEC9EDF932A770B428BC0315 /* USBBoxLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = USBBoxLink.swift; sourceTree = "<group>"; };
+		B285C83090B16D530DD9F9A4 /* OCBMFraming.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = OCBMFraming.swift; path = ../carlink_macOS/OCBM/OCBMFraming.swift; sourceTree = "<group>"; };
+		C1814010871618A2DEB290B0 /* SyntheticLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyntheticLink.swift; sourceTree = "<group>"; };
+		CDE6DFE9D44A00C41AB1AC5E /* ConfigIntegrity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = ConfigIntegrity.swift; path = ../carlink_macOS/OCBM/ConfigIntegrity.swift; sourceTree = "<group>"; };
+		D1259109536755D4E1E439D5 /* AirPlayModeClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirPlayModeClient.swift; sourceTree = "<group>"; };
+		D1EE6A71CDB22B8BA9054428 /* MirrorVideoDecoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MirrorVideoDecoder.swift; sourceTree = "<group>"; };
+		D28906C07D52FA8458B16E25 /* VideoTiming.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoTiming.swift; sourceTree = "<group>"; };
+		D5C4AD93DA90454819F711AE /* AudioPlayoutQueue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioPlayoutQueue.swift; sourceTree = "<group>"; };
+		D974FE6954590159BE6219A3 /* VideoSurface.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoSurface.swift; sourceTree = "<group>"; };
+		DF983A010EC5FB1EF75AAB6A /* AirPlayTestHost.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AirPlayTestHost.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		E494DBF4EEEB13494B486EDC /* AirPlayTunnel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirPlayTunnel.swift; sourceTree = "<group>"; };
+		E7480E009D68383F1F6357BB /* SyntheticBox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyntheticBox.swift; sourceTree = "<group>"; };
+		E99619ED90D8A712CF462814 /* AVCCFastPath.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AVCCFastPath.swift; path = ../carlink_macOS/Video/AVCCFastPath.swift; sourceTree = "<group>"; };
+		EDB08250206061CED735FF1C /* OCBMClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = OCBMClient.swift; path = ../carlink_macOS/OCBM/OCBMClient.swift; sourceTree = "<group>"; };
+		EEC6A92026F7A6191AD7880C /* SeamReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SeamReader.swift; sourceTree = "<group>"; };
+		F3D775B6329B1A5FD6C1C9B1 /* AirPlayTestHostApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirPlayTestHostApp.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		0BC9AA351B9AD0BC1A869EA6 /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				A713F14EDBBF4A12AAA78CE5 /* AudioPlayer.swift */,
+				E99619ED90D8A712CF462814 /* AVCCFastPath.swift */,
+				CDE6DFE9D44A00C41AB1AC5E /* ConfigIntegrity.swift */,
+				AC675660C03F739309DA1B58 /* InputTypes.swift */,
+				5C9FE6229B0957ACF3D8DD1B /* OCBMAVDecrypt.swift */,
+				EDB08250206061CED735FF1C /* OCBMClient.swift */,
+				B285C83090B16D530DD9F9A4 /* OCBMFraming.swift */,
+				6297F5350DFD38DE76DA74AB /* SessionFailureTracker.swift */,
+				98AA4F396FC8C4B279EAF1BE /* StreamMetrics.swift */,
+				0155A2560D2BF9C899D102F7 /* USBBridge.h */,
+				10BE535DC08B9D07F1E83C49 /* USBDeviceManager.swift */,
+				128412E9D1E8B9AEB1334F90 /* USBTransport.swift */,
+				4ED801E0B69109D86E5D8F57 /* VehicleConfig.swift */,
+				23C383F626B01E999D638FAA /* VehicleProfile.swift */,
+			);
+			name = Shared;
+			sourceTree = "<group>";
+		};
+		4489F0528124F87C3F89B2DA /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				DF983A010EC5FB1EF75AAB6A /* AirPlayTestHost.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		7BF8FCC2AF2140C756CDA4A7 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				7D90B69FA7135159FB697E70 /* App */,
+				B02FC3A0BFED2D0B70780359 /* Core */,
+				F529862873CD961B1F35B16A /* Debug */,
+				85F367CA998920B64B5580E8 /* Media */,
+				D3FA9B34C24CEF55068B805E /* Session */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		7D90B69FA7135159FB697E70 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				F3D775B6329B1A5FD6C1C9B1 /* AirPlayTestHostApp.swift */,
+				229E23AEC91C7B93DFDBF837 /* ContentView.swift */,
+				AEC9EDF932A770B428BC0315 /* USBBoxLink.swift */,
+				D974FE6954590159BE6219A3 /* VideoSurface.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		85F367CA998920B64B5580E8 /* Media */ = {
+			isa = PBXGroup;
+			children = (
+				0AAB077A7185C4FE161D2A7E /* AirPlayAudioPlayer.swift */,
+				29D9267289D3A9B0E20A2512 /* FramePresenter.swift */,
+				3D3C191A56D3648D1B74DBCD /* MediaPipeline.swift */,
+				D1EE6A71CDB22B8BA9054428 /* MirrorVideoDecoder.swift */,
+			);
+			path = Media;
+			sourceTree = "<group>";
+		};
+		B02FC3A0BFED2D0B70780359 /* Core */ = {
+			isa = PBXGroup;
+			children = (
+				07D0E25A558DF47164AF4FA9 /* AirPlayEvents.swift */,
+				D1259109536755D4E1E439D5 /* AirPlayModeClient.swift */,
+				292F0A00FBF43F54CD3BC12A /* AirPlayModeSession.swift */,
+				5C350822AD0C059E863C314B /* AirPlayModeWire.swift */,
+				E494DBF4EEEB13494B486EDC /* AirPlayTunnel.swift */,
+				D5C4AD93DA90454819F711AE /* AudioPlayoutQueue.swift */,
+				68534273D911CB34FB79F853 /* MirrorVideoConfig.swift */,
+				EEC6A92026F7A6191AD7880C /* SeamReader.swift */,
+				D28906C07D52FA8458B16E25 /* VideoTiming.swift */,
+			);
+			path = Core;
+			sourceTree = "<group>";
+		};
+		C55E607D4E3798B757A69FD5 = {
+			isa = PBXGroup;
+			children = (
+				0BC9AA351B9AD0BC1A869EA6 /* Shared */,
+				7BF8FCC2AF2140C756CDA4A7 /* Sources */,
+				4489F0528124F87C3F89B2DA /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		D3FA9B34C24CEF55068B805E /* Session */ = {
+			isa = PBXGroup;
+			children = (
+				67528006CDFB9079F40DFDB4 /* BoxLink.swift */,
+				4C248F4A8CB1621ECA8003EE /* SessionController.swift */,
+				602EE40E2D7FE3F8B326833C /* StatusModels.swift */,
+			);
+			path = Session;
+			sourceTree = "<group>";
+		};
+		F529862873CD961B1F35B16A /* Debug */ = {
+			isa = PBXGroup;
+			children = (
+				E7480E009D68383F1F6357BB /* SyntheticBox.swift */,
+				C1814010871618A2DEB290B0 /* SyntheticLink.swift */,
+				4500D7AFF108DFBB8B3F56F8 /* TunnelFixture.swift */,
+			);
+			path = Debug;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		9C4BDDF26D00D3422D5377DF /* AirPlayTestHost */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 8D0778D9EEE5574794905E21 /* Build configuration list for PBXNativeTarget "AirPlayTestHost" */;
+			buildPhases = (
+				45AED8E8AD74DBA24C412122 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = AirPlayTestHost;
+			packageProductDependencies = (
+			);
+			productName = AirPlayTestHost;
+			productReference = DF983A010EC5FB1EF75AAB6A /* AirPlayTestHost.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		90129D01AA928F609B04660A /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					9C4BDDF26D00D3422D5377DF = {
+						DevelopmentTeam = "";
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = 26C1729578D878A319F5687F /* Build configuration list for PBXProject "AirPlayTestHost" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = C55E607D4E3798B757A69FD5;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 4489F0528124F87C3F89B2DA /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				9C4BDDF26D00D3422D5377DF /* AirPlayTestHost */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		45AED8E8AD74DBA24C412122 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				4D7348358DFDEB3184D6BDC4 /* AVCCFastPath.swift in Sources */,
+				A8394DE5537563221247F60A /* AirPlayAudioPlayer.swift in Sources */,
+				6F615A475FEC0E0C6B2D6618 /* AirPlayEvents.swift in Sources */,
+				7D2FE02EF1E2CC3EA88AB748 /* AirPlayModeClient.swift in Sources */,
+				D02AD608745DD043FF77EE50 /* AirPlayModeSession.swift in Sources */,
+				5F7CE6B984AFC92F114C298F /* AirPlayModeWire.swift in Sources */,
+				333D9F90EB410F4D7049D0CF /* AirPlayTestHostApp.swift in Sources */,
+				B77DB03CCC54D3F3F84FBADC /* AirPlayTunnel.swift in Sources */,
+				A93C2311AC60B5393A5F2750 /* AudioPlayer.swift in Sources */,
+				17E1D08C61EA9CD9CDFBE2D2 /* AudioPlayoutQueue.swift in Sources */,
+				A2AAA8756E57AE6E87979D32 /* BoxLink.swift in Sources */,
+				FD98176138C287E852E7669E /* ConfigIntegrity.swift in Sources */,
+				2FF7359494A6DA176ED9A501 /* ContentView.swift in Sources */,
+				41F2510D03ADAA4492E87DA8 /* FramePresenter.swift in Sources */,
+				1F4C833057D1BDE3CEB8DE17 /* InputTypes.swift in Sources */,
+				A41ECD1FB4E8A7A7E82BD6BA /* MediaPipeline.swift in Sources */,
+				A1B0801349AD0607EA1C7947 /* MirrorVideoConfig.swift in Sources */,
+				D52FD5F583415C8CC2B30CCE /* MirrorVideoDecoder.swift in Sources */,
+				3B395A2F60939B6278F062D1 /* OCBMAVDecrypt.swift in Sources */,
+				61857EEA69A0F3C40EC0733F /* OCBMClient.swift in Sources */,
+				AD0437A8FCCBB2D680D01725 /* OCBMFraming.swift in Sources */,
+				CD895C31207FA0FAA8A4A6EE /* SeamReader.swift in Sources */,
+				16BA8EC9FD564E10EF8DC24C /* SessionController.swift in Sources */,
+				8BAEF34D6FBE90AE0B05A98E /* SessionFailureTracker.swift in Sources */,
+				A62EC22408C060618EE15B6E /* StatusModels.swift in Sources */,
+				9F1B45C7F1E8E3F76B79367C /* StreamMetrics.swift in Sources */,
+				6FC92D087FE046A071CA3E67 /* SyntheticBox.swift in Sources */,
+				DAE6833086BA8E42DA66D232 /* SyntheticLink.swift in Sources */,
+				B44422B9FF7B96A2627F247F /* TunnelFixture.swift in Sources */,
+				C43674ECC3436120344FAC9D /* USBBoxLink.swift in Sources */,
+				04791AC47BB99C0BC053047E /* USBDeviceManager.swift in Sources */,
+				E5C8C4C530C077D1883ECC56 /* USBTransport.swift in Sources */,
+				7B8AC1B92562645FB2F245C1 /* VehicleConfig.swift in Sources */,
+				3B851246FA84B9167241BE14 /* VehicleProfile.swift in Sources */,
+				86B4B90C2822B413CC1B336B /* VideoSurface.swift in Sources */,
+				3A58465F39A35D8878FF991C /* VideoTiming.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		6367828F9F820397C72A3AA2 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 27.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		74D2E4D9D407AE2846189753 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = NO;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "AirPlay Test Host";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				INFOPLIST_KEY_NSHighResolutionCapable = YES;
+				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = zeno.carlink.airplaytest;
+				PRODUCT_MODULE_NAME = AirPlayTestHost;
+				PRODUCT_NAME = "AirPlay Test Host";
+				SDKROOT = macosx;
+				SWIFT_OBJC_BRIDGING_HEADER = ../carlink_macOS/USB/USBBridge.h;
+			};
+			name = Release;
+		};
+		8C0D5AEF4402126433B9E39E /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = NO;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "AirPlay Test Host";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				INFOPLIST_KEY_NSHighResolutionCapable = YES;
+				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = zeno.carlink.airplaytest;
+				PRODUCT_MODULE_NAME = AirPlayTestHost;
+				PRODUCT_NAME = "AirPlay Test Host";
+				SDKROOT = macosx;
+				SWIFT_OBJC_BRIDGING_HEADER = ../carlink_macOS/USB/USBBridge.h;
+			};
+			name = Debug;
+		};
+		C1DC7C132B92FC7E278B16EF /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = "";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 27.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		26C1729578D878A319F5687F /* Build configuration list for PBXProject "AirPlayTestHost" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				6367828F9F820397C72A3AA2 /* Debug */,
+				C1DC7C132B92FC7E278B16EF /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		8D0778D9EEE5574794905E21 /* Build configuration list for PBXNativeTarget "AirPlayTestHost" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				8C0D5AEF4402126433B9E39E /* Debug */,
+				74D2E4D9D407AE2846189753 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 90129D01AA928F609B04660A /* Project object */;
+}

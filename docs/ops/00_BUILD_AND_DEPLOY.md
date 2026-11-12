@@ -12,7 +12,7 @@ How the box binaries are built, what they cost in flash/RAM, and how they are pu
   `tools/ocbm_overlay.sh [--minimal|--full]` (output under `$OCBM_CACHE/carlink-artifacts/ocbm-overlay/`, refuses
   the working tree; runs `tools/pkill_selfmatch_check.py` on the packed scripts) and written on the unit with
   `ocbm-overlay write <img> <sha256>` into the last 0x460000 B of its rootfs MTD, outside the GPL image; the rootfs
-  verifies it by sha256 and unpacks it into RAM at boot. Nothing is staged by hand any more. *(Corrected
+  verifies it by sha256 and unpacks it into RAM at boot. Nothing is staged by hand any more. The full profile now also carries `airplayd` (AirPlay-only mode, `docs/ocbm/02_AIRPLAY_ONLY_MODE.md`; image 2,132,664 B of the 4,587,520 B region). Files copied into `/opt/ocbm` (a tmpfs) for a quick test are lost at the next boot, and a power loss reboots the unit into the last overlay written to flash: flash the overlay (`ocbm-overlay write`) before relying on new daemons. *(Corrected
   2026-10-30: this said "no OCBM yet", then that ocbmd "is still staged onto the unit from this tree's build".)*
 - `boards/c2air-v821b/README.md`: the C2Air (Allwinner V821, riscv32), a different box; shared Rust sources, own toolchain.
 - `docs/boards/00_PI_AAOS_PORT.md`: the Raspberry Pi / AAOS arm64 port of the box daemons.

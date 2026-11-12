@@ -1671,7 +1671,7 @@ mod tests {
     /// `docs/ops/captures/2026-07-29_iphone_0x4171_listupdate.txt`.
     ///
     /// ```text
-    /// 40 40 00 74 41 71 | 00 6e 00 06 | 00 06 00 00 00 00 | 00 16 00 01 "+1 (907) 385-5769"
+    /// 40 40 00 74 41 71 | 00 6e 00 06 | 00 06 00 00 00 00 | 00 16 00 01 "+1 (555) 010-0123"
     ///  \____ iAP2 ____/   \_ id 6 _/   \_ id 0 Index _/   \__ id 1 RemoteID __/
     /// ```
     ///
@@ -1688,14 +1688,14 @@ mod tests {
     #[test]
     fn real_iphone_favorites_entry_parses() {
         let mut entry = tlv(0, &[0x00, 0x00]); // Index = 0
-        entry.extend(tlv(1, b"+1 (907) 385-5769\0")); // RemoteID, NUL-terminated as sent
+        entry.extend(tlv(1, b"+1 (555) 010-0123\0")); // RemoteID, NUL-terminated as sent
         let body = tlv(6, &entry); // FavoritesList
 
         let mut out = Vec::new();
         list_update(&body, &mut out);
         assert_eq!(out.len(), 1, "the captured frame must yield exactly one favorite: {out:?}");
         assert!(out[0].contains("\"kind\":\"favorite\""), "{}", out[0]);
-        assert!(out[0].contains("\"remoteId\":\"+1 (907) 385-5769\""), "{}", out[0]);
+        assert!(out[0].contains("\"remoteId\":\"+1 (555) 010-0123\""), "{}", out[0]);
         assert!(out[0].contains("\"index\":0"), "{}", out[0]);
     }
 

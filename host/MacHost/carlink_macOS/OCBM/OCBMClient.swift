@@ -151,6 +151,20 @@ final class OCBMClient: @unchecked Sendable {
     var onBoxInfo: ((CCPAInfo?) -> Void)?
     var onBoxAck: ((UInt8, UInt8) -> Void)?
 
+    /// The bundle identity the box put in its CT_HELLO_ACK tail (`OCBM.helloAckBundle`): fired for EVERY
+    /// ACK, `nil` when the ACK carries no tail (a box older than 2026-11-11, or a cut one). HELLO is
+    /// retransmitted until the ACK is seen, so this can fire more than once per connect with the same
+    /// value. Invoked on the transport read queue. The value is advisory: nothing in the handshake reads
+    /// it, and SUBSCRIBE proceeds identically whatever the tail says.
+    var onBoxBundle: ((BoxBundleIdentity?) -> Void)?
+    /// The value last delivered on `onBoxBundle`; `nil` before the first ACK of this connect. WRITTEN on
+    /// the transport read queue (`handleCtrl`) and by `connect()`, READ from anywhere (the UI reads it on
+    /// the main actor), so it lives behind a lock like `lastProjMode`. A consumer that hops threads
+    /// should read THIS at delivery time rather than trust the callback's argument: two hops can land
+    /// out of order, and the retained value is always the latest one.
+    var boxBundle: BoxBundleIdentity? { boxBundleBox.withLock { $0 } }
+    private let boxBundleBox = Mutex<BoxBundleIdentity?>(nil)
+
     /// Box readiness bitmask (CH_CTRL `ctBoxHealth`, `OCBM.bh*` bits). Sent only while subscribed, on
     /// change only, re-emitted after each fresh SUBSCRIBE — a reconnect always refreshes this rather
     /// than the app caching a stale value across sessions. Invoked on the transport read queue.
@@ -197,6 +211,10 @@ final class OCBMClient: @unchecked Sendable {
 
     /// Connect: start the pipe, then HELLO→(ACK)→SUBSCRIBE→heartbeat, retrying HELLO as needed.
     func connect() {
+        // A fresh link has no ACK yet: whatever an earlier connect on this client learned is not a
+        // statement about the box now on the pipe. Before `transport.start()`, so it cannot race the
+        // read loop's own write of this value.
+        boxBundleBox.withLock { $0 = nil }
         transport.start()
         queue.async { [weak self] in
             guard let self else { return }
@@ -966,10 +984,22 @@ final class OCBMClient: @unchecked Sendable {
         guard let op = payload.first else { return }
         switch op {
         case OCBM.ctHelloAck:
-            log.info("HELLO_ACK from box")
+            // The ACK is accepted at ANY length (a bare opcode included, as before): the bundle tail is
+            // read only when the payload has it, and its absence or content never gates the handshake.
+            let bundle = OCBM.helloAckBundle(payload)
+            if let bundle {
+                let hex = bundle.contentIDHex
+                log.info("HELLO_ACK from box: bundle \(hex.isEmpty ? "-" : String(hex.prefix(12)), privacy: .public) \(OCBM.bundleStateName(bundle.state), privacy: .public)")
+            } else {
+                log.info("HELLO_ACK from box (\(payload.count, privacy: .public) B, no bundle tail)")
+            }
             // Runs on the transport read queue; hop to `queue` where helloAcked is confined. The
             // in-flight helloLoop tick (≤500 ms away) observes it and proceeds to SUBSCRIBE.
             queue.async { [weak self] in self?.helloAcked = true }
+            // Retain BEFORE notifying, so a consumer reading `boxBundle` from the callback (or from a
+            // later hop) never sees a value older than the one it was told about.
+            boxBundleBox.withLock { $0 = bundle }
+            onBoxBundle?(bundle)
         case OCBM.ctUplink where payload.count >= 7:
             // [ctUplink][state u8][rate u32 LE][ch u8]([codec u8]) — the box's mic-uplink gate.
             // The codec byte was appended 2026-09-04 for HFP wideband and is OPTIONAL: a 7-byte
@@ -1181,4 +1211,205 @@ struct CCPAInfo: Codable, Equatable {
     let phone_present: Bool
     let daemons: Daemons
     let devices: [String]
+    /// The OCBM bundle the box runs (added 2026-11-11); `nil` from a box that predates it.
+    let bundle: BundleInfo?
+
+    /// `MGMT_INFO`'s `bundle` object: `{commit, dirty, profile, built, content_id, state}`. Decoding it
+    /// NEVER throws: this object is diagnostics, and one missing or mistyped member must not cost the
+    /// whole adapter snapshot (the enclosing `CCPAInfo` decode fails as a unit). A missing string is "",
+    /// a `content_id` that is not exactly 64 hex digits is "" (the box's own spelling of "none"), and
+    /// `dirty` stays `nil` unless the box sent a boolean: "clean" is a claim, so absence does not make it.
+    struct BundleInfo: Codable, Equatable {
+        let commit: String
+        let dirty: Bool?
+        let profile: String
+        let built: String
+        /// 64 lowercase hex digits, or "".
+        let content_id: String
+        /// The state NAME (`OCBM.bundleStateName`); "" when the box sent none.
+        let state: String
+
+        init(commit: String = "", dirty: Bool? = nil, profile: String = "", built: String = "",
+             content_id: String = "", state: String = "") {
+            self.commit = commit
+            self.dirty = dirty
+            self.profile = profile
+            self.built = built
+            self.content_id = Self.normalizedContentID(content_id)
+            self.state = state
+        }
+
+        init(from decoder: Decoder) {
+            let c = try? decoder.container(keyedBy: CodingKeys.self)
+            func str(_ key: CodingKeys) -> String { (try? c?.decodeIfPresent(String.self, forKey: key)) ?? "" }
+            commit = str(.commit)
+            dirty = try? c?.decodeIfPresent(Bool.self, forKey: .dirty)
+            profile = str(.profile)
+            built = str(.built)
+            content_id = Self.normalizedContentID(str(.content_id))
+            state = str(.state)
+        }
+
+        /// Exactly 64 ASCII hex digits and not all zero, lowercased; anything else is "".
+        static func normalizedContentID(_ s: String) -> String {
+            let u = Array(s.utf8)
+            guard u.count == 2 * OCBM.bundleIdLen else { return "" }
+            var out = [UInt8]()
+            out.reserveCapacity(u.count)
+            for b in u {
+                switch b {
+                case UInt8(ascii: "0")...UInt8(ascii: "9"), UInt8(ascii: "a")...UInt8(ascii: "f"): out.append(b)
+                case UInt8(ascii: "A")...UInt8(ascii: "F"): out.append(b | 0x20)
+                default: return ""
+                }
+            }
+            guard out.contains(where: { $0 != UInt8(ascii: "0") }) else { return "" }
+            return String(decoding: out, as: UTF8.self)
+        }
+    }
+}
+
+/// What the UI shows for the box's OCBM bundle: ONE answer built from the two places the box reports it,
+/// the CT_HELLO_ACK tail (`BoxBundleIdentity`: id + state, once per connect) and `MGMT_INFO`
+/// (`CCPAInfo.BundleInfo`: the same plus commit/dirty/profile/built, on every Refresh). Pure, so the
+/// rules below are pinned by tests/main.swift rather than by a view.
+struct BoxBundleSummary: Equatable {
+    enum State: Equatable {
+        case absent, ok, mixed, corrupt, unchecked
+        /// A state this build has no name for (a newer box); carries the text to show.
+        case unknown(String)
+
+        enum Severity: Equatable { case good, neutral, caution, fault }
+
+        /// From the HELLO_ACK state byte.
+        init(wire: UInt8) {
+            switch wire {
+            case OCBM.bundleAbsent: self = .absent
+            case OCBM.bundleOk: self = .ok
+            case OCBM.bundleMixed: self = .mixed
+            case OCBM.bundleCorrupt: self = .corrupt
+            case OCBM.bundleUnchecked: self = .unchecked
+            default: self = .unknown("unknown (\(wire))")
+            }
+        }
+
+        /// From `MGMT_INFO`'s state name.
+        init(name: String) {
+            switch name {
+            case "absent": self = .absent
+            case "ok": self = .ok
+            case "mixed": self = .mixed
+            case "corrupt": self = .corrupt
+            case "unchecked": self = .unchecked
+            default: self = .unknown(name.isEmpty ? "unknown" : name)
+            }
+        }
+
+        /// The protocol's own word for the state.
+        var name: String {
+            switch self {
+            case .absent: return "absent"
+            case .ok: return "ok"
+            case .mixed: return "mixed"
+            case .corrupt: return "corrupt"
+            case .unchecked: return "unchecked"
+            case .unknown(let text): return text
+            }
+        }
+
+        /// `good` only for a check that ran and passed. `fault` = the id does not describe what runs
+        /// (mixed) or cannot be trusted at all (corrupt). `caution` = nothing was checked, or this build
+        /// cannot tell. `neutral` = the box simply has no bundle identity, which is not an error.
+        var severity: Severity {
+            switch self {
+            case .ok: return .good
+            case .absent: return .neutral
+            case .unchecked, .unknown: return .caution
+            case .mixed, .corrupt: return .fault
+            }
+        }
+
+        /// What the reader sees: the two fault states are upper-cased so they cannot pass for "ok" in a
+        /// monochrome or colour-blind reading; colour and symbol only repeat it.
+        var displayName: String { severity == .fault ? name.uppercased() : name }
+
+        /// One short clause saying what the state means (docs/ocbm/00_PROTOCOL.md, *Bundle identity*).
+        var detail: String {
+            switch self {
+            case .absent: return "this box has no bundle identity"
+            case .ok: return "verified at boot"
+            case .mixed: return "files on the box differ from the bundle"
+            case .corrupt: return "bundle identity files are unusable"
+            case .unchecked: return "not verified: the ID is only a claim"
+            case .unknown: return "state not known to this app"
+            }
+        }
+    }
+
+    /// 64 lowercase hex digits, or "" when the box reports none.
+    let contentID: String
+    let state: State
+    /// "" = not reported (ACK only, or the metadata on hand describes a different bundle).
+    let commit: String
+    /// `nil` = not reported. `true` = built from a tree with uncommitted changes.
+    let dirty: Bool?
+    let profile: String
+    let built: String
+
+    /// The 12-hex-digit short id `ocbm-host` prints, or "—" when there is none.
+    var shortID: String { contentID.isEmpty ? "—" : String(contentID.prefix(12)) }
+    /// True for the conditions that must be visible without expanding anything: a failed integrity state
+    /// or a dirty build.
+    var needsAttention: Bool { state.severity == .fault || dirty == true }
+    /// "ok — verified at boot" / "MIXED — files on the box differ from the bundle".
+    var stateLine: String { "\(state.displayName) — \(state.detail)" }
+    /// The words for the always-visible warning; nil when nothing needs attention.
+    var attentionText: String? {
+        switch (state.severity == .fault, dirty == true) {
+        case (true, true): return "bundle \(state.displayName) · DIRTY"
+        case (true, false): return "bundle \(state.displayName)"
+        case (false, true): return "bundle DIRTY"
+        case (false, false): return nil
+        }
+    }
+
+    init(contentID: String, state: State, commit: String = "", dirty: Bool? = nil, profile: String = "",
+         built: String = "") {
+        self.contentID = contentID
+        self.state = state
+        self.commit = commit
+        self.dirty = dirty
+        self.profile = profile
+        self.built = built
+    }
+
+    /// - `infoIsNewer`: the `MGMT_INFO` snapshot was received AFTER the HELLO_ACK. The box re-reads its
+    ///   bundle files for both, so the later report is the truer one and wins outright.
+    /// - Otherwise the ACK (this connect's own report) supplies id and state, and the snapshot's
+    ///   commit/dirty/profile/built are attached ONLY when its `content_id` is this same, non-empty id.
+    ///   The snapshot outlives a session (it is kept, marked stale, across a reconnect), so after a
+    ///   re-flash it still names the PREVIOUS bundle: printing its commit beside the new id would label
+    ///   one build with another's provenance, which is the exact mistake this identity exists to prevent.
+    static func merge(ack: BoxBundleIdentity?, info: CCPAInfo.BundleInfo?, infoIsNewer: Bool) -> BoxBundleSummary? {
+        func from(_ i: CCPAInfo.BundleInfo) -> BoxBundleSummary {
+            BoxBundleSummary(contentID: i.content_id, state: State(name: i.state), commit: i.commit,
+                             dirty: i.dirty, profile: i.profile, built: i.built)
+        }
+        switch (ack, info) {
+        case (nil, nil):
+            return nil
+        case (nil, let i?):
+            return from(i)
+        case (let a?, nil):
+            return BoxBundleSummary(contentID: a.contentIDHex, state: State(wire: a.state))
+        case (let a?, let i?):
+            if infoIsNewer { return from(i) }
+            let id = a.contentIDHex
+            guard !id.isEmpty, id == i.content_id else {
+                return BoxBundleSummary(contentID: id, state: State(wire: a.state))
+            }
+            return BoxBundleSummary(contentID: id, state: State(wire: a.state), commit: i.commit,
+                                    dirty: i.dirty, profile: i.profile, built: i.built)
+        }
+    }
 }

@@ -21,7 +21,7 @@
   40 40 00 74 41 71            iAP2: length 0x74 = 116, msg id 0x4171 ListUpdate
   00 6e 00 06                  TLV len 110, id 6 = FavoritesList   (value = 106 B)
     00 06 00 00  00 00           TLV len 6,  id 0 = Index    = 0
-    00 16 00 01  "+1 (907) 385-5769\0"   TLV len 22, id 1 = RemoteID
+    00 16 00 01  "+1 (555) 010-0123\0"   TLV len 22, id 1 = RemoteID
     <78 further bytes not shown by the truncated dump>
 
   The entry's fields sit DIRECTLY inside the FavoritesList group — there is no per-entry wrapper.

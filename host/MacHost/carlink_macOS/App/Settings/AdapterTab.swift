@@ -144,6 +144,21 @@ final class CCPABridge: ObservableObject {
     @Published var phoneIdent: PhoneIdent?
     @Published var phoneIdentUpdated: Date?
 
+    /// The bundle identity from this connect's CT_HELLO_ACK (`OCBMClient.boxBundle`); `nil` before the
+    /// ACK, from a box older than the bundle tail, and after `sessionEnded()`. Session-scoped like the
+    /// three values above. `bundleSummary` is what views read.
+    @Published var bundleAck: BoxBundleIdentity?
+    @Published var bundleAckUpdated: Date?
+
+    /// The one bundle answer for the UI: the HELLO_ACK identity and the `MGMT_INFO` snapshot's `bundle`
+    /// reconciled by `BoxBundleSummary.merge` (later report wins; a stale snapshot never lends its
+    /// commit to a different id). `nil` = the box reported nothing either way (an older box).
+    var bundleSummary: BoxBundleSummary? {
+        BoxBundleSummary.merge(
+            ack: bundleAck, info: info?.bundle,
+            infoIsNewer: (lastUpdated ?? .distantPast) > (bundleAckUpdated ?? .distantPast))
+    }
+
     private var busyGen = 0
 
     /// Session teardown (AppDelegate.endSession): the OCBM link is gone, so any latched busy will
@@ -158,6 +173,8 @@ final class CCPABridge: ObservableObject {
         btPhaseUpdated = nil
         phoneIdent = nil
         phoneIdentUpdated = nil
+        bundleAck = nil
+        bundleAckUpdated = nil
     }
 
     func receiveBoxHealth(_ bits: UInt8) {
@@ -171,6 +188,12 @@ final class CCPABridge: ObservableObject {
     func receivePhoneIdent(_ ident: PhoneIdent?) {
         phoneIdent = ident
         phoneIdentUpdated = Date()
+    }
+    /// HELLO is retransmitted until its ACK is seen, so the same identity can arrive twice in a connect:
+    /// publish only a change, but always restamp, since each ACK is a fresh report from the box.
+    func receiveBundle(_ bundle: BoxBundleIdentity?) {
+        if bundleAck != bundle { bundleAck = bundle }
+        bundleAckUpdated = bundle == nil ? nil : Date()
     }
 
     /// (Re)query the adapter snapshot. Also clears a stuck `busy` (an action whose ACK never arrived —
@@ -258,6 +281,78 @@ private struct HealthRow: View {
                 Circle().fill(ok ? Color.green : Color.red).frame(width: 8, height: 8)
                 Text(detail.isEmpty ? (ok ? "up" : "down") : detail).foregroundStyle(.secondary)
             }
+        }
+    }
+}
+
+/// The bundle state as symbol + word + one clause. Colour is the THIRD carrier, never the only one: the
+/// symbol shape differs per severity and the two fault states are upper-cased by `displayName`, so
+/// MIXED / CORRUPT read as faults in monochrome too.
+private struct BundleStateLabel: View {
+    let state: BoxBundleSummary.State
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: symbol).foregroundStyle(tint)
+            Text(state.displayName)
+                .fontWeight(state.severity == .fault ? .bold : .regular)
+                .foregroundStyle(state.severity == .fault ? AnyShapeStyle(tint) : AnyShapeStyle(.primary))
+            Text(state.detail).foregroundStyle(.secondary)
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private var symbol: String {
+        switch state.severity {
+        case .good: return "checkmark.seal.fill"
+        case .neutral: return "minus.circle"
+        case .caution: return "questionmark.circle.fill"
+        case .fault: return state == .corrupt ? "xmark.octagon.fill" : "exclamationmark.triangle.fill"
+        }
+    }
+
+    private var tint: Color {
+        switch state.severity {
+        case .good: return .green
+        case .neutral: return .secondary
+        case .caution: return .orange
+        case .fault: return .red
+        }
+    }
+}
+
+/// The "Bundle" section of the box-state stack: which OCBM bundle the box runs and whether its files
+/// still are that bundle. A separate `View` over one `Equatable` value, so it re-renders when the
+/// summary changes and not on every `CCPABridge` publish.
+private struct BundleSection: View {
+    let summary: BoxBundleSummary
+
+    var body: some View {
+        Section("Bundle") {
+            LabeledContent("Content ID") {
+                Text(summary.shortID)
+                    .font(.system(.body, design: .monospaced))
+                    .textSelection(.enabled)
+                    .help(summary.contentID.isEmpty ? "The box reports no content ID" : summary.contentID)
+            }
+            LabeledContent("State") { BundleStateLabel(state: summary.state) }
+            if summary.dirty == true {
+                LabeledContent("Build") {
+                    HStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                        Text("DIRTY").fontWeight(.bold).foregroundStyle(.orange)
+                        Text("built with uncommitted changes").foregroundStyle(.secondary)
+                    }
+                    .accessibilityElement(children: .combine)
+                }
+            }
+            if !summary.commit.isEmpty {
+                LabeledContent("Commit") {
+                    Text(summary.commit).font(.system(.body, design: .monospaced)).textSelection(.enabled)
+                }
+            }
+            if !summary.profile.isEmpty { LabeledContent("Profile", value: summary.profile) }
+            if !summary.built.isEmpty { LabeledContent("Built", value: summary.built) }
         }
     }
 }
@@ -451,6 +546,13 @@ struct AdapterTab: View {
             if store.stale {
                 Text("stale").font(.caption).foregroundStyle(.orange)
             }
+            // A mixed/corrupt/dirty bundle is promoted here for the same reason `stale` is: this section
+            // starts collapsed, and a fault only visible after expanding is a fault nobody sees.
+            if let bundle = store.bundleSummary, let warning = bundle.attentionText {
+                Label(warning, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption.bold())
+                    .foregroundStyle(bundle.state.severity == .fault ? .red : .orange)
+            }
             Spacer()
             Text(store.statusText).font(.caption).foregroundStyle(.secondary)
         }
@@ -458,6 +560,11 @@ struct AdapterTab: View {
 
     @ViewBuilder
     private var boxState: some View {
+        // From the CT_HELLO_ACK tail and/or the snapshot's `bundle`, so it renders before a GET_INFO
+        // reply; absent altogether for a box that reports neither (older than 2026-11-11).
+        if let bundle = store.bundleSummary {
+            BundleSection(summary: bundle)
+        }
         if let i = store.info {
             Section("Identity") {
                 LabeledContent("Name", value: i.name)

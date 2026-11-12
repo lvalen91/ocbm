@@ -73,6 +73,7 @@ Rules that keep it that way:
 |---|---|
 | [00_PROTOCOL.md](ocbm/00_PROTOCOL.md) | the OCBM envelope, channel ids, seam framing, backpressure — **projection-agnostic**: it carries Android Auto too |
 | [01_ROLES_AND_MFI_SOURCE.md](ocbm/01_ROLES_AND_MFI_SOURCE.md) | the three roles, the boards, the MFi-source model (MFi 2.0 through 3.0) |
+| [02_AIRPLAY_ONLY_MODE.md](ocbm/02_AIRPLAY_ONLY_MODE.md) | AirPlay-only mode (plain AirPlay receiver instead of CarPlay, implemented in `box/airplayd`): the protocol as measured, box/host split, status and open items, the Phase-0 probe |
 
 ## boards/ — board ports outside the CCPA
 
@@ -112,12 +113,14 @@ wireless/01 · `docs/60` → androidauto/00+01, `docs/61` → androidauto/02 · 
 | `boards/rpi4-aaos/` | Raspberry Pi 4 + AAOS port (light testing): full CarPlay A/V reached with a CCPA in NCM mode as MFi source only (`box/mfid`), the Pi's own BT/Wi-Fi used. See `docs/boards/00_PI_AAOS_PORT.md` |
 | `crates/mfi-wire/` | `MFI1` framing and blocking client for the opt-in remote MFi path (`CARPLAY_MFI_ADDR`), linked into production crates |
 | `box/mfid/` | Not shipped: ephemeral MFi service over USB-NCM for hosts without a coprocessor |
+| `box/airplay-probe/` | Not shipped: bench probe for AirPlay-only mode (standalone crate, run from the box's `/tmp`); `capcheck` checks its captures off the box. See [ocbm/02_AIRPLAY_ONLY_MODE.md](ocbm/02_AIRPLAY_ONLY_MODE.md) §7 |
 | `boards/rpi-zero2w/` | Raspberry Pi Zero 2 W bring-up. Measurement only — no OCBM port yet, and the board facts differ from the CCPA |
 | `host/gm_ccpa/` | **Wireless CarPlay as an unprivileged AAOS app** on a 2024 Silverado (GM Info 3.7, API 32). The phone streams over the *vehicle's own* hotspot; the adapter carries no media. Its Rust core links this tree's crates. See [`host/gm_ccpa/README.md`](../host/gm_ccpa/README.md) |
 | `host/CarlinkAndroid/` | AAOS head-unit host app (Kotlin) for GM Info 3.7 — full OCBM, wireless CarPlay over the *adapter's* radios. The opposite division of labour to `gm_ccpa/`. See [`host/CarlinkAndroid/OCBMANDROID.md`](../host/CarlinkAndroid/OCBMANDROID.md) |
 | `host/mfi-probe/` | Host-side exerciser for `mfid`: proves the MFi coprocessor answers with a real certificate and signature over USB-NCM, before anything depends on it |
 | `host/aa-headunit/` | Rust Android Auto head-unit reference client (TCP / `adb forward`) — the de-risking path the macOS engine was built against |
 | `host/MacHost/` | The shipping macOS host app (Xcode project `carlink_macOS`) — VideoToolbox decode, audio, touch/media-key uplink, Settings/YAML, OCBM client |
+| `host/MacHost/AirPlayTestHost/` | AirPlay-only mode test host (its own Xcode project, sharing `carlink_macOS` sources): selects `MODE_AIRPLAY`, decrypts, decodes and plays the tunnel. See its `README.md` and [host/00_MACOS_HOST_APP.md](host/00_MACOS_HOST_APP.md) |
 | `host/CallSim/` | Android app: self-managed Telecom `ConnectionService` that fakes real phone calls (ringing, answer/hang-up, HFP/SCO audio routing) for testing AA telephony without a SIM |
 
 ## Reference material (locations + what each is authoritative for)

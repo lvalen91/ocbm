@@ -1,0 +1,69 @@
+# XcodeGen spec for AirPlayTestHost.xcodeproj (which is checked in; regenerate with `xcodegen` here after
+# editing this file). A separate project on purpose: carlink_macOS.xcodeproj is not touched, and the
+# shared carlink_macOS sources below are compiled as they are.
+name: AirPlayTestHost
+options:
+  deploymentTarget:
+    macOS: "27.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: false
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MACOSX_DEPLOYMENT_TARGET: "27.0"
+    DEVELOPMENT_TEAM: ""
+    DEAD_CODE_STRIPPING: YES
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+targets:
+  AirPlayTestHost:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources
+      # The shipping app's sources, shared by reference (README.md says what each is used for).
+      - path: ../carlink_macOS/OCBM/OCBMFraming.swift
+        group: Shared
+      - path: ../carlink_macOS/OCBM/OCBMClient.swift
+        group: Shared
+      - path: ../carlink_macOS/OCBM/OCBMAVDecrypt.swift
+        group: Shared
+      - path: ../carlink_macOS/OCBM/ConfigIntegrity.swift
+        group: Shared
+      - path: ../carlink_macOS/OCBM/SessionFailureTracker.swift
+        group: Shared
+      - path: ../carlink_macOS/OCBM/StreamMetrics.swift
+        group: Shared
+      - path: ../carlink_macOS/App/InputTypes.swift
+        group: Shared
+      - path: ../carlink_macOS/App/VehicleConfig.swift
+        group: Shared
+      - path: ../carlink_macOS/App/Settings/VehicleProfile.swift
+        group: Shared
+      - path: ../carlink_macOS/Video/AVCCFastPath.swift
+        group: Shared
+      - path: ../carlink_macOS/Audio/AudioPlayer.swift
+        group: Shared
+      - path: ../carlink_macOS/USB/USBDeviceManager.swift
+        group: Shared
+      - path: ../carlink_macOS/USB/USBTransport.swift
+        group: Shared
+      - path: ../carlink_macOS/USB/USBBridge.h
+        group: Shared
+        buildPhase: none
+    settings:
+      base:
+        PRODUCT_NAME: AirPlay Test Host
+        PRODUCT_MODULE_NAME: AirPlayTestHost
+        PRODUCT_BUNDLE_IDENTIFIER: zeno.carlink.airplaytest
+        SWIFT_OBJC_BRIDGING_HEADER: ../carlink_macOS/USB/USBBridge.h
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: AirPlay Test Host
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.utilities
+        INFOPLIST_KEY_NSPrincipalClass: NSApplication
+        INFOPLIST_KEY_NSHighResolutionCapable: YES
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        CODE_SIGN_STYLE: Automatic
+        ENABLE_APP_SANDBOX: NO
+        ENABLE_HARDENED_RUNTIME: YES
+        COMBINE_HIDPI_IMAGES: YES

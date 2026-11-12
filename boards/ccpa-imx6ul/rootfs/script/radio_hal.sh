@@ -454,7 +454,10 @@ ap_layer_up() {  # $1 = wireless interface, $2 = backend name for the state file
     return 1; }
   # RADIO_BOX_NAME is resolved HERE, not inside the AP layer, so the SSID and the Bluetooth
   # name provably come from one decision rather than two derivations that can disagree.
-  ONDEMAND_WIFI=1 RADIO_WLAN_IF="$_i" RADIO_BOX_NAME="$(box_name)" \
+  # RADIO_AP_SSID (AirPlay-only mode, /script/airplay_mode.sh: the HOST APP names the AP) replaces the
+  # box identity for THIS bring-up only. It is never persisted, the Bluetooth name does not come from
+  # it, and unset - every CarPlay path - the line is what it always was.
+  ONDEMAND_WIFI=1 RADIO_WLAN_IF="$_i" RADIO_BOX_NAME="${RADIO_AP_SSID:-$(box_name)}" \
     sh /script/radio_ap_up.sh AP 2>&1 | sed "s/^/$LOGP   /"
   _n=0; while [ "$_n" -lt 50 ]; do ap_running && break; _n=$((_n+1)); sleep 0.2; done
   if ap_running; then

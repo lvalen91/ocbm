@@ -93,6 +93,44 @@ object Ocbm {
      */
     const val CT_PAIR_CONFIRM: Byte = 0x1C
 
+    // ---- AirPlay-only mode (MODE_AIRPLAY, added 2026-11-12; docs/ocbm/00_PROTOCOL.md "AirPlay-only mode"). Constants only:
+    // this client does not select the mode. Mirrors crates/ocbm-proto (tools/proto_check.py).
+    const val CT_MODE_ACK: Byte = 0x1D // box->host [CT_MODE_ACK][mode u8][MODE_ACK_* u8]: the answer to CT_MODE_SELECT of MODE_PROJECTION / MODE_AIRPLAY
+    const val CT_AIRPLAY_STATE: Byte = 0x1E // box->host [CT_AIRPLAY_STATE][AIRPLAY_AP_*][AIRPLAY_SESSION_*][AIRPLAY_END_*]: on change while MODE_AIRPLAY is active; all zero when it is left
+    const val MODE_AIRPLAY: Byte = 0x02 // CT_MODE_SELECT mode: plain AirPlay receiver instead of CarPlay; request = AIRPLAY_REQ_* TLVs [tag u8][len u8][value]
+    const val CAP_AIRPLAY: Int = 0x0000_0040 // HELLO_ACK caps bit: the box can run MODE_AIRPLAY
+    const val MODE_ACK_OK: Byte = 0x00
+    const val MODE_ACK_BAD_PARAMS: Byte = 0x01
+    const val MODE_ACK_UNSUPPORTED: Byte = 0x02
+    const val AIRPLAY_REQ_SSID: Byte = 0x01 // 1..32 bytes UTF-8
+    const val AIRPLAY_REQ_PSK: Byte = 0x02 // 8..63 printable ASCII
+    const val AIRPLAY_REQ_NAME: Byte = 0x03 // 1..63 bytes UTF-8; absent = the SSID
+    const val AIRPLAY_REQ_CHANNEL: Byte = 0x04 // [channel u8]; absent/0 = box default
+    const val AIRPLAY_REQ_DISPLAY: Byte = 0x05 // [width u16 LE][height u16 LE][max_fps u8]
+    const val AIRPLAY_AP_DOWN: Byte = 0x00
+    const val AIRPLAY_AP_STARTING: Byte = 0x01
+    const val AIRPLAY_AP_UP: Byte = 0x02
+    const val AIRPLAY_AP_FAILED: Byte = 0x03
+    const val AIRPLAY_SESSION_NONE: Byte = 0x00
+    const val AIRPLAY_SESSION_WAITING: Byte = 0x01
+    const val AIRPLAY_SESSION_CONNECTED: Byte = 0x02
+    const val AIRPLAY_SESSION_STREAMING: Byte = 0x03
+    const val AIRPLAY_END_NONE: Byte = 0x00
+    const val AIRPLAY_END_TEARDOWN: Byte = 0x01
+    const val AIRPLAY_END_PEER_CLOSED: Byte = 0x02
+    const val AIRPLAY_END_ERROR: Byte = 0x03
+    const val HELLO_ACK_AP_STATE_OFF: Int = 40 // HELLO_ACK mode tail, after the bundle tail: read only when the payload has HELLO_ACK_MODE_LEN bytes
+    const val HELLO_ACK_SESSION_STATE_OFF: Int = 41
+    const val HELLO_ACK_MODE_LEN: Int = 42
+    const val SEAM_KEY: Byte = 0x00 // audio/video lane marker: [key 32][scid u64 LE]
+    const val SEAM_PKT: Byte = 0x01 // audio lane marker: [scid u64 LE][encrypted RTP packet]
+    const val SEAM_FORMAT: Byte = 0x02 // audio lane marker: [scid u64 LE][codec u8][rate u32 LE][ch u8][bits u8][audio_type u8]
+    const val SEAM_CODEC_PCM: Byte = 0x00
+    const val SEAM_CODEC_AAC_LC: Byte = 0x01
+    const val SEAM_CODEC_AAC_ELD: Byte = 0x02
+    const val SEAM_CODEC_OPUS: Byte = 0x03
+    const val SEAM_CODEC_UNKNOWN: Byte = 0xFF.toByte()
+
     /** host->box `[CT_RADIO][0 = radios off now | 1 = radios on if the pushed cfg allows]`. lib.rs:182 */
     const val CT_RADIO: Byte = 0x16
 
@@ -285,6 +323,19 @@ object Ocbm {
     const val CAP_IP: Int = 0x0000_0008
     const val CAP_FILE: Int = 0x0000_0010
     const val CAP_ETH: Int = 0x0000_0020
+
+    // ---- CT_HELLO_ACK bundle tail (2026-11-11): bytes 7..39 = the box's bundle content_id (sha256, zero when
+    // it has none), byte 39 = BUNDLE_* state. A box older than the tail sends 7 bytes: read it only when
+    // pl.size >= HELLO_ACK_LEN, and never reject an ACK for its length.
+    const val HELLO_ACK_BUNDLE_ID_OFF: Int = 7
+    const val BUNDLE_ID_LEN: Int = 32
+    const val HELLO_ACK_BUNDLE_STATE_OFF: Int = 39
+    const val HELLO_ACK_LEN: Int = 40
+    const val BUNDLE_ABSENT: Byte = 0
+    const val BUNDLE_OK: Byte = 1
+    const val BUNDLE_MIXED: Byte = 2
+    const val BUNDLE_CORRUPT: Byte = 3
+    const val BUNDLE_UNCHECKED: Byte = 4
 
     fun capsString(caps: Int): String {
         val bits = ArrayList<String>()

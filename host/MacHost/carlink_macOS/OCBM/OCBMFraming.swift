@@ -15,6 +15,29 @@
 
 import Foundation
 
+/// The OCBM bundle a box says it runs, as carried in the CT_HELLO_ACK tail: `contentID` is the 32 raw bytes
+/// of the sha256 in the box's `etc/BUNDLE` (all zero = none), `state` one of `OCBM.bundle*`. Integrity only,
+/// no signature: it says whether the files on the box are the ones the bundle was built with, not who built
+/// them (docs/ocbm/00_PROTOCOL.md, *Bundle identity*).
+struct BoxBundleIdentity: Equatable, Sendable {
+    let contentID: [UInt8]
+    let state: UInt8
+
+    /// 64 lowercase hex digits, or "" for the all-zero "none" id: the same spelling `MGMT_INFO` uses for
+    /// `bundle.content_id`, so the two sources compare with `==`.
+    var contentIDHex: String {
+        guard contentID.contains(where: { $0 != 0 }) else { return "" }
+        let digits = Array("0123456789abcdef".utf8)
+        var out = [UInt8]()
+        out.reserveCapacity(contentID.count * 2)
+        for b in contentID {
+            out.append(digits[Int(b >> 4)])
+            out.append(digits[Int(b & 0x0f)])
+        }
+        return String(decoding: out, as: UTF8.self)
+    }
+}
+
 enum OCBM {
     static let magic: UInt32 = 0x4F43_424D
     static let hdrLen = 16
@@ -207,6 +230,89 @@ enum OCBM {
     static let capIp: UInt32 = 0x0000_0008
     static let capFile: UInt32 = 0x0000_0010
     static let capEth: UInt32 = 0x0000_0020
+
+    // CT_HELLO_ACK bundle tail (2026-11-11): bytes 7..39 = the box's bundle content_id (sha256, zero when it
+    // has none), byte 39 = bundle state. A box older than the tail sends 7 bytes: read it only when
+    // payload.count >= helloAckLen, and never reject an ACK for its length.
+    static let helloAckBundleIdOff = 7
+    static let bundleIdLen = 32
+    static let helloAckBundleStateOff = 39
+    static let helloAckLen = 40
+    static let bundleAbsent: UInt8 = 0
+    static let bundleOk: UInt8 = 1
+    static let bundleMixed: UInt8 = 2
+    static let bundleCorrupt: UInt8 = 3
+    static let bundleUnchecked: UInt8 = 4
+
+    // ---- AirPlay-only mode (MODE_AIRPLAY, added 2026-11-12; docs/ocbm/00_PROTOCOL.md "AirPlay-only mode"). Constants only:
+    // this client does not select the mode. Mirrors crates/ocbm-proto (tools/proto_check.py).
+    static let ctModeAck: UInt8 = 0x1D // box->host [CT_MODE_ACK][mode u8][MODE_ACK_* u8]: the answer to CT_MODE_SELECT of MODE_PROJECTION / MODE_AIRPLAY
+    static let ctAirplayState: UInt8 = 0x1E // box->host [CT_AIRPLAY_STATE][AIRPLAY_AP_*][AIRPLAY_SESSION_*][AIRPLAY_END_*]: on change while MODE_AIRPLAY is active; all zero when it is left
+    static let modeAirplay: UInt8 = 0x02 // CT_MODE_SELECT mode: plain AirPlay receiver instead of CarPlay; request = AIRPLAY_REQ_* TLVs [tag u8][len u8][value]
+    static let capAirplay: UInt32 = 0x0000_0040 // HELLO_ACK caps bit: the box can run MODE_AIRPLAY
+    static let modeAckOk: UInt8 = 0x00
+    static let modeAckBadParams: UInt8 = 0x01
+    static let modeAckUnsupported: UInt8 = 0x02
+    static let airplayReqSsid: UInt8 = 0x01 // 1..32 bytes UTF-8
+    static let airplayReqPsk: UInt8 = 0x02 // 8..63 printable ASCII
+    static let airplayReqName: UInt8 = 0x03 // 1..63 bytes UTF-8; absent = the SSID
+    static let airplayReqChannel: UInt8 = 0x04 // [channel u8]; absent/0 = box default
+    static let airplayReqDisplay: UInt8 = 0x05 // [width u16 LE][height u16 LE][max_fps u8]
+    static let airplayApDown: UInt8 = 0x00
+    static let airplayApStarting: UInt8 = 0x01
+    static let airplayApUp: UInt8 = 0x02
+    static let airplayApFailed: UInt8 = 0x03
+    static let airplaySessionNone: UInt8 = 0x00
+    static let airplaySessionWaiting: UInt8 = 0x01
+    static let airplaySessionConnected: UInt8 = 0x02
+    static let airplaySessionStreaming: UInt8 = 0x03
+    static let airplayEndNone: UInt8 = 0x00
+    static let airplayEndTeardown: UInt8 = 0x01
+    static let airplayEndPeerClosed: UInt8 = 0x02
+    static let airplayEndError: UInt8 = 0x03
+    static let helloAckApStateOff = 40 // HELLO_ACK mode tail, after the bundle tail: read only when the payload has HELLO_ACK_MODE_LEN bytes
+    static let helloAckSessionStateOff = 41
+    static let helloAckModeLen = 42
+    static let seamKey: UInt8 = 0x00 // audio/video lane marker: [key 32][scid u64 LE]
+    static let seamPkt: UInt8 = 0x01 // audio lane marker: [scid u64 LE][encrypted RTP packet]
+    static let seamFormat: UInt8 = 0x02 // audio lane marker: [scid u64 LE][codec u8][rate u32 LE][ch u8][bits u8][audio_type u8]
+    static let seamCodecPcm: UInt8 = 0x00
+    static let seamCodecAacLc: UInt8 = 0x01
+    static let seamCodecAacEld: UInt8 = 0x02
+    static let seamCodecOpus: UInt8 = 0x03
+    static let seamCodecUnknown: UInt8 = 0xFF
+    static let modeProjection: UInt8 = 0x00
+    static let modeConsole: UInt8 = 0x01
+    // CH_METADATA markers ([u32 BE "META"][u32 BE len][marker][payload]); AirPlay-only mode's events are
+    // metaJson objects {"kind":"airplay","ev":...}, its artwork metaArtwork [id u8][JPEG].
+    static let metaCmd: UInt8 = 0x01
+    static let metaJson: UInt8 = 0x02
+    static let metaArtwork: UInt8 = 0x03
+    static let metaCornermask: UInt8 = 0x04
+
+    /// The name of a bundle state: the word `MGMT_INFO` reports in `bundle.state` (`ocbm-proto`
+    /// `bundle_state_name`). A value this build does not know (a newer box) is "unknown", never an error.
+    static func bundleStateName(_ state: UInt8) -> String {
+        switch state {
+        case bundleAbsent: return "absent"
+        case bundleOk: return "ok"
+        case bundleMixed: return "mixed"
+        case bundleCorrupt: return "corrupt"
+        case bundleUnchecked: return "unchecked"
+        default: return "unknown"
+        }
+    }
+
+    /// The bundle tail of a CT_HELLO_ACK payload (`payload[0]` is the opcode), or nil when the payload does
+    /// not carry it: a 7-byte ACK from an older box, or anything cut short of `helloAckLen`. nil means "no
+    /// bundle information", never "bad ACK": the caller still treats the frame as the ACK it is. Fields are
+    /// taken by offset, so bytes a newer box appends after byte 39 are ignored (`ocbm-proto`
+    /// `hello_ack_bundle`).
+    static func helloAckBundle(_ payload: [UInt8]) -> BoxBundleIdentity? {
+        guard payload.count >= helloAckLen, payload[0] == ctHelloAck else { return nil }
+        return BoxBundleIdentity(contentID: Array(payload[helloAckBundleIdOff..<helloAckBundleStateOff]),
+                                 state: payload[helloAckBundleStateOff])
+    }
 
     // CH_FILE sub-opcodes.
     static let fileOpen: UInt8 = 0x01

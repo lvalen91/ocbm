@@ -922,6 +922,61 @@ canonical control, box-autonomous page-on-boot) are **not** open items and are n
   `cat boards/ccpa-imx6ul/rootfs/etc/init.d/rcS` → `busybox telnetd -l /bin/sh -p 23 &`;
   `grep -rn "ap_isolate" box/ boards/ccpa-imx6ul/` → no matches.
 
+### AirPlay-only mode (experimental; implemented 2026-11-12)
+
+Detail, evidence and the plan: `docs/ocbm/02_AIRPLAY_ONLY_MODE.md` (§3 is the verified/open table; §9 the
+implementation notes). Wire: `docs/ocbm/00_PROTOCOL.md` *AirPlay-only mode*. Closed with evidence: the type 96
+key, offline decode, session length (probe runs); the box tunnel with a real iPhone (`ocbm-host airplay`, 0
+failed frames/packets); live playback in the macOS AirPlay Test Host for mirroring (video + type 96) and for
+Music-only (type 103); capcheck / `pull_and_check.sh` HEVC labelling (reads the `hvc1`-wrapped `hvcC`; 4K captures: hevc Main 994 × 2160, 485 frames decode; B7 h264 High 498 × 1080, 1584 frames; commit 78867b3). Open, one line each:
+
+- **MFi license coverage** for an AirPlay (non-CarPlay) receiver is unconfirmed with Apple. Owner item;
+  `docs/ops/07_AUTHORIZATION.md` (AirPlay-only mode).
+- **Live check of the new test-host build** (readout, pacing, HEVC) with a real iPhone and box: not done. The
+  earlier `video.fps: 0` could not be reproduced (best explanation, INFERRED: it covered only the 0.5 s between
+  status polls while iOS sends no frames on a still screen); the new 2 s / average / header-timestamp readout is
+  a different measurement, offline-verified only.
+- **Display pacing evaluation.** The test host now measures inter-frame jitter against the header timestamps and
+  has optional pacing ("Smooth playback", default off, 100 ms buffer, not remembered). Whether it improves what
+  the owner saw (some sluggish video; the phone also encodes only on screen change) is not evaluated.
+- **Type 103 underruns** (2 in one snapshot of a Music-only session): isolate (playout start, backlog, the
+  ungated audio lane).
+- **A/V sync and PTP/NTP.** No sync in the test host; the box answers no NTP and follows no PTP. Whether real
+  sync or long sessions need it is open (nothing failed in up to 4.5 min).
+- **Keyframes / loss recovery.** One IDR per mirroring session and no keyframe request: a decoder that loses
+  a frame or starts late cannot recover within the session.
+- **HEVC / larger canvas.** Answered on the wire (`02_AIRPLAY_ONLY_MODE.md` §4.10): HEVC Main only with bit 42
+  **and** a 3840 × 2160 canvas; `maxFPS` drives the rate. **Implemented** on the box and protocol (commit
+  78867b3: request TLV `0x06`, validated display, `ocbm-host airplay --hevc`) and in the test host (working
+  tree), verified on the box with a synthetic HEVC sender and offline in the host. Still open:
+  - **Live HEVC check:** a real iPhone with `--hevc` through the test host and through `ocbm-host airplay`, and
+    the mDNS record as seen from the Mac.
+  - **Identity per feature set (INFERRED risk):** `airplayd` keeps one identity across HEVC on/off; if iOS caches
+    features per identity, a phone that saw the receiver without bit 42 might stay on H.264. The probe used a
+    fresh identity per feature set. Decide after the live check.
+  - **Reserved flag bits:** the box ignores them, the test host refuses them; align later.
+  - The HEVC size threshold (only 720p, 1080p, 2160p tried), why D4k60m ran 49.8 fps and D4kn 30 fps while
+    advertising 60, 120 fps, HDR/444 `displays` keys (formats unknown), sustained box load and Mac decode load
+    at 4K.
+- **Protected video.** Mirroring went near-black while an Apple Music music video played, while first-party
+  iOS UI mirrored bright in another session (INFERRED: DRM withheld). Isolate in one session.
+- **Power loss vs RAM-only deploys (ops note).** Files replaced in `/opt/ocbm` at run time are lost when the
+  box loses power (seen 2026-11-12: it came back on the older flashed overlay without AirPlay mode). Flash
+  the overlay (`ocbm-overlay write`) before any test that may power-cycle the box; worth a line in
+  `docs/ops/00_BUILD_AND_DEPLOY.md`.
+- **Mode across reboot (decision record).** The box always boots into projection; AirPlay-only mode exists
+  only while a host requests it and keeps beating. Decide whether that is the intended product behaviour.
+- **AP credentials are not persisted** (host-supplied per request, heartbeat-driven). Decide whether they
+  should ever be; today they are in neither `MGMT_INFO` nor any log.
+- **Control surface.** Host → phone volume, remote commands (no DACP in AirPlay-2 sessions; path unknown),
+  touch/HID: none built.
+- **MFi chip wake-up.** The first transaction after idle NAKs and a retry succeeds (seen repeatedly);
+  confirm the cause and that the retry budget covers it under the chip lock shared with CarPlay daemons.
+- **Probe captures.** The 12 MB per-stream cap fills in about a minute of busy video; three UDP packets from
+  the phone to unlistened box ports (16403, 3492, 3485) in one session are unexplained.
+- **Coverage.** Several sessions in a row and audio ↔ mirroring switching under one daemon, Wi-Fi
+  coexistence, apps other than Music and Screen Mirroring, an MFi 3.0 chip, other iOS versions.
+
 ---
 
 ### Closed by decision — do NOT re-plan these

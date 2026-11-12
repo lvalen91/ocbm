@@ -242,6 +242,20 @@ control → one badge per projection (supported / limited / unsupported) → per
 → badged sub-groups for protocol-exclusive keys → a value note when the current value has one. Protocol
 names appear only in those rows; the save bar and the reboot / NCM alerts are worded neutrally.
 
+**Bundle identity** (2026-11-11; wire format in `docs/ocbm/00_PROTOCOL.md`, *Bundle identity*). The Adapter
+tab's box state opens with a **Bundle** section, and Window ▸ Adapter / Phone Info prints the same as text:
+the 12-hex short `content_id` (full id in the tooltip and the text view), the state, and commit / profile /
+built when `MGMT_INFO` supplied them. `ok` is a green seal; `MIXED` and `CORRUPT` are upper-cased, bold, red
+with a warning symbol; a dirty build adds an orange `DIRTY` row; `unchecked` and a state byte this build does
+not know are orange cautions; `absent` is neutral. A mixed, corrupt or dirty bundle is also flagged in the
+collapsed *Box state* header, beside the stale marker. Two sources feed it: the `CT_HELLO_ACK` tail
+(`OCBMClient.boxBundle` / `onBoxBundle`, read at connect; a 7-byte ACK from an older box is "no bundle
+information", and no ACK length or tail content gates the handshake) and the snapshot's optional `bundle`
+object (`CCPAInfo.BundleInfo`, whose decode never fails the snapshot). `BoxBundleSummary.merge` reconciles
+them: the later report wins, and a kept snapshot lends its commit / profile / built / dirty to the ACK's id
+only when its own `content_id` is that same id, so a re-flashed box never shows the previous bundle's commit.
+A box that reports neither shows no Bundle section.
+
 **Phase 3 — presentation — LANDED 2026-09-09** (commit 9c7191a; it was designed on 2026-09-05, contract in
 `App/Settings/DESIGN.md` §11). The Vehicle tab had grown to ~95-105 form rows because every honesty mechanism
 (badge row, two explanation rows, provenance glyph, value note) costs permanent vertical space. What shipped:
@@ -496,6 +510,48 @@ with `ocbm-host`); an older carplayd logs `unknown INPUT_COMMAND 0x11 — droppe
 `tap` on the Dock resize button. ocbmd needs no change. **Unverified on device** as of 2026-09-07.
 
 `tools/va_wired_sweep.sh` (docs/ops/02_TESTING.md) is the consumer these three were built for.
+
+### AirPlay Test Host — AirPlay-only mode client (2026-11-12)
+
+`host/MacHost/AirPlayTestHost/` is a separate small app (own Xcode project, generated from `project.yml`;
+`carlink_macOS.xcodeproj` and the shipping app are unchanged) for OCBM `MODE_AIRPLAY`
+([../ocbm/00_PROTOCOL.md](../ocbm/00_PROTOCOL.md), AirPlay-only mode). It is the "Test app" row of
+[../ocbm/02_AIRPLAY_ONLY_MODE.md](../ocbm/02_AIRPLAY_ONLY_MODE.md) §6. Layout, switches and behaviour:
+its `README.md`.
+
+- **Shared with the shipping app, unchanged:** `OCBMFraming` (constants, framing, reassembler),
+  the two AEAD open functions of `OCBMAVDecrypt`, `AVCCFastPath`, `CompressedAudioDecoder`, the `USB/` layer.
+- **Not shared, by design:** `OCBMClient` (it SUBSCRIBEs, which ends the mode), `VideoDecoder` (sheds frames
+  and waits for a requested keyframe; this mode has one IDR per session and no request) and `AudioPlayer`
+  (drops beyond a short backlog; type 103 arrives minutes ahead). Their replacements are
+  `AirPlayModeClient`, `MirrorVideoDecoder` (explicit `VTDecompressionSession`, every frame submitted, errors
+  counted) and `AirPlayAudioPlayer` (pull playout through `AVAudioSourceNode`).
+- **Verified offline (2026-11-12), no box:** `tests/run_tests.sh` (wire vectors of `ocbm-proto`, lanes,
+  events, the control state machine, ffmpeg media through tunnel, decrypt and VideoToolbox / AudioToolbox
+  with pixel and sample checks, and the app's controller against a synthetic box); the running app against
+  the synthetic box: 498x1080 H.264 High at 30.0 fps, 600/600 frames decoded, types 96 and 103 played with
+  no underrun, a dropped frame survived, an unplug recovered.
+- **Verified live (2026-11-12), real box and iPhone:** mirroring — link open, `box_caps` 0x7f, bundle `ok`,
+  AP up, session streaming, 3382 video frames decoded with 0 errors at 498x1080, type 96 audio 3701 decoded
+  with 0 errors and 0 underruns, the phone's volume driving the output gain (-21 dB shown as 30 %), real
+  picture and sound seen and heard; Music-only — one type 103 stream, 9820 packets, 5044 decoded, 0 errors,
+  title and artwork shown, 2 underruns in one snapshot (not isolated). Numbers and caveats:
+  [../ocbm/02_AIRPLAY_ONLY_MODE.md](../ocbm/02_AIRPLAY_ONLY_MODE.md) §3.
+- **HEVC, readout, pacing (working tree, not yet committed; offline-verified only):** `MirrorVideoDecoder`
+  decodes H.264 and HEVC (codec from the opcode-1 body: bare avcC, or `hvcC` inside an `hvc1`/`hev1` entry;
+  a codec switch between sessions rebuilds the decoder; hardware decoder reported). Window controls: Display
+  and "Allow HEVC" (`AIRPLAY_REQ_FLAGS`; request e.g. 3840x2160@60 + HEVC ends `05 05 00 0F 70 08 3C 06 01 01`).
+  A frame-rate readout (2 s moving rate, average, rate by header timestamps, age of the last picture) with
+  inter-frame jitter, and optional timestamp pacing ("Smooth playback", off by default, 100 ms buffer, not
+  remembered). 303 tests pass in AirPlayTestHost and 1530 in MacHost (reported, not re-run for this doc).
+  Detail: its `README.md`; [../ocbm/02_AIRPLAY_ONLY_MODE.md](../ocbm/02_AIRPLAY_ONLY_MODE.md) §9.
+- **Known gaps:** no live iPhone/box run of the HEVC path, the new readout or the pacing (the earlier live
+  `video.fps: 0` could not be reproduced; the new readout is a different measurement); the host refuses a
+  reserved flag bit in the flags TLV while the box ignores it (to align); pacing is unevaluated; no A/V sync
+  and no playout clock tied to the phone's; no keyframe request (one IDR per session).
+- **Build notes:** no Team ID is committed in the Xcode projects (`DEVELOPMENT_TEAM` is empty in the repo).
+  Set it on the command line, `xcodebuild ... DEVELOPMENT_TEAM=<your team id>`, or in Xcode's Signing &
+  Capabilities settings.
 
 ### Cross-cutting theme
 The unifying story is **finish the OCBM migration**: the CarPlay path is correct where it was ported

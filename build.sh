@@ -53,6 +53,11 @@ else
   exit 1
 fi
 
+# airplayd (AirPlay-only mode receiver, docs/ocbm/02_AIRPLAY_ONLY_MODE.md) — shipped in the full overlay
+# (tools/ocbm_overlay.sh); plain cross build, no codec (it forwards encrypted media, decodes nothing).
+$BOX_CARGO zigbuild $BOX_STD --target armv7-unknown-linux-musleabihf --release -p airplayd
+echo "built  target/armv7-unknown-linux-musleabihf/release/airplayd  ($(wc -c < target/armv7-unknown-linux-musleabihf/release/airplayd) bytes, armv7 static)"
+
 # btd (BT bring-up/SSP/SDP/RFCOMM + WiFi handoff) — shipped box binary, plain cross build.
 # NO rx-connect line: the mDNS advertiser was merged into carplayd on 2026-09-08
 # (box/carplayd/src/discovery.rs), which also removed tokio from the box set entirely.

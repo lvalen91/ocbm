@@ -34,7 +34,7 @@ on hardware the developer owns, talking to the developer's own iPhone.
 
 - **No target and no adversary** — the only device involved is the owner's own iPhone.
 - **No exploitation, no unauthorized access, no circumvention** of any protection.
-- **No reverse engineering** of security mechanisms.
+- **No reverse engineering** of security mechanisms (the AirPlay-only study below is the one scoped exception: interface level only).
 
 ## Legal basis (asserted)
 
@@ -57,6 +57,28 @@ MFi license terms, and the facts below; not a legal conclusion from any tool or 
   the current triennial cycle with counsel).
 - **No unauthorized access (CFAA and state equivalents).** Nothing touches a third party's computer —
   the only devices involved are the owner's own adapter and iPhone.
+
+## AirPlay-only mode (owner decision 2026-11-12)
+
+Scope extension for the experimental AirPlay-only mode (audio + screen mirroring to a host app, offline; the
+box advertises a plain AirPlay receiver instead of CarPlay). Decided by the owner:
+
+- **MFi coprocessor.** The genuine on-board coprocessor may answer the iPhone's MFi `auth-setup` for this
+  mode, through the same `crates/vendor/mfi` code and chip lock as CarPlay: the key never leaves the chip,
+  nothing is emulated or cloned. This extends the CarPlay/iAP2-only statement above. Whether the owner's MFi
+  license covers AirPlay receiver use has **not** been confirmed with Apple; it is an open item.
+- **FairPlay is out of scope.** No `fp-setup` is answered (the probe refuses it); no FairPlay code, captured
+  Apple replies, keys or tables are used or analyzed. The phone-side behaviour measured on 2026-11-12: with
+  bit 26 advertised the iPhone asks for `auth-setup` after transient pair-setup and never for `fp-setup`
+  (this needs a non-legacy session, i.e. bit 40 too; without bit 40 the phone sends only `OPTIONS` and
+  fails locally before any authentication).
+- **Reference study.** The shipping macOS AirPlay receiver was studied statically at the interface level
+  (feature bits, TXT records, request handlers, SETUP keys), and open-source receivers were read as protocol
+  references. FairPlay was mapped only at its call boundary. Findings go into the owning protocol doc,
+  [../ocbm/02_AIRPLAY_ONLY_MODE.md](../ocbm/02_AIRPLAY_ONLY_MODE.md); sources are listed by role in
+  [03_REFERENCE_INDEX.md](03_REFERENCE_INDEX.md) §G.
+- **Own hardware only.** The iPhone, the Mac and the adapter are the owner's; the probe's Wi-Fi AP is a
+  throwaway on the owner's bench. Nothing contacts third-party devices.
 
 ## Why a classifier may misread this
 

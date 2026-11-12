@@ -701,7 +701,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let snapshot = AdapterInfoPresenter.Snapshot(
             state: state, info: CCPABridge.shared.info, lastUpdated: CCPABridge.shared.lastUpdated,
             boxHealth: CCPABridge.shared.boxHealth, btPhase: CCPABridge.shared.btPhase,
-            phoneIdent: CCPABridge.shared.phoneIdent
+            phoneIdent: CCPABridge.shared.phoneIdent, bundle: CCPABridge.shared.bundleSummary
         )
         AdapterInfoPresenter.present(snapshot: snapshot, on: windowController.window)
     }
@@ -1159,6 +1159,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         client.onBoxHealth = { bits in Task { @MainActor in CCPABridge.shared.receiveBoxHealth(bits) } }
         client.onBtPhase = { phase in Task { @MainActor in CCPABridge.shared.receiveBtPhase(phase) } }
         client.onPhoneIdent = { ident in Task { @MainActor in CCPABridge.shared.receivePhoneIdent(ident) } }
+        // Bundle identity from the CT_HELLO_ACK tail. Two differences from the three above, both because
+        // this hop is an unstructured Task: (1) it delivers `client.boxBundle` as read ON the main actor,
+        // not the callback's argument, so two hops landing out of order still end on the latest value;
+        // (2) it applies only while `client` is still the live session's client. `endSession` nils
+        // `ocbmClient` before `CCPABridge.sessionEnded()` clears the identity, so a hop queued by an ACK
+        // that raced the teardown cannot repopulate it for a box that is gone.
+        client.onBoxBundle = { [weak self, weak client] _ in
+            Task { @MainActor in
+                guard let self, let client, self.ocbmClient === client else { return }
+                CCPABridge.shared.receiveBundle(client.boxBundle)
+            }
+        }
         // Host-authoritative VehicleConfig (task #5 / docs/carplay/04_CAPABILITIES_AND_CONFIG.md): an Apple-schema YAML pushed at SUBSCRIBE.
         // ocbmd lands it at /tmp/carplay_cfg.yaml; airplayd reads the main-panel pixelDimensions per
         // connection to build /info (docs/carplay/06_AV_PIPELINE.md). The box ignores fields it doesn't yet consume, so

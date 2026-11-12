@@ -6,7 +6,7 @@
 #
 #   /etc   The stock OCBM scripts and daemons write /etc: the 0x5703 credentials into /etc/hostapd.conf
 #          (session_supervisor.sh apply_host_wifi_creds), the AP DHCP config, /etc/carplay/ (btd's bond store),
-#          /etc/carplay_peers.bin (carplayd), /etc/carplay_ident. The baseline's /etc is on the read-only
+#          /etc/carplay_peers.bin (carplayd), /etc/carplay_ident, /etc/airplay_ident (airplayd). The baseline's /etc is on the read-only
 #          squashfs, so a RAM copy of it is bind-mounted over it (same content; /etc/shadow and friends are links
 #          into /run already). RAM only: the next boot starts from the image's /etc again.
 #   pairing state  The bond store and the AirPlay peer store are what a phone needs to reconnect after a box
@@ -16,6 +16,7 @@
 #          CarPlay session; iap2d cannot run on this kernel (no Android iAP2 gadget), so there is none to
 #          recover, and its L2 would start a second ocbmd beside the relay's. /tmp/no_escalate inhibits it.
 #   radio  The radio seam (/script/radio_hal.sh) resolves the baseline's own `radio up` (backend=baseline).
+#   bundle The overlay is checked against its own etc/MANIFEST and the result left for ocbmd (bundle_check).
 #
 #   rc.ocbm start     the above, then the radio descriptor; quick, idempotent
 #   rc.ocbm service   the session supervisor in the foreground (init respawns this), plus the state saver
@@ -43,6 +44,9 @@ state_restore() {
     mkdir -p /etc/carplay
     [ -s "$P/bt_link_keys" ] && cp "$P/bt_link_keys" /etc/carplay/bt_link_keys && log "restored $(($(wc -c < "$P/bt_link_keys") / 25)) Bluetooth bond(s) from the persist archive"
     [ -s "$P/carplay_peers.bin" ] && cp "$P/carplay_peers.bin" /etc/carplay_peers.bin && log "restored the AirPlay peer store from the persist archive"
+    # AirPlay-only mode's receiver identity (airplayd: Ed25519 seed + device id + pi, 54 bytes). The phone
+    # keys its cache of a receiver on it, so it must be the same after a reboot.
+    [ -s "$P/airplay_ident" ] && cp "$P/airplay_ident" /etc/airplay_ident && chmod 600 /etc/airplay_ident
     return 0
 }
 
@@ -50,7 +54,8 @@ state_restore() {
 # Polled every 3 s (15 s until 2026-10-30: a power cut in the 15 s after a pairing lost the bond); the poll is
 # two cmp of RAM files. Flash (`persist save` = flashcp of a <64 KiB tar onto the 64 KiB 'customer' MTD, one
 # erase block) is written once per CHANGE: btd replaces bt_link_keys atomically and only on a pairing or a
-# forget, so identical content never reaches flash. A writer that kept changing the files would be the only
+# forget, so identical content never reaches flash (airplay_ident is written once per box, the first time
+# AirPlay-only mode runs). A writer that kept changing the files would be the only
 # wear risk, so flash writes stay at least SAVE_GAP_S apart (the old poll's rate): a change is on flash
 # within 3 s, a burst of changes coalesces into one write per 15 s.
 SAVE_GAP_S=15
@@ -59,7 +64,7 @@ state_saver() {
     last=$(($(cut -d. -f1 /proc/uptime) - SAVE_GAP_S))
     while :; do
         sleep 3
-        for f in /etc/carplay/bt_link_keys /etc/carplay_peers.bin; do
+        for f in /etc/carplay/bt_link_keys /etc/carplay_peers.bin /etc/airplay_ident; do
             b=$P/${f##*/}
             if [ -s "$f" ]; then
                 cmp -s "$f" "$b" 2> /dev/null || { mkdir -p "$P" && cp "$f" "$b.new" && mv "$b.new" "$b" && pending=1; }
@@ -76,8 +81,45 @@ state_saver() {
     done
 }
 
+# Bundle integrity (docs/ocbm/00_PROTOCOL.md "Bundle identity"): check the unpacked overlay against its own
+# etc/MANIFEST and leave ONE word in /run/ocbm/bundle.state. ocbmd checks nothing itself: it reports that word
+# beside etc/BUNDLE's content_id, and "unchecked" when there is none. sha256 integrity only, no signature.
+#   ok       every MANIFEST line verifies, etc/BUNDLE among them, and the MANIFEST is the one content_id was
+#            computed from (tools/ocbm_overlay.sh: content_id = sha256 of the MANIFEST without its etc/BUNDLE line)
+#   mixed    BUNDLE and MANIFEST still agree with each other, another file differs or is missing (a binary
+#            pushed by hand): the identity is intact and no longer describes everything that runs
+#   corrupt  BUNDLE or MANIFEST is not the one the other describes, or the MANIFEST is missing or damaged
+# No state file is written (ocbmd: "absent" / "unchecked") when there is no BUNDLE (an overlay older than it) or
+# this sha256sum cannot check: a tool that cannot verify must not call anything corrupt. The old result is
+# removed first, so a check that is cut short leaves "unchecked", never the previous answer. A file added to
+# /opt/ocbm is not seen (only listed files are hashed), nor is one replaced after this ran. Never fatal.
+bundle_check() {
+    s=/run/ocbm/bundle.state
+    rm -f "$s" "$s.new"
+    [ -f "$O/etc/BUNDLE" ] || return 0
+    mkdir -p /run/ocbm
+    # the sha256 of no bytes: proves `-c` exists (BusyBox FEATURE_MD5_SHA1_SUM_CHECK) and works
+    echo 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  /dev/null' > "$s.new"
+    sha256sum -c "$s.new" > /dev/null 2>&1 || { rm -f "$s.new"; log "bundle: this sha256sum has no working -c, not checked"; return 0; }
+    cid=$(sed -n 's/^content_id=//p' "$O/etc/BUNDLE" 2> /dev/null)
+    mid=$(grep -v '  etc/BUNDLE$' "$O/etc/MANIFEST" 2> /dev/null | sha256sum | cut -d' ' -f1)
+    st=corrupt
+    if [ -n "$cid" ] && [ "$cid" = "$mid" ]; then
+        res=$(cd "$O" && sha256sum -c etc/MANIFEST 2> /dev/null)
+        rc=$?
+        if echo "$res" | grep -qx 'etc/BUNDLE: OK'; then
+            st=mixed
+            [ "$rc" = 0 ] && st=ok
+        fi
+    fi
+    echo "$st" > "$s.new" && mv "$s.new" "$s"
+    log "bundle $(printf %.12s "$cid"): $st"
+    return 0
+}
+
 case ${1:-} in
     start)
+        bundle_check
         etc_rw
         [ -e /etc/hostapd.conf ] || cp "$O/etc/hostapd.conf" /etc/hostapd.conf
         [ -e /etc/udhcpd.conf ] || cp "$O/etc/udhcpd.conf" /etc/udhcpd.conf

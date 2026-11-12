@@ -408,6 +408,17 @@ So the **shell** side resolves the identity once and persists it to `/etc/carpla
 come from one decision rather than two derivations. A placeholder is deliberately never persisted —
 if every source fails the next call retries rather than freezing `ccpa-0000` into flash.
 
+**One exception, AirPlay-only mode (2026-11-12).** There the host app names the AP: `tools/airplay_mode.sh`
+calls `radio_hal.sh wifi_ap_on` with `RADIO_AP_SSID=<the requested SSID>`, and `ap_layer_up` passes that as
+`RADIO_BOX_NAME` instead of `box_name()`, for that bring-up only. Nothing is persisted, the Bluetooth name
+is not taken from it (the mode runs no Bluetooth), and with the variable unset every CarPlay path is as
+before. Because that name is arbitrary text, `radio_ap_up.sh` now rewrites `ssid=` by rebuilding the file
+(`grep -v` + `printf`) instead of a `sed` substitution, in which `/`, `&` or `\` in an SSID would be read
+as syntax. The passphrase reuses the `apply_host_wifi_creds()` approach (rebuild `/etc/hostapd.conf` from a
+pristine copy, here `/etc/hostapd.conf.pre_airplay`, which is put back when the mode is left, and by the
+supervisor at start if a power cut skipped that). Protocol side: [../ocbm/00_PROTOCOL.md](../ocbm/00_PROTOCOL.md),
+AirPlay-only mode.
+
 > **⚠️ CORRECTED: `/etc/carplay_ident` is NOT yet the single source of truth.** `radio_hal.sh` and
 > `radio_ap_up.sh` are its only readers; `btd`, `bt_on.sh` and `ocbmd` each derive a
 > name independently, and `btd` overwrites the advertised BT name every session — so

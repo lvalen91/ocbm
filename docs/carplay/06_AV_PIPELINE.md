@@ -191,7 +191,7 @@ map to the CarPlay `audioFormat` bitmask (`receiver::info::audio_format_bit`):
 |-------|-----|-------------------------|--------|
 | `pcm_16k_mono` | 1<<4 | PCM S16 16 kHz mono | ● verified |
 | `pcm_48k_stereo` | 1<<15 | PCM S16 48 kHz stereo | ● verified |
-| `aac_lc_44k_stereo` | 1<<22 | AAC-LC 44.1 kHz stereo | ○ advertisable |
+| `aac_lc_44k_stereo` | 1<<22 | AAC-LC 44.1 kHz stereo | ○ advertisable (not seen in CarPlay; iOS 27.3 sent it in plain AirPlay, stream types 96 and 103, `ct 4`, 1024 samples/packet: 2026-11-12, [../ocbm/02_AIRPLAY_ONLY_MODE.md](../ocbm/02_AIRPLAY_ONLY_MODE.md)) |
 | `aac_lc_48k_stereo` | 1<<23 | AAC-LC 48 kHz stereo (media) | ● verified |
 | `aac_eld_48k_stereo` | 1<<25 | AAC-ELD 48 kHz stereo | ○ advertisable |
 | `aac_eld_44k_stereo` | 1<<24 | AAC-ELD 44.1 kHz stereo | ○ advertisable |
@@ -466,8 +466,17 @@ has exercised either path on a device.
   counts as a ducking trigger. Wired sessions never hit it (media is atype 0 there); it is reachable
   from the `wireless_8` preset. The box tags it correctly; only the host mapping is wrong.
 - **`mainBufferedAudio` Phase B is unbuilt** — advertise+echo landed, but SETUP phase 2 still omits
-  MainBuffered, so no buffered audio can arrive. Shape and stream-type number unknown. (docs/carplay/04_CAPABILITIES_AND_CONFIG.md,
+  MainBuffered, so no buffered audio can arrive. Shape and stream-type number unknown **for CarPlay**. (docs/carplay/04_CAPABILITIES_AND_CONFIG.md,
   `../ops/04_OPEN_ITEMS.md`.)
+  *Refined 2026-11-12:* the same iPhone's plain-AirPlay buffered stream was measured in the AirPlay-only probe:
+  stream type **103**, TCP, `[u16 BE len counting itself][RTP 12][ciphertext][tag 16][nonce 8]`, key = the
+  stream SETUP's `shk` (not HKDF), AAD = RTP 4..12; the SETUP reply must carry `audioBufferSize` and
+  `controlPort` or iOS tears the stream down. The payload is raw AAC-LC access units (no ADTS); a 187-s
+  session (14200/14200 packets) decoded offline to 329.7 s of audio, i.e. delivered ahead of real time. The
+  realtime type 96 that accompanies AirPlay mirroring uses exactly this section's key rule (no `shk`:
+  `DataStream-Salt<scid>` output key, AAD = RTP 4..12; 20504/20504) and sends each packet three times
+  (`redundantAudio 2`). Whether CarPlay MainBuffered uses the same type number and layout is INFERRED, not
+  measured. Detail: [../ocbm/02_AIRPLAY_ONLY_MODE.md](../ocbm/02_AIRPLAY_ONLY_MODE.md) §4.5–§4.6.
 - **Compressed decode is prestaged, not device-run.** AAC-LC/ELD/Opus decode exists on the host and
   the box advertises the formats, but the ○-marked entries in docs/carplay/06_AV_PIPELINE.md have never been through a live
   wireless session on this bench.

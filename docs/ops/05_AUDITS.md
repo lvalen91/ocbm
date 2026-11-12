@@ -308,7 +308,7 @@ with **no third-level term anywhere** in the iOS 27 extract.
 **Confirmed on the wire, 2026-07-29.** A live iPhone sent this accessory a `0x4171` whose body is:
 
 ```
-40 40 00 74 41 71 | 00 6e 00 06 | 00 06 00 00 00 00 | 00 16 00 01 "+1 (907) 385-5769"
+40 40 00 74 41 71 | 00 6e 00 06 | 00 06 00 00 00 00 | 00 16 00 01 "+1 (555) 010-0123"
  \____ iAP2 ____/   \_ id 6 _/   \_ id 0 Index _/   \__ id 1 RemoteID __/
 ```
 

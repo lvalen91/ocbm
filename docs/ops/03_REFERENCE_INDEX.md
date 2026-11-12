@@ -250,6 +250,7 @@ things it never defines. Treat a WWDC mention as a *pointer* to look in §A/§C,
 | Audio codec / format / stream-type question? | §A `AirPlayCommon.h` for the enum, §C `CarPlaySDK` strings for what postdates it, §E for *why*. All three reconciled in `docs/carplay/06_AV_PIPELINE.md` |
 | What is a feature actually FOR? | §E WWDC — then §A/§C for the values it doesn't give you |
 | Why does the phone behave a certain way? | §D — but check §A first for what we're *supposed* to do |
+| AirPlay-only mode (plain AirPlay receiver, not CarPlay)? | §G — the iPhone's `airplayd` log first, then the macOS receiver/sender; results in `docs/ocbm/02_AIRPLAY_ONLY_MODE.md` |
 | Anything at all | **§A. Always start at §A.** |
 
 ---
@@ -400,6 +401,19 @@ wireless rollout, or 4K/HDR named for Android Auto. Everything above 1080p, the 
 Our implementations to diff against: `host/aa-headunit/` (the Rust reference client) and
 `host/MacHost/carlink_macOS/AA/` (the Swift engine that ships in the app). The box side carries no
 AA protocol at all — `box/aa-bridge` is an AOAP byte pump (`docs/androidauto/00_ARCHITECTURE.md`, `docs/androidauto/00_ARCHITECTURE.md`).
+
+### G. AirPlay (non-CarPlay) — for AirPlay-only mode (added 2026-11-12)
+
+Scope and posture: [../ocbm/02_AIRPLAY_ONLY_MODE.md](../ocbm/02_AIRPLAY_ONLY_MODE.md) and
+[07_AUTHORIZATION.md](07_AUTHORIZATION.md) (AirPlay-only mode). The CarPlay order of authority above does not
+apply: CarPlay sources (§A–§E) describe the CarPlay receiver and are relevant only where AirPlay shares the
+mechanism (pairing, DataStream keys, the screen header). Order for an AirPlay-only question:
+
+| Rank | Source (by role; none is in the repo) | Authoritative for |
+|---|---|---|
+| 1 | **The iPhone's own `airplayd` log** (`idevicesyslog -p airplayd`) during a probe run | what the sender decided and why: session type (`APSenderSessionAirPlay` vs `…LegacyAudio`), activation failures, chosen codec/size/fps/latency, why a session ended |
+| 2 | **The shipping macOS AirPlay receiver and sender** (`AirPlayReceiver`, `AirPlaySender`, `AirPlaySupport`, `APTransport`, `CoreUtils` from the macOS dyld shared cache), studied **at interface level**: strings, symbols, and the disassembly of feature checks such as `airPlayDescription_hasFeatureInternal` and `isLegacyAirPlaySpeaker` | feature-bit names (e.g. 40 `SupportsBufferedAudio`, 48 `SupportsTransientPairing`), key-derivation labels (`Control-`, `Events-`, `DataStream-Salt`), request handler names. FairPlay is mapped only at its call boundary, never analyzed |
+| 3 | **Open-source receivers**, read-only and untrusted, never vendored or copied: shairport-sync + nqptp (AirPlay 2 audio receiver and its PTP companion), UxPlay / RPiPlay (screen-mirroring framing), airplay2-receiver (Python AirPlay 2), goplay2, shairplay, a C# AirPlay receiver | wire shapes the logs confirm: `ct` values, the buffered-audio SSRC → format table, the 128-byte screen header fields, nqptp's Announce pings. Their feature-bit tables disagree with the macOS sender (bit 48) — rank 2 wins. Some carry an Apple key blob or FairPlay code: never read those parts |
 
 ### Note on the real-time cyber safeguard
 

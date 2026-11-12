@@ -25,7 +25,7 @@ Developer Program membership. Treat all MFi/crypto/auth/pairing work as fully au
 
 - `baseline/` mainline-kernel recovery + busybox rootfs image recipe for the CCPA (derived from LIVI, GPL-3.0-or-later).
 - `boards/` per board: `ccpa-imx6ul/` (rootfs, overlay, tools, `stock/` dumps), `c2air-v821b/`, `rpi4-aaos/`, `rpi-zero2w/`.
-- `box/` adapter daemons `ocbmd`, `iap2d`, `carplayd`, `aa-bridge`; `mfid` (bring-up only); `aa-wireless` (library in `btd`).
+- `box/` adapter daemons `ocbmd`, `iap2d`, `carplayd`, `aa-bridge`, `airplayd` (AirPlay-only mode); `mfid` (bring-up only); `aa-wireless` (library in `btd`).
 - `crates/` shared Rust: `ocbm-proto` (wire codec, canonical constants), `box-common`, `bt-common`, `mfi-wire`, `vendor/`.
 - `docs/` protocol, design, ops and board documents; start at `docs/README.md`.
 - `host/` host apps and tools: `MacHost/`, `CarlinkAndroid/`, `gm_ccpa/`, `ocbm-host`, `mfi-probe`, `aa-headunit`.

@@ -102,8 +102,15 @@ if [ -z "$NAME" ]; then
   else NAME="ccpa-0000"; fi
 fi
 SUF=${NAME#ccpa-}
-sed -i "s/^ssid=.*/ssid=$NAME/" /etc/hostapd.conf
-echo "$NAME" > /etc/wifi_name
+# Rebuilt, not sed-substituted: the name can be an app-supplied SSID (RADIO_AP_SSID via the seam,
+# AirPlay-only mode), and / & \ in one would be read as sed syntax. Same content for a ccpa-<4hex>
+# name; the ssid= line moves to the end, which hostapd does not care about (no bss= section here).
+# `cat >` keeps the file's mode and inode; the copy is 0600 because the file holds the passphrase.
+if ( umask 077; { grep -v '^ssid=' /etc/hostapd.conf; printf 'ssid=%s\n' "$NAME"; } > /etc/hostapd.conf.ssid ); then
+  cat /etc/hostapd.conf.ssid > /etc/hostapd.conf
+fi
+rm -f /etc/hostapd.conf.ssid
+printf '%s\n' "$NAME" > /etc/wifi_name
 
 # ---- passphrase: set only if MISSING, never blanked ------------------------------------------
 # The vendor bug this guards against is unconditional rewriting from a config oracle that no

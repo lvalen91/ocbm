@@ -1194,7 +1194,7 @@ preserved; the session directory no longer exists. **They are the entire primary
 §5-§7** — the `accessoryd` `processIncomingData` chain, the two silent-drop dictionary lookups, and the
 hard-coded `type=5`/`transportType=4` literals rest on them and cannot now be re-read. The conclusions
 below stand as written, but treat them as a secondary record: re-derive before relying on a detail, by
-disassembling afresh from `~/Downloads/ios27_extract_24A5390f/` per docs/ops/03_REFERENCE_INDEX.md §D — `split/AirPlaySender`
+disassembling afresh from the iOS dyld extract directory per docs/ops/03_REFERENCE_INDEX.md §D — `split/AirPlaySender`
 and `split/CoreAccessories` are there, but **`accessoryd` itself is NOT in the split cache** (only
 `mined/accessoryd.strings.txt`, plus `split/AccessoryDaemonSupport` / `split/CarAccessoryDaemon`).
 Note also that §7's closing "instrument the `iAPSendMessage` path" step is separately dead per the
@@ -2407,12 +2407,12 @@ written.
 - **Landed:** uncommitted, same session (2026-10-19)
 - **Scope:** docs/ops/03_REFERENCE_INDEX.md §A/§B/§C/§D/§E/§F; docs/carplay/02_SESSION_LIFECYCLE.md §1 and the `local_carplay_sdk/conformance` citation; README.md `ccpa_backups`
 
-`~/carlink/local_carplay_sdk/` is now `~/Documents/carlink/old/carplay_RE/carplay_sdk/` (the R14G17 tree, `tbox_speedplay`,
-`cinemo_*` and `conformance/` all resolve there; CLAUDE.md already used the new path). `~/Downloads/Carplay WWDC/` does not
-exist — the surviving Simulator copy is `~/Documents/carlink/carplay_simulator/CarPlay Simulator.app`, and the WWDC
-transcripts are the five files in `reference/wwdc_transcripts/`. `~/Downloads/ios27_extract_24A5390f/` (raw dyld dumps) was
-not found (marked UNVERIFIED in the index). `~/Downloads/ccpa_backups` is now `~/Documents/carlink/carlinkit_misc/ccpa_backups`.
-`/Volumes/stuff` IS mounted and holds `rpi/aaos/docs/os-corrections-2026-08-16.md`. The index's `analysis/aa_full_session_emulator_*.txt`
+the old SDK directory is now `$OCBM_CARPLAY_SDK` (the R14G17 tree, `tbox_speedplay`,
+`cinemo_*` and `conformance/` all resolve there; CLAUDE.md already used the new path). the old WWDC download directory does not
+exist — the surviving Simulator copy is `$OCBM_CARPLAY_SIMULATOR`, and the WWDC
+transcripts are the five files in `reference/wwdc_transcripts/`. the iOS dyld extract directory (raw dyld dumps) was
+not found (marked UNVERIFIED in the index). the old CCPA backup directory is now the CCPA backup directory.
+an external volume IS mounted and holds `rpi/aaos/docs/os-corrections-2026-08-16.md`. The index's `analysis/aa_full_session_emulator_*.txt`
 could not be located anywhere (marked UNVERIFIED). Other documents that repeat the dead paths are listed in the final report
 of this pass, not edited here.
 

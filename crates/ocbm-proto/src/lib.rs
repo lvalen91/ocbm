@@ -154,6 +154,50 @@ pub const CT_PAIR_CONFIRM: u8 = 0x1C; // host->box [CT_PAIR_CONFIRM][accept u8: 
                                       // USER_CONFIRM_NEG_REPLY (cancel). Any byte != 0 reads as accept.
                                       // Unsolicited (no code on screen) is ignored, and the box gives up
                                       // after 55 s — inside the 60 s pairing_aware_connect hold.
+// ---- mode switch acknowledgement + AirPlay-only mode state (docs/ocbm/02_AIRPLAY_ONLY_MODE.md) ----
+pub const CT_MODE_ACK: u8 = 0x1D; // box->host [CT_MODE_ACK][mode u8][MODE_ACK_* u8] -> the answer to a
+                                  // CT_MODE_SELECT of MODE_PROJECTION or MODE_AIRPLAY (MODE_CONSOLE keeps its
+                                  // banner on CH_CONSOLE and is not acked). OK means "accepted, switching":
+                                  // progress follows as CT_AIRPLAY_STATE.
+pub const CT_AIRPLAY_STATE: u8 = 0x1E; // box->host [CT_AIRPLAY_STATE][AIRPLAY_AP_* u8][AIRPLAY_SESSION_* u8]
+                                       // [AIRPLAY_END_* u8] -> sent on change while MODE_AIRPLAY is active,
+                                       // once right after the CT_MODE_ACK, and once (all zero) when the
+                                       // mode is left. The same two state bytes ride HELLO_ACK 40/41.
+pub const MODE_ACK_OK: u8 = 0; // accepted; the switch is in progress
+pub const MODE_ACK_BAD_PARAMS: u8 = 1; // the request did not parse or a field is out of range; mode unchanged
+pub const MODE_ACK_UNSUPPORTED: u8 = 2; // this box cannot run the mode (not installed); mode unchanged
+
+// MODE_AIRPLAY request: `[CT_MODE_SELECT][MODE_AIRPLAY]` then TLVs `[tag u8][len u8][value]`, any order,
+// unknown tags skipped. SSID and PSK are required. See [`AirplayRequest`].
+pub const AIRPLAY_REQ_SSID: u8 = 0x01; // 1..=32 bytes UTF-8, no control characters: the AP's SSID, verbatim
+pub const AIRPLAY_REQ_PSK: u8 = 0x02; // 8..=63 printable ASCII (0x20..=0x7E): the WPA2 passphrase
+pub const AIRPLAY_REQ_NAME: u8 = 0x03; // 1..=63 bytes UTF-8, no control characters: the advertised receiver
+                                       // name; absent = the SSID
+pub const AIRPLAY_REQ_CHANNEL: u8 = 0x04; // [channel u8] 1..=14 or 36..=165; absent/0 = the box template's
+pub const AIRPLAY_REQ_DISPLAY: u8 = 0x05; // [width u16 LE][height u16 LE][max_fps u8], exactly 5 bytes: the
+                                          // host panel the phone renders for (/info displays[0]); width and
+                                          // height 320..=7680, max_fps 1..=120; absent = 1920x1080 at 30
+pub const AIRPLAY_REQ_FLAGS: u8 = 0x06; // [flags u8]: AIRPLAY_FLAG_* bits; absent = 0. The box reads the
+                                        // first byte only (a longer value is not an error; an empty one
+                                        // = 0) and ignores bits it does not know; a host sends them as 0
+pub const AIRPLAY_FLAG_HEVC: u8 = 0x01; // advertise SupportsScreenMultiCodec (feature bit 42): with a display
+                                        // larger than 1080p the iPhone then mirrors in HEVC (opcode-1 body =
+                                        // an `hvc1` sample entry carrying `hvcC`), otherwise it stays H.264
+pub const AIRPLAY_FLAGS_KNOWN: u8 = AIRPLAY_FLAG_HEVC;
+
+pub const AIRPLAY_AP_DOWN: u8 = 0; // no AP (mode not active, or torn down)
+pub const AIRPLAY_AP_STARTING: u8 = 1; // CarPlay stack being stopped / AP coming up
+pub const AIRPLAY_AP_UP: u8 = 2; // hostapd + DHCP serving with the requested SSID and passphrase
+pub const AIRPLAY_AP_FAILED: u8 = 3; // the radio seam reported a failure; the supervisor retries
+pub const AIRPLAY_SESSION_NONE: u8 = 0; // receiver not running
+pub const AIRPLAY_SESSION_WAITING: u8 = 1; // advertised on mDNS, waiting for a sender
+pub const AIRPLAY_SESSION_CONNECTED: u8 = 2; // a sender paired and authenticated (control channel encrypted)
+pub const AIRPLAY_SESSION_STREAMING: u8 = 3; // at least one media stream is set up
+pub const AIRPLAY_END_NONE: u8 = 0; // no session has ended yet
+pub const AIRPLAY_END_TEARDOWN: u8 = 1; // the sender sent the session TEARDOWN (the user stopped it)
+pub const AIRPLAY_END_PEER_CLOSED: u8 = 2; // the control connection closed without a TEARDOWN
+pub const AIRPLAY_END_ERROR: u8 = 3; // the receiver ended it (decrypt/parse/write failure)
+
 pub const CT_PHONE_IDENT: u8 = 0x18; // box->host [CT_PHONE_IDENT][utf8 JSON] -> who the connected phone IS.
                                      // {"name","deviceID","model","osName","osVersion"} lifted verbatim from the
                                      // phone's own AirPlay phase-1 SETUP plist (kAirPlayKey_Name and friends,
@@ -348,6 +392,7 @@ pub const MGMT_ACK: u8 = 0x82; // [MGMT_ACK][verb u8][status u8] — 0 ok / 1 er
 // modes
 pub const MODE_PROJECTION: u8 = 0x00;
 pub const MODE_CONSOLE: u8 = 0x01;
+pub const MODE_AIRPLAY: u8 = 0x02; // plain AirPlay receiver instead of CarPlay; request layout: AIRPLAY_REQ_* below
 
 // capability bits
 pub const CAP_CONSOLE: u32 = 0x0000_0001;
@@ -356,6 +401,204 @@ pub const CAP_MFI: u32 = 0x0000_0004;
 pub const CAP_IP: u32 = 0x0000_0008;
 pub const CAP_FILE: u32 = 0x0000_0010;
 pub const CAP_ETH: u32 = 0x0000_0020; // box can bridge a raw-ethernet netdev (ncm0) over CH_ETH
+pub const CAP_AIRPLAY: u32 = 0x0000_0040; // box can run MODE_AIRPLAY (airplayd + the mode script are installed)
+
+// HELLO_ACK payload: `[CT_HELLO_ACK][ver][caps u32 LE][active_mode]` (7 bytes, every box), then the BUNDLE
+// TAIL (added 2026-11-11): bytes 7..39 = `content_id` of the OCBM bundle the box runs, the 32 raw bytes of
+// the sha256 in its `etc/BUNDLE` (all zero when there is none), byte 39 = `BUNDLE_*` state. A box older than
+// the tail sends 7 bytes: a host reads the tail only when the payload has it ([`hello_ack_bundle`]) and
+// treats a short ACK as "no bundle information", never as an error. Later fields are appended after byte 39;
+// every reader takes fields by offset and ignores bytes past the ones it knows.
+pub const HELLO_ACK_BUNDLE_ID_OFF: usize = 7;
+pub const BUNDLE_ID_LEN: usize = 32;
+pub const HELLO_ACK_BUNDLE_STATE_OFF: usize = 39;
+pub const HELLO_ACK_LEN: usize = 40;
+// MODE TAIL (added 2026-11-12, appended after the bundle tail): byte 40 = `AIRPLAY_AP_*`, byte 41 =
+// `AIRPLAY_SESSION_*`, both zero outside MODE_AIRPLAY. `HELLO_ACK_LEN` stays 40 (the length that carries
+// the bundle tail, which older readers test for); a reader takes these two only when the payload has
+// `HELLO_ACK_MODE_LEN` bytes ([`hello_ack_airplay`]).
+pub const HELLO_ACK_AP_STATE_OFF: usize = 40;
+pub const HELLO_ACK_SESSION_STATE_OFF: usize = 41;
+pub const HELLO_ACK_MODE_LEN: usize = 42;
+
+// Bundle state (HELLO_ACK byte 39, `MGMT_INFO` `bundle.state` by name). Integrity only (sha256, no signature):
+// it says whether the files on the box are the ones the bundle was built with, not who built them.
+pub const BUNDLE_ABSENT: u8 = 0; // no etc/BUNDLE (an install older than bundle identity); content_id is zero
+pub const BUNDLE_OK: u8 = 1; // checked at boot: every file matches etc/MANIFEST, which matches content_id
+pub const BUNDLE_MIXED: u8 = 2; // checked: BUNDLE and MANIFEST agree, another file differs or is missing
+pub const BUNDLE_CORRUPT: u8 = 3; // BUNDLE or MANIFEST is unusable; content_id is whatever BUNDLE says, or zero
+pub const BUNDLE_UNCHECKED: u8 = 4; // BUNDLE read, no check result: content_id is a claim, not a finding
+
+/// The name of a `BUNDLE_*` state: the word `MGMT_INFO` reports and the box's check writes.
+pub fn bundle_state_name(state: u8) -> &'static str {
+    match state {
+        BUNDLE_ABSENT => "absent",
+        BUNDLE_OK => "ok",
+        BUNDLE_MIXED => "mixed",
+        BUNDLE_CORRUPT => "corrupt",
+        BUNDLE_UNCHECKED => "unchecked",
+        _ => "unknown",
+    }
+}
+
+/// The bundle tail of a HELLO_ACK payload: `(content_id, state)`, or `None` from a box that predates it.
+pub fn hello_ack_bundle(pl: &[u8]) -> Option<([u8; BUNDLE_ID_LEN], u8)> {
+    if pl.len() < HELLO_ACK_LEN || pl[0] != CT_HELLO_ACK {
+        return None;
+    }
+    let mut id = [0u8; BUNDLE_ID_LEN];
+    id.copy_from_slice(&pl[HELLO_ACK_BUNDLE_ID_OFF..HELLO_ACK_BUNDLE_STATE_OFF]);
+    Some((id, pl[HELLO_ACK_BUNDLE_STATE_OFF]))
+}
+
+/// The mode tail of a HELLO_ACK payload: `(AIRPLAY_AP_*, AIRPLAY_SESSION_*)`, or `None` from a box without it.
+pub fn hello_ack_airplay(pl: &[u8]) -> Option<(u8, u8)> {
+    if pl.len() < HELLO_ACK_MODE_LEN || pl[0] != CT_HELLO_ACK {
+        return None;
+    }
+    Some((pl[HELLO_ACK_AP_STATE_OFF], pl[HELLO_ACK_SESSION_STATE_OFF]))
+}
+
+pub fn airplay_ap_name(s: u8) -> &'static str {
+    match s {
+        AIRPLAY_AP_DOWN => "down",
+        AIRPLAY_AP_STARTING => "starting",
+        AIRPLAY_AP_UP => "up",
+        AIRPLAY_AP_FAILED => "failed",
+        _ => "unknown",
+    }
+}
+
+pub fn airplay_session_name(s: u8) -> &'static str {
+    match s {
+        AIRPLAY_SESSION_NONE => "none",
+        AIRPLAY_SESSION_WAITING => "waiting",
+        AIRPLAY_SESSION_CONNECTED => "connected",
+        AIRPLAY_SESSION_STREAMING => "streaming",
+        _ => "unknown",
+    }
+}
+
+pub fn airplay_end_name(s: u8) -> &'static str {
+    match s {
+        AIRPLAY_END_NONE => "none",
+        AIRPLAY_END_TEARDOWN => "teardown",
+        AIRPLAY_END_PEER_CLOSED => "peer-closed",
+        AIRPLAY_END_ERROR => "error",
+        _ => "unknown",
+    }
+}
+
+/// A decoded MODE_AIRPLAY request (`[CT_MODE_SELECT][MODE_AIRPLAY]` + `AIRPLAY_REQ_*` TLVs).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AirplayRequest {
+    pub ssid: String,
+    pub psk: String,
+    /// The advertised receiver name; [`AirplayRequest::decode`] fills in the SSID when the TLV is absent.
+    pub name: String,
+    /// 0 = the box template's channel.
+    pub channel: u8,
+    /// `(width, height, max_fps)` of the host panel.
+    pub display: (u16, u16, u8),
+    /// `AIRPLAY_FLAG_*`. [`AirplayRequest::decode`] keeps only the known bits (`AIRPLAY_FLAGS_KNOWN`).
+    pub flags: u8,
+}
+
+pub const AIRPLAY_DEFAULT_DISPLAY: (u16, u16, u8) = (1920, 1080, 30);
+
+/// The `AIRPLAY_REQ_DISPLAY` ranges: width and height 320..=7680 pixels, max_fps 1..=120.
+pub fn airplay_display_ok((w, h, fps): (u16, u16, u8)) -> bool {
+    (320..=7680).contains(&w) && (320..=7680).contains(&h) && (1..=120).contains(&fps)
+}
+
+fn airplay_text_ok(v: &[u8], min: usize, max: usize) -> bool {
+    // UTF-8 with no control characters (C0, DEL, C1): it is written into a config line and a DNS label.
+    v.len() >= min
+        && v.len() <= max
+        && std::str::from_utf8(v).is_ok_and(|t| !t.chars().any(|c| c.is_control()))
+}
+
+impl AirplayRequest {
+    /// The CH_CTRL payload, type byte included. Does not validate: [`AirplayRequest::decode`] does, on the box.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut o = vec![CT_MODE_SELECT, MODE_AIRPLAY];
+        for (tag, v) in [
+            (AIRPLAY_REQ_SSID, self.ssid.as_bytes()),
+            (AIRPLAY_REQ_PSK, self.psk.as_bytes()),
+            (AIRPLAY_REQ_NAME, self.name.as_bytes()),
+        ] {
+            if tag == AIRPLAY_REQ_NAME && v.is_empty() {
+                continue;
+            }
+            o.push(tag);
+            o.push(v.len().min(255) as u8);
+            o.extend_from_slice(&v[..v.len().min(255)]);
+        }
+        if self.channel != 0 {
+            o.extend_from_slice(&[AIRPLAY_REQ_CHANNEL, 1, self.channel]);
+        }
+        let (w, h, fps) = self.display;
+        o.extend_from_slice(&[AIRPLAY_REQ_DISPLAY, 5]);
+        o.extend_from_slice(&w.to_le_bytes());
+        o.extend_from_slice(&h.to_le_bytes());
+        o.push(fps);
+        // Only when set: a request without flags stays byte-identical to the pre-0x06 layout.
+        if self.flags != 0 {
+            o.extend_from_slice(&[AIRPLAY_REQ_FLAGS, 1, self.flags]);
+        }
+        o
+    }
+
+    /// Feature bit 42 (SupportsScreenMultiCodec) is to be advertised.
+    pub fn hevc(&self) -> bool {
+        self.flags & AIRPLAY_FLAG_HEVC != 0
+    }
+
+    /// Parse and VALIDATE a CH_CTRL payload. `None` = not a well-formed MODE_AIRPLAY request (the box
+    /// answers `MODE_ACK_BAD_PARAMS` and changes nothing): truncated TLV, missing SSID or PSK, or a field
+    /// outside the ranges documented at `AIRPLAY_REQ_*`.
+    pub fn decode(pl: &[u8]) -> Option<AirplayRequest> {
+        if pl.len() < 2 || pl[0] != CT_MODE_SELECT || pl[1] != MODE_AIRPLAY {
+            return None;
+        }
+        let (mut ssid, mut psk, mut name) = (None, None, None);
+        let (mut channel, mut display, mut flags) = (0u8, AIRPLAY_DEFAULT_DISPLAY, 0u8);
+        let mut b = &pl[2..];
+        while !b.is_empty() {
+            if b.len() < 2 || b.len() < 2 + b[1] as usize {
+                return None;
+            }
+            let (tag, v) = (b[0], &b[2..2 + b[1] as usize]);
+            b = &b[2 + v.len()..];
+            match tag {
+                AIRPLAY_REQ_SSID if airplay_text_ok(v, 1, 32) => ssid = Some(v),
+                AIRPLAY_REQ_PSK if v.len() >= 8 && v.len() <= 63 && v.iter().all(|c| (0x20..=0x7E).contains(c)) => {
+                    psk = Some(v)
+                }
+                AIRPLAY_REQ_NAME if airplay_text_ok(v, 1, 63) => name = Some(v),
+                AIRPLAY_REQ_CHANNEL if v.len() == 1 && (v[0] == 0 || (1..=14).contains(&v[0]) || (36..=165).contains(&v[0])) => {
+                    channel = v[0]
+                }
+                AIRPLAY_REQ_DISPLAY if v.len() == 5 => {
+                    let d = (u16::from_le_bytes([v[0], v[1]]), u16::from_le_bytes([v[2], v[3]]), v[4]);
+                    if !airplay_display_ok(d) {
+                        return None;
+                    }
+                    display = d;
+                }
+                // Never a reason to refuse: unknown bits are a later revision's, and dropped here.
+                AIRPLAY_REQ_FLAGS => flags = v.first().copied().unwrap_or(0) & AIRPLAY_FLAGS_KNOWN,
+                AIRPLAY_REQ_SSID | AIRPLAY_REQ_PSK | AIRPLAY_REQ_NAME | AIRPLAY_REQ_CHANNEL | AIRPLAY_REQ_DISPLAY => {
+                    return None
+                }
+                _ => {} // a later revision's tag
+            }
+        }
+        let s = |v: &[u8]| String::from_utf8_lossy(v).into_owned();
+        let ssid = s(ssid?);
+        Some(AirplayRequest { name: name.map(s).unwrap_or_else(|| ssid.clone()), ssid, psk: s(psk?), channel, display, flags })
+    }
+}
 
 // OCBM_CH_IP stream-mux sub-frame types. Payload = [type u8][conn_id u16 LE][data].
 // AAOS has no NCM, so L3 is done in userspace over this channel (no kernel TUN needed).
@@ -525,6 +768,30 @@ pub const APPEARANCE_MODE_DARK: u8 = 0x01;
 //   SEAM_FORMAT audio_type (the SETUP audioType): 0 media, 1 telephony, 2 speechRecognition (Siri),
 //     3 alert, 4 default/absent, 5 compatibility (a MEDIA-carrying PCM fallback, deliberately not
 //     folded into 4 — see receiver::forward::tag_voice and docs/carplay/06_AV_PIPELINE.md)
+
+/// Seam magic of the video and audio lanes: every message is `[u32 BE len][SEAM_MAGIC][marker]...`.
+pub const SEAM_MAGIC: [u8; 4] = *b"SEAV";
+/// Audio lanes: `[SEAM_KEY][key 32][scid u64 LE]`. The video lanes' key message has the same bytes.
+pub const SEAM_KEY: u8 = 0x00;
+/// Audio lanes: `[SEAM_PKT][scid u64 LE][encrypted RTP packet]`. On the VIDEO lanes marker `0x01` is the
+/// frame message `[0x01][seq u64 LE][hdr 128][body]` ([`seam::video_frame_prefix`]).
+pub const SEAM_PKT: u8 = 0x01;
+/// Audio lanes: `[SEAM_FORMAT][scid u64 LE][codec u8][rate u32 LE][ch u8][bits u8][audio_type u8]`.
+pub const SEAM_FORMAT: u8 = 0x02;
+pub const SEAM_CODEC_PCM: u8 = 0;
+pub const SEAM_CODEC_AAC_LC: u8 = 1;
+pub const SEAM_CODEC_AAC_ELD: u8 = 2;
+pub const SEAM_CODEC_OPUS: u8 = 3;
+/// `SEAM_FORMAT` codec for a stream whose SETUP named a codec this table has no value for (AirPlay-only
+/// mode: `ct` other than 1/4/8). The raw `ct`/`audioFormat` are in the stream event on CH_METADATA.
+pub const SEAM_CODEC_UNKNOWN: u8 = 255;
+
+// CH_METADATA seam: `[u32 BE "META"][u32 BE len][marker][payload]`, `len` = 1 + payload.
+pub const META_MAGIC: [u8; 4] = *b"META";
+pub const META_CMD: u8 = 0x01; // a /command plist (CarPlay)
+pub const META_JSON: u8 = 0x02; // one JSON object, `{"kind":...}`
+pub const META_ARTWORK: u8 = 0x03; // [id u8][JPEG]
+pub const META_CORNERMASK: u8 = 0x04; // [u32 BE display_width_px][PNG]
 
 /// Audio-seam marker `0x03` — **an unencrypted PCM payload**: `[scid 8 LE][raw PCM]`.
 ///
@@ -920,9 +1187,61 @@ impl Reassembler {
     }
 }
 
+pub mod seam;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hello_ack_bundle_tail_layout_is_pinned_and_a_short_ack_has_none() {
+        // The 7 bytes every host already reads must not move: the tail is appended, never inserted.
+        assert_eq!(HELLO_ACK_BUNDLE_ID_OFF, 7);
+        assert_eq!(
+            HELLO_ACK_BUNDLE_STATE_OFF,
+            HELLO_ACK_BUNDLE_ID_OFF + BUNDLE_ID_LEN
+        );
+        assert_eq!(HELLO_ACK_LEN, 40);
+        assert_eq!(
+            [
+                BUNDLE_ABSENT,
+                BUNDLE_OK,
+                BUNDLE_MIXED,
+                BUNDLE_CORRUPT,
+                BUNDLE_UNCHECKED
+            ],
+            [0, 1, 2, 3, 4]
+        );
+
+        let mut pl = [0u8; HELLO_ACK_LEN];
+        pl[0] = CT_HELLO_ACK;
+        pl[1] = VERSION;
+        pl[2..6].copy_from_slice(&(CAP_CONSOLE | CAP_FILE).to_le_bytes());
+        pl[6] = MODE_CONSOLE;
+        for (i, b) in pl[7..39].iter_mut().enumerate() {
+            *b = 0xA0 + i as u8;
+        }
+        pl[39] = BUNDLE_MIXED;
+        let (id, state) = hello_ack_bundle(&pl).expect("a 40-byte ACK carries the tail");
+        assert_eq!((id[0], id[31], state), (0xA0, 0xBF, BUNDLE_MIXED));
+        assert_eq!(
+            &pl[..7],
+            &[CT_HELLO_ACK, VERSION, 0x11, 0, 0, 0, MODE_CONSOLE]
+        );
+
+        // An older box (7 bytes), a cut tail, and a longer ACK from a newer box.
+        assert!(hello_ack_bundle(&pl[..7]).is_none());
+        assert!(hello_ack_bundle(&pl[..39]).is_none());
+        let mut longer = pl.to_vec();
+        longer.extend_from_slice(&[0xEE; 8]);
+        assert_eq!(hello_ack_bundle(&longer), Some((id, BUNDLE_MIXED)));
+
+        let names: Vec<_> = (0..=5).map(bundle_state_name).collect();
+        assert_eq!(
+            names,
+            ["absent", "ok", "mixed", "corrupt", "unchecked", "unknown"]
+        );
+    }
 
     #[test]
     fn f_replay_is_a_distinct_bit_that_does_not_disturb_framing() {

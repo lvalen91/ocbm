@@ -494,6 +494,9 @@ struct Daemon {
     seq: u32,
     mfi: Option<Mfi>,
     ptm: Option<File>,
+    /// Some = MODE_AIRPLAY is in force (see `AIRPLAY_CFG_FILE`). Mutually exclusive with a projection
+    /// subscription: entering it goes idle first, and a CT_SUBSCRIBE leaves it first.
+    airplay: Option<AirplayMode>,
     file: FileState,
     eth: Option<RawFd>, // AF_PACKET raw socket bridging ncm0 <-> CH_ETH (host-driven, on demand)
     // Local A/V ingest seam: the box AirPlay session (carplayd / AvSession) connects to these local
@@ -969,6 +972,250 @@ const WIRELESS_RESTART_FLAG: &str = "/tmp/wireless_restart";
 const RADIO_OFF_FLAG: &str = "/tmp/radio_off";
 #[cfg(test)]
 const RADIO_OFF_FLAG: &str = "/tmp/ocbmd_selftest_radio_off";
+
+// ---- AirPlay-only mode (MODE_AIRPLAY, docs/ocbm/02_AIRPLAY_ONLY_MODE.md) ----
+// ocbmd's part is small on purpose: validate the request, land it in AIRPLAY_CFG_FILE for the
+// supervisor (whose airplay_tick stops the CarPlay stack, raises the AP through the radio seam with
+// exactly these credentials and starts airplayd), mirror the two state files to the host, and take the
+// file away again when the host leaves. The media never passes through here as anything but the same
+// seam bytes carplayd produces: airplayd connects to :9001/:9002/:9004 like any producer.
+//
+// AIRPLAY_CFG_FILE present = the mode is wanted. It holds the passphrase, so it is 0600 on tmpfs and
+// is never logged. `gen` changes with every request so the supervisor can tell a new one from the
+// one it already applied.
+#[cfg(not(test))]
+const AIRPLAY_CFG_FILE: &str = "/tmp/airplay_mode.cfg";
+#[cfg(test)]
+const AIRPLAY_CFG_FILE: &str = "/tmp/ocbmd_selftest_airplay_mode.cfg";
+/// Written by /script/airplay_mode.sh: `gen=<the request it applied>`, `ap=<AIRPLAY_AP_*>`.
+#[cfg(not(test))]
+const AIRPLAY_AP_FILE: &str = "/tmp/airplay_ap";
+#[cfg(test)]
+const AIRPLAY_AP_FILE: &str = "/tmp/ocbmd_selftest_airplay_ap";
+/// Written by airplayd: `session=<AIRPLAY_SESSION_*>`, `end=<AIRPLAY_END_*>`.
+#[cfg(not(test))]
+const AIRPLAY_STATE_FILE: &str = "/tmp/airplay_state";
+#[cfg(test)]
+const AIRPLAY_STATE_FILE: &str = "/tmp/ocbmd_selftest_airplay_state";
+/// The mode's box half. Its presence is what `CAP_AIRPLAY` reports: without it a MODE_AIRPLAY request
+/// would be accepted and then never acted on.
+const AIRPLAY_SCRIPT: &str = "/script/airplay_mode.sh";
+
+fn airplay_supported() -> bool {
+    cfg!(test) || std::path::Path::new(AIRPLAY_SCRIPT).exists()
+}
+
+/// The mode as this daemon holds it. The passphrase is NOT kept here: it goes into the cfg file only.
+struct AirplayMode {
+    ssid: String,
+    name: String,
+    /// The effective display (`AIRPLAY_REQ_DISPLAY`) and multi-codec flag (`AIRPLAY_FLAG_HEVC`).
+    display: (u16, u16, u8),
+    hevc: bool,
+    gen: String,
+    last_poll: Option<Instant>,
+    /// The `(ap, session, end)` last sent as CT_AIRPLAY_STATE; None = send the current one.
+    reported: Option<(u8, u8, u8)>,
+}
+
+/// Land a validated request for the supervisor. Atomic (`.tmp` + rename) and 0600 from creation: the
+/// file carries the passphrase. Every value is one line by construction (`AirplayRequest::decode`
+/// rejects control characters), so a value cannot add a key of its own.
+fn write_airplay_cfg(req: &p::AirplayRequest, gen: &str) -> bool {
+    use std::os::unix::fs::OpenOptionsExt;
+    let tmp = format!("{AIRPLAY_CFG_FILE}.tmp");
+    let _ = std::fs::remove_file(&tmp);
+    let body = format!(
+        "gen={gen}\nssid={}\npsk={}\nname={}\nchannel={}\ndisplay={}x{}@{}\nhevc={}\n",
+        req.ssid, req.psk, req.name, req.channel, req.display.0, req.display.1, req.display.2, u8::from(req.hevc())
+    );
+    let ok = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)
+        .and_then(|mut f| f.write_all(body.as_bytes()))
+        .is_ok();
+    ok && std::fs::rename(&tmp, AIRPLAY_CFG_FILE).is_ok()
+}
+
+fn clear_airplay_cfg() {
+    let _ = std::fs::remove_file(AIRPLAY_CFG_FILE);
+}
+
+fn kv_u8(text: &str, key: &str) -> Option<u8> {
+    text.lines().find_map(|l| l.strip_prefix(key)?.strip_prefix('=')?.trim().parse().ok())
+}
+
+/// `(AIRPLAY_AP_*, AIRPLAY_SESSION_*, AIRPLAY_END_*)` for the request `gen`, from the two state files.
+/// An AP file that answers another request is the previous AP still coming down: STARTING. The
+/// receiver's file counts only under an AP that is up (it may be a stopped receiver's leftover).
+fn airplay_states(gen: &str) -> (u8, u8, u8) {
+    let ap_text = std::fs::read_to_string(AIRPLAY_AP_FILE).unwrap_or_default();
+    let ours = ap_text.lines().any(|l| l.strip_prefix("gen=") == Some(gen));
+    let ap = if ours { kv_u8(&ap_text, "ap").unwrap_or(p::AIRPLAY_AP_STARTING) } else { p::AIRPLAY_AP_STARTING };
+    if ap != p::AIRPLAY_AP_UP {
+        return (ap, p::AIRPLAY_SESSION_NONE, p::AIRPLAY_END_NONE);
+    }
+    let st = std::fs::read_to_string(AIRPLAY_STATE_FILE).unwrap_or_default();
+    (ap, kv_u8(&st, "session").unwrap_or(p::AIRPLAY_SESSION_NONE), kv_u8(&st, "end").unwrap_or(p::AIRPLAY_END_NONE))
+}
+
+// --- OCBM bundle identity (docs/ocbm/00_PROTOCOL.md "Bundle identity") ---
+/// What this box runs, as one set: `key=value` lines written into every overlay by tools/ocbm_overlay.sh
+/// (`commit`, `dirty`, `profile`, `built`, `content_id`). Read at run time on each HELLO / MGMT_GET_INFO and
+/// never compiled in: a binary pushed onto a box by hand must not carry a bundle's identity with it. An
+/// install older than the file has none, which is a state (`BUNDLE_ABSENT`), not an error.
+///
+/// `cfg(test)` aliases as for `HOST_PRESENT_FLAG`: the HELLO_ACK test writes both files.
+#[cfg(not(test))]
+const BUNDLE_FILE: &str = "/opt/ocbm/etc/BUNDLE";
+#[cfg(test)]
+const BUNDLE_FILE: &str = "/tmp/ocbmd_selftest_bundle";
+/// One word (`ok` | `mixed` | `corrupt`) written by `rc.ocbm start` after it has checked the overlay
+/// against `etc/MANIFEST`. ocbmd checks nothing itself, so without this file the best it can say is
+/// `BUNDLE_UNCHECKED`; it never reports `ok` on its own.
+#[cfg(not(test))]
+const BUNDLE_STATE_FILE: &str = "/run/ocbm/bundle.state";
+#[cfg(test)]
+const BUNDLE_STATE_FILE: &str = "/tmp/ocbmd_selftest_bundle.state";
+
+#[derive(Debug, Default, PartialEq)]
+struct BundleInfo {
+    commit: String,
+    /// Built from a tree with uncommitted tracked changes. Anything but a literal `dirty=0` reads as dirty:
+    /// "clean" is a claim, and a missing or mangled line does not make it.
+    dirty: bool,
+    profile: String,
+    built: String,
+    /// `None` unless the file holds exactly 64 hex digits that are not all zero (the wire's "none" value).
+    content_id: Option<[u8; p::BUNDLE_ID_LEN]>,
+    state: u8,
+}
+
+/// Exactly 64 hex digits, either case. Digit by digit: `from_str_radix` would also take a sign.
+fn parse_content_id(s: &str) -> Option<[u8; p::BUNDLE_ID_LEN]> {
+    let b = s.as_bytes();
+    if b.len() != 2 * p::BUNDLE_ID_LEN {
+        return None;
+    }
+    let mut id = [0u8; p::BUNDLE_ID_LEN];
+    for (i, &c) in b.iter().enumerate() {
+        id[i / 2] = (id[i / 2] << 4) | (c as char).to_digit(16)? as u8;
+    }
+    (id != [0u8; p::BUNDLE_ID_LEN]).then_some(id)
+}
+
+/// Combine what was read: `bundle` is the BUNDLE text (`None` = no such file), `checked` the state word.
+///
+/// Tolerant where it is free: unknown keys, blank lines, lines without `=`, CRLF and missing fields are
+/// skipped, so a later bundle_format can add fields without breaking an older ocbmd. Strict where a wrong
+/// answer would be a false claim: a key counts only at the start of a line and `content_id` only once (the
+/// check in rc.ocbm reads it with `sed -n 's/^content_id=//p'`, and the two must not be able to pick different
+/// lines of one file), and a check result is believed only beside a content_id that parses, for a known word.
+fn bundle_info_from(bundle: Option<&str>, checked: Option<&str>) -> BundleInfo {
+    let Some(text) = bundle else {
+        return BundleInfo::default(); // BUNDLE_ABSENT, whatever a stale state file says
+    };
+    let mut b = BundleInfo {
+        dirty: true,
+        ..Default::default()
+    };
+    // Bounded: these are echoed into MGMT_INFO. The tool writes a short hash, a profile word and a stamp.
+    let val = |v: &str| v.chars().take(64).collect::<String>();
+    let mut ids = 0;
+    for line in text.lines() {
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        let v = v.trim();
+        match k {
+            "commit" => b.commit = val(v),
+            "dirty" => b.dirty = v != "0",
+            "profile" => b.profile = val(v),
+            "built" => b.built = val(v),
+            "content_id" => {
+                ids += 1;
+                b.content_id = parse_content_id(v);
+            }
+            _ => {}
+        }
+    }
+    if ids != 1 {
+        b.content_id = None;
+    }
+    b.state = match (b.content_id, checked.map(str::trim)) {
+        (None, _) => p::BUNDLE_CORRUPT, // no usable identity: nothing a check result could be about
+        (Some(_), Some("ok")) => p::BUNDLE_OK,
+        (Some(_), Some("mixed")) => p::BUNDLE_MIXED,
+        (Some(_), Some("corrupt")) => p::BUNDLE_CORRUPT,
+        (Some(_), _) => p::BUNDLE_UNCHECKED, // no result, or a word this build does not know
+    };
+    b
+}
+
+/// At most `cap` bytes of a file (these are read on the HELLO path: a wrong file there must stay cheap).
+fn read_capped(path: &str, cap: u64) -> std::io::Result<String> {
+    let mut v = Vec::new();
+    File::open(path)?.take(cap).read_to_end(&mut v)?;
+    Ok(String::from_utf8_lossy(&v).into_owned())
+}
+
+fn bundle_info_at(bundle_path: &str, state_path: &str) -> BundleInfo {
+    match read_capped(bundle_path, 4096) {
+        Ok(text) => bundle_info_from(Some(&text), read_capped(state_path, 32).ok().as_deref()),
+        // No file, or no directory to hold one: an install without bundle identity.
+        Err(e)
+            if e.kind() == std::io::ErrorKind::NotFound
+                || e.raw_os_error() == Some(libc::ENOTDIR) =>
+        {
+            bundle_info_from(None, None)
+        }
+        // It is there and cannot be read: not "absent", and nothing to report as an identity.
+        Err(_) => bundle_info_from(Some(""), None),
+    }
+}
+
+fn hex_lower(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// `[CT_HELLO_ACK][ver][caps u32 LE][mode]` + the bundle tail (`p::HELLO_ACK_*`). The first 7 bytes are what
+/// every host has always read; the tail is appended so none of them has to change.
+#[cfg(test)]
+fn hello_ack(caps: u32, mode: u8, b: &BundleInfo) -> [u8; p::HELLO_ACK_MODE_LEN] {
+    hello_ack_mode(caps, mode, b, (p::AIRPLAY_AP_DOWN, p::AIRPLAY_SESSION_NONE))
+}
+
+/// [`hello_ack`] with the mode tail (`p::HELLO_ACK_AP_STATE_OFF`..): the AirPlay-only mode's AP and
+/// session state, zero in every other mode. Appended after the bundle tail, so no reader moves.
+fn hello_ack_mode(caps: u32, mode: u8, b: &BundleInfo, airplay: (u8, u8)) -> [u8; p::HELLO_ACK_MODE_LEN] {
+    let mut a = [0u8; p::HELLO_ACK_MODE_LEN];
+    a[p::HELLO_ACK_AP_STATE_OFF] = airplay.0;
+    a[p::HELLO_ACK_SESSION_STATE_OFF] = airplay.1;
+    a[0] = p::CT_HELLO_ACK;
+    a[1] = p::VERSION;
+    a[2..6].copy_from_slice(&caps.to_le_bytes());
+    a[6] = mode;
+    if let Some(id) = b.content_id {
+        a[p::HELLO_ACK_BUNDLE_ID_OFF..p::HELLO_ACK_BUNDLE_STATE_OFF].copy_from_slice(&id);
+    }
+    a[p::HELLO_ACK_BUNDLE_STATE_OFF] = b.state;
+    a
+}
+
+/// The `bundle` object of MGMT_INFO. `content_id` is 64 lowercase hex digits, or "" when there is none.
+fn bundle_json(b: &BundleInfo) -> String {
+    format!(
+        "{{\"commit\":\"{}\",\"dirty\":{},\"profile\":\"{}\",\"built\":\"{}\",\"content_id\":\"{}\",\"state\":\"{}\"}}",
+        json_escape(&b.commit),
+        b.dirty,
+        json_escape(&b.profile),
+        json_escape(&b.built),
+        b.content_id.as_ref().map(|id| hex_lower(id)).unwrap_or_default(),
+        p::bundle_state_name(b.state),
+    )
+}
 
 /// Read a file and trim it, or "" on any error (for the info snapshot's small /sys+/proc reads).
 fn read_trim(path: &str) -> String {
@@ -1985,6 +2232,76 @@ impl Daemon {
     /// there, and is the FIRST thing the NEXT host reads — observed as HELLO -> HOST_GONE ->
     /// HELLO_ACK within 8 ms, which the app reads as "the box dropped us" on a link that just came
     /// up. `CT_HELLO`'s queue-clear cannot retract it. So: go idle silently.
+    /// `CT_MODE_SELECT MODE_AIRPLAY`: validate, end any projection session, land the request for the
+    /// supervisor, acknowledge. Nothing is started from here (ocbmd forks nothing on this thread).
+    fn airplay_select(&mut self, pl: &[u8]) {
+        let ack = |d: &mut Self, st: u8| d.send(p::CH_CTRL, p::F_SOM | p::F_EOM, &[p::CT_MODE_ACK, p::MODE_AIRPLAY, st]);
+        let Some(req) = p::AirplayRequest::decode(pl) else {
+            eprintln!("[ocbmd] mode: AIRPLAY request refused — malformed or out of range ({} B)", pl.len());
+            return ack(self, p::MODE_ACK_BAD_PARAMS);
+        };
+        if !airplay_supported() {
+            eprintln!("[ocbmd] mode: AIRPLAY request refused — {AIRPLAY_SCRIPT} is not installed on this box");
+            return ack(self, p::MODE_ACK_UNSUPPORTED);
+        }
+        // Mutually exclusive with projection: end that session exactly as CT_STOP would (presence
+        // drops, the supervisor tears CarPlay/iAP2/Bluetooth down), and tell the host so.
+        if self.subscribed || self.present {
+            eprintln!("[ocbmd] mode: AIRPLAY requested during a projection session — ending it first");
+            self.go_idle(true);
+        }
+        static GEN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let gen = format!("{}-{}", std::process::id(), GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1);
+        if !write_airplay_cfg(&req, &gen) {
+            eprintln!("[ocbmd] mode: AIRPLAY request could not be written to {AIRPLAY_CFG_FILE}");
+            return ack(self, p::MODE_ACK_UNSUPPORTED);
+        }
+        // The SSID is broadcast and the name advertised; the passphrase is neither and is not logged.
+        eprintln!(
+            "[ocbmd] mode: AIRPLAY (gen {gen}) ssid={:?} name={:?} channel={} display={}x{}@{} hevc={} passphrase={} chars",
+            req.ssid, req.name, req.channel, req.display.0, req.display.1, req.display.2, req.hevc(), req.psk.len()
+        );
+        self.last_hb = Some(Instant::now());
+        let hevc = req.hevc();
+        self.airplay = Some(AirplayMode { ssid: req.ssid, name: req.name, display: req.display, hevc, gen, last_poll: None, reported: None });
+        ack(self, p::MODE_ACK_OK);
+        self.airplay_tick(Instant::now());
+    }
+
+    /// Leave AirPlay-only mode (no-op outside it): the request file goes, so the supervisor stops
+    /// airplayd and the AP and restores the AP config; the host is told with an all-zero state.
+    fn airplay_exit(&mut self, why: &str) {
+        if self.airplay.take().is_none() {
+            return;
+        }
+        clear_airplay_cfg();
+        eprintln!("[ocbmd] mode: leaving AIRPLAY — {why}");
+        self.send(
+            p::CH_CTRL,
+            p::F_SOM | p::F_EOM,
+            &[p::CT_AIRPLAY_STATE, p::AIRPLAY_AP_DOWN, p::AIRPLAY_SESSION_NONE, p::AIRPLAY_END_NONE],
+        );
+    }
+
+    /// Mirror the supervisor's AP state and airplayd's session state to the host, on change.
+    fn airplay_tick(&mut self, now: Instant) {
+        let Some(a) = self.airplay.as_mut() else { return };
+        if a.last_poll.is_some_and(|t| now.duration_since(t) < Duration::from_millis(400)) && a.reported.is_some() {
+            return;
+        }
+        a.last_poll = Some(now);
+        let st = airplay_states(&a.gen);
+        if a.reported == Some(st) {
+            return;
+        }
+        a.reported = Some(st);
+        eprintln!(
+            "[ocbmd] mode: AIRPLAY ap={} session={} last-end={}",
+            p::airplay_ap_name(st.0), p::airplay_session_name(st.1), p::airplay_end_name(st.2)
+        );
+        self.send(p::CH_CTRL, p::F_SOM | p::F_EOM, &[p::CT_AIRPLAY_STATE, st.0, st.1, st.2]);
+    }
+
     fn go_idle(&mut self, notify_host: bool) {
         if notify_host {
             self.set_present(false);
@@ -2076,6 +2393,13 @@ impl Daemon {
                 }
             }
         }
+        // AirPlay-only mode lives exactly as long as its host does: same grace as a projection session.
+        if self.airplay.is_some()
+            && self.last_hb.is_some_and(|hb| now.duration_since(hb) >= HEARTBEAT_GRACE)
+        {
+            self.airplay_exit("heartbeat lost");
+        }
+        self.airplay_tick(now);
         self.phone_tick(now);
         self.pairing_code_tick(now);
         self.bt_phase_tick(now);
@@ -3542,8 +3866,36 @@ impl Daemon {
              \"rootfs_free_kb\":{rt_free},\"ssp\":{ssp},\"hci_up\":{hci_up},\"wlan_ap\":{ap},\
              \"transport\":\"{transport}\",\"host_present\":{host},\"phone_present\":{phone},\
              \"daemons\":{{\"ocbmd\":{d0},\"iap2d\":{d1},\"airplayd\":{d2},\"carplay_wireless\":{d3}}},\
-             \"host_name\":\"{host_name}\",\"devices\":[{devs}]}}",
+             \"host_name\":\"{host_name}\",\"devices\":[{devs}],\
+             \"mode\":\"{mode}\",\"airplay\":{airplay},\"bundle\":{bundle}}}",
+            mode = if self.airplay.is_some() {
+                "airplay"
+            } else if self.ptm.is_some() {
+                "console"
+            } else {
+                "projection"
+            },
+            airplay = match &self.airplay {
+                Some(a) => {
+                    let st = airplay_states(&a.gen);
+                    format!(
+                        "{{\"active\":true,\"ap\":\"{}\",\"session\":\"{}\",\"last_end\":\"{}\",\"ssid\":\"{}\",\"name\":\"{}\",\
+                         \"hevc\":{},\"display\":\"{}x{}@{}\"}}",
+                        p::airplay_ap_name(st.0),
+                        p::airplay_session_name(st.1),
+                        p::airplay_end_name(st.2),
+                        json_escape(&a.ssid),
+                        json_escape(&a.name),
+                        a.hevc,
+                        a.display.0,
+                        a.display.1,
+                        a.display.2
+                    )
+                }
+                None => format!("{{\"active\":false,\"supported\":{}}}", airplay_supported()),
+            },
             ser = json_escape(&serial),
+            bundle = bundle_json(&bundle_info_at(BUNDLE_FILE, BUNDLE_STATE_FILE)),
             host_name = json_escape(self.host_name.as_deref().unwrap_or("")),
             ap = procs[4],
             host = self.present,
@@ -3656,25 +4008,55 @@ impl Daemon {
                     if self.mfi.is_some() {
                         caps |= p::CAP_MFI;
                     }
+                    if airplay_supported() {
+                        caps |= p::CAP_AIRPLAY;
+                    }
                     // Unconditional: everything above logs only CHANGES, so a host reattaching with
                     // the same nonce and label — the ordinary case, and the one a "why is there no
                     // HELLO in the log" investigation starts from — left no trace at all.
+                    // Read now, not at startup (two small tmpfs reads; one ENOENT on a box with no
+                    // overlay): a check that is run again is reported at the next HELLO, not the next ocbmd.
+                    let bundle = bundle_info_at(BUNDLE_FILE, BUNDLE_STATE_FILE);
                     eprintln!(
-                        "[ocbmd] HELLO nonce={inst:#010x} caps={caps:#x} label={label:?} replaced={}",
-                        self.host_replaced
+                        "[ocbmd] HELLO nonce={inst:#010x} caps={caps:#x} label={label:?} replaced={} bundle={}:{}",
+                        self.host_replaced,
+                        bundle.content_id.as_ref().map_or("-".into(), |id| hex_lower(&id[..6])),
+                        p::bundle_state_name(bundle.state)
                     );
-                    let mut a = [0u8; 7];
-                    a[0] = p::CT_HELLO_ACK;
-                    a[1] = p::VERSION;
-                    a[2..6].copy_from_slice(&caps.to_le_bytes());
-                    a[6] = if self.ptm.is_some() {
+                    // AirPlay-only mode outlives a host re-attach for one heartbeat grace: the host that
+                    // just said HELLO gets a full grace to start beating (or to select another mode), and
+                    // the current state again as CT_AIRPLAY_STATE on the next tick.
+                    let mut ap_state = (p::AIRPLAY_AP_DOWN, p::AIRPLAY_SESSION_NONE);
+                    if let Some(a) = self.airplay.as_mut() {
+                        a.reported = None;
+                        let st = airplay_states(&a.gen);
+                        ap_state = (st.0, st.1);
+                        self.last_hb = Some(Instant::now());
+                    }
+                    let mode = if self.airplay.is_some() {
+                        p::MODE_AIRPLAY
+                    } else if self.ptm.is_some() {
                         p::MODE_CONSOLE
                     } else {
                         p::MODE_PROJECTION
                     };
-                    self.send(p::CH_CTRL, p::F_SOM | p::F_EOM, &a);
+                    self.send(
+                        p::CH_CTRL,
+                        p::F_SOM | p::F_EOM,
+                        &hello_ack_mode(caps, mode, &bundle, ap_state),
+                    );
                 } else if pl.len() >= 2 && pl[0] == p::CT_MODE_SELECT && pl[1] == p::MODE_CONSOLE {
                     self.start_console();
+                } else if pl.len() >= 2 && pl[0] == p::CT_MODE_SELECT && pl[1] == p::MODE_AIRPLAY {
+                    self.airplay_select(pl);
+                } else if pl.len() >= 2 && pl[0] == p::CT_MODE_SELECT && pl[1] == p::MODE_PROJECTION {
+                    // Back to the default mode. Acked either way, so a host can use it as "make sure".
+                    self.airplay_exit("the host selected MODE_PROJECTION");
+                    self.send(
+                        p::CH_CTRL,
+                        p::F_SOM | p::F_EOM,
+                        &[p::CT_MODE_ACK, p::MODE_PROJECTION, p::MODE_ACK_OK],
+                    );
                 } else if pl.len() >= 9 && pl[0] == p::CT_SETTIME {
                     // host->box clock sync (no RTC battery): apply the wall clock, then ack
                     // back the seconds actually set so the host can confirm.
@@ -3773,6 +4155,10 @@ impl Daemon {
                         eth::close(fd);
                     }
                 } else if pl.first() == Some(&p::CT_SUBSCRIBE) {
+                    // Projection and AirPlay-only are mutually exclusive, and the last request wins:
+                    // a SUBSCRIBE leaves AirPlay-only mode before anything below raises presence, so
+                    // the supervisor sees the AirPlay request gone on the same tick the flag rises.
+                    self.airplay_exit("the host subscribed to projection");
                     // A replaced host — one whose predecessor died WITHOUT CT_STOP — owes a clean
                     // re-arm: its carplayd is gone (or bound to the dead host) and presence never
                     // dropped, so only a forced GONE->PRESENT edge makes the supervisor spawn a new
@@ -3884,6 +4270,9 @@ impl Daemon {
                     self.last_hb = Some(now);
                     if self.subscribed {
                         self.set_present(true); // recover if a prior beat had lapsed
+                    } else if self.airplay.is_some() {
+                        // AirPlay-only mode has no subscription: the beat is its only liveness (the
+                        // watchdog is in presence_tick), and the "re-SUBSCRIBE" nudge would be wrong.
                     } else {
                         // A heartbeat from a host this daemon has NEVER seen SUBSCRIBE (2026-09-05).
                         // The host only beats while IT believes it is subscribed, so this is exactly
@@ -3936,6 +4325,7 @@ impl Daemon {
                     // see `go_idle`'s contract. The supervisor's teardown rides the flag file, not the
                     // event, so it is unaffected.
                     eprintln!("[ocbmd] session: STOP — host closed, ending the projection session");
+                    self.airplay_exit("the host sent CT_STOP");
                     self.go_idle(false);
                 } else if pl.first() == Some(&p::CT_RADIO) {
                     // App-commanded mid-session radio kill switch (docs/carplay/04_CAPABILITIES_AND_CONFIG.md radio gating). Actuation
@@ -4089,6 +4479,7 @@ fn touch_alive_file() {
 fn clear_session_state_for_exit() {
     write_flag_atomic(HOST_PRESENT_FLAG, false);
     clear_cfg_file();
+    clear_airplay_cfg(); // the mode ends with the daemon that held its host
     let _ = std::fs::remove_file(RADIO_OFF_FLAG);
     // These paths exit on purpose, for respawn — the supervisor must read "gone", not "wedged".
     // Only reached after the file was created; the earlier exits (duplicate instance, ACC_DEV,
@@ -4193,6 +4584,7 @@ fn main() {
         seq: 0,
         mfi,
         ptm: None,
+        airplay: None,
         file: FileState::default(),
         eth: None,
         av_listeners,
@@ -4259,6 +4651,9 @@ fn main() {
     write_flag_atomic(HOST_PRESENT_FLAG, false);
     // Drop any config left by a prior (crashed) session so carplayd never reads a stale one at idle.
     clear_cfg_file();
+    // Likewise an AirPlay-only request: its host talked to a previous ocbmd, and nothing here would
+    // watch that host's heartbeat. The supervisor reads the file's absence as "leave the mode".
+    clear_airplay_cfg();
     // Same for a stale CT_RADIO inhibit from a crashed prior ocbmd (tmpfs, but a daemon respawn
     // without a reboot would otherwise inherit it).
     let _ = std::fs::remove_file(RADIO_OFF_FLAG);
@@ -4376,7 +4771,7 @@ fn main() {
         // OR while a presence re-arm dip is pending so presence_tick can restore the flag on an
         // otherwise-idle box (without this the poll blocks on -1 and the dip never resolves).
         // Block indefinitely only when truly idle.
-        let timeout_ms = if d.subscribed || d.rearm_deadline.is_some() {
+        let timeout_ms = if d.subscribed || d.rearm_deadline.is_some() || d.airplay.is_some() {
             500
         } else {
             LOG_IDLE_POLL_MS
@@ -4705,6 +5100,7 @@ mod tests {
             seq: 0,
             mfi: None,
             ptm: None,
+            airplay: None,
             file: FileState::default(),
             eth: None,
             av_listeners: Vec::new(),
@@ -5268,6 +5664,249 @@ mod tests {
         pl
     }
 
+    // ---- bundle identity (2026-11-11) ---------------------------------------------------------
+
+    const CID: &str = "5f1d0c9a3b7e2468ace013579bdf02468ace13579bdf0123456789abcdef0a1b";
+
+    /// Byte for byte what tools/ocbm_overlay.sh prints into etc/BUNDLE.
+    fn bundle_text(cid: &str) -> String {
+        format!("bundle_format=1\ncommit=b1d38af\ndirty=0\nprofile=full\nbuilt=20261111T0102Z\ncontent_id={cid}\n")
+    }
+
+    #[test]
+    fn bundle_absent_reads_as_absent_never_as_an_error() {
+        // An overlay older than etc/BUNDLE, and a stock-layout box with no /opt/ocbm at all. A state file
+        // left behind by another bundle must not turn "no identity" into a checked one.
+        let dir = format!("/tmp/ocbmd_selftest_bundle_absent_{}", std::process::id());
+        let state = format!("{dir}.state");
+        std::fs::write(&state, "ok\n").unwrap();
+        for path in [format!("{dir}/etc/BUNDLE"), format!("{state}/BUNDLE")] {
+            // (the second is ENOTDIR: a path component is a file)
+            let b = bundle_info_at(&path, &state);
+            assert_eq!(b, BundleInfo::default(), "{path}");
+            assert_eq!(b.state, p::BUNDLE_ABSENT);
+            let ack = hello_ack(0, p::MODE_PROJECTION, &b);
+            assert_eq!(
+                &ack[7..p::HELLO_ACK_LEN],
+                &[0u8; 33],
+                "absent = zero content_id and state 0"
+            );
+            assert_eq!(
+                bundle_json(&b),
+                r#"{"commit":"","dirty":false,"profile":"","built":"","content_id":"","state":"absent"}"#
+            );
+        }
+        let _ = std::fs::remove_file(&state);
+    }
+
+    #[test]
+    fn bundle_valid_file_reports_its_fields_and_only_the_checked_state() {
+        let text = bundle_text(CID);
+        let b = bundle_info_from(Some(&text), Some("ok\n"));
+        assert_eq!(
+            (b.commit.as_str(), b.dirty, b.profile.as_str()),
+            ("b1d38af", false, "full")
+        );
+        assert_eq!(b.built, "20261111T0102Z");
+        assert_eq!(hex_lower(&b.content_id.unwrap()), CID);
+        assert_eq!(b.state, p::BUNDLE_OK);
+        assert_eq!(
+            bundle_json(&b),
+            format!(
+                r#"{{"commit":"b1d38af","dirty":false,"profile":"full","built":"20261111T0102Z","content_id":"{CID}","state":"ok"}}"#
+            )
+        );
+        assert_eq!(
+            bundle_info_from(Some(&text), Some("mixed")).state,
+            p::BUNDLE_MIXED
+        );
+        assert_eq!(
+            bundle_info_from(Some(&text), Some("corrupt")).state,
+            p::BUNDLE_CORRUPT
+        );
+        // `ok` is never ocbmd's own conclusion: no result, an empty or half-written one, a word from a
+        // newer rc.ocbm, or a near miss all read as "not checked".
+        for unchecked in [
+            None,
+            Some(""),
+            Some("o"),
+            Some("OK"),
+            Some("ok mixed"),
+            Some("verified"),
+        ] {
+            assert_eq!(
+                bundle_info_from(Some(&text), unchecked).state,
+                p::BUNDLE_UNCHECKED,
+                "{unchecked:?}"
+            );
+        }
+        // Uppercase hex is the same id; a dirty build says so.
+        let up = bundle_info_from(
+            Some(&bundle_text(&CID.to_uppercase()).replace("dirty=0", "dirty=1")),
+            None,
+        );
+        assert_eq!(hex_lower(&up.content_id.unwrap()), CID);
+        assert!(up.dirty);
+    }
+
+    #[test]
+    fn bundle_malformed_content_id_is_corrupt_with_a_zero_id_whatever_the_check_said() {
+        let short = &CID[..63];
+        let long = format!("{CID}0");
+        let nonhex = format!("{}zz", &CID[..62]);
+        let signed = format!("+{}", &CID[..63]); // from_str_radix would take "+5"
+        let zero = "0".repeat(64); // the wire's "no bundle" value cannot be an identity
+        let spaced = format!("{} {}", &CID[..32], &CID[32..]);
+        for bad in [
+            short,
+            long.as_str(),
+            nonhex.as_str(),
+            signed.as_str(),
+            zero.as_str(),
+            spaced.as_str(),
+            "",
+        ] {
+            let b = bundle_info_from(Some(&bundle_text(bad)), Some("ok"));
+            assert_eq!(b.content_id, None, "{bad:?}");
+            assert_eq!(b.state, p::BUNDLE_CORRUPT, "{bad:?}");
+            assert_eq!(
+                b.commit, "b1d38af",
+                "the readable fields are still reported"
+            );
+            let ack = hello_ack(0, p::MODE_PROJECTION, &b);
+            assert_eq!(&ack[7..39], &[0u8; 32]);
+            assert_eq!(ack[39], p::BUNDLE_CORRUPT);
+            assert!(bundle_json(&b).contains(r#""content_id":"","state":"corrupt""#));
+        }
+        // No content_id line at all, an empty file, binary junk: present, so not "absent".
+        for text in ["commit=b1d38af\n", "", "\u{0}\u{1}\u{fffd}=\n\n"] {
+            assert_eq!(
+                bundle_info_from(Some(text), Some("ok")).state,
+                p::BUNDLE_CORRUPT
+            );
+        }
+        // Two content_id lines, even two that agree, name no single identity; and a key counts only at the
+        // start of a line, so an indented second id cannot replace the one rc.ocbm's check read.
+        let other = CID.replace('5', "6");
+        for second in [
+            format!("content_id={other}\n"),
+            format!("content_id={CID}\n"),
+        ] {
+            let b = bundle_info_from(Some(&(bundle_text(CID) + &second)), Some("ok"));
+            assert_eq!((b.content_id, b.state), (None, p::BUNDLE_CORRUPT));
+        }
+        let b = bundle_info_from(
+            Some(&(bundle_text(CID) + &format!(" content_id={other}\n"))),
+            Some("ok"),
+        );
+        assert_eq!(hex_lower(&b.content_id.unwrap()), CID);
+        // A missing or mangled dirty line is not a clean build.
+        assert!(bundle_info_from(Some(&bundle_text(CID).replace("dirty=0\n", "")), None).dirty);
+        assert!(
+            bundle_info_from(Some(&bundle_text(CID).replace("dirty=0", "dirty=no")), None).dirty
+        );
+    }
+
+    #[test]
+    fn bundle_unknown_keys_and_untidy_lines_are_skipped() {
+        let text = format!(
+            "bundle_format=2\r\nabi=7\r\n\r\n# a comment\r\nno equals sign here\r\ncommit= b1d38af \r\n\
+             update_url=http://x/?a=b\r\ndirty=0\r\nprofile=full\r\nbuilt=20261111T0102Z\r\ncontent_id={CID}\r\nsig=\r\n"
+        );
+        let b = bundle_info_from(Some(&text), Some("ok"));
+        assert_eq!(b, bundle_info_from(Some(&bundle_text(CID)), Some("ok")));
+        // Values reach MGMT_INFO's hand-rolled JSON: bounded and escaped.
+        let b = bundle_info_from(
+            Some(&format!(
+                "commit={}\nprofile=a\"b\\c\ncontent_id={CID}\n",
+                "x".repeat(500)
+            )),
+            None,
+        );
+        assert_eq!(b.commit.len(), 64);
+        assert!(bundle_json(&b).contains(r#""profile":"a\"b\\c""#));
+    }
+
+    #[test]
+    fn hello_ack_is_the_seven_legacy_bytes_then_the_bundle_tail() {
+        // The only test that writes BUNDLE_FILE / BUNDLE_STATE_FILE (other HELLO tests read them, and
+        // assert nothing about the ACK).
+        let ack_of = |d: &mut Daemon| {
+            let _ = sent(d);
+            d.handle(p::CH_CTRL, p::F_SOM | p::F_EOM, &hello(0x0B0B_0B0B, b""));
+            let acks: Vec<_> = sent(d)
+                .into_iter()
+                .filter(|(ch, _, pl)| *ch == p::CH_CTRL && pl.first() == Some(&p::CT_HELLO_ACK))
+                .collect();
+            assert_eq!(acks.len(), 1);
+            acks[0].2.clone()
+        };
+        let mut d = td();
+        // (CAP_AIRPLAY: the test build reports the mode's box half as installed)
+        let caps = p::CAP_CONSOLE | p::CAP_ECHO | p::CAP_IP | p::CAP_FILE | p::CAP_ETH | p::CAP_AIRPLAY;
+        let legacy = [
+            p::CT_HELLO_ACK,
+            p::VERSION,
+            caps as u8,
+            0,
+            0,
+            0,
+            p::MODE_PROJECTION,
+        ];
+        let id: Vec<u8> = (0..32)
+            .map(|i| u8::from_str_radix(&CID[2 * i..2 * i + 2], 16).unwrap())
+            .collect();
+
+        let _ = std::fs::remove_file(BUNDLE_FILE);
+        let _ = std::fs::remove_file(BUNDLE_STATE_FILE);
+        let ack = ack_of(&mut d);
+        assert_eq!(ack.len(), p::HELLO_ACK_MODE_LEN, "bundle tail, then the two mode-tail bytes");
+        assert_eq!(&ack[p::HELLO_ACK_LEN..], &[0u8; 2], "outside AirPlay-only mode the mode tail is zero");
+        assert_eq!(
+            &ack[..7],
+            &legacy,
+            "what every existing host parses must not move"
+        );
+        assert_eq!(&ack[7..p::HELLO_ACK_LEN], &[0u8; 33], "no BUNDLE: zero id, BUNDLE_ABSENT");
+        assert!(d
+            .box_info_json()
+            .contains(r#""bundle":{"commit":"","dirty":false"#));
+
+        std::fs::write(BUNDLE_FILE, bundle_text(CID)).unwrap();
+        let ack = ack_of(&mut d);
+        assert_eq!(ack.len(), 42);
+        assert_eq!(&ack[..7], &legacy);
+        assert_eq!(
+            &ack[7..39],
+            id.as_slice(),
+            "content_id as 32 raw bytes, in hex order"
+        );
+        assert_eq!(
+            ack[39],
+            p::BUNDLE_UNCHECKED,
+            "a BUNDLE with no check result is never `ok`"
+        );
+
+        std::fs::write(BUNDLE_STATE_FILE, "ok\n").unwrap();
+        let ack = ack_of(&mut d);
+        assert_eq!((&ack[7..39], ack[39]), (id.as_slice(), p::BUNDLE_OK));
+        assert_eq!(
+            p::hello_ack_bundle(&ack).map(|(i, s)| (i.to_vec(), s)),
+            Some((id.clone(), p::BUNDLE_OK))
+        );
+        let json = d.box_info_json();
+        assert!(
+            json.ends_with(&format!(r#""content_id":"{CID}","state":"ok"}}}}"#)),
+            "{json}"
+        );
+
+        std::fs::write(BUNDLE_STATE_FILE, "mixed\n").unwrap();
+        assert_eq!(ack_of(&mut d)[39], p::BUNDLE_MIXED);
+
+        let _ = std::fs::remove_file(BUNDLE_FILE);
+        let _ = std::fs::remove_file(BUNDLE_STATE_FILE);
+    }
+
     // ---- CH_MFI correlation tag (2026-08-27) --------------------------------------------------
     //
     // The reply carries no opcode echo and no request id. The tag is the ONLY thing that can tell
@@ -5374,6 +6013,201 @@ mod tests {
         let mut d = td();
         d.handle(p::CH_CTRL, p::F_SOM | p::F_EOM, &hello(1, b"bench tool"));
         assert!(d.box_info_json().contains("\"host_name\":\"bench tool\""));
+    }
+
+    // ---- AirPlay-only mode (MODE_AIRPLAY) -----------------------------------------------------
+
+    fn airplay_req() -> p::AirplayRequest {
+        p::AirplayRequest {
+            ssid: "Bench AP & co".into(),
+            psk: "correct horse".into(),
+            name: "Car Screen".into(),
+            channel: 44,
+            display: (1280, 720, 60),
+            flags: 0,
+        }
+    }
+
+    fn ctrl_frames(d: &mut Daemon) -> Vec<Vec<u8>> {
+        sent(d).into_iter().filter(|(ch, _, _)| *ch == p::CH_CTRL).map(|(_, _, pl)| pl).collect()
+    }
+
+    fn airplay_files_clear() {
+        for f in [AIRPLAY_CFG_FILE, AIRPLAY_AP_FILE, AIRPLAY_STATE_FILE] {
+            let _ = std::fs::remove_file(f);
+        }
+    }
+
+    #[test]
+    fn airplay_mode_select_lands_the_request_acks_and_reports_state() {
+        let _flag = presence_flag_lock(); // shares the AirPlay state files with the other mode tests
+        airplay_files_clear();
+        let mut d = td();
+        let _ = sent(&mut d);
+        d.handle(p::CH_CTRL, p::F_SOM | p::F_EOM, &airplay_req().encode());
+        let f = ctrl_frames(&mut d);
+        assert_eq!(f[0], [p::CT_MODE_ACK, p::MODE_AIRPLAY, p::MODE_ACK_OK]);
+        // nothing has applied the request yet: the AP is starting, there is no receiver
+        assert_eq!(f[1], [p::CT_AIRPLAY_STATE, p::AIRPLAY_AP_STARTING, p::AIRPLAY_SESSION_NONE, p::AIRPLAY_END_NONE]);
+        let cfg = std::fs::read_to_string(AIRPLAY_CFG_FILE).unwrap();
+        let gen = d.airplay.as_ref().unwrap().gen.clone();
+        assert_eq!(
+            cfg,
+            format!("gen={gen}\nssid=Bench AP & co\npsk=correct horse\nname=Car Screen\nchannel=44\ndisplay=1280x720@60\nhevc=0\n")
+        );
+        assert_eq!(std::fs::metadata(AIRPLAY_CFG_FILE).unwrap().permissions().mode() & 0o777, 0o600);
+
+        // the supervisor's script reports the AP for THIS request, then airplayd its session
+        std::fs::write(AIRPLAY_AP_FILE, format!("gen={gen}\nap=2\n")).unwrap();
+        std::fs::write(AIRPLAY_STATE_FILE, "session=1\nend=0\n").unwrap();
+        d.airplay_tick(Instant::now() + Duration::from_secs(1));
+        assert_eq!(ctrl_frames(&mut d), [vec![p::CT_AIRPLAY_STATE, p::AIRPLAY_AP_UP, p::AIRPLAY_SESSION_WAITING, 0]]);
+        d.airplay_tick(Instant::now() + Duration::from_secs(2));
+        assert!(ctrl_frames(&mut d).is_empty(), "unchanged state is not re-sent");
+        std::fs::write(AIRPLAY_STATE_FILE, "session=3\nend=0\n").unwrap();
+        d.airplay_tick(Instant::now() + Duration::from_secs(3));
+        assert_eq!(ctrl_frames(&mut d), [vec![p::CT_AIRPLAY_STATE, p::AIRPLAY_AP_UP, p::AIRPLAY_SESSION_STREAMING, 0]]);
+
+        // HELLO_ACK: the mode byte, the capability, and the mode tail after the bundle tail
+        d.handle(p::CH_CTRL, p::F_SOM | p::F_EOM, &hello(0x0A0A_0A0A, b""));
+        let f = ctrl_frames(&mut d);
+        let ack = f.iter().find(|pl| pl[0] == p::CT_HELLO_ACK).unwrap();
+        assert_eq!(ack.len(), p::HELLO_ACK_MODE_LEN);
+        assert_eq!(ack[6], p::MODE_AIRPLAY);
+        assert_ne!(u32::from_le_bytes(ack[2..6].try_into().unwrap()) & p::CAP_AIRPLAY, 0);
+        assert_eq!(p::hello_ack_airplay(ack), Some((p::AIRPLAY_AP_UP, p::AIRPLAY_SESSION_STREAMING)));
+        assert!(p::hello_ack_bundle(ack).is_some());
+
+        // MGMT_INFO names the mode and the states, and never the passphrase
+        let j = d.box_info_json();
+        assert!(j.contains("\"mode\":\"airplay\""), "{j}");
+        assert!(j.contains("\"airplay\":{\"active\":true,\"ap\":\"up\",\"session\":\"streaming\",\"last_end\":\"none\",\"ssid\":\"Bench AP & co\",\"name\":\"Car Screen\",\"hevc\":false,\"display\":\"1280x720@60\"}"), "{j}");
+        assert!(!j.contains("correct horse"));
+
+        // an AP file answering an OLDER request is not this request's AP
+        std::fs::write(AIRPLAY_AP_FILE, "gen=someone-else\nap=2\n").unwrap();
+        assert_eq!(airplay_states(&gen), (p::AIRPLAY_AP_STARTING, p::AIRPLAY_SESSION_NONE, p::AIRPLAY_END_NONE));
+
+        // MODE_PROJECTION leaves the mode: the request file goes, the host gets zeros and an ack
+        d.handle(p::CH_CTRL, p::F_SOM | p::F_EOM, &[p::CT_MODE_SELECT, p::MODE_PROJECTION]);
+        assert!(!std::path::Path::new(AIRPLAY_CFG_FILE).exists());
+        let f = ctrl_frames(&mut d);
+        assert!(f.contains(&vec![p::CT_AIRPLAY_STATE, 0, 0, 0]));
+        assert!(f.contains(&vec![p::CT_MODE_ACK, p::MODE_PROJECTION, p::MODE_ACK_OK]));
+        assert!(d.box_info_json().contains("\"mode\":\"projection\",\"airplay\":{\"active\":false,\"supported\":true},"));
+        airplay_files_clear();
+    }
+
+    #[test]
+    fn airplay_mode_select_with_bad_parameters_changes_nothing() {
+        let _flag = presence_flag_lock();
+        airplay_files_clear();
+        let mut d = td();
+        let _ = sent(&mut d);
+        let mut req = airplay_req();
+        req.psk = "short".into();
+        d.handle(p::CH_CTRL, p::F_SOM | p::F_EOM, &req.encode());
+        assert_eq!(ctrl_frames(&mut d), [vec![p::CT_MODE_ACK, p::MODE_AIRPLAY, p::MODE_ACK_BAD_PARAMS]]);
+        // a value that tries to add a config line of its own
+        let mut req = airplay_req();
+        req.ssid = "x\npsk=attacker".into();
+        d.handle(p::CH_CTRL, p::F_SOM | p::F_EOM, &req.encode());
+        assert_eq!(ctrl_frames(&mut d), [vec![p::CT_MODE_ACK, p::MODE_AIRPLAY, p::MODE_ACK_BAD_PARAMS]]);
+        // a display outside 320..=7680 x 320..=7680 @ 1..=120
+        for disp in [(7681, 2160, 60), (3840, 2160, 121), (319, 240, 30)] {
+            let mut req = airplay_req();
+            req.display = disp;
+            d.handle(p::CH_CTRL, p::F_SOM | p::F_EOM, &req.encode());
+            assert_eq!(ctrl_frames(&mut d), [vec![p::CT_MODE_ACK, p::MODE_AIRPLAY, p::MODE_ACK_BAD_PARAMS]], "{disp:?}");
+        }
+        assert!(d.airplay.is_none());
+        assert!(!std::path::Path::new(AIRPLAY_CFG_FILE).exists());
+    }
+
+    #[test]
+    fn airplay_mode_hevc_flag_and_display_reach_the_cfg_and_mgmt_info() {
+        let _flag = presence_flag_lock();
+        airplay_files_clear();
+        let mut d = td();
+        let _ = sent(&mut d);
+        let mut req = airplay_req();
+        req.display = (3840, 2160, 60);
+        req.flags = p::AIRPLAY_FLAG_HEVC | 0x80; // an unknown bit rides along and is ignored
+        d.handle(p::CH_CTRL, p::F_SOM | p::F_EOM, &req.encode());
+        assert_eq!(ctrl_frames(&mut d)[0], [p::CT_MODE_ACK, p::MODE_AIRPLAY, p::MODE_ACK_OK]);
+        let cfg = std::fs::read_to_string(AIRPLAY_CFG_FILE).unwrap();
+        assert!(cfg.ends_with("\ndisplay=3840x2160@60\nhevc=1\n"), "{cfg}");
+        let j = d.box_info_json();
+        assert!(j.contains("\"name\":\"Car Screen\",\"hevc\":true,\"display\":\"3840x2160@60\"}"), "{j}");
+        // CT_AIRPLAY_STATE keeps its 3-byte layout
+        let gen = d.airplay.as_ref().unwrap().gen.clone();
+        std::fs::write(AIRPLAY_AP_FILE, format!("gen={gen}\nap=2\n")).unwrap();
+        d.airplay_tick(Instant::now() + Duration::from_secs(1));
+        assert_eq!(ctrl_frames(&mut d), [vec![p::CT_AIRPLAY_STATE, p::AIRPLAY_AP_UP, p::AIRPLAY_SESSION_NONE, 0]]);
+        d.handle(p::CH_CTRL, p::F_SOM | p::F_EOM, &[p::CT_MODE_SELECT, p::MODE_PROJECTION]);
+        airplay_files_clear();
+    }
+
+    #[test]
+    fn airplay_mode_and_projection_are_mutually_exclusive_and_the_last_request_wins() {
+        let _flag = presence_flag_lock();
+        airplay_files_clear();
+        let mut d = td();
+        // a projection session is up
+        d.handle(p::CH_CTRL, p::F_SOM | p::F_EOM, &[p::CT_SUBSCRIBE]);
+        d.presence_tick(Instant::now() + REARM_HOLD + Duration::from_millis(100));
+        assert!(d.subscribed);
+        let _ = sent(&mut d);
+        // AIRPLAY ends it exactly as CT_STOP would, and says so to the host
+        d.handle(p::CH_CTRL, p::F_SOM | p::F_EOM, &airplay_req().encode());
+        assert!(!d.subscribed && !d.present && d.airplay.is_some());
+        assert_eq!(std::fs::read_to_string(HOST_PRESENT_FLAG).unwrap().trim(), "0");
+        let f = ctrl_frames(&mut d);
+        if f.contains(&vec![p::CT_SESSION_EVENT, p::SEV_HOST_PRESENT]) || d.rearm_deadline.is_some() {
+            panic!("the projection presence must be down, not re-arming: {f:?}");
+        }
+        assert!(f.contains(&vec![p::CT_MODE_ACK, p::MODE_AIRPLAY, p::MODE_ACK_OK]));
+        // a heartbeat in AirPlay-only mode is liveness only: no presence, no "re-SUBSCRIBE" nudge
+        d.handle(p::CH_CTRL, p::F_SOM | p::F_EOM, &[p::CT_HEARTBEAT]);
+        assert!(!d.present);
+        assert!(!ctrl_frames(&mut d).contains(&vec![p::CT_SESSION_EVENT, p::SEV_HOST_GONE]));
+        // a SUBSCRIBE leaves AirPlay-only mode BEFORE presence can rise
+        d.handle(p::CH_CTRL, p::F_SOM | p::F_EOM, &[p::CT_SUBSCRIBE]);
+        assert!(d.airplay.is_none() && d.subscribed);
+        assert!(!std::path::Path::new(AIRPLAY_CFG_FILE).exists());
+        assert!(ctrl_frames(&mut d).contains(&vec![p::CT_AIRPLAY_STATE, 0, 0, 0]));
+        d.go_idle(false);
+        airplay_files_clear();
+    }
+
+    #[test]
+    fn airplay_mode_ends_when_its_host_stops_beating_or_stops() {
+        let _flag = presence_flag_lock();
+        airplay_files_clear();
+        let mut d = td();
+        d.handle(p::CH_CTRL, p::F_SOM | p::F_EOM, &airplay_req().encode());
+        let t0 = Instant::now();
+        d.presence_tick(t0 + HEARTBEAT_GRACE - Duration::from_secs(1));
+        assert!(d.airplay.is_some(), "inside the grace");
+        d.handle(p::CH_CTRL, p::F_SOM | p::F_EOM, &[p::CT_HEARTBEAT]);
+        d.presence_tick(Instant::now() + HEARTBEAT_GRACE - Duration::from_secs(1));
+        assert!(d.airplay.is_some(), "a beat renews it");
+        let _ = sent(&mut d);
+        d.presence_tick(Instant::now() + HEARTBEAT_GRACE + Duration::from_secs(1));
+        assert!(d.airplay.is_none(), "no beat for the whole grace: the host is gone");
+        assert!(!std::path::Path::new(AIRPLAY_CFG_FILE).exists());
+        assert!(ctrl_frames(&mut d).contains(&vec![p::CT_AIRPLAY_STATE, 0, 0, 0]));
+        // and a clean CT_STOP ends it at once
+        d.handle(p::CH_CTRL, p::F_SOM | p::F_EOM, &airplay_req().encode());
+        assert!(std::path::Path::new(AIRPLAY_CFG_FILE).exists());
+        d.handle(p::CH_CTRL, p::F_SOM | p::F_EOM, &[p::CT_STOP]);
+        assert!(d.airplay.is_none() && !std::path::Path::new(AIRPLAY_CFG_FILE).exists());
+        // the default mode's ACK is unchanged but for its length: zeros in the mode tail
+        d.handle(p::CH_CTRL, p::F_SOM | p::F_EOM, &hello(0x0C0C_0C0C, b""));
+        let f = ctrl_frames(&mut d);
+        let ack = f.iter().find(|pl| pl[0] == p::CT_HELLO_ACK).unwrap();
+        assert_eq!((ack[6], p::hello_ack_airplay(ack)), (p::MODE_PROJECTION, Some((0, 0))));
+        airplay_files_clear();
     }
 
     /// 2026-09-05: a host that heartbeats into a daemon that never saw it SUBSCRIBE (the L2-restart

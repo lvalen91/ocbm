@@ -1,0 +1,26 @@
+[package]
+name = "airplayd"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Box-side receiver of AirPlay-only mode (docs/ocbm/02_AIRPLAY_ONLY_MODE.md): mDNS, transient pairing, MFi auth-setup through the on-board coprocessor, RTSP control, and the tunnel of the still-encrypted streams plus their keys onto ocbmd's media seams. No FairPlay; no media is decrypted on the box."
+
+[[bin]]
+name = "airplayd"
+path = "src/main.rs"
+
+[dependencies]
+# Every primitive is an existing crate: SRP + TLV + HKDF (pairing), the encrypted control channel and
+# the request codec (rtsp), MFi-SAP (mfi) with the chip behind /tmp/carplay_mfi.lock (mfi-i2c-local).
+pairing = { path = "../../crates/vendor/pairing" }
+rtsp = { path = "../../crates/vendor/rtsp" }
+mfi = { path = "../../crates/vendor/mfi" }
+mfi-i2c-local = { path = "../../crates/vendor/mfi-i2c-local" }
+ocbm-proto = { path = "../../crates/ocbm-proto" }
+mdns-sd = "0.11"
+plist = "1"
+libc = "0.2"
+
+# Tests only: the host's side of the tunnel (decrypt what the daemon forwarded).
+[dev-dependencies]
+chacha20poly1305 = "0.10"

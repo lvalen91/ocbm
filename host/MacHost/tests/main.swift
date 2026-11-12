@@ -3136,6 +3136,264 @@ do {
           "streaming ⇒ no detail regardless of history (catches: stale banner under live video)")
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// Bundle identity — CT_HELLO_ACK tail + MGMT_INFO `bundle` (2026-11-11)
+// ════════════════════════════════════════════════════════════════════════════
+
+/// A CT_HELLO_ACK ctrl payload as ocbmd builds it (`box/ocbmd/src/main.rs` `hello_ack`): the 7 legacy
+/// bytes, then the 32-byte content_id and the state byte.
+func helloAck(id: [UInt8], state: UInt8) -> [UInt8] {
+    precondition(id.count == OCBM.bundleIdLen)
+    return [OCBM.ctHelloAck, OCBM.version, 0x3b, 0, 0, 0, 0] + id + [state]
+}
+
+section("Bundle identity — HELLO_ACK tail parse (40 B, legacy 7 B, zero id, states, cut ACKs)")
+do {
+    check(OCBM.helloAckBundleIdOff == 7 && OCBM.helloAckBundleStateOff == 39 && OCBM.helloAckLen == 40
+          && OCBM.bundleIdLen == 32, "tail layout pinned: id at 7..39, state at 39, 40 bytes")
+
+    let id: [UInt8] = (0..<32).map { 0xA0 + UInt8($0) }
+    let ack = helloAck(id: id, state: OCBM.bundleMixed)
+    check(ack.count == 40, "fixture is a 40-byte ACK")
+    let b = OCBM.helloAckBundle(ack)
+    check(b?.contentID == id, "40-byte ACK: content_id is bytes 7..39 verbatim")
+    check(b?.state == OCBM.bundleMixed, "40-byte ACK: state is byte 39")
+    check(b?.contentIDHex == "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+          "contentIDHex is 64 lowercase hex digits in wire order")
+
+    // A box older than the tail: the first 7 bytes only. No bundle information, and NOT an error.
+    check(OCBM.helloAckBundle(Array(ack[..<7])) == nil, "7-byte legacy ACK carries no bundle")
+
+    // Zero id = "none": parsed, but it spells as "" (MGMT_INFO's own spelling), never as 64 zeros.
+    let none = OCBM.helloAckBundle(helloAck(id: [UInt8](repeating: 0, count: 32), state: OCBM.bundleAbsent))
+    check(none != nil && none?.state == OCBM.bundleAbsent, "zero-id ACK still parses (state absent)")
+    check(none?.contentIDHex == "", "zero id spells as the empty string")
+    // One non-zero byte anywhere makes it an id (leading zeros are digits, not absence).
+    var lastOnly = [UInt8](repeating: 0, count: 32); lastOnly[31] = 0x01
+    check(OCBM.helloAckBundle(helloAck(id: lastOnly, state: OCBM.bundleOk))?.contentIDHex
+          == String(repeating: "0", count: 63) + "1", "an id with leading zero bytes keeps all 64 digits")
+
+    // Every state byte, and one from a newer box.
+    let names: [(UInt8, String)] = [(0, "absent"), (1, "ok"), (2, "mixed"), (3, "corrupt"), (4, "unchecked"),
+                                    (5, "unknown"), (0xFF, "unknown")]
+    for (byte, name) in names {
+        check(OCBM.helloAckBundle(helloAck(id: id, state: byte))?.state == byte, "state byte \(byte) round-trips")
+        check(OCBM.bundleStateName(byte) == name, "bundleStateName(\(byte)) == \(name)")
+    }
+
+    // Malformed / cut ACKs: every length short of 40 is "no tail", none of them traps.
+    for n in [0, 1, 2, 6, 8, 20, 38, 39] {
+        check(OCBM.helloAckBundle(Array(ack[..<n])) == nil, "\(n)-byte ACK has no bundle tail (and does not trap)")
+    }
+    // A longer ACK from a newer box: fields by offset, the rest ignored.
+    check(OCBM.helloAckBundle(ack + [UInt8](repeating: 0xEE, count: 8)) == b, "48-byte ACK parses the same tail")
+    // Not an ACK at all.
+    var notAck = ack; notAck[0] = OCBM.ctHello
+    check(OCBM.helloAckBundle(notAck) == nil, "a 40-byte payload with another opcode is not a bundle tail")
+}
+
+section("Bundle identity — OCBMClient retains + delivers it, and the handshake never depends on it")
+do {
+    // The id the bench box reported on 2026-11-11 starts ab02dea48b4c; the rest is filler.
+    let id = hb("ab02dea48b4c") + (0..<26).map { UInt8($0 + 1) }
+
+    /// Connect a fresh client, answer its HELLO with `ack`, and report what it did with it.
+    func handshake(_ ack: [UInt8], _ label: String) -> (bundle: BoxBundleIdentity?, calls: [BoxBundleIdentity?]) {
+        let t = FakeTransport()
+        let c = OCBMClient(transport: t)
+        let calls = Mutex<[BoxBundleIdentity?]>([])
+        c.onBoxBundle = { b in calls.withLock { $0.append(b) } }
+        check(c.boxBundle == nil, "\(label): no bundle before any ACK")
+        c.connect()
+        check(waitUntil(3.0) { ctrlCount(t, OCBM.ctHello) >= 1 }, "\(label): HELLO sent")
+        t.inject(ctrlFrame(ack))
+        check(waitUntil(3.0) { ctrlCount(t, OCBM.ctSubscribe) >= 1 }, "\(label): SUBSCRIBE follows the ACK")
+        check(waitUntil(1.0) { calls.withLock { $0.count } >= 1 }, "\(label): onBoxBundle fired for the ACK")
+        let out = (c.boxBundle, calls.withLock { $0 })
+        c.disconnect()
+        return out
+    }
+
+    let full = handshake(helloAck(id: id, state: OCBM.bundleOk), "40-byte ACK")
+    check(full.bundle?.contentIDHex.hasPrefix("ab02dea48b4c") == true && full.bundle?.state == OCBM.bundleOk,
+          "40-byte ACK: client retains id + state")
+    check(full.calls.last == .some(full.bundle), "40-byte ACK: callback value == retained value")
+
+    let legacy = handshake(Array(helloAck(id: id, state: OCBM.bundleOk)[..<7]), "7-byte legacy ACK")
+    check(legacy.bundle == nil && legacy.calls == [nil], "7-byte legacy ACK: delivered as nil, retained as nil")
+
+    let bare = handshake([OCBM.ctHelloAck], "bare-opcode ACK")
+    check(bare.bundle == nil && bare.calls == [nil], "bare-opcode ACK still acks, with no bundle")
+
+    let cut = handshake(Array(helloAck(id: id, state: OCBM.bundleCorrupt)[..<39]), "39-byte cut ACK")
+    check(cut.bundle == nil && cut.calls == [nil], "39-byte cut ACK: no bundle, handshake unaffected")
+
+    // Fault states do not gate anything either: the host still subscribes to a box that says CORRUPT.
+    let corrupt = handshake(helloAck(id: [UInt8](repeating: 0, count: 32), state: OCBM.bundleCorrupt), "corrupt ACK")
+    check(corrupt.bundle?.state == OCBM.bundleCorrupt && corrupt.bundle?.contentIDHex == "",
+          "corrupt + zero id is retained as reported")
+
+    // One client, successive ACKs: the latest wins, and a later tail-less ACK CLEARS the value (it
+    // must not keep vouching for an identity the box no longer reports).
+    let t = FakeTransport()
+    let c = OCBMClient(transport: t)
+    let calls = Mutex<[BoxBundleIdentity?]>([])
+    c.onBoxBundle = { b in calls.withLock { $0.append(b) } }
+    c.connect()
+    check(waitUntil(3.0) { ctrlCount(t, OCBM.ctHello) >= 1 }, "HELLO sent (successive-ACK case)")
+    t.inject(ctrlFrame(helloAck(id: id, state: OCBM.bundleOk)))
+    t.inject(ctrlFrame(helloAck(id: id, state: OCBM.bundleMixed)))
+    check(c.boxBundle?.state == OCBM.bundleMixed, "a second ACK replaces the retained state")
+    t.inject(ctrlFrame(Array(helloAck(id: id, state: OCBM.bundleOk)[..<7])))
+    check(c.boxBundle == nil, "a later tail-less ACK clears the retained identity")
+    check(calls.withLock { $0.map { $0?.state } } == [OCBM.bundleOk, OCBM.bundleMixed, nil],
+          "one callback per ACK, in wire order")
+    // A reconnect on the same client starts from "unknown" until the new link's ACK.
+    t.inject(ctrlFrame(helloAck(id: id, state: OCBM.bundleOk)))
+    check(c.boxBundle != nil, "identity retained again")
+    c.disconnect()
+    c.connect()
+    check(c.boxBundle == nil, "connect() forgets the previous link's identity")
+    c.disconnect()
+}
+
+section("Bundle identity — CCPAInfo JSON with and without `bundle`")
+do {
+    // box/ocbmd `box_info_json` shape. `host_name` is a key CCPAInfo does not declare (ignored).
+    func infoJSON(_ bundleMember: String) -> Data {
+        Data(("{\"bt_mac\":\"00:11:22:33:44:55\",\"wifi_mac\":\"00:11:22:33:44:66\",\"serial\":\"OCBM-TEST\","
+            + "\"name\":\"CarLink\",\"uptime_s\":42,\"rootfs_pct\":61,\"rootfs_free_kb\":20480,\"ssp\":true,"
+            + "\"hci_up\":true,\"wlan_ap\":false,\"transport\":\"\",\"host_present\":true,\"phone_present\":false,"
+            + "\"daemons\":{\"ocbmd\":true,\"iap2d\":false,\"airplayd\":false,\"carplay_wireless\":true},"
+            + "\"host_name\":\"carlink_macOS\",\"devices\":[\"AA:BB:CC:DD:EE:FF\"]" + bundleMember + "}").utf8)
+    }
+    func decode(_ bundleMember: String) -> CCPAInfo? { try? JSONDecoder().decode(CCPAInfo.self, from: infoJSON(bundleMember)) }
+    let cid = "ab02dea48b4c" + String(repeating: "5", count: 52)
+
+    // An older box: no `bundle` member at all. The snapshot decodes exactly as it always did.
+    let old = decode("")
+    check(old != nil, "MGMT_INFO without `bundle` still decodes")
+    check(old?.bundle == nil, "…and reports no bundle")
+    check(old?.serial == "OCBM-TEST" && old?.daemons.carplay_wireless == true && old?.devices == ["AA:BB:CC:DD:EE:FF"],
+          "…with every pre-existing field intact")
+
+    let full = decode(",\"bundle\":{\"commit\":\"8761597\",\"dirty\":false,\"profile\":\"ccpa\","
+        + "\"built\":\"2026-11-11T22:51:07Z\",\"content_id\":\"\(cid)\",\"state\":\"ok\"}")
+    check(full?.bundle == CCPAInfo.BundleInfo(commit: "8761597", dirty: false, profile: "ccpa",
+                                              built: "2026-11-11T22:51:07Z", content_id: cid, state: "ok"),
+          "MGMT_INFO with `bundle`: all six members decoded")
+
+    // The box's "nothing installed" object.
+    let absent = decode(",\"bundle\":{\"commit\":\"\",\"dirty\":false,\"profile\":\"\",\"built\":\"\",\"content_id\":\"\",\"state\":\"absent\"}")
+    check(absent?.bundle?.content_id == "" && absent?.bundle?.state == "absent", "absent bundle: empty id, state absent")
+
+    // Tolerance: unknown members, missing members, mistyped members. None may cost the snapshot.
+    let extra = decode(",\"bundle\":{\"content_id\":\"\(cid.uppercased())\",\"state\":\"mixed\",\"signer\":\"x\",\"n\":[1,2]}")
+    check(extra != nil, "unknown + missing `bundle` members do not fail the snapshot")
+    check(extra?.bundle?.content_id == cid, "content_id is lowercased")
+    check(extra?.bundle?.commit == "" && extra?.bundle?.dirty == nil, "missing members: \"\" and dirty unknown (never 'clean')")
+    let mistyped = decode(",\"bundle\":{\"commit\":7,\"dirty\":\"no\",\"content_id\":\"abc\",\"state\":3}")
+    check(mistyped != nil && mistyped?.serial == "OCBM-TEST", "mistyped `bundle` members do not fail the snapshot")
+    check(mistyped?.bundle == CCPAInfo.BundleInfo(), "mistyped members read as not reported; a short content_id is \"\"")
+    check(decode(",\"bundle\":{\"content_id\":\"\(String(repeating: "g", count: 64))\"}")?.bundle?.content_id == "",
+          "64 non-hex characters are not a content_id")
+    check(decode(",\"bundle\":{\"content_id\":\"\(String(repeating: "0", count: 64))\"}")?.bundle?.content_id == "",
+          "64 zeros is the wire's 'none', spelled \"\"")
+    check(decode(",\"bundle\":null")?.bundle == nil, "`bundle: null` is no bundle")
+    check(decode(",\"bundle\":\"garbage\"") != nil, "a non-object `bundle` does not fail the snapshot")
+    check(decode(",\"bundle\":[1,2,3]")?.serial == "OCBM-TEST", "an array `bundle` does not fail the snapshot")
+
+    // Through the client: a CH_MGMT MGMT_INFO frame reaches onBoxInfo with the bundle attached.
+    let t = FakeTransport()
+    let c = OCBMClient(transport: t)
+    let got = Mutex<CCPAInfo??>(nil)
+    c.onBoxInfo = { info in got.withLock { $0 = info } }
+    let json = infoJSON(",\"bundle\":{\"commit\":\"8761597\",\"dirty\":true,\"profile\":\"ccpa\",\"built\":\"\",\"content_id\":\"\(cid)\",\"state\":\"ok\"}")
+    t.inject(OCBM.frame(channel: OCBM.chMgmt, flags: OCBM.fSom | OCBM.fEom, seq: 0, payload: [OCBM.mgmtInfo] + [UInt8](json)))
+    check(waitUntil(1.0) { got.withLock { $0 } != nil }, "MGMT_INFO delivered via onBoxInfo")
+    let delivered = got.withLock { $0 } ?? nil
+    check(delivered?.bundle?.dirty == true && delivered?.bundle?.content_id == cid, "…carrying the bundle object")
+}
+
+section("Bundle identity — what the UI shows (state mapping, attention, ACK/INFO reconciliation)")
+do {
+    typealias S = BoxBundleSummary
+    // State byte and state name land on the same cases.
+    let pairs: [(UInt8, String, S.State, S.State.Severity)] = [
+        (0, "absent", .absent, .neutral), (1, "ok", .ok, .good), (2, "mixed", .mixed, .fault),
+        (3, "corrupt", .corrupt, .fault), (4, "unchecked", .unchecked, .caution),
+    ]
+    for (byte, name, state, severity) in pairs {
+        check(S.State(wire: byte) == state && S.State(name: name) == state, "state \(name): byte and name agree")
+        check(state.name == name && state.severity == severity, "state \(name): name + severity")
+    }
+    check(S.State(wire: 9) == .unknown("unknown (9)") && S.State(wire: 9).severity == .caution,
+          "an unknown state byte is shown with its value, as a caution")
+    check(S.State(name: "quarantined") == .unknown("quarantined"), "an unknown state name is shown verbatim")
+    check(S.State(name: "") == .unknown("unknown"), "a missing state name is 'unknown', never 'ok'")
+    check(S.State(name: "OK") != .ok, "state names are the protocol's exact words (case-sensitive)")
+    // The faults cannot be read as fine: upper-cased, flagged.
+    check(S.State.mixed.displayName == "MIXED" && S.State.corrupt.displayName == "CORRUPT", "fault states are upper-cased")
+    check(S.State.ok.displayName == "ok" && S.State.unchecked.displayName == "unchecked", "non-fault states keep the wire word")
+
+    let cidA = "ab02dea48b4c" + String(repeating: "5", count: 52)
+    let cidB = "75e7c1c0ca73" + String(repeating: "6", count: 52)
+    func ack(_ hex: String, _ state: UInt8) -> BoxBundleIdentity {
+        BoxBundleIdentity(contentID: hex.isEmpty ? [UInt8](repeating: 0, count: 32) : hb(hex), state: state)
+    }
+    func info(_ hex: String, _ state: String, commit: String = "8761597", dirty: Bool? = false) -> CCPAInfo.BundleInfo {
+        CCPAInfo.BundleInfo(commit: commit, dirty: dirty, profile: "ccpa", built: "2026-11-11", content_id: hex, state: state)
+    }
+
+    check(S.merge(ack: nil, info: nil, infoIsNewer: false) == nil, "neither source: nothing to show (older box)")
+
+    // ACK only (connected, no GET_INFO yet): id + state, no provenance.
+    let a = S.merge(ack: ack(cidA, OCBM.bundleOk), info: nil, infoIsNewer: false)
+    check(a?.shortID == "ab02dea48b4c" && a?.state == .ok, "ACK only: 12-hex short id + state")
+    check(a?.commit == "" && a?.dirty == nil && a?.needsAttention == false && a?.attentionText == nil,
+          "ACK only: no commit, dirty unknown, nothing flagged")
+    check(a?.stateLine == "ok — verified at boot", "state line: word, then meaning")
+    let z = S.merge(ack: ack("", OCBM.bundleAbsent), info: nil, infoIsNewer: false)
+    check(z?.shortID == "—" && z?.contentID == "" && z?.state == .absent && z?.needsAttention == false,
+          "zero id: shown as —, absent is not a fault")
+
+    // INFO only (the snapshot outlived the session, or the ACK had no tail).
+    let i = S.merge(ack: nil, info: info(cidA, "ok"), infoIsNewer: true)
+    check(i?.shortID == "ab02dea48b4c" && i?.commit == "8761597" && i?.profile == "ccpa" && i?.built == "2026-11-11" && i?.dirty == false,
+          "INFO only: id, state and provenance from the snapshot")
+
+    // Both, same id, ACK newer: ACK's state, snapshot's provenance.
+    let same = S.merge(ack: ack(cidA, OCBM.bundleMixed), info: info(cidA, "ok"), infoIsNewer: false)
+    check(same?.state == .mixed && same?.commit == "8761597", "same id, ACK newer: ACK state + snapshot provenance")
+    check(same?.needsAttention == true && same?.attentionText == "bundle MIXED", "mixed is flagged")
+    // Both, snapshot newer: the snapshot wins outright.
+    let newer = S.merge(ack: ack(cidA, OCBM.bundleOk), info: info(cidA, "corrupt"), infoIsNewer: true)
+    check(newer?.state == .corrupt && newer?.attentionText == "bundle CORRUPT", "snapshot newer: its state wins")
+
+    // THE case this reconciliation exists for: re-flash + reconnect. The kept (stale) snapshot names
+    // bundle A with commit 8761597; the new link's ACK says bundle B. B must not inherit A's commit.
+    let reflash = S.merge(ack: ack(cidB, OCBM.bundleOk), info: info(cidA, "ok", dirty: true), infoIsNewer: false)
+    check(reflash?.shortID == "75e7c1c0ca73", "re-flash: the new link's id is shown")
+    check(reflash?.commit == "" && reflash?.profile == "" && reflash?.built == "" && reflash?.dirty == nil,
+          "re-flash: the old snapshot's commit/profile/built/dirty are NOT attached to the new id")
+    check(reflash?.needsAttention == false, "re-flash: the old bundle's DIRTY does not flag the new one")
+    // Two empty ids are not "the same bundle": no id, no attribution.
+    let noid = S.merge(ack: ack("", OCBM.bundleCorrupt), info: info("", "corrupt"), infoIsNewer: false)
+    check(noid?.commit == "" && noid?.state == .corrupt, "empty ids never match: provenance withheld")
+
+    // Dirty.
+    let dirty = S.merge(ack: ack(cidA, OCBM.bundleOk), info: info(cidA, "ok", dirty: true), infoIsNewer: true)
+    check(dirty?.state == .ok && dirty?.needsAttention == true && dirty?.attentionText == "bundle DIRTY",
+          "a dirty build is flagged even when the state is ok")
+    let both = S.merge(ack: nil, info: info(cidA, "mixed", dirty: true), infoIsNewer: true)
+    check(both?.attentionText == "bundle MIXED · DIRTY", "mixed + dirty: both named")
+    let unknownDirty = S.merge(ack: nil, info: info(cidA, "ok", dirty: nil), infoIsNewer: true)
+    check(unknownDirty?.needsAttention == false && unknownDirty?.dirty == nil, "dirty not reported: not flagged, not called clean")
+    let unchecked = S.merge(ack: ack(cidA, OCBM.bundleUnchecked), info: nil, infoIsNewer: false)
+    check(unchecked?.state.severity == .caution && unchecked?.needsAttention == false,
+          "unchecked: a caution in its row, not a fault badge")
+}
+
 runSettingsTests()
 
 // MARK: - Summary
