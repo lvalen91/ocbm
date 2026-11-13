@@ -25,7 +25,7 @@ class TapTargetTest {
         var d: File? = File(System.getProperty("user.dir") ?: ".").absoluteFile
         while (d != null) {
             for (prefix in listOf("", "host/gm_ccpa/")) {
-                val f = File(d, prefix + "netprobe_app/app/src/main/java/zeno/gmccpa/" + rel)
+                val f = File(d, prefix + "app/src/main/java/zeno/gmccpa/" + rel)
                 if (f.isFile) return f
             }
             d = d.parentFile

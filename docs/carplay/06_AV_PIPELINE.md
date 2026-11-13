@@ -784,7 +784,7 @@ that advertises the stock per-type latencies below.
 
 #### 10.4 · What gm_ccpa does differently (rewritten 2026-10-08 against the v5.8/v5.9 working tree; the 2026-10-07 table described the pre-v5.8 build)
 
-Paths are under `host/gm_ccpa/netprobe_app/app/src/main/java/zeno/gmccpa/av/`.
+Paths are under `host/gm_ccpa/app/src/main/java/zeno/gmccpa/av/`.
 
 | Area | Stock GM/Cinemo | gm_ccpa now |
 |---|---|---|

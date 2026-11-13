@@ -67,7 +67,7 @@ import plistlib
 import sys
 from pathlib import Path
 
-PLIST = Path(__file__).resolve().parent.parent / "netprobe_app/app/src/main/assets/info.bplist"
+PLIST = Path(__file__).resolve().parent.parent / "app/src/main/assets/info.bplist"
 
 # The device-proven-good second area on a 2400x960 panel. See module docstring.
 AREA2 = {"x": 188, "y": 118, "w": 1416, "h": 842}

@@ -2,7 +2,7 @@
 #
 # FORMAT (owned by plan v5.8 unit V6 / VC):
 #   * one fully-qualified test class per line, e.g. zeno.gmccpa.av.FgsGateTest;
-#   * its source MUST be netprobe_app/app/src/test/java/<package path>/<Class>.kt — the path is
+#   * its source MUST be app/src/test/java/<package path>/<Class>.kt — the path is
 #     derived from the name, so a class whose file is elsewhere is a gate failure, not a skip;
 #   * `#` starts a comment (whole line or trailing); blank lines are ignored;
 #   * a class may appear once only (a duplicate fails the gate).

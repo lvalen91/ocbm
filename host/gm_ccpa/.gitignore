@@ -1,8 +1,8 @@
 # Build artifacts
 native/carplay-jni/target/
-netprobe_app/app/build/
-netprobe_app/build/
-netprobe_app/.gradle/
+/app/build
+/build
+/.gradle
 **/*.class
 
 # OS
@@ -33,11 +33,10 @@ logs/
 # written for tool-regenerated output, which this is not. If a genuinely regenerated audit lands
 # here later, ignore that file by name — not the directory.
 
-# Dirty builds are reproducible from their sha and are not rollback targets — only the sha-clean
-# stamps and the golden v*.apk are worth keeping.
+# Dirty builds are reproducible from their sha and are not rollback targets.
 apk/*-dirty.apk
 
-# Keep: apk/ (golden rollback artifacts), evidence/, docs/, reference/, tools/, source
+# Tracked: docs/, reference/, tools/, source. apk and evidence are ignored below (apk is a symlink into $OCBM_CACHE).
 
 # Convenience symlink rewritten by every build — tracking it made every build dirty the
 # tree, which made build_apk.sh stamp -dirty on clean checkouts and rendered the flag useless.

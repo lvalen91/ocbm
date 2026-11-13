@@ -1,4 +1,4 @@
-# R8/ProGuard keep-rules for netprobe.
+# R8/ProGuard keep-rules for gm_ccpa.
 #
 # The Rust JNI core (native/carplay-jni/src/lib.rs) resolves these callback methods by STRING NAME
 # via jni::call_method ("copyCertificate", "createSignature"). R8 renaming/stripping them breaks the

@@ -33,7 +33,7 @@ android {
     sourceSets {
         // The canonical build (build_apk.sh) builds and stores this .so; mirror the path here so a
         // Gradle build at least packages whatever was last cargo-built rather than shipping none.
-        main.jniLibs.srcDirs += ["${rootProject.projectDir}/../native/jniLibs"]
+        main.jniLibs.srcDirs += ["${rootProject.projectDir}/native/jniLibs"]
         // plan v5.9 MIC — mirrors tools/build_apk.sh's GMCCPA_BENCH switch (documentation only;
         // Gradle is not the build): exactly one of the two BenchHooks source dirs is compiled.
         main.java.srcDirs += [(System.getenv('GMCCPA_BENCH') == '1') ? 'src/bench/java' : 'src/nobench/java']

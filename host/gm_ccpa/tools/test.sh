@@ -82,7 +82,7 @@ NDK_BIN="$HOME/Library/Android/sdk/ndk/30.0.15729638/toolchains/llvm/prebuilt/da
 # source is a FAIL, never a skip: a gate that runs zero tests is a silent green.
 echo "=== Tier-0: JVM unit tests (tools/jvm_tests.txt) ==="
 JVM_LIST="$GM_ROOT/tools/jvm_tests.txt"
-APP_SRC="$GM_ROOT/netprobe_app/app/src"
+APP_SRC="$GM_ROOT/app/src"
 SDK="$HOME/Library/Android/sdk"
 ANDJAR="$SDK/platforms/android-32/android.jar"
 CARJAR="$SDK/platforms/android-32/optional/android.car.jar"
@@ -94,7 +94,7 @@ HAMCREST="$(find "$GRADLE_FILES/org.hamcrest" -name 'hamcrest-core-1.3.jar' 2>/d
 for p in "$JVM_LIST" "$ANDJAR" "$CARJAR" "$KC" "$STDLIB" "$JUNIT" "$HAMCREST"; do
     [ -n "$p" ] && [ -e "$p" ] || {
         echo "[Tier-0] FAIL: JVM test input missing: '${p}' (junit 4.13.2 / hamcrest-core 1.3 come"
-        echo "  from the Gradle cache — one Android Studio sync of netprobe_app fetches them)."
+        echo "  from the Gradle cache — one Android Studio sync of host/gm_ccpa fetches them)."
         exit 1
     }
 done

@@ -60,7 +60,7 @@ import plistlib
 import sys
 from pathlib import Path
 
-PLIST = Path(__file__).resolve().parent.parent / "netprobe_app/app/src/main/assets/info.bplist"
+PLIST = Path(__file__).resolve().parent.parent / "app/src/main/assets/info.bplist"
 
 # Apple's full emission order. Index here is meaningful only as documentation of that order.
 APPLE_ORDER = [

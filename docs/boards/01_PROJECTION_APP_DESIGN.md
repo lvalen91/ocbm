@@ -332,7 +332,7 @@ around it.** Nothing in this document depends on it.
 
 ## 6. Our starting point
 
-**`host/CarlinkAndroid` — not `gm_ccpa`.** `gm_ccpa/netprobe_app` is an instrument that grew into a
+**`host/CarlinkAndroid` — not `gm_ccpa`.** `gm_ccpa/app` is an instrument that grew into a
 receiver; its UI is scaffolding and explicitly not a design reference.
 
 CarlinkAndroid already has the right shape:

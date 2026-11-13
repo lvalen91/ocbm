@@ -5,11 +5,10 @@ discovery to live streaming. [`04_SYSTEM_MODEL.md`](04_SYSTEM_MODEL.md) says wha
 says what happens, in what order, and what breaks if the order is wrong. Treat it as the implementation
 checklist for the head-unit app.
 
-**Source:** traced across `ocbm/` — the `wireless`, `receiver`,
-`pairing`, `mfi`, `rtsp` and `metadata` crates, plus that project's on-hardware captures
-(`docs/ops/captures/`) and unredacted iPhone-side logs (`scratchpad/syslog_profile.log`, 2026-08-02, iOS 27).
-Timings and failure modes below are measured, not inferred, unless marked otherwise. iPhone-side log
-lines cannot be re-verified from this repo; they are kept as reported, not re-checked here.
+**Source:** traced across `ocbm/` (the `wireless`, `receiver`, `pairing`, `mfi`, `rtsp` and `metadata` crates),
+its on-hardware captures (`docs/ops/captures/`) and unredacted iPhone-side logs (2026-08-02, iOS 27; not retained in this tree). Timings and failure modes are measured unless marked otherwise; iPhone-side log lines are
+kept as reported and cannot be re-verified from this repo. Protocol detail owned by `ocbm/docs/carplay/` is
+summarised here; this doc keeps the order, the failure modes and the gm_ccpa split.
 
 ---
 
@@ -26,13 +25,16 @@ separate places per session (§10).
 
 ## 1. Phase A — Bluetooth: becoming visible *(stays on the CCPA)*
 
-| # | Stage | Detail |
-|---|---|---|
-| A1 | Radios wake | Off at boot. The app's OCBM `CT_SUBSCRIBE` is the trigger — `ocbmd` mirrors host presence, the box brings BT up on that edge. |
-| A2 | HCI bring-up | Three things make iOS classify this as a CarPlay accessory: CoD `0x200408`, the device name, and an EIR carrying two 128-bit UUIDs — iAP2 `00000000-deca-fade-deca-deafdecacaff` (AD type 0x06) and the CarPlay marker `d31fbf50-5d57-2797-a240-41cd484388ec` (AD type 0x07). Then `piscan`. |
-| A3 | SDP | Record named "Wireless iAPv2" on L2CAP PSM 1, pointing at RFCOMM channel 1. Not optional — without it the phone pairs, browses SDP, finds nothing, and disconnects. |
-| A4 | SSP pairing | Just-Works (NoInputNoOutput) by default, auto-accepted in-kernel. Link key persisted so later sessions skip this. Numeric-comparison mode exists but is experimental. |
-| A5 | RFCOMM | Inbound (phone dials ch 1), or outbound for a bonded phone. |
+- **A1 Radios wake.** Off at boot. The app's OCBM `CT_SUBSCRIBE` is the trigger: `ocbmd` mirrors host
+  presence and the box brings BT up on that edge.
+- **A2 HCI.** iOS classifies the box as a CarPlay accessory from CoD `0x200408`, the device name and an EIR with
+  two 128-bit UUIDs: iAP2 `00000000-deca-fade-deca-deafdecacaff` (AD 0x06) and the CarPlay marker
+  `d31fbf50-5d57-2797-a240-41cd484388ec` (AD 0x07). Then `piscan`.
+- **A3 SDP.** Record "Wireless iAPv2" on L2CAP PSM 1 pointing at RFCOMM channel 1. Mandatory: without it the
+  phone pairs, browses SDP, finds nothing and disconnects.
+- **A4 SSP.** Just-Works (NoInputNoOutput), auto-accepted in-kernel; link key persisted. Numeric comparison is
+  experimental.
+- **A5 RFCOMM.** Inbound (phone dials ch 1), or outbound for a bonded phone.
 
 > **Trap on the outbound path:** the phone's iAP2 service lives under a different UUID —
 > `02030302-1d19-415f-86f2-22a2106a0a77` — not the accessory's `…decacaff` (empty result on iOS), and
@@ -73,13 +75,13 @@ RFCOMM link stays up and idles — in the happy path only the phone ever closes 
 | # | Stage | Detail |
 |---|---|---|
 | C1 | Phone joins | `Sending iAP in-car wifi notification` → `setting WiFiManager to in-car` → `StartBonjourForWiFi … reason: initiated by CarKit` |
-| C2 | Advertise | `_airplay._tcp`, TXT: `deviceid`, `features`, `flags=0x4`, `model`, `protovers=1.0`, `pi`, `srcvers`. No `pk` key — the Ed25519 LTPK is exchanged inside pairing, not advertised. **Unverified-as-of-2026-09-09**: not traced into the TXT builder in `CarPlayRx.kt`; taken as reported, not re-checked against this repo's code. |
+| C2 | Advertise | `_airplay._tcp`, TXT: `deviceid`, `features`, `flags=0x4`, `model`, `protovers=1.0`, `pi`, `srcvers`. No `pk` key — the Ed25519 LTPK is exchanged inside pairing, not advertised. Built by `CarPlayRx.txtRecordFor`. |
 | C3 | **Dial out** | Discovery is bidirectional. The accessory also browses `_carplay-ctrl._tcp` and sends the phone `GET /ctrl-int/1/connect` with an `AirPlay-Receiver-Device-ID` header. Surfaces phone-side as `HandleControlServerEvent command 'connect'`. |
 | C4 | Phone connects in | Resolves SRV → connects TCP. ~8 ms for SRV + DNS + connect. |
 
-App-side: `CarPlayRx.kt` advertises `_airplay._tcp` while browsing `_carplay-ctrl._tcp`
-(`browseForPhone()`, called from `CarPlayRx.start()`) and dials the resolved peer with `GET /ctrl-int/1/connect`
-(the `dialsSinceInbound` KDoc, the `ORDER IS LOAD-BEARING` comment in `start()`, and the outbound-nudge section `rediscoverLoop()` / `browseForPhone()` / `dialOut()` → `connectOut()`); the phone's `_carplay-ctrl` port changes every session.
+App-side: `CarPlayRx` advertises `_airplay._tcp` while browsing `_carplay-ctrl._tcp` (`browseForPhone`, called
+from `start`) and dials the resolved peer (`rediscoverLoop` → `dialOut` → `connectOut`; see the `ORDER IS
+LOAD-BEARING` comment in `start`). The phone's `_carplay-ctrl` port changes every session.
 
 > **The `features` TXT value is load-bearing.** Its high word bit 32 (Car) is what makes iOS open RTSP
 > back to the advertised port. Drop it and the phone answers the connect-out with 200 OK and never opens
@@ -98,19 +100,17 @@ App-side: `CarPlayRx.kt` advertises `_airplay._tcp` while browsing `_carplay-ctr
 | D4 | Encryption flips | See below |
 | D5 | `POST /auth-setup` | MFi-SAP. Chip calls #3 and #4. |
 
-**The encryption flip:** the pair-verify M4 response itself goes out in plaintext; ChaCha20-Poly1305
-starts with the next byte in either direction. Keys are HKDF-SHA512 off the ECDH secret, salt
-`Control-Salt`, and the read/write info strings are crossed over (named from the controller's viewpoint,
-so the server decrypts inbound with `Control-Write-…` and encrypts outbound with `Control-Read-…`).
-Frame format afterwards: `[len u16 LE][ciphertext][tag 16]`, AAD = the two length bytes, nonce = 4 zero
-bytes ‖ per-direction u64 LE counter. Outbound is split at 1 KiB; inbound over 16 KiB is rejected before
-decrypt.
+**The encryption flip:** the pair-verify M4 response goes out in plaintext; ChaCha20-Poly1305 starts with the next
+byte in either direction. Keys: HKDF-SHA512 off the ECDH secret, salt `Control-Salt`, read/write info strings
+crossed over (named from the controller's side: the server decrypts inbound with `Control-Write-…` and
+encrypts outbound with `Control-Read-…`). Frame: `[len u16 LE][ciphertext][tag 16]`, AAD = the two length
+bytes, nonce = 4 zero bytes ‖ per-direction u64 LE counter; outbound split at 1 KiB, inbound over 16 KiB
+rejected before decrypt.
 
-`/auth-setup` runs inside the already-encrypted channel — an MFi attestation layered on top of
-pair-verify, not a bootstrap for it. Sequence: X25519 ECDH → SHA-1-derived AES-128-CTR key/IV →
-`create_signature(SHA1(ourPK‖peerPK))` **then** `copy_certificate()` (signature first,
-`exchange_with_secret` in `ocbm/crates/vendor/mfi/src/sap.rs`) → M2 of 1113 bytes, with the certificate
-in the clear and only the signature AES-encrypted.
+`/auth-setup` runs inside the encrypted channel, layered on pair-verify: X25519 ECDH → SHA-1-derived AES-128-CTR
+key/IV → `create_signature(SHA1(ourPK‖peerPK))` **then** `copy_certificate()` (signature first;
+`exchange_with_secret` in `ocbm/crates/vendor/mfi/src/sap.rs`) → 1113-byte M2, certificate in the clear, only
+the signature AES-encrypted.
 
 ---
 
@@ -128,13 +128,11 @@ it before the tunnel opens lets an inbound `modesChanged` race in and trigger a 
 event channel gets its own keys — salt `Events-Salt`, no read/write crossover, because the receiver is
 the HTTP client on that socket.
 
-Real negotiation, measured 2026-08-02: the phone proposed 14 feature keys, six survived — `hevc`,
-`altScreen`, `viewAreas`, `cornerMasks`, `iAPChannel`, `sessionManagement`. Not negotiated: `uiContext`,
-`focusTransfer`, `h.264Level5.1`, `mainBuffered`, `enhancedSiri`, `vehicleStateProtocol`,
-`videoPlayback`, `logTransfer`.
-
-**HEVC needs three gates:** a `hevcInfo` key present in `/info` (an empty dict — presence is the signal),
-`hevc` present in the SETUP feature array, then iOS streams `hvc1`.
+Measured 2026-08-02: the phone proposed 14 feature keys, six survived (`hevc`, `altScreen`, `viewAreas`,
+`cornerMasks`, `iAPChannel`, `sessionManagement`); not negotiated: `uiContext`, `focusTransfer`,
+`h.264Level5.1`, `mainBuffered`, `enhancedSiri`, `vehicleStateProtocol`, `videoPlayback`, `logTransfer`.
+**HEVC needs three gates:** a `hevcInfo` key in `/info` (an empty dict; presence is the signal), `hevc` in the
+SETUP feature array, then iOS streams `hvc1`.
 
 ---
 
@@ -145,35 +143,23 @@ re-SETUPs MainAudio on every Siri turn.
 
 | Type | Purpose | Transport | In R14G17? |
 |---|---|---|---|
-| **100** | MainAudio — bidirectional; voice / telephony / speechRecognition / alert, and the mic uplink | UDP RTP | ✅ |
-| **101** | AltAudio — second low-latency sink | UDP RTP | ✅ |
-| **102** | MainHighAudio — high-latency media (AAC-LC). Only type given a `controlPort` (RTCP) | UDP RTP + RTCP | ✅ |
-| **110** | MainScreen | TCP (accessory binds, phone connects out) | ✅ |
-| **111** | AltScreen / instrument cluster | TCP | ❌ post-2017 |
-| **130** | DataStream / RemoteControlSession — the iAP2 carrier | TCP | ❌ post-2017 |
-| **106** | AuxOutAudio — dedicated Siri downlink, opened at Siri launch | — | ❌ post-2017 |
-| **107** | AuxInAudio — the Enhanced Siri car-mic uplink (paired with 106 as `GeneralAudio`) | — | ❌ post-2017 |
-| — | MainBuffered — music/media, distinct from 102 | TCP | ❌ post-2017 |
+| **100** | MainAudio — bidirectional; voice / telephony / speechRecognition / alert, and the mic uplink | UDP RTP | yes |
+| **101** | AltAudio — second low-latency sink | UDP RTP | yes |
+| **102** | MainHighAudio — high-latency media (AAC-LC). Only type given a `controlPort` (RTCP) | UDP RTP + RTCP | yes |
+| **110** | MainScreen | TCP (accessory binds, phone connects out) | yes |
+| **111** | AltScreen / instrument cluster | TCP | no (post-2017) |
+| **130** | DataStream / RemoteControlSession — the iAP2 carrier | TCP | no (post-2017) |
+| **106** | AuxOutAudio — dedicated Siri downlink, opened at Siri launch | — | no (post-2017) |
+| **107** | AuxInAudio — the Enhanced Siri car-mic uplink (paired with 106 as `GeneralAudio`) | — | no (post-2017) |
+| — | MainBuffered — music/media, distinct from 102 | TCP | no (post-2017) |
 
-> R14G17 `AirPlayCommon.h:251-255` defines only four stream types (100, 101, 102, 110). Everything else
-> is post-2017, evidenced by `CarPlaySDK` symbols in the Simulator, not the header —
-> `_AuxInSetup`/`_AuxInTearDown`/`AudioStreamAuxInStart`, `_BufferedAudioSetup`/`_BufferedAudioThread`,
-> `_MainAltAudioSetup`/`_MainAltAudioThread`. Recorded in `ocbm/docs/carplay/03_SDK_GROUND_TRUTH.md` §7 "Audio + Siri", under **Stream types**. Cited by section, not line: that corpus is being cut and line anchors do not survive it.
-> Silence in a 2017 source is not evidence of absence — that assumption hid the missing type-130 channel
-> for that project's entire history.
+> R14G17 `AirPlayCommon.h:251-255` defines only types 100, 101, 102, 110; the rest are post-2017, evidenced by
+> `CarPlaySDK` symbols (`ocbm/docs/carplay/03_SDK_GROUND_TRUTH.md` §7 "Audio + Siri", **Stream types**). Silence
+> in a 2017 source is not evidence of absence; that assumption hid the missing type-130 channel upstream.
 
-### `mainBuffered` — the one audio feature Apple actually shipped
-
-`wwdc2023-10150.txt:136-142`: "The audio is provided as an additional stream to the vehicle system,
-called main buffered audio. The CarPlay communication plugin contains an up to 2 minute audio buffer,
-where audio from iPhone is streamed in faster than real-time speeds… audio content can continue playback
-through an intermittent disconnection."
-
-The buffer lives in the head unit — i.e. the app — not on the phone. Every buffered symbol in
-`CarPlaySDK` is receiver-side, and the decisive one is RTSP verb `FLUSHBUFFERED` — the phone must be
-able to tell the receiver to discard what it already sent on a skip or seek, which only makes sense if
-the receiver holds it. Worth doing here: a `br0` glitch of a few seconds becomes inaudible instead of a
-dropout. Full evidence: `ocbm/docs/carplay/06_AV_PIPELINE.md`.
+`mainBuffered` (receiver-side buffer of up to 2 minutes, RTSP `FLUSHBUFFERED`) is not built and must not be
+advertised: [`13_AUDIO_ROUTING.md`](13_AUDIO_ROUTING.md) §5; evidence in `ocbm/docs/carplay/06_AV_PIPELINE.md`
+(`mainBuffered`).
 
 Concurrently with the A/V SETUPs, the second iAP2 handshake runs over stream 130 — DETECT/SYN, then
 `0xAA00`→`0xAA01` (**chip call #5**), `0xAA02`→`0xAA03` (**chip call #6**), `0x1D00`→`0x1D01`→`0x1D02`,
@@ -183,38 +169,29 @@ two pipelines interleave; neither waits for the other.
 Streams are keyed individually: HKDF salt `DataStream-Salt<streamConnectionID>`. Except stream 130,
 which carries no `streamConnectionID` — its salt uses the SETUP `seed` instead.
 
-> **Audio ceiling: stereo AAC-LC 48 kHz**, a wire-format limit. Apple's `kAirPlayAudioFormat_*` bitmask
-> (R14G17 `AirPlayCommon.h`, 34 defines) has no channel count above 2 and no ALAC, AC-3/E-AC-3, or
-> object-based entry — no way to express Atmos or multichannel on this protocol in any SDK revision
-> available. Best media path: type 102, AAC-LC 48 kHz stereo. Spatial-audio-mixed content still plays —
-> the phone renders it down to stereo first. Full enum + provenance:
+> **Audio ceiling: stereo AAC-LC 48 kHz** (wire-format limit: no channel count above 2, no ALAC, AC-3/E-AC-3
+> or object-based format; spatial content is rendered down to stereo). Best media path: type 102. Enum:
 > `ocbm/docs/carplay/06_AV_PIPELINE.md`.
 
 ---
 
 ## 7. Phase G — steady state
 
-**Video:** repeating `[128-byte header][body]`. Opcode 0 = encrypted AVCC frame — ChaCha20-Poly1305 with
-the entire 128-byte header as AAD and a per-VideoFrame u64 LE counter nonce. Opcode 1 = plaintext config
-blob (auto-detect avcC vs hvcC); does not advance the counter.
+**Video:** repeating `[128-byte header][body]`. Opcode 0 = encrypted AVCC frame (ChaCha20-Poly1305, the whole
+header as AAD, per-VideoFrame u64 LE counter nonce); opcode 1 = plaintext config blob (auto-detect avcC vs
+hvcC), which does not advance the counter. **Audio:** RTP over UDP, `[12-byte RTP header][ciphertext][tag 16]
+[nonce 8]`, AAD = RTP bytes 4..12 (`ts‖ssrc`), minimum packet 36 bytes. Detail:
+`ocbm/docs/carplay/06_AV_PIPELINE.md`.
 
-**Audio:** RTP over UDP — `[12-byte RTP header][ciphertext][tag 16][nonce 8]`, AAD = RTP bytes 4..12
-(`ts‖ssrc`) for any modern iOS client. Minimum valid packet is 36 bytes.
+**Also flowing:** mic RTP uplink (type-100 SETUP with `input=true`), NTP time-sync (request 210, 32-byte
+response 211), keepAlive beacons, HID reports on the event channel, RCS metadata on stream 130. Soak
+(2026-07-17, before the type-130 tunnel; A/V durability only): 30.5 min, 58,068 video + 93,314 audio frames
+(~32 video, ~51 audio fps), zero failures.
 
-**Also flowing:** mic RTP uplink (armed by a type-100 SETUP with `input=true`), NTP time-sync (request
-type 210 → 32-byte response type 211), keepAlive beacons, HID reports outbound on the event channel, and
-RCS metadata on stream 130.
-
-Soak evidence (2026-07-17, before the type-130 tunnel existed — covers A/V durability only, not the
-metadata plane): 30.5 minutes, 58,068 video + 93,314 audio frames, zero failures, steady ~32 video and
-~51 audio fps.
-
-**Teardown** is partial or full, distinguished by presence *and non-emptiness* of `streams[]` — a
-non-empty array stops just those streams and keeps the session; absent, non-array, or an **empty**
-array means full teardown
-(`fn teardown`, `ocbm/crates/vendor/receiver/src/session.rs`). Treating `streams: []` as partial is a
-real bug that leaks every stream thread — in Rust, `as_array()` returns `Some(&[])` for it, so test the
-length, not the `Option`.
+**Teardown** is partial or full, distinguished by presence *and non-emptiness* of `streams[]`: a non-empty
+array stops just those streams and keeps the session; absent, non-array or **empty** means full teardown
+(`fn teardown`, `ocbm/crates/vendor/receiver/src/session.rs`). Treating `streams: []` as partial leaks every
+stream thread; in Rust `as_array()` returns `Some(&[])` for it, so test the length, not the `Option`.
 
 ---
 
@@ -229,9 +206,9 @@ Each of these is an observed, reproducible hard failure. Highest-value section h
 2. **The SETUP-130 response must carry a non-zero int64 `streamID`.** Without it the phone logs
    `Failed to obtain transport token from SETUP response: -6727 kNotFoundErr` and its entire outbound
    path to the accessory ceases to exist. Observed 20+ times in one failing session.
-3. **Accessory→phone RCS frames must be stamped `'cmnd'`, not `'comm'`** (phone→accessory direction —
-   `const MSGTYPE_COMM` / `const MSGTYPE_CMND`, `datastream.rs`). The wrong 4CC is dropped silently, with no logging on either side, returning
-   `noErr`. Symptom: the phone parks in FSM state `Pending` retransmitting SYN-ACK forever.
+3. **Accessory→phone RCS frames must be stamped `'cmnd'`, not `'comm'`** (`'comm'` is the phone→accessory
+   direction; `MSGTYPE_COMM` / `MSGTYPE_CMND`, `datastream.rs`). The wrong 4CC is dropped silently, with no
+   logging on either side, returning `noErr`. Symptom: the phone parks in FSM state `Pending` retransmitting SYN-ACK forever.
 4. **Declaring a `Start*` iAP2 message id without its `Stop*` partner rejects the whole Identify** —
    Apple's condition name is `OptionalMsgNotValidWithoutRequiredMsgs`.
 5. **Tunnel `MaxPacketSize` must be `0xFFFF`**, not 4096 — the phone's SYN-ACK carries `FF FF`.
@@ -249,19 +226,13 @@ Each of these is an observed, reproducible hard failure. Highest-value section h
    loudly.
 10. **Never advertise a stream you haven't implemented.** Rules 1 and 9 combined: advertise
     `enhancedSiri` and iOS will SETUP AuxIn 107 and AuxOut 106; advertise `mainBuffered` and it will
-    SETUP the buffered stream. `ocbm/docs/wireless/00_WIRELESS_CARPLAY.md (was docs/29:99`) names the trap — "AuxOutAudio, AuxInAudio and
-    MainBuffered are the same shape today" as the type-130 bug. Implement, then advertise.
+    SETUP the buffered stream. Same shape as the type-130 bug. Implement, then advertise.
 
-    Weigh the two differently. **`mainBuffered` is worth doing** — a receive buffer and a
-    `FLUSHBUFFERED` handler, and a Wi-Fi glitch stops being audible. **`enhancedSiri` is a DSP project,
-    not a protocol one.** Per `wwdc2019-252.txt:97-134` it obligates an always-on microphone under
-    continuous processing, an echo canceller + noise reduction stage whose echo reference is the car's
-    own speaker output, a couple-of-seconds historical ring buffer, two mandatory detectors (keyword and
-    voice-activity, iOS chooses which), and a three-way mixer for media + Siri prompts + route guidance.
-    The car only does first-pass detection; iOS re-verifies and can reject it
-    (`kAFErrorSpeechAbortedFalseVoiceTrigger`). None of that is plausible from an unprivileged app.
-    **Classic Siri via the steering-wheel button needs none of it** — no AuxIn, no feature gate, the
-    phone's own mic (`ocbm/docs/wireless/00_WIRELESS_CARPLAY.md` §5). Ship Classic; skip Enhanced.
+    `enhancedSiri` is a DSP project, not a protocol one: always-on mic under continuous processing, an echo
+    canceller referenced to the car's own speaker output, a historical ring buffer, keyword and voice-activity
+    detectors, and a three-way mixer (`ocbm/docs/carplay/03_SDK_GROUND_TRUTH.md` §7 "Audio + Siri");
+    implausible from an unprivileged app. Classic Siri via the steering-wheel button needs none of it (`ocbm/docs/carplay/05_METADATA_AND_CONTROLS.md`,
+    "Mic uplink is NOT required for the button"). Ship Classic; skip Enhanced.
 
 ---
 
@@ -269,21 +240,13 @@ Each of these is an observed, reproducible hard failure. Highest-value section h
 
 Wireless reconnect of a known device, iPhone-side log, 2026-08-02:
 
-| Phase | Duration |
-|---|---|
-| BT service connect → fast-reconnect | 51 ms |
-| Fast-reconnect → `connect` command (Wi-Fi bring-up + Bonjour) | 3.40 s |
-| Bonjour SRV + DNS + TCP connect | 8 ms |
-| pair-verify (both round trips) | 120 ms |
-| `POST /auth-setup` (MFi-SAP) | **1.91 s** ← the slowest step by far |
-| SETUP phase 1 | 8.8 ms |
-| `GET /info` (36,635 B response) | 92 ms |
-| RECORD | 14.6 ms |
-| TCP connect → RECORD answered | 2.19 s |
+BT service connect → fast-reconnect 51 ms; fast-reconnect → `connect` command (Wi-Fi bring-up + Bonjour) 3.40 s;
+Bonjour SRV + DNS + TCP connect 8 ms; pair-verify (both round trips) 120 ms; `POST /auth-setup` (MFi-SAP)
+**1.91 s**, the slowest step; SETUP phase 1 8.8 ms; `GET /info` (36,635 B) 92 ms; RECORD 14.6 ms; TCP connect →
+RECORD answered 2.19 s.
 
-(Session-start → first-video-frame is not measured anywhere in the corpus — the 2026-08-02 session died
-at RECORD on the cornerMasks error and never streamed, and the older captures are untimestamped. Don't
-quote a number for it.)
+That session died at RECORD on the cornerMasks error and never streamed. Inbound to first rendered frame on a
+later session: **2.598 s** (`RECORD done` to first frame 875 ms), [`12_OBSERVED_FLOW.md`](12_OBSERVED_FLOW.md).
 
 Phone-enforced timeouts: 10 s on every normal request, 1 s on teardown, 30 s temporary assertion on the
 `connect` command.
@@ -302,28 +265,30 @@ Phone-enforced timeouts: 10 s on every normal request, 1 s on teardown, 30 s tem
 | 3, 4 | Phase D5 — `/auth-setup` MFi-SAP sign + cert | **app** | **OCBM `CH_MFI`** |
 | 5, 6 | Phase F — tunnel iAP2 cert + sign | **app** | **OCBM `CH_MFI`** |
 
-The `local-mfi` feature gate must cut inside `iap_tunnel.rs` at its two chip call sites
-(`fn mfi_cert` and `fn mfi_sign`, where the `#[cfg(feature = "local-mfi")]` arms now sit; stale line cite, re-anchored 2026-09-10 — the old range is now `handle_one` and the remote-signer docs), not at the module boundary — gating the module out would remove the
-metadata/controls plane entirely.
+The `local-mfi` feature gate must cut inside `iap_tunnel.rs` at its two chip call sites (`fn mfi_cert`,
+`fn mfi_sign`: the `#[cfg(feature = "local-mfi")]` arms), not at the module boundary; gating the module out
+would remove the metadata/controls plane.
 
-**OCBM relay latency is a non-issue.** `/auth-setup` costs 1.91 s end-to-end, essentially all of it the
-coprocessor's signature poll. A USB round trip of a few hundred bytes adds noise against a 10 s
-phone-side budget.
+**OCBM relay latency is a non-issue.** `/auth-setup` costs 1.91 s end to end, essentially all of it the
+coprocessor's signature poll; a USB round trip of a few hundred bytes is noise against the phone's 10 s request
+timeout.
 
-**But budget the pathological case.** The poll is bounded at 2.5 s by a wall-clock deadline, not by
-firmware — it exists because an older iteration-count loop was observed running ~7.1 s under chip NAK.
-**That deadline is box-side, not the app's:** `const SIGN_POLL_DEADLINE = Duration::from_millis(2500)`
-inside `Mfi::sign()` in `box/ocbmd/src/main.rs` — `ocbmd`'s own I2C driver — reached from `handle_mfi`
-via `self.mfi.as_ref().and_then(|m| m.sign(…))`. It is `ocbmd` polling its local I2C chip, on the box,
-underneath the relay. (`crates/vendor/mfi-i2c-local/src/lib.rs` `sign()` carries an identical
-`SIGN_POLL_DEADLINE`, but that crate serves `mfid` and the reference `carplayd` (through `receiver`'s
-`local-mfi` feature), so it is not on the `CH_MFI` path this app hits.) The app's own OCBM driver sets
-separate, larger budgets on top of that relay call — `OcbmClient.mfiCertificate(timeoutMs = 12_000)` and
-`OcbmClient.mfiSign(timeoutMs = 15_000)` — which bound the USB round trip plus the box's own 2.5 s poll,
-not a second poll of their own.
-With up to 3 MFi retries the box-side poll is ~6.3 s against the phone's 10 s request timeout. The
-relay does not add meaningfully to this, but it leaves less headroom than the happy-path number
-suggests.
+**Budgets, outermost to innermost.**
+- Box: `ocbmd`'s own I2C driver polls the chip under a 2.5 s wall-clock deadline (`SIGN_POLL_DEADLINE` in
+  `Mfi::sign()`, `box/ocbmd/src/main.rs`), reached from `handle_mfi`. It replaced an iteration-count loop
+  observed running ~7.1 s under chip NAK. `crates/vendor/mfi-i2c-local` carries an identical constant but
+  serves `mfid` and the reference `carplayd`, not the `CH_MFI` path.
+- No in-box retry on this path. `mfi_retry` (3 attempts, `iap_tunnel.rs`) is compiled only under `local-mfi`, so
+  it does not apply to the app; on a `local-mfi` host the poll worst case is 3 x 2.5 s = 7.5 s.
+- App, `OcbmClient` budgets cover the USB round trip, the box poll and the lock wait out of one clock. Two tiers:
+  - `/auth-setup` (the `ControlServer` signer, `RemoteMfiSigner { fast: false }` in `native/carplay-jni`) and the
+    bring-up probe (`OcbmProbe.runAllLocked`) use the defaults, 12 s cert / 15 s sign (`MFI_CERT_TIMEOUT_MS`,
+    `MFI_SIGN_TIMEOUT_MS`). The relay serves the certificate from the link's `cachedCertificate()` once any read
+    succeeded, so the 12 s applies only to the first read; the signature is never cached.
+  - The iAP2 tunnel (`RemoteMfiSigner { fast: true }`, registered through `set_remote_signer`) uses the 4 s
+    `copyCertificateFast` / `createSignatureFast` (`OcbmProbe.mfiRelay`; cert ~1.1 s, sign ~1.7 s per
+    `iap_tunnel.rs`). Its chip ops run under the module-wide `SESSION` mutex, so the budget must stay short.
+  The phone's request timeout is 10 s.
 
 **Chip contention stays benign.** The six calls are sequenced by the protocol flow — B before D before
 F — and with no wired path there is no competing `iap2d`. Overlap is possible only if Bluetooth

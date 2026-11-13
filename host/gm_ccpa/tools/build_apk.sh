@@ -1,5 +1,5 @@
 #!/bin/bash
-# Gradle-free debug APK build for netprobe (single Kotlin file, no app resources).
+# Gradle-free debug APK build for gm_ccpa.
 # Repo-relative roots. This project lives at ocbm/host/gm_ccpa, so the tools resolve both
 # roots from their own location rather than hard-coding an absolute path — moving the checkout, or
 # having a second one, must not silently build against the wrong tree.
@@ -38,7 +38,7 @@ if [ "$KOTLINC_ACTUAL" != "$KOTLINC_EXPECTED" ]; then
     echo "WARNING: kotlinc is ${KOTLINC_ACTUAL:-unknown}, expected $KOTLINC_EXPECTED — bytecode may differ from earlier builds" >&2
 fi
 
-PROJ="$GM_ROOT/netprobe_app"
+PROJ="$GM_ROOT"
 # Compile the whole java/ source root. Every source class is zeno.gmccpa.* (one tree). The INSTALL
 # package is a separate thing — INSTALL_PKG below — and does not move any class. Kept as a source-root
 # compile rather than a package glob so a new subpackage never has to be added here to get built.
@@ -49,7 +49,7 @@ MAN="$PROJ/app/src/main/AndroidManifest.xml"
 # names (ocbm/docs/host/01_ANDROID_AND_AAOS.md); it was this app's package until 2026-09-08,
 # then zeno.gmccpa until 2026-10-15. The manifest keeps package="zeno.gmccpa" (= the Gradle namespace,
 # the class package) and `aapt2 link --rename-manifest-package` below sets the installed id, exactly as
-# Gradle's applicationId does (netprobe_app/app/build.gradle carries the same value). Classes, JNI
+# Gradle's applicationId does (app/build.gradle carries the same value). Classes, JNI
 # symbol names (Java_zeno_gmccpa_*) and every fully-qualified component android:name are unaffected.
 # Short am forms resolve against THIS name: use android.car.usb.handler/zeno.gmccpa.MainActivity,
 # never android.car.usb.handler/.MainActivity.

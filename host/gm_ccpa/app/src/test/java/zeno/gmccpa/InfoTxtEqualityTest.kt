@@ -15,9 +15,9 @@ class InfoTxtEqualityTest {
     private fun infoPlist(): Map<*, *> {
         var d: File? = File(System.getProperty("user.dir") ?: ".").absoluteFile
         while (d != null) {
-            val f = File(d, "netprobe_app/app/src/main/assets/info.bplist")
+            val f = File(d, "app/src/main/assets/info.bplist")
             if (f.isFile) return BPlist.parse(f.readBytes()) as Map<*, *>
-            val g = File(d, "host/gm_ccpa/netprobe_app/app/src/main/assets/info.bplist")
+            val g = File(d, "host/gm_ccpa/app/src/main/assets/info.bplist")
             if (g.isFile) return BPlist.parse(g.readBytes()) as Map<*, *>
             d = d.parentFile
         }

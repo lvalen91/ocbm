@@ -33,7 +33,7 @@ import plistlib
 import sys
 from pathlib import Path
 
-PLIST = Path(__file__).resolve().parent.parent / "netprobe_app/app/src/main/assets/info.bplist"
+PLIST = Path(__file__).resolve().parent.parent / "app/src/main/assets/info.bplist"
 
 ELD_16K_MONO = 1 << 26          # 0x04000000
 ELD_48K_MONO = 1 << 32          # 0x100000000

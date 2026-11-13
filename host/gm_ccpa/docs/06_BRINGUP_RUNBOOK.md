@@ -1,39 +1,36 @@
-# 06 — Bring-up runbook (device-proven through 2026-08-27; build/install/auto-claim/UI sections corrected 2026-10-08)
+# 06 — Bring-up runbook
 
-What is proven on hardware, and the exact commands to repeat it. Reading order for context:
-[`04_SYSTEM_MODEL.md`](04_SYSTEM_MODEL.md) → [`05_SESSION_FLOW.md`](05_SESSION_FLOW.md) → this file.
+What is proven on hardware, and the commands to repeat it. Context: [`04_SYSTEM_MODEL.md`](04_SYSTEM_MODEL.md)
+→ [`05_SESSION_FLOW.md`](05_SESSION_FLOW.md) → this file. Items not measured on the unit are marked UNVERIFIED
+or NOT bench-verified. Paths: `tools/test.sh`, `tools/build_apk.sh` are relative to `host/gm_ccpa`;
+`tools/ocbmcmd.py`, `tools/ocbm_push.sh`, `tools/ocbm_install.sh`, `tools/uart_push.sh` are relative to the
+`ocbm` root.
 
 ---
 
 ## 1. What is proven
 
-| Step | Status | Evidence |
-|---|---|---|
-| Ordinary Android app claims `0x1314:0x2d00` | done | `claimed interface 0 (class 0xff)` |
-| OCBM framing byte-compatible with the box | done | `CT_HELLO_ACK v1 caps=0x0000003f` |
-| `CT_SETTIME` applied | done | ack `status=0 (applied)` |
-| MFi certificate over `CH_MFI` | done | 945 bytes, `30 82 03 ad 06 09 2a 86 48 86 f7 0d 01 07 02` (PKCS#7 signedData) |
-| MFi signature over `CH_MFI` | done | 128 bytes (RSA-1024) |
-| `CH_MGMT` identity snapshot | done | `<box BT name A>`, serial `<box serial>` |
-| `CT_SUBSCRIBE` wakes the box radios | done | `host_present=1`, `hci0 UP RUNNING PSCAN ISCAN` |
-| Box raises no SoftAP (`wifi_ap: false`) | done | no `hostapd`, no `wlan0`, moal/mlan not loaded |
-| Box spawns no A/V layer | done | `airplayd absent` via `AIRPLAYD_BIN=/bin/true` |
-| iPhone completes the full BT handshake | done | see §2 |
-| App-supplied hotspot creds reach the `0x5703` source | done | `/etc/hostapd.conf` regenerated from the OCBM config |
-| `0x5703` hands the iPhone the VEHICLE hotspot | done | `replying 0x5703 (ssid="<vehicle SSID>" sec=Wpa2OrWpa3Personal)` |
-| iPhone joins `br0` | done | `num_connected_clients=1`, `<IPHONE_IP>` / `<MAC-1>` |
-| iPhone advertises `_carplay-ctrl._tcp` on br0 | done | `<phone name>._carplay-ctrl._tcp.local` |
-| App has direct unicast reach to the phone | done | ICMP true, TCP 62078 + 49152 OPEN |
-| App is the AirPlay endpoint, phone dials in | done | `POST /pair-setup` inbound — §6.1 |
-| SRP-6a pair-setup verified against a real iPhone | done | M4/M5 reached — §6.2 |
-| Rust core cross-compiles and runs on-unit | done | §6.3 |
-| Full A/V session (HEVC + AAC, both stream SETUPs) | done | §7.1 |
-| Untethered fault capture (no laptop attached) | done | §8 |
+Reproduced on the real truck (`gminfo37`, serial `<unit serial>`), not only the emulator. The keystone: `CH_MFI`
+works from an ordinary app UID, the most load-bearing unknown in the architecture.
 
-Reproduced on the real truck (`gminfo37`, serial `<unit serial>`), not only the emulator.
-
-**The keystone is proven.** `CH_MFI` works from an ordinary app UID — the single most load-bearing
-unknown in the architecture.
+| Step | Evidence |
+|---|---|
+| Ordinary app claims `0x1314:0x2d00`; OCBM framing byte-compatible | `claimed interface 0 (class 0xff)`; `CT_HELLO_ACK v1 caps=0x0000003f` |
+| `CT_SETTIME` applied | ack `status=0 (applied)` |
+| MFi certificate over `CH_MFI` | 945 bytes, `30 82 03 ad 06 09 2a 86 48 86 f7 0d 01 07 02` (PKCS#7 signedData) |
+| MFi signature over `CH_MFI` | 128 bytes (RSA-1024) |
+| `CH_MGMT` identity snapshot | `<box BT name A>`, serial `<box serial>` |
+| `CT_SUBSCRIBE` wakes the box radios | `host_present=1`, `hci0 UP RUNNING PSCAN ISCAN` |
+| Box raises no SoftAP (`wifi_ap: false`); its own A/V layer still spawns (`AV_SUPPRESS=''`, `04` §2) but is unreachable | no `hostapd`, no `wlan0`, moal/mlan not loaded (NXP unit; the Realtek unit loads its WLAN driver before BT attaches, so `wlan0` exists, `04` §2) |
+| iPhone completes the full BT handshake | §2 |
+| App hotspot creds reach the `0x5703` source; it hands the iPhone the VEHICLE hotspot | `/etc/hostapd.conf` regenerated from the OCBM config; `replying 0x5703 (ssid="<vehicle SSID>" sec=Wpa2OrWpa3Personal)` |
+| iPhone joins `br0`, advertises `_carplay-ctrl._tcp` | `num_connected_clients=1`, `<IPHONE_IP>` / `<MAC-1>`; `<phone name>._carplay-ctrl._tcp.local` |
+| App reaches the phone by unicast | ICMP true, TCP 62078 + 49152 OPEN |
+| App is the AirPlay endpoint, phone dials in | `POST /pair-setup` inbound, §6.1 |
+| SRP-6a pair-setup verified against a real iPhone | M4/M5 reached, §6.2 |
+| Rust core cross-compiles and runs on-unit | §6.3 |
+| Full A/V session (HEVC + AAC, both stream SETUPs) | §7.1 |
+| Untethered fault capture (no laptop attached) | §8 |
 
 ## 2. The captured BT handshake
 
@@ -52,25 +49,21 @@ Driven entirely by the app's `CT_SUBSCRIBE`, with the box raising no access poin
 [bt-driver] RX 0x5702 RequestAccessoryWiFiConfig -> replying 0x5703 (ssid=... ch=36 sec=Wpa2OrWpa3Personal)
 ```
 
-iOS retries `0x5702` (observed twice per session) — the handler must be idempotent. The
-accessory-initiated reconnect path also completes.
-
----
+iOS retries `0x5702` (twice per session observed), so the handler must be idempotent. The accessory-initiated
+reconnect path also completes.
 
 ## 3. Box-side changes (all reversible)
 
-Two files on the adapter. Nothing else was modified.
+Two files on the adapter; nothing else was modified. Both default to stock when the keys are absent.
 
 | File | Change | Restore |
 |---|---|---|
 | `/script/session_supervisor.sh` | `wifi_ap:` gate, `apply_host_wifi_creds()`, `AV_SUPPRESS` | `git checkout tools/session_supervisor.sh` in `ocbm`, then `tools/uart_push.sh` |
-| `/etc/hostapd.conf` | ssid / passphrase / channel regenerated from the app's OCBM config | `cp /etc/hostapd.conf.stock /etc/hostapd.conf` (backup made automatically) |
+| `/etc/hostapd.conf` | ssid / passphrase regenerated from the app's OCBM config (channel only if supplied; the app supplies none) | `cp /etc/hostapd.conf.stock /etc/hostapd.conf` (backup made automatically) |
 
-Both default to stock when the keys are absent, so an unmodified app sees unmodified behaviour.
-
-The credential path deliberately avoids a Rust rebuild: `wifi_handoff::read_hostapd_ap_config()` reads
-`/etc/hostapd.conf` unconditionally, so writing that file is enough to change what `0x5703` sends. This
-is only safe because `wifi_ap: false` means no `hostapd` ever runs from it.
+`wifi_handoff::read_hostapd_ap_config()` reads `/etc/hostapd.conf` unconditionally, so writing that file
+changes what `0x5703` sends with no Rust rebuild; safe only because `wifi_ap: false` means no `hostapd` runs
+from it.
 
 ---
 
@@ -79,98 +72,84 @@ is only safe because `wifi_ap: false` means no `hostapd` ever runs from it.
 ### Build + install
 
 ```bash
-bash tools/test.sh                 # Tier-0: tree-artifact guard, cargo tests, JNI cross-build, 46 JVM test classes, docs budget, proto check
+bash tools/test.sh                 # Tier-0: tree-artifact guard, cargo tests, JNI cross-build, JVM tests (tools/jvm_tests.txt), docs budget, proto check
 bash tools/build_apk.sh            # release flavor;  GMCCPA_BENCH=1 bash tools/build_apk.sh  = bench flavor
 # -> apk/gmccpa-debug-<STAMP>[-bench].apk. The build prints the full path AND the install line; copy it.
 ```
 
-**Build output never lives in the tree (owner rule, enforced 2026-10-08).** A cloud-synced working tree's
-conflict copies poison build trees (`ocbm/CLAUDE.md`). Both scripts route every cargo call
-through `CARGO_TARGET_DIR` under `$OCBM_CACHE/cargo-targets/` (the receiver/pairing `cargo test` runs included —
-until 2026-10-08 those built ≈1.1 GB in-tree), the APK work dir is a `mktemp -d`, `apk/` is a symlink out of
-the tree, and python runs with `PYTHONDONTWRITEBYTECODE=1`. The gate's first step,
-`tools/tree_artifact_guard.sh`, FAILS and lists any real `target`/`build`/`.gradle`/`__pycache__`/`.build`/
-`node_modules` directory under `host/gm_ccpa` or `crates/` (symlinks out of the tree pass); set
-`GMCCPA_ALLOW_TREE_ARTIFACTS=1` only to run the rest of the gate while cleaning such a directory up.
+**Build output never lives in the tree** (owner rule, `ocbm/CLAUDE.md`). Both scripts send every cargo call to
+`CARGO_TARGET_DIR` under `$OCBM_CACHE/cargo-targets/`, use a `mktemp -d` APK work dir, expect `apk/` to be a symlink
+into `$OCBM_CACHE` (created by hand; `build_apk.sh` only runs `mkdir -p apk`, which on a fresh clone is a real in-tree directory), and set `PYTHONDONTWRITEBYTECODE=1`. The gate's first step, `tools/tree_artifact_guard.sh`,
+FAILS on any real `target`/`build`/`.gradle`/`__pycache__`/`.build`/`node_modules` directory under
+`host/gm_ccpa` or `crates/` (symlinks pass); `GMCCPA_ALLOW_TREE_ARTIFACTS=1` runs the rest while cleaning up.
 
-**Version stamp (corrected 2026-10-08; `build_apk.sh` header, V6/Q009).** `versionCode` is the commit count
-(`git rev-list --count HEAD`), `versionName` is `4.0+<STAMP>` (+`-bench` for the bench flavor), and `STAMP` is
-`<sha>` for a clean tree or `<sha>-dirty.<h8>` for a dirty one, where `h8` is the first 8 hex digits of a
-sha256 over `git diff HEAD --binary` plus every untracked, non-ignored file. Untracked files count toward
-dirty; a git failure is FATAL, never read as clean. The same STAMP is the APK filename and
-`assets/build_sha`, which `IDENTITY` prints. Dirty builds on one commit share a `versionCode`, so identity
-between them rides on `versionName`/`build_sha`, never on the code. The old "versionCode is pinned at 7"
-statements are gone: older artifacts (all code 7) cannot be installed over a newer build with `-r`; rolling
-back needs `adb uninstall -k android.car.usb.handler` first (`-k` keeps the data so the pairing survives). There is still NO
-"latest" symlink (removed 2026-09-10): the STAMP in the filename is the only tie between a binary and its sources.
+**Version stamp** (`build_apk.sh` header): `versionCode` = commit count (`git rev-list --count HEAD`);
+`versionName` = `4.0+<STAMP>` (+`-bench`); `STAMP` = `<sha>` clean or `<sha>-dirty.<h8>` dirty, `h8` = first 8
+hex of a sha256 over `git diff HEAD --binary` plus every untracked, non-ignored file (a git failure is FATAL,
+never read as clean). The STAMP is the APK filename and `assets/build_sha` (printed by `IDENTITY`); there is NO
+"latest" symlink, so the STAMP is the only tie between a binary and its sources. Dirty builds on one commit
+share a `versionCode`; identity rides on `versionName`/`build_sha`. An artifact with a higher `versionCode`
+cannot be installed over a newer build with `-r`: roll back with `adb uninstall -k android.car.usb.handler`
+first (`-k` keeps the data, so the pairing survives).
 
-**Install procedure (owner-set, 2026-10-06).** Confirm `adb shell am get-current-user` prints `10` first;
-stop and report if it does not. Then:
+**Install (owner-set).** Confirm `adb shell am get-current-user` prints `10`; stop and report if not.
 
 ```bash
 adb install --user 10 -g -r -i com.android.vending apk/gmccpa-debug-<STAMP>.apk
 ```
 
-`-i com.android.vending` keeps the in-motion path eligible; `-g` grants the runtime permissions (including
-`SYSTEM_ALERT_WINDOW`, which is `development`); `--user 10` is mandatory (without it adb installs for every
-user: the package was once found installed, stopped and never launched, for user 0). **Any uninstall followed by
-a reinstall must have a 30 second wait in between** (owner, 2026-10-06). A plain uninstall also wipes
-`carplay_peers.bin`, the per-install accessory seed and the saved hotspot details, so the iPhone must re-pair and
-the hotspot dialog is shown again; use `uninstall -k` only when you want to keep them.
+- `-i com.android.vending` is the installer the in-motion path requires; eligibility is untested once vending is uninstalled (`01` §8). `-g` grants runtime permissions and
+  `SYSTEM_ALERT_WINDOW` (`development` level).
+- `--user 10` is mandatory: without it adb installs for every user. A user-0 install is not the driver's user and never claims
+  (`AutoClaim.kt` step 1).
+- **Any uninstall followed by a reinstall needs a 30 s wait** (owner rule). A plain uninstall also wipes
+  `carplay_peers.bin`, the per-install accessory seed and the saved hotspot details (iPhone must re-pair, hotspot
+  dialog returns); use `uninstall -k` only to keep them.
+
+The package is `android.car.usb.handler`, source classes `zeno.gmccpa.*`; every `am`/`pm`/`appops`/`dumpsys`
+command targets the package, and activities are `android.car.usb.handler/zeno.gmccpa.<Activity>` (the short
+`/.MainActivity` form resolves against the package and fails). An old `zeno.gmccpa` install must be
+uninstalled, or two copies coexist, each with its own `AdapterAttachReceiver` auto-claim. GM's fixed handler
+starts the manifest alias `android.car.usb.handler.UsbHostManagementActivity` (target `UsbAttachActivity`) on
+each attach, after granting this uid. Whether that makes the persistent grant below redundant is not
+bench-verified: keep running `UsbGrant grant` after a reinstall.
 
 ### USB permission grant (re-run after every uninstall + reinstall)
 
-The USB permission dialog for the adapter is removed by a persistent grant, written once from the shell uid
-(which holds `MANAGE_USB`) through an `app_process` helper — mechanism, evidence and limits are in
-`docs/host/01_ANDROID_AND_AAOS.md` ("Bench verification of the persistent USB grant"). The helper is not in
-`tools/` yet (it lives in session scratch pending the owner's approval to land it); its contract is
-`CLASSPATH=/data/local/tmp/usbgrant.dex app_process /system/bin UsbGrant <list|grant|revoke|status> [pkg] [userId]`,
-e.g. `… UsbGrant grant android.car.usb.handler 10` with the adapter attached. The entry is keyed on the adapter's
-descriptor strings and serial plus the app's uid and the user, so: re-run after any uninstall/reinstall (new
-uid; the uid did change across this session's reinstalls) and after a box swap; a plain `install -r` keeps
-it (bench-confirmed 2026-10-08, rc2 → `230eaa7`: `is_granted=true` after the upgrade — while READ_LOGS was
-lost by the same `-r` and needed §8.1 again). `revoke` stores `is_granted=false` rather than deleting — run
-`grant` again to undo. Without the grant
-the auto-claim logs `SKIP_NO_GRANT` and never prompts; Start then asks as it always did.
+A persistent grant, written once from the shell uid (holds `MANAGE_USB`) through an `app_process` helper,
+removes the adapter's USB permission dialog (mechanism and limits: `docs/host/01_ANDROID_AND_AAOS.md`, "Bench
+verification of the persistent USB grant"). The helper is not in `tools/` yet (session scratch, pending owner
+approval to land it):
 
-**Changed 2026-10-15 (owner request):** the app installs as package `android.car.usb.handler` again (it was
-`zeno.gmccpa` 2026-09-08..10-15, after the original fixed-handler squat was reverted). Every
-`am`/`pm`/`appops`/`dumpsys` command below targets that package name; source classes are still
-`zeno.gmccpa.*`, so activity components are `android.car.usb.handler/zeno.gmccpa.<Activity>` — the short
-`/.MainActivity` form resolves against `android.car.usb.handler` and fails. The manifest's
-`android.car.usb.handler.UsbHostManagementActivity` alias is the component GM's fixed handler starts on each
-attach, after granting this uid; whether that per-attach grant now makes the persistent grant above redundant
-is not bench-verified — keep running `UsbGrant grant` after a reinstall. Moving from `zeno.gmccpa` is an
-uninstall of the old package (otherwise two copies coexist, each with its own `AdapterAttachReceiver` auto-claim), not an `install -r`.
+```bash
+CLASSPATH=/data/local/tmp/usbgrant.dex app_process /system/bin UsbGrant <list|grant|revoke|status> [pkg] [userId]
+# e.g. ... UsbGrant grant android.car.usb.handler 10     (adapter attached)
+```
 
-A user-0 install is not the driver's user and never claims (`AutoClaim.kt` step 1). **Corrected
-2026-10-08:** this paragraph used to say to expect the one-time permission dialog per device. Without the
-persistent grant above that is still what happens (the ordinary attach resolver is never launched on this
-unit, so the dialog comes from the app's own claim loop); with it there is no dialog. The
-`android.car.usb.handler` squat never avoided the dialog either (corrected 2026-09-10), so there is nothing to
-go back to.
+The entry is keyed on the adapter's descriptor strings and serial plus the app uid and user: re-run after any
+uninstall/reinstall (new uid) and after a box swap. A plain `install -r` keeps it (bench 2026-10-08:
+`is_granted=true`), though the same `-r` lost READ_LOGS (§8.1). `revoke` stores `is_granted=false`; run `grant`
+to undo. Without it the auto-claim logs `SKIP_NO_GRANT` and never prompts; Start then asks through the app's
+own claim loop (the ordinary attach resolver is never launched on this unit).
 
-### Auto-claim with the app closed (plan v5.9 D6, 2026-10-08)
+### Auto-claim with the app closed
 
-The adapter is claimed without opening the app on three triggers, each logged as
-`auto-claim (<origin>): <DECISION> — <why>`: `usb-attach` (the `AdapterAttachReceiver` manifest
-receiver — hot plug or box reboot), `boot` (BOOT_COMPLETED) and `media-browser bind` (the media host
-binding `CarPlayMediaBrowserService`, ~+7 s at boot when CCPA is the source). No dialog is ever raised
-from these: without the persistent USB grant the decision is `SKIP_NO_GRANT` and Start asks as before.
-While the adapter is linked one ongoing notification ("GM CCPA status" channel) shows the state; it
-carries no names or addresses. **`am force-stop` does NOT keep the app closed on this unit** (bench 2026-10-08,
-`6c95684`): the system re-binds the media browser within ≈1 s, the auto-claim re-claims the adapter and CarPlay
-is live again ≈4 s later. To hold the app down use the in-app Stop (below), or the `carplay_stop` + `ocbm_stop`
-verbs (the process stays alive, nothing re-claims; no Stop-until-boot flag, so the next launcher open starts it
-— observed ≈4.9 s from reopen to CarPlay live). An on-screen **Stop** suppresses the auto-claim until the next head-unit
-boot (`stop flag: boot identity = boot_count|boot_id|none`); Start or Restart session clears it.
+Three triggers claim the adapter without the app open, each logged `auto-claim (<origin>): <DECISION> — <why>`:
+`usb-attach` (`AdapterAttachReceiver`; hot plug or box reboot), `boot` (BOOT_COMPLETED), `media-browser bind`
+(`CarPlayMediaBrowserService`, ~+7 s at boot when CCPA is the source). None raises a dialog; without the
+persistent grant the decision is `SKIP_NO_GRANT`. While linked, one ongoing notification ("GM CCPA status"
+channel) shows the state, with no names or addresses.
 
-**SYSTEM_ALERT_WINDOW rule** (it admits the background FGS start and the CarPlay screen's background
-launch): effective = appop `allow`, OR appop `default` AND the permission granted. `install -g` grants
-it (`development`), so nothing extra is needed after an install with `-g`. Never set the appop to
-`ignore`/`deny` (that overrides the grant); `appops set --user 10 android.car.usb.handler SYSTEM_ALERT_WINDOW
-allow` is optional and lost on uninstall. Giving the ASSISTANT role back to its previous holder also resets
-the app-op to `default` (Steering-wheel Voice button section below). Preflight (read-only, no serials printed):
+**`am force-stop` does NOT keep the app closed here** (bench 2026-10-08, `6c95684`): the system re-binds the
+media browser within ~1 s and CarPlay is live again ~4 s later. Instead use the in-app **Stop** (suppresses
+auto-claim until the next head-unit boot, `stop flag: boot identity = boot_count|boot_id|none`; Start or
+Restart session clears it), or the `carplay_stop` + `ocbm_stop` verbs (process stays, nothing re-claims, but no
+Stop-until-boot flag: the next launcher open starts it, ~4.9 s to CarPlay live).
+
+**SYSTEM_ALERT_WINDOW rule** (admits the background FGS start and the CarPlay screen's background launch):
+effective = appop `allow`, OR appop `default` AND permission granted. `install -g` grants it. Never set the
+appop to `ignore`/`deny` (overrides the grant); `appops set --user 10 android.car.usb.handler
+SYSTEM_ALERT_WINDOW allow` is optional and lost on uninstall. Preflight (read-only, no serials):
 
 ```bash
 adb shell appops get --user 10 android.car.usb.handler SYSTEM_ALERT_WINDOW
@@ -179,62 +158,48 @@ adb shell cmd package query-receivers --user 10 -a android.hardware.usb.action.U
 adb logcat -d -b all | grep -a -E 'auto-claim \(|link hold|stop flag' | tail -20
 ```
 
-"Adapter reconnecting" with no adapter present is by design: a detach arms a relink bounded at 10 minutes
-(`OcbmProbe.kt:494`, `:591`), then the link hold is released (`SessionCore.kt:1495`). Fix round finished
-2026-10-08.
+`grep -a` is mandatory on these captures (binary bytes stop a plain grep). "Adapter reconnecting" with no
+adapter is by design: a detach arms a relink bounded by `OcbmProbe.CLAIM_WAIT_MS` (10 minutes), then the link
+hold is released (`SessionCore`, `releaseLinkIfUnlinked("relink: no link")`).
 
-The bench steps (B-D6-0 … B-D6-5: replug with the app closed, box reboot, cold boot, Stop for the
-boot, headless missing credentials via the bench-only `finish_launcher` verb) and their pass values
-are in the plan's D6 "Bench" section; `grep -a` is mandatory on those captures (binary bytes stop a
-plain grep).
+Headless bench checks (B-D6-0 … B-D6-5): replug with the app
+closed, box reboot, cold boot, Stop for the boot, and missing credentials via the bench-only `finish_launcher`
+verb. Pass = `auto-claim (<origin>): CLAIM` followed by `claimed interface` (§8.3).
 
-### Steering-wheel Voice button → Siri (default assistant; added 2026-10-26, NOT bench-verified)
+### Steering-wheel Voice button → Siri (default assistant; NOT bench-verified)
 
-The wheel's Voice key is a CarService custom input that GM's `com.gm.car.input` GMCarInputService captures.
-It is not a KeyEvent an app receives. On key-down GMCarInputService offers the stock projection
-`vrKeyEvent(0)`. On release of a **short** press it first runs a ringing-call pre-check, then offers the
-stock projection `vrKeyEvent(1)`, then BT call and OnStar; a press none of them consumed ends, on this GAS
-build, in `AssistUtils.showSessionForActiveService({EXTRA_CAR_PUSH_TO_TALK=true}, 0x20)`, which opens a
-VoiceInteractionSession in the **active assistant** with showFlags `0x23` (the system ORs in
-`WITH_ASSIST|WITH_SCREENSHOT`, 1|2). A long press never reaches the assistant. The ringing pre-check reads
-the native projection's call state, which gm_ccpa never feeds, so it never sees a CarPlay call carried by
-this app; but if the iPhone also has Bluetooth HFP to the radio, GM answers the ringing call itself and the
-press never reaches the app. What iOS does with a Siri tap during a call is UNVERIFIED.
-
-When the app holds `android.app.role.ASSISTANT`, that session is `zeno.gmccpa.assist.Assistant`. It sends
-one Siri-button tap to the phone (`requestSiri` buttondown 2 then buttonup 3, as MacHost `siriPress()`),
-then finishes with no UI. **Stock parity is partial.** That pair matches stock Cinemo only for the release
-half of a short press with no call and no Siri turn active and no built-in voice recognition. Stock also
-sends a prewarm `RequestSiriWithLatency(1)` on key-down, and by `VRStateMachine` state a short press sends
-NONE (no built-in VR): 2 then 3; NONE (built-in VR): 3 only; ACCESSORY: 3 only; CONTROLLER: 2 only;
-INSPEECH: nothing. During any CarPlay call stock swallows voice presses (jadx `ResourceManager.java`
-~2889-2905). gm_ccpa always sends 2 then 3 — a disclosed difference: the owner chose no call-state or
-Siri-state branching, iOS decides what the request means. The role cannot be requested in-app: the
-firmware's roles.xml has ASSISTANT `requestable=false`. It is set from the shell:
+Mechanism and design: `04_SYSTEM_MODEL.md` §4e. The wheel Voice key is captured by GM's `GMCarInputService`
+(never a KeyEvent to an app); a short press no stock consumer takes opens a VoiceInteractionSession in the
+**active assistant** (showFlags `0x23`); a long press never reaches it. If the iPhone also has Bluetooth HFP to
+the radio, GM answers a ringing call itself and the press never reaches the app; what iOS does with a Siri tap
+during a call is UNVERIFIED. With `android.app.role.ASSISTANT` held, `zeno.gmccpa.assist.AssistantSession`
+(created by `AssistantSessionService`) sends one Siri tap (`requestSiri` buttondown 2, buttonup 3, as MacHost
+`siriPress()`) and finishes. Stock Cinemo also sends a prewarm `RequestSiriWithLatency(1)` on key-down, varies
+the sequence by `VRStateMachine` state (built-in VR off: 2,3; on: 3; ACCESSORY: 3; CONTROLLER: 2; INSPEECH:
+nothing) and swallows voice presses during a CarPlay call; gm_ccpa always sends 2,3 (owner decision, iOS
+decides). The role is not requestable in-app (roles.xml `requestable=false`); set it from the shell:
 
 ```bash
 adb shell cmd role get-role-holders --user 10 android.app.role.ASSISTANT    # note it: the restore target
 adb shell cmd role add-role-holder --user 10 android.app.role.ASSISTANT android.car.usb.handler
-# The platform's role observer writes both settings itself; check them:
+# Firmware normally writes both settings on role grant (observed); check them:
 adb shell settings --user 10 get secure voice_interaction_service   # android.car.usb.handler/zeno.gmccpa.assist.AssistantService
 adb shell settings --user 10 get secure assistant                   # same value
-# If they did not follow the role, re-run add-role-holder (preferred). A settings-only fallback must set
-# BOTH keys: GMCarInputService calls getAssistComponentForUser, so `assistant` must be non-null too. It is
-# fragile: the role observer re-runs at user start and can revert both to the role holder.
+# If they did not follow, re-run add-role-holder (preferred). A settings-only fallback must set BOTH keys
+# (GMCarInputService calls getAssistComponentForUser) and is fragile: the observer re-runs at user start.
 adb shell settings --user 10 put secure voice_interaction_service android.car.usb.handler/zeno.gmccpa.assist.AssistantService
 adb shell settings --user 10 put secure assistant android.car.usb.handler/zeno.gmccpa.assist.AssistantService
 # Restore the previous assistant (the role is exclusive; this replaces Google Assistant for user 10):
 adb shell cmd role add-role-holder --user 10 android.app.role.ASSISTANT <previous holder>
 ```
 
-**Role side effect on SYSTEM_ALERT_WINDOW.** Holding the role also grants the `SYSTEM_ALERT_WINDOW` app-op;
-restoring the previous holder resets that app-op to `default`. After an install made with `-g` that is
-harmless (the permission is granted; see the SYSTEM_ALERT_WINDOW rule above). On an install made without
-`-g`, re-run `appops set --user 10 android.car.usb.handler SYSTEM_ALERT_WINDOW allow` after restoring, or the
-background FGS start and CarPlay screen launch lose their admission.
+Holding the role also grants the `SYSTEM_ALERT_WINDOW` appop; restoring the previous holder resets it to
+`default`, so after an install made without `-g` re-run the appop `allow` above. While held, system_server
+keeps the assistant service bound, so the app process runs from boot. Re-run `add-role-holder` after an
+uninstall + reinstall.
 
-Logging must be revived first (§7.1 step 0). Watch with `adb logcat -s NETPROBE GMCarInputService | grep -a -E '\[vis  \]|Voice Assist|AssistUtils'`.
-On a short press, expect these lines:
+Revive logging first (§7). Watch: `adb logcat -s NETPROBE GMCarInputService | grep -a -E '\[vis  \]|Voice Assist|AssistUtils'`.
+Expected on a short press:
 
 ```
 [vis  ] ASSISTANT status (service): roleHeld=true voice_interaction_service=android.car.usb.handler/zeno.gmccpa.assist.AssistantService ...
@@ -246,35 +211,20 @@ GMCarInputService: Receive Voice Assist Key Short Press / voice key, invoke Assi
 [vis  ] session onHide
 ```
 
-`onHandleAssist` fires on every press: the system's `WITH_ASSIST` bit is set, the service disabled that
-context, so `AssistDataRequester` delivers null assist data. The `Siri tap` line is written from the
-`cp-event-tx` thread, so its position relative to the session lines can vary. `result=-1`/`-3` reads
-`DROPPED — CarPlay not connected`, which is normal with no session. If the session tears down between the
-`session_started` gate and the send, the same disconnect is logged as `FAILED`/`PARTIAL` instead. The
-`ASSISTANT status (launcher)` line is printed once per process from MainActivity, whether or not the role is
-held. Side effect: once the role is held, system_server keeps the assistant service bound, so the app
-process runs from boot. Re-run the `add-role-holder` after an uninstall + reinstall, as with the USB grant.
+The `Siri tap` line comes from the `cp-event-tx` thread, so its position varies. `result=-1`/`-3` =
+`DROPPED — CarPlay not connected` (normal with no session); a teardown between the `session_started` gate and
+the send logs `FAILED`/`PARTIAL`. `ASSISTANT status (launcher)` prints once per process from MainActivity,
+role held or not. Bench check: press Voice again while Siri is listening/answering and record what iOS does
+(expected: toggles/ends Siri; intended, no Siri-active guard).
 
-**Bench check: press during an active Siri turn.** Start Siri (one wheel press, or from the phone), then press
-the wheel Voice key again while Siri is listening or answering, and record what iOS does with the extra tap
-(expected: it toggles/ends Siri). This is intended: the app deliberately has no Siri-active guard.
-
-**Hangup key (1003 → `KEYCODE_VOLUME_MUTE` 164) does not reach the app** (2026-10-26 decompile of
-`com.gm.car.input` and the framework, Y181 Silverado). GMCarInputService closes an open voice session (GAS
-builds), ends a *telecom* call, offers the key to the stock projection (`vrKeyEvent(8/9)`) or OnStar, and
-only if none consumed it injects 164. `PhoneWindowManager.interceptKeyBeforeDispatching` then returns -1 for
-164 (`config_handleVolumeKeysInWindowManager=true`), so it goes only to AudioService, never to the focused
-window. It is not a call-control channel, and CarPlay's own answer and end are the uid-5 Telephony HID,
-which this app's `/info` does not advertise (§6.4).
-
-**Call key (1001 → `KEYCODE_CALL` 5) CAN reach a focused gm_ccpa activity — UNMEASURED.** It falls through
-to injection, and the window manager consumes 5 only while a Telecom call rings. The app has no key handler,
-so a 5 delivered to its focused window is unhandled and `PhoneFallbackEventHandler` starts
-`ACTION_CALL_BUTTON` (short press) or `ACTION_VOICE_COMMAND` (long press). Decompile evidence only; no live
-press log exists. Bench procedure: CarPlay screen focused, no call ringing, `adb logcat -b all | grep -a -E
-'GMCarInputService|CALL_BUTTON|VOICE_COMMAND|START u10'` while pressing the call key short, then long, and
-record which activity (if any) starts. For the hangup key the same capture should show
-`onKeyEvent(KeyEvent { … keyCode=164 … })` / `handle ENDCALL key` and nothing from the app.
+Other wheel keys (decompile only, no press log): the **hangup** key (1003 → `KEYCODE_VOLUME_MUTE` 164) never
+reaches the app (GMCarInputService ends the call or offers it to projection/OnStar; the window manager routes
+164 only to AudioService; expect `onKeyEvent(KeyEvent { … keyCode=164 … })` / `handle ENDCALL key` and nothing
+from the app); CarPlay's answer/end are the uid-5 Telephony HID, not advertised in `/info` (§6.4). The **call**
+key (1001 → `KEYCODE_CALL` 5) CAN reach a focused gm_ccpa activity (UNMEASURED): with no key handler,
+`PhoneFallbackEventHandler` would start `ACTION_CALL_BUTTON` (short) or `ACTION_VOICE_COMMAND` (long). Bench:
+CarPlay focused, no call ringing, `adb logcat -b all | grep -a -E 'GMCarInputService|CALL_BUTTON|VOICE_COMMAND|START u10'`
+while pressing short, then long.
 
 ### Run (scriptable — no tapping)
 
@@ -290,156 +240,133 @@ adb shell "am start -n android.car.usb.handler/zeno.gmccpa.MainActivity --es run
 adb logcat -d -s NETPROBE
 ```
 
-No channel is passed, on purpose (owner, 2026-10-07): the app sends no `wifi_channel`, so the box
-keeps its stock hostapd channel. An `--es chan` extra is not read at all (plan v5.9 UI-2, D015, 2026-10-08:
-the "ignored" log line went too, and the next credentials Save purges a channel an older build stored). With no
-saved hotspot credentials and no `--es ssid/pass`, a start or USB attach opens the credentials dialog
-instead of linking (OD-7A; there are no compiled-in credentials since 2026-10-07). `--es ssid/pass` apply to
-that run only and are never saved; only the dialog's Save writes `HotspotPrefs` (`HotspotPrefs.kt`).
+- No channel is passed (owner decision): the app sends no `wifi_channel`, so the box keeps its stock hostapd
+  channel; `--es chan` is not read.
+- With no saved credentials and no `--es ssid/pass`, a start or USB attach opens the credentials dialog (no
+  compiled-in credentials). `--es ssid/pass` apply to that run only; only the dialog's Save writes `HotspotPrefs`.
+- The passphrase cannot be read programmatically: read it from Settings ▸ Hotspot (`com.gm.hmi.connection`'s
+  `WifiHotspotActivity`) and type it in, or pass `--es pass`.
 
-Other `--es run` verbs (`MainActivity.handleRunExtra`): `full` (BT handoff + Wi-Fi endpoint together —
-the real end-to-end sequence, §7.1), `carplay_ui`, `mdns_self`, `carplay_stop`, `ocbm_state`, `ocbm_disconnect`, `ocbm_forget`, `ocbm_stop`,
-`capture_status`, `capture_whole_os`, `capture_own`, `export_log`, `export_log_raw` (§8.2). A `run` verb executes
-once per delivery: a recreate of the launcher (configuration change, process death restored from recents, the
-task re-selected from history) re-delivers the original intent but does NOT replay the verb — it auto-starts
-instead, and the retained intent is stripped of `run`/`ssid`/`pass`/`mac` (D-F2, 2026-10-08, `IntentReplay`).
+Other `--es run` verbs (`MainActivity.handleRunExtra`): `full` (BT handoff + Wi-Fi endpoint, the real
+end-to-end sequence, §7.1), `carplay_rx` (Wi-Fi endpoint only), `carplay_ui`, `mdns_self`, `carplay_stop`,
+`ocbm_state`, `ocbm_disconnect`, `ocbm_forget`, `ocbm_stop`, `capture_status`, `capture_whole_os`,
+`capture_own`, `export_log`, `export_log_raw` (§8.2). A verb executes once per delivery: a launcher recreate
+(config change, process death restored from recents, task re-selected) re-delivers the intent but does NOT
+replay it; it auto-starts, and the retained intent is stripped of `run`/`ssid`/`pass`/`mac` (`IntentReplay`).
 
-`mic_inject` (plan v5.9 MIC, owner-approved 2026-10-07) exists only in a **bench** build
-(`GMCCPA_BENCH=1 tools/build_apk.sh`, versionName `…-bench`); a release build answers
-`mic_inject: not in this build (release)`. It streams a pushed 16 kHz mono S16LE WAV into the open
-uplink gate in place of the vehicle mic (lead silence, the clip, tail silence, then the real mic),
-paced by AudioRecord. Enable per test with `adb shell setprop debug.gmccpa.mic_inject 1` (back to `0`
-after; props reset on reboot) — MainActivity is exported, so while it is 1 any installed app could
-send the verb. Arguments: `--es file <path>|-|none`, `--ei lead_ms` (700), `--ei tail_ms` (1500),
-`--ei expire_s` (60). Make the clip with `say -o p.wav --file-format=WAVE --data-format=LEI16@16000
---channels=1 "<text>"`, `adb push` it to `/data/local/tmp/gmccpa_mic.wav` and `chmod 644` it; if the app
-cannot read that path, `--es file -` takes it over `toybox nc 127.0.0.1 9119` within 30 s instead. `--es file none` clears an armed clip and is honoured even while the property is 0 (it can only remove a
-clip; `bench/BenchHooks.kt` KDoc).
-
-`finish_launcher` (plan v5.9 D6, bench build only; a release build only logs) applies any
-`--es ssid/pass` and then finishes MainActivity, so the headless auto-claim can be tested (BACK only
-moves this singleTask launcher root to the back). Pass check: the log shows `launcher view detached —
-the session core runs on headless`.
-
-The passphrase cannot be read programmatically on the head unit; read it from Settings ▸ Hotspot
-(`com.gm.hmi.connection`'s `WifiHotspotActivity`) and type it into the app's hotspot field, or pass it
-as `--es pass`.
+**Bench-only verbs** (a release build answers `mic_inject: not in this build (release)` / only logs; build with
+`GMCCPA_BENCH=1 tools/build_apk.sh`):
+- `mic_inject` streams a pushed 16 kHz mono S16LE WAV into the open uplink gate in place of the vehicle mic
+  (lead silence, clip, tail silence, then the real mic), paced by AudioRecord. Enable per test with
+  `adb shell setprop debug.gmccpa.mic_inject 1` (`0` after; resets on reboot): MainActivity is exported, so
+  while it is 1 any app could send the verb. Args: `--es file <path>|-|none`, `--ei lead_ms` (700),
+  `--ei tail_ms` (1500), `--ei expire_s` (60). Clip: `say -o p.wav --file-format=WAVE --data-format=LEI16@16000
+  --channels=1 "<text>"`, `adb push` to `/data/local/tmp/gmccpa_mic.wav`, `chmod 644`; if unreadable,
+  `--es file -` takes it over `toybox nc 127.0.0.1 9119` within 30 s. `--es file none` clears an armed clip
+  even with the property 0 (`bench/BenchHooks.kt` KDoc).
+- `finish_launcher` applies any `--es ssid/pass`, then finishes MainActivity to test the headless auto-claim
+  (BACK only backgrounds this singleTask root). Pass: `launcher view detached — the session core runs on headless`.
 
 ### Watch the box
 
-**Signature: `uart_cmd.sh OUTFILE SECONDS 'command'`** — outfile first, then the capture window, then
-the command.
+`uart_cmd.sh OUTFILE SECONDS 'command'` is the local, git-ignored `scratchpad/uart_cmd.sh` at the `ocbm` root;
+the tracked `host/uart_cmd.sh` takes `"command" [seconds]` and prints to stdout (do not mix them).
 
 ```bash
-cd ../..   # host/gm_ccpa -> ocbm root; `cd ../ocbm` does not exist (corrected 2026-09-09)
+cd ../..   # host/gm_ccpa -> ocbm root
 bash scratchpad/uart_cmd.sh /tmp/u1.txt 8 'tail -40 /tmp/wl.log'   # BT / iAP2 / handoff trace
 tr -d '\r' < /tmp/u1.txt | tail -40
-bash scratchpad/uart_cmd.sh /tmp/u2.txt 8 'grep -E "^(ssid|channel)=" /etc/hostapd.conf'
-tr -d '\r' < /tmp/u2.txt
 ```
 
-Send one or two short commands per call — long compound lines come back truncated or as a garbled
-`/bin/sh: ???…: not found` — and strip `\r` from the capture before reading it. A call that returns only
-a bare prompt usually means the command was too long, not that the box is wedged; re-send it shorter.
+Send one or two short commands per call (long lines come back truncated or as `/bin/sh: ???…: not found`) and
+strip `\r`. A bare prompt usually means the command was too long, not that the box is wedged.
 
-**Prefer OCBM over the UART whenever the adapter is on USB.** The UART is for recovery — a box that will
-not enumerate, or a flash. For everything else the OCBM link already carries what you need, faster and
-without a second cable — and the app now streams `/tmp/{bt,wlan,wl,supervisor,ocbmd,attach}.log` to
-logcat over `CH_FILE` as `[box:<file>]`, so watching the box's logs live needs nothing extra:
+**Prefer OCBM over the UART whenever the adapter is on USB;** the UART is for recovery (box will not
+enumerate, or a flash). The app follows the box's `CH_LOG` stream and prints each line as `[box:<source>]`
+(box, airplayd, iap2d, aa-bridge, bt, wl, `radio_*`; `ocbmd` and the supervisor narrate into `/tmp/box.log`).
+`wlan.log`, `wlan_off.log`, `supervisor.log` and `ocbm_boot.log` are only snapshotted at session end
+(`OcbmProbe.BOX_LOG_SNAPSHOT_FILES`).
 
 | Want | Use |
 |---|---|
 | Run a command on the box | `python3 tools/ocbmcmd.py "<cmd>"` (one-shot, `CH_CONSOLE`) |
-| An interactive root shell | `ocbm-host console` |
+| Interactive root shell | `ocbm-host console` |
 | Read a box file | `ocbm-host pull 1314 2d00 <remote> <local>` (`CH_FILE`, CRC-checked) |
 | Deploy a binary or script | `tools/ocbm_push.sh <local> <remote> 755` |
-| Watch the box's logs live | nothing — the app follows them and prints `[box:<file>]` to logcat |
+| Watch box logs live | nothing: read the `[box:<source>]` lines in logcat |
 
-`ocbmd` gives `CH_CONSOLE` its own output queue drained after audio and video, so a chatty `tail -f`
-cannot starve a live A/V session.
+`ocbmd` gives `CH_CONSOLE` its own queue drained after audio and video, so a chatty `tail -f` cannot starve a
+live session.
 
-**`tools/ocbm_push.sh` is not an install.** Its default set is `ocbmd` + `btd` and nothing
-else — pushing `session_supervisor.sh` without `/script/radio_hal.sh` and `radio_detect.sh` leaves the
-box with no radio bring-up and no error anywhere. This is exactly how Bluetooth died silently once
-(`ocbm` `docs/ops/06_CORRECTIONS_LEDGER.md` R-20W-5): a targeted push landed the supervisor without the radio
-seam, `hciattach` failed with `Can't set line discipline: Invalid argument` underneath a flawless
-firmware download, and the supervisor never reads the exit status of the detached script that reported
-it. Use `ocbm_install.sh --full` for a real deploy, and after pushing the supervisor verify the radio
-seam is present:
-
-```bash
-ls /script/radio_hal.sh /script/radio_detect.sh
-```
+**`tools/ocbm_push.sh` is not an install.** Its default set is `ocbmd` + `btd`; pushing `session_supervisor.sh`
+without `/script/radio_hal.sh` and `radio_detect.sh` leaves no radio bring-up and no error anywhere. That is how
+Bluetooth died silently once (`docs/ops/06_CORRECTIONS_LEDGER.md` R-20W-5): `hciattach` failed with `Can't set
+line discipline: Invalid argument` beneath a flawless firmware download, and the supervisor never reads the
+exit status of the detached script. Use `ocbm_install.sh --full` for a real deploy; after pushing the
+supervisor verify `ls /script/radio_hal.sh /script/radio_detect.sh`.
 
 ---
 
-## 5. Gotchas learned the hard way
+## 5. Gotchas
 
-1. **Do not cycle `host_present`.** Repeated app stop/start inside ~20 s trips the supervisor's flap
-   detector, which escalates to an `ocbmd` restart and then to a full box reboot. Connect once and leave
-   the link up; the 1 Hz heartbeat holds it.
-2. **The bulk endpoints are IN `0x81` / OUT `0x01`**, not `0x83`/`0x02`. Discover the bulk pair by
-   walking the interface; anything that hardcodes the addresses will fail.
-3. **A bonded phone is paged by the box; the phone does not have to initiate.** *(Corrected
-   2026-10-30: this item said the phone must open the BR/EDR link because outbound paging returned
-   `CONNECT_FAILED status=0x07` / `SDP query failed: Connection refused`. Refuted on the mainline
-   baseline, revision 8, iOS 27.2: every box-initiated reconnect with the phone in range succeeded —
+1. **Do not cycle `host_present`.** Repeated app stop/start inside ~20 s trips the supervisor's flap detector
+   (escalates to an `ocbmd` restart, then a full box reboot). Connect once; the 1 Hz heartbeat holds the link.
+2. **The bulk endpoints are IN `0x81` / OUT `0x01`**, not `0x83`/`0x02`. Discover the pair by walking the
+   interface; hardcoded addresses fail.
+3. **A bonded phone is paged by the box; the phone need not initiate.** Measured on the mainline baseline
+   (revision 8, iOS 27.2): every box-initiated reconnect with the phone in range succeeded,
    `[reconnect] … driving reconnect` → `[sdp-client] L2CAP SDP channel up (phone paged)` (~1 s) →
-   `RFCOMM connected OUT … ch 1` → `IdentifyAccept` → 0x5703 in ~3 s, including the hands-off cold
-   boot after a radio reboot. With the phone out of range the page fails `CONNECT_FAILED
-   status=0x04` (page timeout, ~5 s) and the loop backs off 10 → 60 s.)* Settings ▸ Bluetooth on
-   the iPhone is only needed for the FIRST pairing, or when one side has lost the bond.
-4. **A stale hotspot poisons the next session.** After a session that handed out credentials for a
-   network that no longer exists, forget that network on the iPhone before retrying.
-5. **`pkill -f session_supervisor` kills the shell running it** (its own cmdline matches). Use an
-   explicit PID, or the `[s]ession_supervisor` char-class trick the script itself uses.
-6. **MFi can return status 1 transiently** while `btd` is mid-bring-up doing its own chip
-   calls. Observed once as an immediate (~2 ms) failure on `copy_certificate` with the signature
-   succeeding moments later; every subsequent attempt returned the full 945 bytes. Worth a soak loop
-   before trusting it in the session path.
-7. **A box reboot leaves `ocbmd` exiting for respawn** until a host reconfigures the gadget. If `HELLO`
-   times out, check `/tmp/ocbmd.log` for `accessory POLLHUP/POLLERR` and confirm
+   `RFCOMM connected OUT … ch 1` → `IdentifyAccept` → 0x5703 in ~3 s, including the hands-off cold boot after a
+   radio reboot. Out of range: `CONNECT_FAILED status=0x04` (page timeout, ~5 s), backoff 10 → 60 s. Settings ▸
+   Bluetooth on the iPhone is needed only for the FIRST pairing or after a lost bond.
+4. **A stale hotspot poisons the next session.** After handing out credentials for a network that no longer
+   exists, forget that network on the iPhone before retrying.
+5. **`pkill -f session_supervisor` kills the shell running it** (its cmdline matches). Use an explicit PID or
+   the `[s]ession_supervisor` char-class trick the script uses.
+6. **MFi can return status 1 transiently** while `btd` is mid-bring-up doing its own chip calls: observed once
+   as an immediate (~2 ms) `copy_certificate` failure with the signature succeeding moments later; every later
+   attempt returned the full 945 bytes. Worth a soak loop before trusting it in the session path.
+7. **A box reboot leaves `ocbmd` exiting for respawn** until a host reconfigures the gadget. If `HELLO` times
+   out, check `/tmp/ocbmd.log` for `accessory POLLHUP/POLLERR` and that
    `/sys/class/android_usb_accessory/android0/state` reads `CONFIGURED`.
-8. **logcat boots effectively dead on this unit.** All four ring buffers read 0 bytes at 64 KiB each.
-   `setprop persist.log.tag V` and `logcat -G 16M` before concluding anything from silence — see §7.
+8. **logcat boots effectively dead on this unit.** Revive it before concluding anything from silence (§7).
 
 ---
 
 ## 6. The Wi-Fi endpoint: proven, plus the byte-level details that made it work
 
-Ported faithfully from `crates/vendor/rx-connect/src/main.rs` rather than inferred. Verified on the
-truck end to end (§6.1): advert with the Car bit, TXT set matching `rx-connect` exactly, SRV resolving to
-a reachable br0 address, listener bound, browse + resolve of the phone's `_carplay-ctrl._tcp`,
-`GET /ctrl-int/1/connect` accepted, and the phone dialing the control connection back in.
+Ported from carplayd's mDNS advertiser and connect-out (`box/carplayd/src/discovery.rs`), not inferred.
+Verified on the truck end to end: advert with the Car bit, TXT set matching carplayd's, SRV resolving to a
+reachable br0 address, listener bound, browse + resolve of the phone's `_carplay-ctrl._tcp`,
+`GET /ctrl-int/1/connect` accepted, phone dialing the control connection back in.
 
-**The fix that made the connect-out work** — the single most valuable byte-level detail of the session:
-`AirPlay-Receiver-Device-ID` is a decimal uint64, not a MAC string. `rx-connect`'s `mac_to_dec()` folds
-the MAC; sending `<MAC-3>` makes iOS parse it base-10 as `0`, look up "receiver 0" among the
-peers it browsed, find nothing, and have nothing to dial back to. The correct header for our identity is
-`AirPlay-Receiver-Device-ID: <decimal deviceID>`. TXT `deviceid` and `/info` `deviceID` keep the colon MAC —
-the asymmetry is deliberate.
+**The fix that made the connect-out work:** `AirPlay-Receiver-Device-ID` is a decimal uint64, not a MAC string
+(carplayd's `mac_to_dec()` folds the MAC). Sending `<MAC-3>` makes iOS parse it base-10 as `0`, find no
+"receiver 0" among the browsed peers, and have nothing to dial back to. TXT `deviceid` and `/info` `deviceID`
+keep the colon MAC; the asymmetry is deliberate.
 
-Other corrections applied from the reference: `Host:` for an IPv6 peer must be bracketed with the zone
-id stripped (the zone belongs to the socket); the CarPlay version family is **320.17**, not the
-AirPlay-2 980.x; no `CSeq` on the connect-out (it is plain HTTP, not RTSP); retry the nudge 10×1 s and
-clear dial memory on `ServiceRemoved`; never answer an unimplemented route with a bodyless 200 (a false
-success on pair-verify M1 is worse than an error); echo the request's protocol version.
+Other reference details: `Host:` for an IPv6 peer is bracketed with the zone id stripped (the zone belongs to
+the socket); CarPlay version family is **320.17**, not AirPlay-2 980.x; no `CSeq` on the connect-out (plain
+HTTP, not RTSP); retry the nudge 10×1 s and clear dial memory on `ServiceRemoved`; never answer an
+unimplemented route with a bodyless 200 (a false success on pair-verify M1 is worse than an error); echo the
+request's protocol version.
 
 **Two platform facts that are not negotiable:**
 
 1. **GM's own CarPlay receiver cannot be disabled from shell.** `pm disable-user` on
    `com.gm.domain.server.delayed/...CarPlayService` fails with `SecurityException: Shell cannot change
-   component state` (a PERSISTENT guard). `:7000` stays held and GM's `CarPlay._airplay._tcp` keeps
-   advertising from `192.168.5.1` — coexist with a distinct Bonjour instance name and a distinct port.
-   `am start-service` cannot restart it either ("no service started"); it returns on reboot. `pm
-   uninstall --user 10` does work, if that is ever the right tool.
-2. **`NsdManager` cannot pin the advertised address** the way `rx-connect` does with `RX_ADDR`. Measured
-   rather than assumed — the platform published `192.168.5.1` on br0, which is fine. If that ever
-   changes, the fix is a controlled mDNS responder bound to br0, not NsdManager.
+   component state` (a PERSISTENT guard); `am start-service` cannot restart it; it returns on reboot. `:7000`
+   stays held and `CarPlay._airplay._tcp` keeps advertising from `192.168.5.1`: coexist with a distinct
+   Bonjour instance name and port. `pm uninstall --user 10` does work, if ever the right tool.
+2. **`NsdManager` cannot pin the advertised address or SRV host** the way carplayd does with `RX_ADDR`. The
+   app therefore runs a self-hosted `MdnsResponder` (owns `gmccpa-rx.local`, publishes `br0` only) alongside
+   `NsdManager`; design in `04_SYSTEM_MODEL.md` Phase 4.
 
-## 6.1 MILESTONE (2026-08-04): the iPhone opens the CarPlay control connection to the app
+### 6.1 Milestone (2026-08-04): the iPhone opens the CarPlay control connection to the app
 
-The full wireless-CarPlay chain closes, on the truck, into an ordinary non-privileged app:
+The full chain closes on the truck into an ordinary non-privileged app (BT handshake → MFi cert+sign →
+`0x5703` handoff to the vehicle SoftAP → phone joins `br0` → our advert indexed by iOS → connect command
+matched → the phone dials our app), every step device-proven:
 
 ```
 [WiFi] Bonjour device added/updated
@@ -449,46 +376,30 @@ carManager_handlePendingAutoconnect: index = WiFi, for deviceID: <MAC-4>,
 --- POST /pair-setup
 ```
 
-Bluetooth handshake → MFi cert+sign → `0x5703` handoff to the vehicle's SoftAP → phone joins `br0` →
-our advert indexed by iOS → connect command matched → the phone dials our app → first real CarPlay
-request. Every step device-proven.
-
-**Three things that made it work:**
-
-1. **`NsdManager` for the advert.** It is the only thing observed to produce `[WiFi] Bonjour device
-   added/updated` — i.e. to get us into iOS's Wi-Fi endpoint index, which the pending autoconnect
-   resolves against. A hand-written responder emitting byte-perfect records (verified against dnslib,
-   scapy and the `mdns-sd` crate) never produced an endpoint.
-2. **Advertise before dialing.** `GET /ctrl-int/1/connect` does not make iOS connect; it sets a pending
-   autoconnect resolved immediately against the already-populated index. Dialing in the same breath as
-   advertising loses the race by milliseconds.
+Three things made it work:
+1. **`NsdManager` for the advert.** The only thing observed to produce `[WiFi] Bonjour device added/updated`
+   (entry in iOS's Wi-Fi endpoint index). A hand-written responder with byte-perfect records (checked against
+   dnslib, scapy, `mdns-sd`) never produced an endpoint.
+2. **Advertise before dialing.** `GET /ctrl-int/1/connect` sets a pending autoconnect resolved immediately
+   against the already-populated index; dialing in the same breath as advertising loses the race by ms.
 3. **Letting the cached endpoint age out** rather than forcing a fresh one mid-session.
 
-**Pin the identity before a run, never vary it inside one.** iOS indexes the endpoint by `deviceid` and
-holds it for the record TTL. Changing the advertised identity mid-session guarantees a spurious `No
-matching endpoint found`, because the pending autoconnect carries the new id while the index still holds
-the old one:
+**Pin the identity before a run, never vary it inside one.** iOS indexes the endpoint by `deviceid` for the
+record TTL; changing it mid-session guarantees a spurious `No matching endpoint found` (a diagnostic identity
+swap produced exactly this and looked like a protocol failure):
 
 ```
 carManager_handlePendingAutoconnect: pendingAutoconnectID: <MAC-3> is expired (55.682 seconds old)
 ```
 
-A diagnostic identity swap produced exactly this and looked like a real protocol failure. It was not.
+GM's `CarplayService` was force-stopped during this run (`:7000` free). Coexistence with GM's service running
+is the shipping configuration (status: `12_OBSERVED_FLOW.md` Failure Point 3).
 
-**Caveats on this result:**
-- GM's `CarplayService` was force-stopped during the successful run (`:7000` free). Coexistence is
-  permanent in the shipping configuration and has since been re-tested (§6).
-- The session stopped at `POST /pair-setup`, which was correct and expected at the time — see §6.2.
+### 6.2 SRP-6a pair-setup verified against a real iPhone
 
-## 6.2 SRP-6a pair-setup verified against a real iPhone
-
-> **Corrected 2026-10-08 (plan v5.9 D016):** this milestone was reached by a Kotlin SRP server, `pair/SrpServer.kt`,
-> which (with `pair/Tlv8.kt` and the `handleStub` path) is deleted — `ls pair/` now shows only `NativeCore.kt`.
-> The shipping receiver does pair-setup in the Rust core; with no core the connection is closed. The result
-> below stands as the proof that SRP wire-compatibility with an iPhone holds; the Kotlin code does not exist.
-
-`POST /pair-setup` was implemented in Kotlin (a port of `pairing/src/srp.rs` + `tlv.rs`) and driven by
-the phone:
+The shipping receiver does pair-setup in the Rust core (`NativeCore.kt`); with no core the connection is
+closed. This capture, from a Kotlin port of `pairing/src/srp.rs` + `tlv.rs`, proves SRP wire-compatibility with an
+iPhone:
 
 ```
 --- POST /pair-setup
@@ -498,32 +409,17 @@ pair-setup M3: A=384B proof=64B — verifying SRP
 *** pair-setup M5 reached — the Ed25519 LTPK exchange
 ```
 
-The phone accepting M4 and advancing to M5 is the proof — it only does that if our server proof matched
-its own computation.
+The phone advancing to M5 means our proof matched its own computation. This closes the gap `pairing/src/setup.rs`
+flags as unprovable offline, including the HomeKit divergence that `H(g)` is taken over the minimal generator
+byte `[5]`, not padded to the modulus length. SRP-6a needs no third-party crypto (`BigInteger` + SHA-512 exist
+at API 32); M5/M6 (Ed25519 LTPK) and pair-verify (X25519 + Ed25519) do not, hence the Rust core.
 
-This closes a gap the reference itself flags as unclosable offline: `pairing/src/setup.rs` says "SRP
-wire-compatibility with the iPhone's client is the single thing not provable offline (we have no
-captured pair-setup)." It is now proven — including the documented HomeKit divergence that `H(g)` is
-taken over the minimal generator byte `[5]`, not padded to the modulus length.
+### 6.3 Build toolchain for the Rust core
 
-pair-setup needs no third-party crypto: SRP-6a is `BigInteger` + SHA-512, both on the platform at API 32.
-M5/M6 (Ed25519 LTPK exchange) and pair-verify (X25519 + Ed25519) are the parts API 32 cannot do natively
-— hence the Rust core (§6.3).
-
-## 6.3 Build toolchain for the Rust core — proven end to end
-
-Everything needed was already on the machine except two Rust components.
-
-| Piece | Status |
-|---|---|
-| NDK | `30.0.15729638` in Android Studio's SDK, with `x86_64-linux-android32-clang` — the head unit's exact ABI and API level |
-| Rust targets | `x86_64-linux-android` (head unit) + `aarch64-linux-android` (emulator) via rustup |
-| `cargo-ndk` | 4.1.2 installed, but panics on this workspace — not needed, see below |
-
-**Gotcha:** `/opt/homebrew/bin/cargo` (Homebrew's Rust) shadows rustup's shim and cannot add
-cross-targets. Use rustup's `$CARGO_HOME/bin/cargo`.
-
-**Working recipe** (no `cargo-ndk`):
+- NDK `30.0.15729638` in Android Studio's SDK, `x86_64-linux-android32-clang` (the head unit's exact ABI/API).
+- Rust targets `x86_64-linux-android` (head unit) + `aarch64-linux-android` (emulator) via rustup.
+- `cargo-ndk` 4.1.2 panics on this workspace; not needed.
+- `/opt/homebrew/bin/cargo` shadows rustup's shim and cannot add cross-targets: use `$CARGO_HOME/bin/cargo`.
 
 ```bash
 export PATH="$CARGO_HOME/bin:$PATH"
@@ -532,101 +428,69 @@ export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$NDK/x86_64-linux-android32-cla
 cargo build --release --target x86_64-linux-android
 ```
 
-All six crates cross-compile clean, and a `cdylib` linking `receiver` + `pairing` produces:
+Result: the crates cross-compile clean and a `cdylib` linking `receiver` + `pairing` loads on the head unit
+(`ELF shared object, 64-bit LSB x86-64, for Android 32, built by NDK r30-beta2`). `x25519-dalek` and
+`ed25519-dalek` cross-compile, so no third-party Java crypto provider is needed.
 
-```
-liblinkprobe.so: ELF shared object, 64-bit LSB x86-64, for Android 32, built by NDK r30-beta2
-```
+**The `eld-codec` trap:** a workspace-root build pulls it in via feature unification and fails on a missing
+`fdk-aac` header. Build `receiver` from its own directory with `--no-default-features --features mic-uplink`
+(the default also enables `local-mfi`); this is the recipe `tools/test.sh` uses for Tier-0.
 
-Pushed to the head unit and verified. Three things this retired:
+### 6.4 `/info`: generated from the reference, every number measured on the unit
 
-1. **The `ControlServer<'a>` lifetime is a non-issue.** The probe holds `&'static Identity` via
-   `OnceLock` and links against the real crates. No fork.
-2. **`x25519-dalek` and `ed25519-dalek` cross-compile** — the exact primitives API 32 denies, so the
-   Rust core solves pairing and no third-party Java crypto provider is needed.
-3. **The `eld-codec` trap is real and avoidable.** Building from the workspace root pulls it in via
-   feature unification and fails on a missing `fdk-aac` header. Build `receiver` from its own directory
-   with default features (`mic-uplink`) and it never enters the graph — same recipe `tools/test.sh`
-   uses for the Tier-0 gate.
-
-## 6.4 `/info` — generated from the reference, every number measured on the unit
-
-`/info` is generated by `receiver::info::build_info()` via a small `infogen` tool, shipped as
-`assets/info.bplist`, served as `application/x-apple-binary-plist`. Not hand-written: iOS validates this
-capability set at RECORD and tears the session down if it is incomplete.
-
-1879 bytes. Contains every key the reference's own regression test lists as validated at activation,
-plus `modes` (without which the screen resource is `type=N/A` → `StartupFailed -17483`).
-
-### The geometry is measured, not assumed
+`/info` derives from `receiver::info::build_info()` (`crates/vendor/receiver/src/info.rs`); the shipped
+`assets/info.bplist` is adjusted by `tools/info_plist_*.py` and served as `application/x-apple-binary-plist`. Not hand-written: iOS validates this
+capability set at RECORD and tears the session down if incomplete. It holds every key the reference's
+regression test lists as validated at activation, plus `modes` (without it the screen resource is `type=N/A`
+→ `StartupFailed -17483`).
 
 | Property | Measured on `gminfo37` | In `/info` |
 |---|---|---|
 | Panel | `2400x960`, `DD134IA-01B` | `widthPixels 2400`, `heightPixels 960` |
 | Refresh | 60.001434 Hz | `maxFPS 60` |
 | Density | 200, `192.911 x 193.523` dpi | `widthPhysical/heightPhysical 0` (matches the genuine CCPA) |
-| App window | `2400x960` — full panel | — |
-| System bar insets, normal | `left=189 top=118` — GM chrome overlays the panel | — |
-| `mAppBounds`, normal | `Rect(189, 0 - 1605, 960)` = `1416x842`. Left 189 is the LeftBar; the right 795 is a separate navigation-class inset provider (GM's widget pane), NOT a bar. The 118 px TopCarSystemBar is status-class and does NOT reduce `mAppBounds` — top stays 0 — it purely overlays | second `viewAreas[]` entry |
+| App window | `2400x960`, full panel | — |
+| System bar insets, normal | `left=189 top=118`; GM chrome overlays the panel | — |
+| `mAppBounds`, normal | `Rect(189, 0 - 1605, 960)`; usable view area `1416x842` = bounds minus the 118 px overlay. Left 189 is the LeftBar; the right 795 is a navigation-class inset provider (GM's widget pane), NOT a bar. The 118 px TopCarSystemBar is status-class: it overlays and does NOT reduce `mAppBounds` (top stays 0; the 842 height subtracts it separately) | second `viewAreas[]` entry |
 | System bar insets, immersive | `0,0,0,0` | no `safeArea`, `viewAreas` lever off |
 
-The immersive flag is a hard requirement **for the full-bleed view area only** — corrected 2026-09-08,
-it used to say "hard requirement" unqualified. When CarPlay owns the whole panel, without
-`IMMERSIVE_STICKY | FULLSCREEN | HIDE_NAVIGATION` the top-left `189x118` region is covered by GM's
-chrome and CarPlay would put interactive UI under it.
+The immersive flag is a hard requirement **for the full-bleed view area only**: when CarPlay owns the panel,
+without `IMMERSIVE_STICKY | FULLSCREEN | HIDE_NAVIGATION` the top-left `189x118` is covered by GM's chrome
+and CarPlay would put interactive UI under it. In the SECOND view area it inverts: GM's chrome stays VISIBLE
+and immersive is dropped.
 
-In the SECOND view area the requirement inverts: the picture is cropped into GM's own app bounds, so
-GM's chrome must be VISIBLE around it and immersive is dropped. See `04_SYSTEM_MODEL.md` §4d.
+Insets act on the CONTENT, never the window (`mBounds` stays `2400x960`): only the three hide flags and
+`FLAG_FULLSCREEN` may toggle; clearing the `LAYOUT_*` flags displaces the surface to `377,236`. Rules and
+reasoning: `04_SYSTEM_MODEL.md` §4d.
 
-Two facts that make this work, both measured here and easy to get wrong:
+**Audio matches the hardware:** every output thread is 48000 Hz, `AUDIO_FORMAT_PCM_16_BIT`, stereo,
+`channels=0x2`, no multichannel (CarPlay's stereo-48k ceiling costs nothing).
+- type 100 `default`/`telephony`/`speechRecognition`: AAC-ELD 16k mono in and out (mic uplink)
+- type 100 `alert`, type 101 `default`: AAC-ELD 48k stereo out
+- type 102 `media`: AAC-LC 48k stereo, the high-latency path so music avoids the voice channel
+- type 100/101 `compatibility`: PCM fallbacks
 
-- **AAOS insets the CONTENT, never the window.** `mBounds` stays the full `2400x960` and
-  `mWindowingMode=fullscreen` in both states. GM's LeftBar and TopCarSystemBar are separate system-UI
-  windows at a higher Z that OVERLAY ours — that is the default, not something the app arranges.
-- **Only the three hide flags may toggle.** `LAYOUT_STABLE | LAYOUT_FULLSCREEN | LAYOUT_HIDE_NAVIGATION`
-  must stay set permanently: they are what stop the decor padding our content. Clearing them alongside
-  the hide bits moves the root to `(189,118)` and displaces the fixed `2400x960` surface — the picture
-  lands at `377,236`, i.e. the LeftBar width and top-bar height added a second time.
-  `FLAG_FULLSCREEN` (from `Theme.NoTitleBar.Fullscreen`) must toggle too: it suppresses the status bar
-  independently of `systemUiVisibility`, so clearing only the sysui bits brings the LeftBar back and
-  leaves TopCarSystemBar hidden.
+**Input: touch + media buttons only.** `hidDevices` carries `CarLink Touchscreen` and `CarLink Media Buttons`
+(both with `displayUUID` matching the display `uuid`, which iOS checks). D-pad, knob and telephony-button
+levers are off, so `displays[].features` is `0x0A`, not `0x1A`. Wheel media buttons ride this HID path and do
+not depend on the metadata plane. If identity or geometry changes, patch/regenerate via `tools/info_plist_*.py`;
+`deviceid` / `pi` / `features` must stay byte-equal to the Bonjour TXT or pair-verify fails.
 
-### Audio matches the hardware exactly
-
-Every output thread reports 48000 Hz, `AUDIO_FORMAT_PCM_16_BIT`, stereo (`front-left, front-right`);
-`channels=0x2` everywhere, no multichannel anywhere:
-
-- type 100 `default`/`telephony`/`speechRecognition` — AAC-ELD 16k mono in and out (the mic uplink)
-- type 100 `alert`, type 101 `default` — AAC-ELD 48k stereo out
-- type 102 `media` — AAC-LC 48k stereo, the high-latency path so music is not squeezed through the
-  low-latency voice channel
-- type 100/101 `compatibility` — PCM fallbacks
-
-CarPlay's stereo-48k wire ceiling costs nothing here: the hardware is stereo 48k.
-
-### Input: touch + media buttons only
-
-`hidDevices` carries `CarLink Touchscreen` and `CarLink Media Buttons` (both with `displayUUID` matching
-the display `uuid`, which iOS checks). D-pad, knob and telephony-button levers are off, so
-`displays[].features` is `0x0A` rather than `0x1A`. Steering-wheel media buttons ride this HID path —
-they do not depend on the metadata plane, so metadata can be deferred until after A/V is stable.
-
-Regenerate with `infogen` if identity or geometry changes. `deviceid` / `pi` / `features` must stay
-byte-equal to the Bonjour TXT or pair-verify fails.
+---
 
 ## 7. A/V capture, the logcat trap, and a full session
 
-**The head unit boots with logging effectively dead** — all four `logcat` ring buffers read 0 bytes,
-each 64 KiB. Nothing from the app appears, which looks exactly like the app failing to run. Fix it at
-the start of every session:
+**The head unit boots with logging effectively dead:** all four `logcat` ring buffers read 0 bytes, each 64 KiB.
+Nothing from the app appears, which looks exactly like the app failing to run; silence is not evidence. Fix
+it at the start of every session:
 
 ```bash
-adb shell "setprop persist.log.tag V"   # revives logd
+adb shell "setprop persist.log.tag V"   # revives logd; survives reboot
 adb logcat -G 16M                       # 64 KiB is ~2 s of A/V logging
 ```
 
-**Verifying a session without logs (the socket table never lies).** Derive the uid; never hardcode it —
-it changes on every uninstall/reinstall.
+**Verifying a session without logs (the socket table).** Derive the uid; it changes on every
+uninstall/reinstall, and a stale literal shows an empty table on a healthy session.
 
 ```bash
 APPID=$(adb shell dumpsys package android.car.usb.handler | sed -n 's/.*userId=\([0-9]*\).*/\1/p' | head -1)
@@ -634,49 +498,41 @@ SOCKUID=$((1000000 + APPID))     # user 10 => 10*100000 + appId; on user 0 it is
 adb shell "cat /proc/net/tcp6" | awk -v u="$SOCKUID" '$8==u && $4=="01"'   # 01 = ESTABLISHED
 ```
 
-4–5 established sockets to the iPhone's `fe80::…%<if>` plus `POST /feedback` every 2 s = healthy session.
-GM's own receiver owns `:7000` (`0x1B58`) under uid `1001000` — as of 2026-08-12 it listens again, so
-coexistence is the live condition, not a hypothetical.
-
-Do not leave `nc -l -p 9001` running from manual probing: it steals the seam port from the app and the
+4–5 established sockets to the iPhone's `fe80::…%<if>` plus `POST /feedback` every 2 s = healthy session. GM's
+own receiver owns `:7000` (`0x1B58`) under uid `1001000` and listens again, so coexistence is the live
+condition. Do not leave `nc -l -p 9001` running from manual probing: it steals the seam port, and the
 receiver's forwarder then connects to `nc` instead of the CarPlay screen's decoders.
 
----
+### 7.1 Bringing up a full A/V session
 
-## 7.1 Bringing up a full A/V session (the working procedure)
+The sequence that produced the working session in `evidence/session_2026-08-05/WORKING_SESSION.md` (the
+`evidence/` archive is in the archived standalone `gm_ccpa` checkout, not this tree; `00_HANDOFF.md` §8).
+Assumes the CCPA adapter is on USB and the iPhone is paired to the vehicle over Bluetooth.
 
-This is the sequence that produced the working session in
-`evidence/session_2026-08-05/WORKING_SESSION.md` (the `evidence/`
-archive lives in the archived standalone `gm_ccpa` checkout, not under this tree — see `00_HANDOFF.md` §"Document
-policy"). Assumes the CCPA adapter is on USB and the iPhone is paired to the vehicle over Bluetooth.
+**Step 0. Revive logging first** (§7). Nothing below is observable without it.
 
-### 0. Revive logging first — silence is not evidence
-```bash
-adb shell "setprop persist.log.tag V"    # survives reboot; logcat boots effectively dead without it
-adb logcat -G 16M                        # 64 KiB is ~2 s of A/V logging
-```
+**Step 1. Start the session (BT handoff + Wi-Fi receiver).**
 
-### 1. Start the session (BT handoff + Wi-Fi receiver)
 ```bash
 adb shell am force-stop android.car.usb.handler
 adb logcat -c
 adb shell "am start -n android.car.usb.handler/zeno.gmccpa.MainActivity --es run full \
            --es ssid '<vehicle SSID>' --es pass '<passphrase>'"
 ```
-Wait for both stream SETUPs before opening the UI:
+
+The CarPlay screen opens by itself when the phone opens the control connection (`CarPlayRx.onSessionUp` →
+`SessionCore.showCarPlayScreen`); no further command is needed. Wait for both stream SETUPs:
+
 ```bash
 adb logcat -d -s NETPROBE | grep -E "SETUP phase2"
 #   SETUP phase2 screen(110) ... -> dataPort NNNNN
 #   SETUP phase2 audio(102) ... AacLc audioType="media" -> dataPort NNNNN
 ```
 
-### 2. Open the CarPlay screen
-```bash
-adb shell am start -n android.car.usb.handler/zeno.gmccpa.MainActivity --es run carplay_ui
+**Step 2. Expect the CarPlay screen to come up on its own** (it starts at session-up, before the stream SETUPs):
+
 ```
-Expect, within a second:
-```
-[cpui] session up: seams listening on 127.0.0.1:9001 (HEVC) and :9002 (AAC-LC)
+[cpui] session up: seams listening on :9001 (HEVC), :9002 (AAC-LC), :9003 (voice, routed), :9004 (metadata); audio is surface-independent
 [cpui] renderer attached to Surface
 [hevc] MediaCodec configured: video/hevc 2400x960 ... decoder=OMX.Intel.hw_vd.h265
 [hevc] keyframe — decoding starts
@@ -684,224 +540,145 @@ Expect, within a second:
 [aac ] FIRST AUDIO FRAME PLAYED
 ```
 
-### 3. Watch it
-```bash
-adb logcat -d -s NETPROBE | grep -E "\[hevc \]|\[aac  \]|\[cpui \]"
-```
-`MainActivity` commands are safe during a live session — they detach the video renderer while audio and
-the seams keep running; `carplay_ui` reattaches it. (The `av_sink`/`av_stats` diagnostic sink that
-used to be listed here was removed 2026-09-11: it bound the same :9001/:9002 the real decoders need,
-and the running counts it printed are in the `[hevc ]`/`[aac  ]` lines above.)
-(`evidence/session_2026-08-05/WORKING_SESSION.md` in the archived `gm_ccpa` checkout,
-§5).
+**Step 3. Watch it:** `adb logcat -d -s NETPROBE | grep -E "\[hevc \]|\[aac  \]|\[cpui \]"`. `MainActivity`
+commands are safe during a live session: they detach the video renderer while audio and the seams keep
+running; `carplay_ui` (or a launcher resume) reattaches it. Health without logs: the socket table in §7.
 
-### 4. Restore the screen after anything backgrounds it
-```bash
-adb shell am start -n android.car.usb.handler/zeno.gmccpa.MainActivity --es run carplay_ui
-```
-Video returns in ~250 ms via the producer's re-dial + ForceKeyFrame. Audio is never interrupted.
+**Step 4. Restore the screen after anything backgrounds it:** `--es run carplay_ui` (refused with `carplay_ui refused: no live CarPlay session` when no session is live). Video returns in ~250 ms
+via the producer's re-dial + ForceKeyFrame; audio is never interrupted.
 
-**Do NOT** try `am start -n android.car.usb.handler/zeno.gmccpa.av.CarPlayActivity` — it is
-`exported="false"` and `adb shell` (uid 2000) lacks `START_ANY_ACTIVITY` on this user build:
-`SecurityException: … not exported from uid 1010123`. Always go through `MainActivity`.
+**Do NOT** `am start -n android.car.usb.handler/zeno.gmccpa.av.CarPlayActivity`: it is `exported="false"` and
+`adb shell` (uid 2000) lacks `START_ANY_ACTIVITY` on this user build (`SecurityException: … not exported from
+uid 1010123`). Always go through `MainActivity`.
 
-### Verifying without logs (the socket table never lies)
-```bash
-APPID=$(adb shell dumpsys package android.car.usb.handler | sed -n 's/.*userId=\([0-9]*\).*/\1/p' | head -1)
-adb shell "cat /proc/net/tcp6" | awk -v u="$((1000000 + APPID))" '$8==u && $4=="01"'   # 01 = ESTABLISHED
-```
-4–5 established sockets to the iPhone plus `POST /feedback` every 2 s = healthy session. Derive the uid
-— do not hardcode it (§7): a stale literal shows an empty table on a healthy session.
-
-### Troubleshooting
+#### Troubleshooting
 
 | Symptom | Cause | Action |
 |---|---|---|
-| App dials, phone answers `HTTP/1.1 200 OK`, no inbound on `:7011` | Stale iOS endpoint cache. iOS logs `carManager_handlePendingAutoconnect: No matching endpoint found for deviceID …` then `-6753 kConnectionErr` | Forget the vehicle on the iPhone (Settings → General → CarPlay) and re-pair over Bluetooth. Confirmed fix — not caused by GM's `:7000` |
-| Black screen, session otherwise healthy | video seam bound but no frames | check `[hevc]` lines; `first frame decoded (0 B Annex-B)` means the sample-description unwrap regressed (`01_FINDINGS` §8b) |
+| App dials, phone answers `HTTP/1.1 200 OK`, no inbound on `:7011` | Stale iOS endpoint cache; iOS logs `carManager_handlePendingAutoconnect: No matching endpoint found for deviceID …` then `-6753 kConnectionErr` | Forget the vehicle on the iPhone (Settings → General → CarPlay) and re-pair over Bluetooth. Confirmed fix; not caused by GM's `:7000` |
+| Black screen, session otherwise healthy | video seam bound but no frames | check `[hevc]` lines; `first frame decoded (0 B Annex-B)` means the sample-description (AVCC→Annex-B) unwrap regressed (`12_OBSERVED_FLOW.md`, `forward.rs`) |
 | `bind :9001 … EADDRINUSE` | a stale CarPlayActivity generation or a manual `nc` holds the seam | the seam bind retries across TIME_WAIT on its own; kill any manual `nc -l -p 9001` |
-| No `[hevc]`/`[aac ]` lines at all and no app logs | logcat is dead (§7) | `setprop persist.log.tag V`, `logcat -G 16M` |
-| Nothing after a reboot | GM's `CarplayService` self-restarts and re-claims `:7000` | coexistence must be verified live each time — see §6 |
+| No `[hevc]`/`[aac ]` lines and no app logs | logcat is dead | `setprop persist.log.tag V`, `logcat -G 16M` (§7) |
+| Nothing after a reboot | GM's `CarplayService` self-restarts and re-claims `:7000` | verify coexistence live each time (§6) |
 
----
+### 7.2 The credential-ordering trap and the stale-resolve trap
 
-## 7.2 The credential-ordering trap, and the stale-resolve trap
+Neither errors at the point of the mistake; both surface later as "CarPlay just doesn't start."
 
-Two failures found in one session. Neither produces an error at the point of the mistake; both present
-much later as "CarPlay just doesn't start."
+#### Trap 1: a credential-less `CT_SUBSCRIBE` pins `0x5703` to the box's stock SSID for the whole session
 
-### Trap 1 — a credential-less `CT_SUBSCRIBE` pins `0x5703` to the box's stock SSID for the whole session
+The box applies host Wi-Fi credentials only inside `wireless_up()` (`tools/session_supervisor.sh`:
+`apply_host_wifi_creds()` is called from it), which runs on the `host_present` 0→1 edge that `CT_SUBSCRIBE`
+triggers. Subscribe once without credentials and the stack comes up on the stock `/etc/hostapd.conf`; a later
+`CT_SUBSCRIBE` with credentials does not re-apply them. Observed: the app sent a 153-byte config with
+`wifi_ssid: <vehicle SSID>`, the box logged nothing wrong, and `/etc/hostapd.conf` still read
+`ssid=<box stock SSID>`: `0x5703` would hand the iPhone an AP that is never raised (`wifi_ap:false`) and, per
+§5 item 4, poison the next attempt.
 
-`CT_SUBSCRIBE` is the radio-wake edge, and the box applies host-supplied Wi-Fi credentials only inside
-`wireless_up()` (`session_supervisor.sh` → `apply_host_wifi_creds`, defined at `:827` and called at
-`:920` inside `wireless_up()` itself at `:863` — corrected 2026-09-09, it used to say the call was at
-`:547`, which is unrelated escalation/health-check logic), which runs on the
-`host_present` 0→1 edge.
+**Guard:** all credential entry points (button, USB attach, `--es run`) go through
+`SessionCore.applyHotspotFields()`, and `OcbmProbe` refuses the radio-wake edge with no SSID
+(`CT_SUBSCRIBE refused: no hotspot …`).
 
-> Subscribe once without credentials and the wireless stack comes up against the box's stock
-> `/etc/hostapd.conf`. A later `CT_SUBSCRIBE` that does carry credentials will not re-apply them —
-> `wireless_up` has already run.
-
-Observed: the app sent a 153-byte config with `wifi_ssid: <vehicle SSID>`, the box logged nothing
-wrong, and `/etc/hostapd.conf` still read `ssid=<box stock SSID>`. `0x5703` would have handed the iPhone an AP
-that is never raised (`wifi_ap:false`), and per §5 gotcha 4 that dead network then poisons the next
-attempt until it is forgotten on the phone.
-
-**Fixed:** all three credential entry points (on-screen button, USB-attach, `--es run`) now go through
-`MainActivity.applyHotspotFields()`, and `OcbmProbe` refuses to take the radio-wake edge with no SSID
-rather than proceeding into an unrecoverable state.
-
-**Recovery if you hit it:** a full `host_present` cycle — release the box for ≥20 s (the flap detector), then
-relaunch with `--es ssid/--es pass`. Since 2026-10-08 (bench, `6c95684`) `am force-stop` alone cannot provide
-that gap on this unit — the media-browser bind relaunches the app and re-claims within seconds — so use the
-in-app Stop or the `ocbm_stop` verb to hold the box released for the 20 s. Verify before trusting it:
+**Recovery:** release the box for at least 20 s (flap detector), then relaunch with `--es ssid/--es pass`.
+`am force-stop` cannot provide the gap (media-browser bind re-claims within seconds); use the in-app Stop or
+`ocbm_stop`. Verify:
 
 ```bash
-bash scratchpad/uart_cmd.sh /tmp/h.txt 11 'cat /etc/hostapd.conf'   # in ocbm root (cd ../.. from here)
+bash scratchpad/uart_cmd.sh /tmp/h.txt 11 'cat /etc/hostapd.conf'   # ocbm root, local scratchpad script
 tr -d '\r' < /tmp/h.txt | grep -aE '^ssid=|^channel=|^wpa_passphrase='
 ```
-Expect `ssid=<vehicle SSID>`. If it still says `<box stock SSID>`, the credentials did not reach
-`wireless_up`.
 
-### Trap 2 — `NsdManager` serves a stale peer address, and restarting discovery does not fix it
+Expect `ssid=<vehicle SSID>`; `ssid=<box stock SSID>` means the credentials did not reach `wireless_up`.
 
-Symptom: the handoff succeeds, the phone joins `br0`, `_carplay-ctrl._tcp` resolves fine — and every
-`GET /ctrl-int/1/connect` times out after 3000 ms with no response at all.
+#### Trap 2: `NsdManager` serves a stale peer address and port, and restarting discovery does not fix it
 
-The address was dead. `NsdManager` kept answering with an iPhone IPv6 link-local that had rotated away:
+Symptom: handoff succeeds, the phone joins `br0`, `_carplay-ctrl._tcp` resolves, and every
+`GET /ctrl-int/1/connect` times out after 3000 ms; iOS logs `carManager_handlePendingAutoconnect: no pending
+autoconnections` (the connect-out never set it, §6.1). The neighbour table shows the dial target is a ghost
+(iOS rotates its IPv6 privacy address and control port; cached port `57236` vs live SRV `57292`):
 
 ```
 $ adb shell ip neigh show dev br0
-<IPHONE_IP>                 lladdr <MAC-5> REACHABLE   <- the phone, actually here
-<IPHONE_LL6>      lladdr <MAC-5> STALE       <- and here
-fe80::48f:dfe5:7179:6f60     INCOMPLETE                           <- what we were dialling
-```
-
-iOS confirmed the consequence from its own side — the advert was indexed correctly, so this is not a
-discovery or identity fault:
-
-```
-[WiFi] Bonjour device added/updated
-carManager_handlePendingAutoconnect: no pending autoconnections
-```
-
-Per §6.1 the connect-out is what sets the pending autoconnect. A dead dial address means it is never set,
-so the phone never opens the control connection — with nothing in any log saying "wrong address."
-
-Restarting discovery did not help: the platform answers a fresh resolve from the same cache, so it
-returned the same dead address indefinitely. iOS rotates its IPv6 privacy address, so expect this to
-recur. The cached PORT was stale too (`NsdManager` reported `57236`; the live SRV said `57292`) — assume
-the whole cached record is suspect, not just the address.
-
-**Fix: the wire is the authority, `NsdManager` is only the discovery trigger.**
-`MdnsInspect.liveEndpoint()` queries the link directly (SRV, then A/AAAA for the SRV target) and
-`CarPlayRx.dialCandidates()` puts those addresses first, re-querying at attempts 3 and 6 in case the peer
-moves mid-retry. The cached pair is kept as the last candidate (the wire query can occasionally miss a
-reply) but is never dialled first.
-
-**Diagnosing it fast:** the neighbour table is the tell. `INCOMPLETE` against the address in the
-`resolved '<peer>' -> …` log line means you are dialling a ghost:
-
-```bash
-adb shell ip neigh show dev br0
+<IPHONE_IP>         lladdr <MAC-5> REACHABLE   <- the phone, actually here
+<IPHONE_LL6>        lladdr <MAC-5> STALE       <- and here
+<IPHONE_GHOST_LL6>  INCOMPLETE                 <- what we were dialling
 adb shell "ping6 -c 2 -W 2 <resolved-addr>%br0"    # "Address unreachable" = confirmed
 ```
+
+`INCOMPLETE` against the address in the `resolved '<peer>' -> …` log line confirms it. Fix (in code): the wire
+is the authority; `MdnsInspect.liveEndpoint()` queries SRV then A/AAAA and `CarPlayRx.dialCandidates()` dials
+those first (re-querying at attempts 3 and 6), the cached pair last. Mechanism: `12_OBSERVED_FLOW.md`
+"FAILURE POINT 2".
 
 ---
 
 ## 8. Untethered capture
 
-The two faults that survive every tethered session — the USB permission dialog appearing on roughly
-half of adapter attaches (retired 2026-10-08 on a unit that carries the persistent grant, §4), and the iPhone
-refusing to auto-reconnect until iOS forgets the box — only happen when no Mac is attached. The app captures
-itself.
-
-`logcat -d` dumps what is already in the ring buffer, so capture does not have to be running when the
-fault happens, only within the ring-buffer window afterwards. Capture is armed
-(idempotently) from every entry point — `MainActivity.onCreate`, `AutoClaim.trigger`, `BootReceiver`,
-`CarPlayMediaBrowserService.onCreate`, and `UsbAttachActivity` when it runs — and drains the backlog before
-it starts tailing (`LogCapture.start` call sites; corrected 2026-10-08: the attach trampoline is dormant on
-this unit and is no longer the primary arm). Coverage does not depend on any one of them.
+The two faults that survive every tethered session (the USB permission dialog on roughly half of adapter
+attaches, absent with the persistent grant, §4; and the iPhone refusing to auto-reconnect until iOS forgets
+the box) only happen with no Mac attached, so the app captures itself. `logcat -d` dumps the ring buffer, so
+capture need not be running at the fault, only within the ring window afterwards. Capture is armed
+idempotently from every entry point (`MainActivity.onCreate`, `AutoClaim.trigger`, `BootReceiver`,
+`CarPlayMediaBrowserService.onCreate`, `UsbAttachActivity` when it runs; `LogCapture.start` call sites) and
+drains the backlog before tailing. `UsbAttachActivity` is reached through the `UsbHostManagementActivity`
+alias after GM's handler grants the uid; before the grant, `AdapterAttachReceiver` is the live route.
 
 ### 8.1 One-time bench grant
 
-The declared default scope is whole-OS (`CapturePrefs`, so a granted unit never quietly captures less); without
-`READ_LOGS` it degrades to own-process, which needs no permission and always works, and says so in the capture
-header (corrected 2026-10-08). Whole-OS needs `READ_LOGS`,
-which is `signature|privileged|development` — it can never be obtained by declaring it, but the
-`development` flag means adb can grant it. The app declares it so the grant has something to land on;
-`pm grant` rejects a permission the package does not request.
+Default scope is whole-OS (`CapturePrefs`); without `READ_LOGS` it degrades to own-process (always works) and
+says so in the capture header. `READ_LOGS` is `signature|privileged|development`: declaring it is not enough,
+but adb can grant it (the app declares it so `pm grant` accepts it).
 
 ```bash
 adb shell pm grant --user 10 android.car.usb.handler android.permission.READ_LOGS
-adb shell am force-stop android.car.usb.handler       # NOT optional — see below
+adb shell am force-stop android.car.usb.handler       # NOT optional
 ```
 
-**The app's own on-screen/logcat suggestion is safe to copy again** (fixed 2026-09-09). It was not,
-between 2026-09-08 and 2026-09-09: `LogCapture.kt`'s `GRANT_CMD`/`FORCE_STOP_CMD` (pre-fix file
-byte-exact at commit `b049810` —
-`git show b049810:host/gm_ccpa/netprobe_app/app/src/main/java/zeno/gmccpa/logging/LogCapture.kt` —
-constants at `:163`/`:166`, printed at `:572`, `:608-609`, and into the capture-file header's
-`degraded :` line at `:794`; the header's `app :` line at `:790` hard-coded the same literal directly)
-survived the package-squat revert with the dead package `android.car.usb.handler` hard-coded, so a
-copy-pasted `pm grant` targeted a package not installed on the unit and failed. They are now
-`LogCapture.grantCmd(ctx)`/`forceStopCmd(ctx)`, built from the running app's `ctx.packageName`, so
-the printed remediation and the capture-file header (`header()`'s `app :` and `degraded :` lines)
-always name whatever package is actually installed. The commands above remain correct.
+The remediation the app prints (`LogCapture.grantCmdForUser`/`forceStopCmd`) is built from the running package
+name, so it is safe to copy.
 
-**The force-stop is load-bearing.** `READ_LOGS` maps to the supplementary gid `log`, and supplementary
-gids are assigned at fork. An already-running process keeps reporting `GRANTED` from
-`checkSelfPermission` while `logd` still filters it to its own uid — permission says yes, the kernel
-says no. The engine detects exactly this — before the first capture file, it asks logd once
-(`logcat -d -t 2000 -v threadtime -v uid`, retried for up to 15 s only while that probe cannot run or
-returns no line) for a line of a uid other than ours; none seen = degrade — and it degrades the reported
-scope and prints the force-stop command; believe the `effective` scope, never the granted flag.
-(Corrected 2026-10-06: it used to look for a foreign *pid* in the captured stream for 15 s. That was
-wrong: logd filters an unprivileged reader by uid, so lines from dead pids of our own uid are visible,
-and the pid parser misread the `-v year -v UTC` format. A probe that cannot run logs `whole-OS capture
-UNVERIFIED` and capture continues as requested; it never degrades without positive evidence.)
+**The force-stop is the working remedy, cause unconfirmed.** A process that predates the grant can keep reporting
+`GRANTED` while `logd` still filters it to its own uid; the usual explanation (the `log` gid is assigned at
+fork) is refuted on this unit, where a process forked at boot also degraded (`11_HARDENING_PLAN.md` N25, root
+cause OPEN; `LogCapture` prints a different remediation after a fresh-process failure). Before the first
+capture file the engine asks logd once (`logcat -d -t 2000 -v threadtime -v uid`, retried up to 15 s only while
+the probe cannot run or returns no line) for a line of another uid; none = degrade the reported scope and print
+the force-stop command. Believe `effective`, never the granted flag. A probe that cannot run logs `whole-OS
+capture UNVERIFIED` and capture continues as requested.
 
-The grant survives reboots and `adb install -r`. It is lost only on a full uninstall.
+The grant survives reboots and is lost by a full uninstall. The 2026-10-08 bench also saw `adb install -r`
+lose it (§4): check `capture_status` after any install and re-run the grant when scope reads degraded.
 
 ### 8.2 Operating it
 
 ```bash
-# status: which scope actually took, which buffers opened, bytes on disk, lines dropped
-adb shell am start -n android.car.usb.handler/zeno.gmccpa.MainActivity --es run capture_status
+adb shell am start -n android.car.usb.handler/zeno.gmccpa.MainActivity --es run capture_status   # scope, buffers, bytes, drops
 adb shell am start -n android.car.usb.handler/zeno.gmccpa.MainActivity --es run capture_whole_os
 adb shell am start -n android.car.usb.handler/zeno.gmccpa.MainActivity --es run capture_own
 adb shell am start -n android.car.usb.handler/zeno.gmccpa.MainActivity --es run export_log
 ```
 
-The launcher screen carries only Export: **Adapter & logs ▸ Export logs** (corrected 2026-10-08, plan v5.9
-D003/D004: the Log Scope and Log Status pills were removed; scope and status are these verbs only). The
-same sheet holds Restart adapter Bluetooth, Reboot adapter and Forget pairing, each confirmed, plus the
-full "Last message" (the engineering sentence the screen's driver line no longer shows; it is also in
-logcat as `ui: <STATE> — <detail>`). Recover was merged into Restart session (D001), and "Box Info" is gone
-(MGMT_GET_INFO still runs on every link-up; `ocbm_state` reads the box state).
+The launcher carries only Export (**Adapter & logs ▸ Export logs**); scope and status are these verbs only.
+The same sheet holds Restart adapter Bluetooth, Reboot adapter, Forget pairing (each confirmed) and the full
+"Last message" (also logged as `ui: <STATE> — <detail>`). `MGMT_GET_INFO` runs on every link-up; `ocbm_state`
+reads the box state.
 
-Export walks a ladder and reports which rung it used: SAF document picker → a mounted USB volume via
-`getExternalFilesDirs()` → `MediaStore.Downloads` → a no-op that reports the path in `filesDir`. Some AAOS
-builds ship without DocumentsUI; THIS unit has it (bench 2026-10-08, `230eaa7`): `export_log` opens the SAF
-picker in its own task, which the CarPlay screen covers (it relaunches on MainActivity resume), so the export
-sits pending until the app is brought forward — the picker's cancel was processed ≈43 s later, after which the
-ladder fell through to MediaStore Downloads. Read that artifact with
+Export walks a ladder and reports the rung: SAF picker → mounted USB volume (`getExternalFilesDirs()`) →
+`MediaStore.Downloads` → path in `filesDir`. This unit has DocumentsUI (bench 2026-10-08, `230eaa7`), but the
+picker opens in its own task, which the CarPlay screen covers: the export sat pending until the app was brought
+forward (cancel processed ~43 s later, then MediaStore Downloads). Read it with
 `adb shell content read --user 10 --uri content://media/external_primary/downloads/<id>`; `adb pull` of the
-Download path is permission-denied for the shell. `run-as` is blocked on this unit, so the ladder is the only
-retrieval path that does not need adb.
+Download path is permission-denied for the shell and `run-as` is blocked.
 
-**Exports are redacted by default.** A whole-OS capture from this unit contains the vehicle hotspot
-passphrase, the iPhone's BR/EDR MAC (in the box's `[box:…]` log lines and the `MGMT_INFO` bonded-device
-snapshot — `CT_PHONE_IDENT.deviceID` stays EMPTY in this role, the box never sees SETUP, F-C8), the adapter's
-serial and derived `CarLink-xxxx` name, the VIN and GPS; an export lands on a removable stick and leaves the
-vehicle. `export_log_raw` opts out and is a separate verb on purpose. The redactor's rules and its known gaps
-are listed in `logging/Redactor.kt`'s class KDoc (corrected 2026-10-08; they moved out of `LogExport.kt` in
-v5.8 V7) — read them before trusting an export.
+**Exports are redacted by default.** A whole-OS capture contains the hotspot passphrase, the iPhone's BR/EDR
+MAC (in `[box:…]` lines and the `MGMT_INFO` snapshot; `CT_PHONE_IDENT.deviceID` stays EMPTY in this role, F-C8),
+the adapter serial and `CarLink-xxxx` name, the VIN and GPS, and an export leaves the vehicle on a stick.
+`export_log_raw` opts out and is a separate verb on purpose. Rules and known gaps: `logging/Redactor.kt` class
+KDoc.
 
 ### 8.3 What to grep
 
-**Start from a plain `adb logcat > logcat.log`.** Capture everything, filter afterwards — the
-unfiltered file is what tells you the fault was NOT the app, and that is worth more than a tidy one.
+Start from a plain `adb logcat > logcat.log`; the unfiltered file is what shows the fault was NOT the app.
 
 ```bash
 grep NETPROBE logcat.log                                    # the app's own narrative
@@ -909,76 +686,48 @@ PID=$(grep -m1 'IDENTITY pid=' logcat.log | grep -o 'pid=[0-9]*' | cut -d= -f2)
 awk -v p="$PID" '$3==p' logcat.log                          # + every framework line the app caused
 grep -E 'EXPECTED-MISSING|EXPECTED-LATE' logcat.log         # steps that did not happen, or nearly
 grep '## STATUS' logcat.log                                 # standing state, nearest block to any offset
-grep ' E NETPROBE' logcat.log                               # faults — E means fault since 6c6ec79
+grep ' E NETPROBE' logcat.log                               # faults
 grep -E 'iPhone DETECTED|INBOUND CONTROL|MILESTONE' logcat.log
 ```
 
-**Both filters are needed, and the second is the non-obvious one.** In the 2026-09-09 capture the
-app's PID emitted ~250 lines under OTHER tags — `CCodec` 68, `CCodecConfig` 55, `CCodecBuffers` 45,
-`BufferQueueProducer` 17, `MediaCodec` 11, `ViewRootImpl[CarPlayActivity]` 8, `SurfaceUtils` 7 —
-and those are exactly the lines that separate an app decode fault from a platform one. `grep
-NETPROBE` throws all of them away. The `IDENTITY` anchor exists so the PID filter is constructible;
-before `6c6ec79` the PID reached logcat only on the USB-attach path, so a launcher start left
-nothing to key on.
+Both filters are needed. In the 2026-09-09 capture the app's PID emitted ~250 lines under other tags
+(`CCodec` 68, `CCodecConfig` 55, `CCodecBuffers` 45, `BufferQueueProducer` 17, `MediaCodec` 11,
+`ViewRootImpl[CarPlayActivity]` 8, `SurfaceUtils` 7), the lines that separate an app decode fault from a
+platform one. `IDENTITY` anchors the PID filter and carries the build SHA (`assets/build_sha`; `pm install`
+discards the SHA in the filename).
 
-`IDENTITY` also carries the build SHA, stamped into `assets/build_sha` at build time — the SHA is in
-the APK filename and `pm install` discards it, so without the asset a capture cannot be tied to the
-sources that produced it.
-
-
-
-Every session emits one `SESSION v=3 …` line plus a `SESSION_DETAIL` block (schema 3, `SessionSummary.SCHEMA_VERSION`). That is the point: a drive
-capture in `evidence/` can run into gigabytes, and reading it is not a diagnostic strategy — diffing one
-line per session is.
-
-**Schema v=2 (2026-09-10) — and "every session" only became true with it.** Before v=2 the line was
-emitted ONLY for a session that began at a USB attach, because `SessionSummary.begin()` was called
-only from `UsbAttachActivity`. A launcher tap or an `am start` produced **no summary at all** — the
-whole 2026-09-09 capture, a complete and successful session, contains zero `SESSION v=` lines. v=2
-adds a launch origin, so:
-
-- `origin=` is appended at the END of the line (`usb_attach` | `launch`). The field set and order are
-  a versioned contract — grow it by bumping the version and appending, never by reordering, because
-  these lines are diffed across weeks of captures.
-- `perm_trampoline=none` and `serial=unknown` on a launch-origin session. These are **deliberately
-  not fabricated**: there was no trampoline to sample, and `serial=sec_exception` is *defined* as
-  "the attach-time grant did not land", so a launch-time read would mislabel itself. `grep
-  perm_trampoline=false` therefore still matches only sessions where a trampoline really did see a
-  missing grant, which is the fault-1 query.
-- A launch-origin session superseded by a real attach closes as `exit=launch_superseded_by_attach`,
-  distinct from `superseded_by_new_attach`.
-- **v=3 (2026-10-08, D6):** `origin=` also reads `auto_attach` | `auto_boot` | `auto_bind` for a session whose
-  link attempt the auto-claim started with no UI (adapter-attach broadcast, BOOT_COMPLETED, media-browser
-  bind); the same absent-token rules as `launch` apply (`SessionSummary.kt:60-62`). No key moved or was added.
+Every session emits one `SESSION v=3 …` line plus a `SESSION_DETAIL` block (`SessionSummary.SCHEMA_VERSION`);
+diff one line per session instead of reading gigabytes. The field set and order are a versioned contract (bump
+the version and append, never reorder). `origin=` is last: `usb_attach` | `launch` | `auto_attach` |
+`auto_boot` | `auto_bind` (`auto_*` = started by the auto-claim with no UI). A session not begun at a USB attach
+logs `perm_trampoline=none` and `serial=unknown` (deliberately not fabricated; `serial=sec_exception` is
+*defined* as "the attach-time grant did not land"), so `grep perm_trampoline=false` matches only sessions where
+a trampoline really saw a missing grant. A launch-origin session superseded by an attach closes as
+`exit=launch_superseded_by_attach` (distinct from `superseded_by_new_attach`).
 
 | Question | Grep |
 |---|---|
-| Did the USB permission grant land (dialog or cached "always")? | `grep 'USB HANDLER' … held=` and `grep 'prompted=' *.log` — `held=`/`prompted=` are legacy field names from the squat-era diagnostics (`UsbAttachActivity.kt`), kept on purpose post-revert since they still answer the same question about the ordinary attach flow. **Corrected 2026-10-08:** those lines come from `UsbAttachActivity`, which is dormant on this unit (manifest comment), so on an auto-claimed session the answer is the `auto-claim (<origin>): <DECISION>` line instead — `SKIP_NO_GRANT` = no grant; `CLAIM` followed by `claimed interface` = granted |
-| Where does Bluetooth stall? | `grep -o 'btp_max=[A-Z_]*'` — `none`/`LINK_UP` = box never got RFCOMM; `AUTHENTICATING` = MFi; `IDENTIFYING` = iAP2 identification; `WIFI_HANDOFF` = BT succeeded, look at Wi-Fi |
-| Bond asymmetry (the "forget it in iOS and it works" shape) | `grep 'bond_changed=true'` |
-| Sessions that never produced video | `grep 'no_video=true'` |
-| Did the box send something we still don't parse? | `grep 'CTRL unknown type'` |
+| Did the USB permission grant land? | `grep 'USB ATTACH TRAMPOLINE' … held=`, `grep 'prompted=' *.log` (names kept from the earlier trampoline; same question). These come from `UsbAttachActivity`, which runs only when GM's handler starts the alias; on an auto-claimed session read `auto-claim (<origin>): <DECISION>`: `SKIP_NO_GRANT` = no grant; `CLAIM` then `claimed interface` = granted |
+| Where does Bluetooth stall? | `grep -o 'btp_max=[A-Z_]*'`: `none`/`LINK_UP` = box never got RFCOMM; `AUTHENTICATING` = MFi; `IDENTIFYING` = iAP2 identification; `WIFI_HANDOFF` = BT succeeded, look at Wi-Fi |
+| Bond asymmetry ("forget it in iOS and it works") | `grep 'bond_changed=true'` |
+| Sessions with no video | `grep 'no_video=true'` |
+| Box sent something we don't parse | `grep 'CTRL unknown type'` |
 
-`desc_fp=` is the adapter's descriptor fingerprint. A changed fingerprint across attaches means the USB
-permission cache saw a different device — the leading hypothesis for the intermittent dialog;
-`/script/ncm_only` flips the box between descriptor variants.
+`desc_fp=` is the adapter's descriptor fingerprint; a change across attaches means the USB permission cache saw
+a different device (leading hypothesis for the intermittent dialog; `/script/ncm_only` flips descriptor
+variants).
 
-**Platform log flood (F-C5, recorded 2026-10-08, read-only bench).** `ethctrlmgr` writes ~1.2k lines/s into the
-1 MiB main ring, so the ring holds seconds, not minutes, and the app's own logcat child costs ~3.4 % of a core
-keeping up. Platform behaviour, not the app's; raising `persist.logd.size` is a device-owner action. The box's
-`wireless` daemon's 1 Hz `EADDRINUSE` retry loop (SDP/HSP/HFP; F-C1, static box code) is 32-37 % of the app's
-own lines on the same bench — see `11_HARDENING_PLAN.md` for both.
+**Platform log flood (F-C5, read-only bench).** `ethctrlmgr` writes ~1.2k lines/s into the 1 MiB main ring (it
+holds seconds) and the app's logcat child costs ~3.4 % of a core; the box `wireless` daemon's 1 Hz `EADDRINUSE`
+retry loop (F-C1) is 32-37 % of the app's own lines. Raising `persist.logd.size` is a device-owner action; see
+`11_HARDENING_PLAN.md`.
 
 ### 8.4 Not yet verified on the unit
 
-Each item below is probed at start and the result goes into every file header, but none has been
-confirmed on hardware:
+Probed at start with the result in every file header, not confirmed on hardware: whether an `untrusted_app` may
+`exec /system/bin/logcat` under this unit's SELinux policy; which buffers open (`main,system,crash` should;
+`events`/`radio` are probed; `kernel` is opt-in and probably refused, `tools/drive_capture.sh` gets `-b all`
+only because it runs as the adb shell user); DocumentsUI presence (bench says yes):
+`adb shell cmd package resolve-activity -a android.intent.action.CREATE_DOCUMENT -t text/plain`.
 
-- whether an `untrusted_app` may `exec /system/bin/logcat` at all under this unit's SELinux policy;
-- which buffers open. `main,system,crash` should; `events`/`radio` are probed; `kernel` is opt-in and
-  probably refused (`tools/drive_capture.sh` only gets `-b all` because it runs as the adb shell user);
-- whether DocumentsUI exists here:
-  `adb shell cmd package resolve-activity -a android.intent.action.CREATE_DOCUMENT -t text/plain`
-
-Raise the ring buffer once at the bench so the backward drain reaches far enough — use
-`persist.logd.size` rather than a runtime `logcat -G`, which does not survive a reboot.
+Raise the ring once at the bench with `persist.logd.size`, not a runtime `logcat -G` (lost on reboot).

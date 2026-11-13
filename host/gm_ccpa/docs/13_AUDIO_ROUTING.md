@@ -1,624 +1,280 @@
-# 13 — Audio routing (LIVING DOCUMENT — update in place)
+# 13 — Audio routing
 
-**What this is.** Full CarPlay audio: media, phone calls, Siri, alerts, navigation and the microphone
-uplink. Derived from four parallel studies — the working Android stack in `carlink_native_personal`,
-the `ocbm` receiver, its macOS host, and an audit of what this app does versus what it
-advertises. See [`12_OBSERVED_FLOW.md`](12_OBSERVED_FLOW.md) for the flow this plugs into.
+Full CarPlay audio: media, phone calls, Siri, alerts, navigation and the microphone uplink, on a GM AAOS head
+unit where the app cannot address a bus and can only choose `AudioAttributes` usages. Flow context:
+[`12_OBSERVED_FLOW.md`](12_OBSERVED_FLOW.md). History of the superseded 2026-09 voice design (keep-alive,
+idle sweep, energy duck, per-usage `Sink`, rows A6-A11): [`11_HARDENING_PLAN.md`](11_HARDENING_PLAN.md).
 
-> ## CURRENT STATE (2026-10-08) — read this first; sections below are layered history
-> The voice half was rebuilt in plan v5.8/v5.9 (uncommitted working tree). Where a section below describes the
-> 2026-09 design (`keepAlive`, `sweepIdle`, `TRACK_BUFFER_MIN_MS`, the energy duck, `Sink.feed`,
-> `ASSISTANT_HOLD_MS`/`DUCK_RELEASE_MS`), it is marked SUPERSEDED in place; none of those symbols exist in the
-> tree now (`rg` over `av/*.kt` finds only a comment in `AacPlayer.kt`). What the code does today, with cites
-> to `netprobe_app/app/src/main/java/zeno/gmccpa/av/`:
->
-> - **Real time, per stream.** `:9003` is voice-tag v2; each voice stream (call 100+telephony, Siri
->   100+speechRecognition/default, alert 100+alert, nav 101) has its own RTP-timestamp jitter buffer
->   (`VoiceJitterBuffer.kt`): target = SETUP `audioLatencyMs` (absent -> 80 ms, floor 32 ms), watermark
->   W = max(target + 20, 200) ms, continuous Discard Excess DOWN TO W, re-anchored on the first surviving
->   node, so a trim cuts delay and inserts no silence (`VoiceLatency.kt:13-46`). Stale audio is dropped, never
->   queued (owner 2026-10-07; OD-8A: no late nav).
-> - **Device buffer = stock's per-usage value** (call 32, Siri 128, alert 48, nav 48 ms; `VoiceLatency.kt` `deviceBufferMs`), primed with
->   silence before `play()`; one writer per track (its purpose worker, 8 ms period, `WRITE_NON_BLOCKING`).
-> - **Start-transient exemption (fix2).** After `play()` the HAL bus takes ~140-400 ms to start pulling (cp12).
->   Until the head first moves no trim happens (bounded at W + 500 ms, `START_STALL_CAP_MS`); what built up
->   becomes an allowance, paid back only by dropping silent AUs (`VoiceJitterBuffer.kt:220-262`) so the first
->   words are delayed, not cut. Observed (rc2 nav stream, 04:48:20): excess 11, excess loud 0, silent
->   catch-up 9.
-> - **URGENT_AUDIO switch.** `VoiceLatency.VOICE_THREADS_URGENT_AUDIO` (default true) raises the voice
->   workers and the `:9003` reader to `THREAD_PRIORITY_URGENT_AUDIO` (`VoiceRouter.kt:421-428`), as
->   `MicUplink`'s capture already was. Origin: a Fable perf review saw a nav worker runnable-not-running for
->   97.5 ms at nice 0 against a 48 ms device buffer (`perf_fable_findings.md` is PROVISIONAL — not settled;
->   no before/after CPU measurement has been taken).
-> - **Focus.** CALL, ASSISTANT and ALERT request focus through a fresh epoch-stamped listener per request
->   (`FocusSlot.kt`); **NAV requests none** (OD-8C = YES, as stock: SD:CarPlayAudioManager.java:748-750; bench
->   T1/T3 in `stock_runtime/`), plays live from BEGIN to END, and the old Siri guard / park-and-re-acquire code
->   is deleted. NAV while a call or Siri is live is PLAY_LIVE (OD-8D; the iPhone's maneuver tone over a call);
->   `NAV_DURING_VOICE=DROP` remains only as a non-default safety net (`VoiceLatency.kt:24-41`).
-> - **Ducking.** The loud-frame energy duck is gone. Media follows `duckAudio` / `unduckAudio` (volume dB,
->   durationMs; defaults 0.2 / 500 ms) through one VolumeShaper per track: gain = min(voice ramp, focus ramp)
->   (`DuckRamp.kt`). On an unduck media returns to 1.0 at once; the GM platform duck carries the tail (stock
->   T1). `NAV_UNDUCK_HOLD` (software hold at -13.6 dB until the nav stream ends) is OFF by default because the
->   platform duck already runs for gm_ccpa and a hold would stack to ~-30 dB (`VoiceLatency.kt:106-115`).
-> - **Stock-style duck lift (owner 2026-10-08).** When the nav track's head first advances (bus1 active), our own
->   software duck lifts over 100 ms so media sits at the platform duck alone (~-14..-19 dB) instead of
->   ~-30 dB (`VoiceStreams.kt:957-967`, `NAV_DUCK_LIFT_ON_BUS`). rc2 capture: lift 286 ms and 313 ms after
->   `duckAudio`, platform `ducking -18.70dB` (cp12 04:48:16, 04:48:46).
-> - **Siri and the knob.** Media is still PAUSED (not ducked) while Siri is live so the volume knob reaches
->   `VOICE_COMMAND`: `VoiceRouter.assistantTick` (`:585`) -> `AacPlayer.setAssistantSpeaking`; edges come from the
->   ASSISTANT stream's BEGIN..END plus the speech-mode START edge, not from a quiet timer.
-> - **Alert** goes to `USAGE_NOTIFICATION_RINGTONE` (CALL_RING, bus3; OD-7C). Still unexercised on the truck.
-> - **Permanent media-focus loss (fix round finished 2026-10-08).** `AacPlayer.reclaimFocus` no longer retries
->   just because media keeps flowing. Focus returns on a resume intent (MediaSession play, new screen, or the
->   surviving screen back at the front: `CarPlayActivity.onResume` -> `AacPlayer.onScreenReturned`) or on a
->   phone-side resume (`FocusReclaimRule.kt`; a phone already paused when the loss landed counts). The loss
->   also takes MainAudio from the phone like stock (OD-9C, `MainAudioHandover.kt`; events.rs Take
->   {resource 2, type 1, priority 500, take 500, borrow 100} / Untake {2, 2}; JNI `nativeTakeMainAudio` /
->   `nativeReleaseMainAudio`), and gives it back on focus GAIN. UNKNOWN until bench (plan B-MED-9): whether iOS
->   pauses on the take, and whether HID PLAY alone resumes it. Voice dead code (`dueAtUs`, `ctrlEnded`,
->   `idleOnAuClock`, `idle`, `VoiceIdleRulesTest`) was removed (UC2, D010/D019).
-> - **Bench status.** Verified on the unit (cp12): nav plays live with no focus request, the lift, the
->   platform duck, a 0-loud-excess start. Not yet: the B-V1-W overlap matrix (10 nav + 3 Siri overlaps + 5 Siri),
->   B-V3-3, the media net-underrun rate against cp12's ~1/min, FM -> CarPlay resume.
-> - **Unknown:** whether iOS sends `audioLatencyMs` other than 80 on this unit's SETUPs beyond cp7/cp8; why the
->   radio cold-restarted at 04:48:50 during rc2 (see `12_OBSERVED_FLOW.md`).
-
-**Status (as of 2026-09-10, the pre-v5.8 build — see the block above for today): BUILT, compiles clean, Tier-0 green. Five of the six sinks are truck-confirmed.** All
-five build-order steps below (A1–A5) landed in commits `525a845`/`ee1f270`/`5515bf4`/`a65a1f0`
-(2026-08-12) plus the 2026-08-28/29 focus-recovery fixes. **Owner-confirmed on the truck 2026-09-04**
-(no capture committed): media, Siri, call and navigation audio each route audibly to the correct GM
-vehicle volume group — Media→`Audio`, Siri→`Voice`, Call→`Phone`/`Call`, Nav→`Navigation` — and the
-**mic uplink works** (§4). Still unconfirmed on hardware: only the **alert** sink. The post-Siri
-media-silence bug reported on 2026-09-04 is **fixed** in `b8e8736` (2026-09-08) and the fix is now
-**measured on the truck at 1.95 s** — see §3a.
-
-**Captured session 2026-09-09 (`gmccpa_probe_20260909_225421`, app build `7c92000`) — the first
-capture that exercises ducking, and it found three defects.** Duck-and-return is no longer "unexercised":
-it runs, and it PUMPS (§3 Ducking). `VoiceRouter` dropped **42 of 249 Siri AUs (17%)** (§3 rule 3).
-Media took **6 underruns in 843 frames** (§3 rule 2). All four are filed as rows A6–A9 in
-[`11_HARDENING_PLAN.md`](11_HARDENING_PLAN.md).
+Source: `app/src/main/java/zeno/gmccpa/av/` — `AacPlayer` (media), `VoiceRouter` (Android half of `:9003`),
+`PurposeEngine` + `VoiceStreams` (one `AudioTrack` + `MediaCodec` per active purpose), `VoiceJitterBuffer`,
+`VoiceLatency` (constants, `Purpose`, `mapping`), `VoiceFrame`, `FocusSlot`, `DuckRamp`, `MainAudioHandover`,
+`FocusReclaimRule`, `MicUplink`; wired into `CarPlayActivity`.
 
 ---
 
-## 0a. What is truck-verified, and what is not
+## 0. Wire format: `:9003`
+
+`:9002` carries media (bare ADTS AAC-LC). `:9003` carries every other stream, tagged by the box
+(`crates/vendor/receiver/src/forward.rs`). All fields big endian. Base head, 11 bytes:
+
+```
+[rate u32][ch u16][atype u8][len u32][payload]        // tag_voice (v1): payload = AU
+```
+
+`atype`: 0 media, 1 telephony, 2 speechRecognition, 3 alert, 4 default/absent, 5 compatibility. The base
+tag spec is `docs/ocbm/00_PROTOCOL.md` ("The `:9003` voice seam tag").
+
+**The shipped app speaks voice-tag v2** (`voice-tag-v2` feature, enabled by `carplay-jni`; `tag_voice_v2`):
+
+| Frame | `atype` | `len` covers | Payload |
+|---|---|---|---|
+| AU | `atype \| 0x80` | 23-byte extension + AU | `[scid u64][rx_us u64][seq u16][rtp_ts u32][stream_type u8][AU]` |
+| control | `0xFF` | payload | `[kind u8][write_us u64]…`; kind 1 BEGIN, 2 END (`voice_begin_v2` payload is 35 bytes) |
+
+`rx_us` is the box's `voice_clock_us()` at RTP receive; `seq` and `rtp_ts` are the packet's RTP fields. END
+carries a reason (unknown, teardown, session reset, superseded, socket error).
+
+Why `atype` exists: telephony, speechRecognition and Siri `default` are all AAC-ELD 16 kHz mono, so
+`(rate, channels)` yields one bit where five purposes are needed. The macOS host collapses `audioType` to one
+`isVoice` bit and `carlink_native_personal`'s `resolveTargetSlot` sends Siri to the call track, so neither
+reference implementation can be copied for routing.
+
+`VoiceLatency.mapping(streamType, audioType, codec)` picks the purpose; rows are evaluated top to bottom:
+
+| Stream | Result |
+|---|---|
+| any + compatibility (5) | dropped, no PCM path (explicit decision) |
+| non-ELD codec (non-media AAC-LC, PCM, Opus) | dropped, no voice decoder |
+| media (0) | dropped; media never reaches `:9003` |
+| 101, any remaining audioType | NAV |
+| telephony / speechRecognition / alert | CALL / ASSISTANT / ALERT |
+| default/absent | ASSISTANT (deviation from stock, which maps it to Media; not seen on this unit) |
+
+---
+
+## 0a. Verification state
 
 | Claim | State |
 |---|---|
-| Media (AAC-LC 48 k stereo, `AacPlayer`) | **Device-proven**, 2026-08-05 working session |
-| Media pausing so the volume knob reaches `VOICE_COMMAND` during Siri | **Device-proven**, 2026-08-12 (117 knob steps measured; see §3) |
-| `atype` byte on `:9003` (box-side `tag_voice`) | Landed in `ocbm` `forward.rs`; parsed by `VoiceRouter`. **Routing device-confirmed 2026-09-04**: Siri, call and nav each land audibly on the correct bus, so the `atype`→purpose split is right on hardware |
-| Per-purpose sinks: CALL and NAV routing, AAC-ELD decode, silence-fill watchdog (`VoiceRouter.kt`) | **Owner-confirmed on the truck 2026-09-04** (no capture committed): Siri→`Voice`, Call→`Phone`/`Call`, Nav→`Navigation` each audible on the correct volume group. The **ALERT** sink is still unexercised. The energy-gated **ducking** IS now exercised (2026-09-09 capture) and is defective — see §3 Ducking |
-| AAC-ELD decode of the Siri downlink | **Device-proven 2026-09-09**: `[voice] siri: AAC-ELD 16000Hz 1ch -> AudioTrack(usage=16), decoder=c2.android.aac.decoder`. Note the decoder is SOFTWARE — this head unit has no hardware audio codec of any kind (§5) |
-| `VoiceRouter` AU delivery | **SUPERSEDED 2026-10-07 (v5.8 V1b) — `Sink.feed` no longer exists.** Was **DEFECTIVE, measured 2026-09-09**: `stopping — 249 AUs routed, 42 dropped` — 17 % of one Siri turn discarded by the `w == 0` branch in `Sink.feed`. Filed as A6 |
-| Mic uplink (`MicUplink.kt`, `mic-uplink-eld` feature) | **Owner-confirmed on the truck 2026-09-04**: works. CarPlay raises the AAOS mic-in-use indicator when it requests the mic and it clears cleanly on release; no GM AAOS mic volume/gain control exists (expected) |
-| `AacPlayer.reclaimFocus()` (recovers from `AUDIOFOCUS_LOSS` without a permanent hang) | Landed 2026-08-28; **reworked 2026-10-08** (resume intent / screen return / phone-side resume, plus the OD-9C MainAudio take — see CURRENT STATE) — cp12 showed the screen restored twice; the rework itself is **not truck-verified** |
-| Media recovery after a voice/call turn | **FIXED 2026-09-08 (`b8e8736`); truck re-measurement RECORDED 2026-09-09 at 1.95 s.** Owner-observed 2026-09-04 as 10–20 s of silence; device-measured at **12.0 s** before the fix, **1.95 s** after (assistant edge `22:55:50.348` → `media resumed after focus gain` `22:55:52.295`). Two clocks: `assistantTick` cleared `pausedForAssistant` after `ASSISTANT_HOLD_MS` (4 s), but focus was abandoned only by `Sink.release()` at `Purpose.idleMs` (15 s for ASSISTANT), so media resumed on the focus edge, not the assistant edge. `ASSISTANT.idleMs` is now `ASSISTANT_HOLD_MS + 1` sweep period. The design target was ~1 s; the measured 1.95 s is the sweep's 1 Hz throttle on top of it, and is accepted — see §3a |
-
-**Source (corrected 2026-10-08):** `netprobe_app/app/src/main/java/zeno/gmccpa/av/{AacPlayer,
-VoiceRouter, VoiceStreams, VoiceJitterBuffer, VoiceFrame, FocusSlot, DuckRamp, MicUplink}.kt`, wired into
-`CarPlayActivity.kt`; `VoiceRouter` is now only the Android half (629 lines) and the decisions live in the pure
-classes beside it. The original `VoiceRouter` (656 lines as of 2026-09-09, was 597) replaced the
-earlier `drainVoice`, which accepted `:9003` and discarded every byte — that silence is why this
-section previously read "design only, nothing implemented"; it no longer applies.
-
----
-
-## 0. The wire format this depends on
-
-`:9003` carries every non-media stream, tagged:
-
-```rust
-// ocbm/crates/vendor/receiver/src/forward.rs — pub fn tag_voice
-pub fn tag_voice(au: &[u8], rate: u32, channels: u16, atype: u8) -> Vec<u8>
-// -> [rate u32 BE][ch u16 BE][atype u8][len u32 BE][AU]
-```
-
-`atype` is the CarPlay purpose byte (0 media, 1 telephony, 2 speechRecognition, 3 alert, 4 default) —
-**this is A1, landed**, not the historical gap. Before it, the three purposes that most need
-separating were indistinguishable on the wire:
-
-| Purpose | `/info` entry | Format |
-|---|---|---|
-| Siri downlink | type 100 `default` | AAC-ELD 16 kHz mono |
-| Phone call | type 100 `telephony` | AAC-ELD 16 kHz mono |
-| Speech recognition | type 100 `speechRecognition` | AAC-ELD 16 kHz mono |
-
-`(rate, channels)` alone can only separate *16 kHz mono* from *48 kHz stereo* — one bit where five
-purposes are needed. `VoiceRouter.purposeFor()` uses `atype` first and falls back to format only for
-`atype 4` (`default`), where 16 kHz mono is genuinely Siri and 48 kHz stereo is genuinely nav/alt-audio
-— that split is safe because the two entries actually differ in format.
-
-Both reference implementations that guessed from format alone got it wrong: the macOS host collapses
-`audioType` to a single `isVoice` bit, and `carlink_native_personal`'s `resolveTargetSlot` sends Siri
-audio to the phone-call track whenever both flags are set (16 kHz mono matches the first branch). This
-is why A1 was required before A2, not an optional refinement.
+| Media AAC-LC 48 k stereo (`AacPlayer`) | Device-proven 2026-08-05 |
+| Media paused during Siri so the knob reaches `VOICE_COMMAND` | Device-proven 2026-08-12 (117 knob steps measured, §3) |
+| `atype` routing: Siri, call, nav each audible on the correct bus/volume group | Owner-confirmed on the truck 2026-09-04 (no capture committed). Pre-v5.8 build; the v5.8/v5.9 voice rebuild is bench-verified on cp12 only |
+| AAC-ELD Siri decode | Device-proven 2026-09-09: `[voice] siri: AAC-ELD 16000Hz 1ch -> AudioTrack(usage=16), decoder=c2.android.aac.decoder` (software decoder; no hardware audio codec on this unit, §1) |
+| Mic uplink | Owner-confirmed on the truck 2026-09-04: AAOS mic-in-use indicator raises on request and clears on release; no GM mic gain control exists |
+| ALERT sink | Unexercised on the truck |
+| `reclaimFocus` rework (§2), MainAudio take (OD-9C) | Not truck-verified; cp12 showed the screen restored twice |
+| cp12 bench (nav live with no focus request, duck lift, platform duck, 0-loud-excess start) | Verified on the unit |
+| Not yet measured | B-V1-W overlap matrix (10 nav + 3 Siri overlaps + 5 Siri), B-V3-3, media net-underrun rate vs cp12's ~1/min, FM -> CarPlay resume, whether iOS sends `audioLatencyMs` other than 80 beyond cp7/cp8, why the radio cold-restarted at 04:48:50 during rc2 (see `12`) |
+| Media recovery after a voice/call turn | Measured on the truck: 12.0 s before the fix (2026-09-08), 1.95 s after (2026-09-09), on the pre-v5.8 two-clock design (assistant edge vs sink-idle focus release) that no longer exists; not re-measured on v5.8/v5.9 |
 
 ---
 
 ## 1. Target routing
 
-The vehicle's bus map, read from `/vendor/etc/car_audio_configuration.xml` on the unit:
+Bus map, read from `/vendor/etc/car_audio_configuration.xml` on the unit:
 
-| Bus | Context | CarPlay source | Android `AudioAttributes` usage | `VoiceRouter.Purpose` |
+| Bus | Context | CarPlay source | `AudioAttributes` usage | Purpose |
 |---|---|---|---|---|
-| `bus0_media_out` | music | type 102 `media` | `USAGE_MEDIA` + `CONTENT_TYPE_MUSIC` | (handled by `AacPlayer`, not `VoiceRouter`) |
-| `bus1_navigation_out` | navigation | type 101, 48 k stereo | `USAGE_ASSISTANCE_NAVIGATION_GUIDANCE` + `SPEECH` | `NAV` |
-| `bus2_voice_command_out` | voice_command | atype 2/4, 16 k mono | `USAGE_ASSISTANT` + `SPEECH` | `ASSISTANT` |
-| `bus3_call_ring_out` | call_ring | atype 3 `alert` | `USAGE_NOTIFICATION_RINGTONE` + `SONIFICATION` | `ALERT` — ring bus since 2026-10-07 (was `bus4_call_out` via `SIGNALLING`), see below |
-| `bus4_call_out` | call | atype 1 `telephony` | `USAGE_VOICE_COMMUNICATION` + `SPEECH` | `CALL` |
+| `bus0_media_out` | music | type 102 `media` | `USAGE_MEDIA` + `CONTENT_TYPE_MUSIC` | `AacPlayer` |
+| `bus1_navigation_out` | navigation | type 101, 48 k stereo | `USAGE_ASSISTANCE_NAVIGATION_GUIDANCE` + `SPEECH` | NAV |
+| `bus2_voice_command_out` | voice_command | 100 speechRecognition/default, 16 k mono | `USAGE_ASSISTANT` + `SPEECH` | ASSISTANT |
+| `bus3_call_ring_out` | call_ring | 100 alert | `USAGE_NOTIFICATION_RINGTONE` + `SONIFICATION` | ALERT (alert volume = ring volume; OD-7C) |
+| `bus4_call_out` | call | 100 telephony | `USAGE_VOICE_COMMUNICATION` + `SPEECH` | CALL |
 
-**You never address a bus directly.** GM's `CarAudioService` maps `usage → context → volume group →
-bus`; picking the right usage is the whole mechanism. `carlink_native_personal` confirms this and
-contains no `CarAudioManager`, no zone API, no bus address anywhere.
+The app never addresses a bus: GM's `CarAudioService` maps usage -> context -> volume group -> bus.
+`carlink_native_personal` uses no `CarAudioManager`, zone API or bus address either.
 
-**`bus0_media_out` is a shared HAL mix bus, not a switch.** From the `<route type="mix"
-sink="bus0_media_out">` entry in `audio_policy_configuration.xml`:
-`<route type="mix" sink="bus0_media_out" sources="mixport_bus0_media_out,bus3_sxm_in,bus4_lvm_in,
-bus8_tuner_in,bus10_tuner_am_in,bus13_dab_in,bus14_rsi_in"/>` — GM FM/AM/SXM/DAB (all
-`isExternalBus=1` / `AUDIO_DEVICE_IN_BUS role="source"`) is injected at the DSP and never passes
-through AudioFocus or an `AudioTrack`. `type="mix"` means the hardware **sums** these sources rather
-than switching between them, so an app that keeps writing PCM into `bus0_media_out` during a
-focus-loss window produces genuine double-talk over live radio, not a silent no-op — this is the
-mechanism behind the device-observed `Use hal ducking signals true`. `AacPlayer.reclaimFocus()` has
-not been tested against a live FM session; needs vehicle time.
+ALERT uses `NOTIFICATION_RINGTONE` because the alternative cannot reach the ring bus: the `voice_call` product
+strategy puts `VOICE_COMMUNICATION` and `VOICE_COMMUNICATION_SIGNALLING` in the same volume group `phone`, and
+`CarAudioContext.CONTEXT_TO_USAGES` (decompiled `CarService.apk`) maps context 5 (CALL, `bus4_call_out`) to
+`{VOICE_COMMUNICATION, VOICE_COMMUNICATION_SIGNALLING}` and context 4 (CALL_RING, `bus3_call_ring_out`) to
+`{NOTIFICATION_RINGTONE}` only. `dumpsys car_service` (2026-10-07) shows `CALL_RING -> bus3_call_ring_out`.
+Not measured: how AAOS focus treats a `CALL_RING` request against CALL and MEDIA holders on this radio.
 
-### What the HAL will actually accept — read from the firmware, 2026-09-09
+**`bus0_media_out` is a shared HAL mix bus.** `audio_policy_configuration.xml`:
+`<route type="mix" sink="bus0_media_out" sources="mixport_bus0_media_out,bus3_sxm_in,bus4_lvm_in,bus8_tuner_in,
+bus10_tuner_am_in,bus13_dab_in,bus14_rsi_in"/>`. GM FM/AM/SXM/DAB (`isExternalBus=1`) is injected at the DSP
+and never passes through AudioFocus or an `AudioTrack`. `type="mix"` sums sources, so PCM written into
+`bus0_media_out` during a focus-loss window is double-talk over live radio, not a no-op (cf. the observed
+`Use hal ducking signals true`). `AacPlayer.reclaimFocus` has not been tested against a live FM session.
 
-Extracted from the unit's own `/vendor/etc/audio_policy_configuration.xml` (cleanroom image of
-`W231E-Y181.3.2`). These bound every buffer-sizing and format decision in this document, and two of
-them were previously assumed rather than known:
+### HAL capabilities (from `/vendor/etc/audio_policy_configuration.xml`, image `W231E-Y181.3.2`, 2026-09-09)
 
-- **Every output bus mixPort declares exactly one profile: `AUDIO_FORMAT_PCM_16_BIT / 48000 /
-  AUDIO_CHANNEL_OUT_STEREO`.** That includes `mixport_bus2_voice_command_out`, which is where the
-  16 kHz mono Siri track lands. AudioFlinger therefore resamples and up-mixes every voice AU; the
-  HAL never sees 16 kHz. `getMinBufferSize(16000, MONO)` in `VoiceRouter.Sink.configure` is sizing
-  against a rate this hardware does not serve. Tracked as A9.
-- **`mixport_bus0_media_out` carries `flags="AUDIO_OUTPUT_FLAG_PRIMARY"` and nothing else.** There is
-  **no DEEP_BUFFER mixPort** on this unit, so media has no deep-buffer path to fall back on and the
-  `AudioTrack` buffer is the entire cushion. Measured cost: 6 underruns in 843 frames. Tracked as A8.
-- **There is no `AUDIO_OUTPUT_FLAG_COMPRESS_OFFLOAD` anywhere in the file.** The only output flags
-  present in the whole configuration are `PRIMARY` and `DIRECT|VOIP_RX` (the latter on the single
-  `"direct output"` mixPort, which does accept 8/16/24/44.1/48 kHz mono or stereo). A compressed
-  bitstream can never reach the DSP; combined with §5's finding that every audio codec is software,
-  every CarPlay sample on this unit is CPU-decoded and CPU-resampled with nothing to offload to.
-- **Three buses exist that this document never listed, and none of them is an app lever.**
-  `bus11_mix_unduck_out`, `bus12_audio_cue_out` and `bus13_high_priority_mutex_out` appear in
-  `audio_routing_configuration.xml` wired to `pcmUnduck_p` / `pcmCue_p` / `pcmHPMutex_p`, but they
-  have **no volume group in `car_audio_configuration.xml` and no usage in
-  `audio_policy_engine_product_strategies.xml`** — they are DSP mix inputs GM drives internally and
-  are unreachable through `AudioAttributes`. Recorded so the name `mix_unduck` is not mistaken for a
-  way out of the ducking problem.
-
-> **Updated 2026-10-07 (owner decision OD-7C):** ALERT now uses `USAGE_NOTIFICATION_RINGTONE`, the
-> `CALL_RING` context, so it lands on `bus3_call_ring_out` and alert volume is ring volume. The
-> radio's `dumpsys car_service` (2026-10-07) shows `CALL_RING -> bus3_call_ring_out`. The note below
-> is kept as the record of why SIGNALLING could never reach the ring bus. Its table facts still hold.
-> What it says about ALERT describes the build before the change. Not yet measured: how AAOS's focus
-> interaction treats a `CALL_RING` request against the CALL and MEDIA holders on this radio.
->
-> **ALERT was not distinguishable from CALL before 2026-10-07 — confirmed, not a hypothesis (2026-09-09).**
-> `audio_policy_engine_product_strategies.xml`'s `voice_call` product strategy puts
-> `AUDIO_USAGE_VOICE_COMMUNICATION` and `AUDIO_USAGE_VOICE_COMMUNICATION_SIGNALLING` in the SAME
-> `<AttributesGroup volumeGroup="phone">`, and the decompiled `CarAudioContext.CONTEXT_TO_USAGES` in
-> `CarService.apk` settles it at the context/bus level: context 5 (`CALL` → `bus4_call_out`) carries
-> usages `{VOICE_COMMUNICATION, VOICE_COMMUNICATION_SIGNALLING}`; context 4 (`CALL_RING` →
-> `bus3_call_ring_out`) carries only `{NOTIFICATION_RINGTONE}`. So ALERT (`USAGE_VOICE_COMMUNICATION_
-> SIGNALLING`) lands on `bus4_call_out`, the same bus, context and volume group as CALL — it does not
-> reach `bus3_call_ring_out` at all. The earlier claim that GM remaps `USAGE_NOTIFICATION_RINGTONE` to
-> `BUS_NOTIFICATION` is also wrong on this table: usage `NOTIFICATION_RINGTONE` maps straight to
-> `CALL_RING`/`bus3_call_ring_out`, matching AOSP. Before 2026-10-07 nothing in the build routed
-> CarPlay's `alert` purpose to `bus3_call_ring_out`. `VoiceRouter.Purpose.ALERT` now does, through
-> `USAGE_NOTIFICATION_RINGTONE`.
+- Every output bus mixPort declares exactly one profile, `PCM_16_BIT / 48000 / OUT_STEREO`, including
+  `mixport_bus2_voice_command_out`. AudioFlinger resamples and up-mixes every 16 kHz voice AU; the HAL never
+  sees 16 kHz. Building voice tracks at 48 k (plan row A9) was refuted and closed 2026-09-10 (see `11`):
+  `getMinBufferSize` scales by the output-thread rate ratio, so it is not mis-sized.
+- `mixport_bus0_media_out` has `flags="AUDIO_OUTPUT_FLAG_PRIMARY"` only. No DEEP_BUFFER mixPort exists, so the
+  `AudioTrack` buffer is media's entire cushion (§3 rule 2).
+- No `COMPRESS_OFFLOAD` anywhere; the only output flags are `PRIMARY` and `DIRECT|VOIP_RX` (the single
+  `"direct output"` mixPort, 8/16/24/44.1/48 kHz mono or stereo). Every CarPlay sample is CPU-decoded and
+  CPU-resampled.
+- `bus11_mix_unduck_out`, `bus12_audio_cue_out`, `bus13_high_priority_mutex_out` (wired to `pcmUnduck_p` /
+  `pcmCue_p` / `pcmHPMutex_p` in `audio_routing_configuration.xml`) have no volume group in
+  `car_audio_configuration.xml` and no usage in `audio_policy_engine_product_strategies.xml`: DSP mix inputs GM
+  drives internally, unreachable through `AudioAttributes`. `mix_unduck` is not a way around the platform duck.
 
 ---
 
-## 2. Five sinks, one per usage — implemented in `VoiceRouter.kt`
+## 2. Live mechanics (plan v5.8/v5.9, committed 02b12c0)
 
-One `AudioTrack` + `MediaCodec` per usage (`VoiceRouter.Sink`, one instance per active `Purpose`), all
-allowed to play simultaneously. **Mixing is AudioFlinger's job** — no app-level mixer; nothing preempts
-the media track because another purpose started.
-
-| Sink | Fed by | Format | Status |
-|---|---|---|---|
-| MEDIA | `:9002` ADTS → `AacPlayer` | AAC-LC 48 k stereo | **Device-proven** (2026-08-05) |
-| CALL | `:9003` atype 1 → `VoiceRouter` | AAC-ELD 16 k mono | **Owner-confirmed on truck** (2026-09-04) — audible on the `Phone`/`Call` group |
-| ASSISTANT | `:9003` atype 2/4 @ 16 k mono → `VoiceRouter` | AAC-ELD 16 k mono | **Owner-confirmed on truck** (2026-09-04) — Siri audible on `Voice`; media-pause also proven (§3) |
-| ALERT | `:9003` atype 3 → `VoiceRouter` | AAC-ELD 48 k stereo | Built, untested on truck — and there is now a **mechanical reason to expect it is broken**, see below |
-| NAV | `:9003` atype 4 @ 48 k stereo → `VoiceRouter` | AAC-ELD 48 k stereo | **Owner-confirmed on truck** (2026-09-04) — audible on `Navigation` |
-
-> ### ⚠ The ALERT sink may be structurally inaudible on this unit — predicted 2026-09-10
-> **Premise changed 2026-10-07:** the 400 ms floor this prediction rests on was removed in v5.8 V1b (ALERT's track is
-> now 48 ms and primed with silence). Whether an alert is audible is still UNEXERCISED on the truck.
->
-> AudioFlinger will not mix a fresh `MODE_STREAM` track until its buffer has been filled once
-> (`Track::isReady` compares `framesReady` against `bufferSizeInFrames`). Every voice track is
-> floored at `TRACK_BUFFER_MIN_MS` = 400 ms, and `Purpose.ALERT` is by design *a short burst* with
-> `keepAlive = false` — so **an alert shorter than 400 ms can never satisfy that gate and produces
-> no sound at all**, rather than merely arriving late. That is a candidate explanation for why this
-> row has read "built, untested" since it was written: it may have been tested and silently done
-> nothing.
->
-> Instrumented rather than assumed: `av/voice-first-out/alert` (N24) arms on `Sink.configure` and is
-> met at the first `playbackHeadPosition > 0`. If it fires on the first truck run that plays an
-> alert, that is a **true positive**, not a false alarm, and the fix is A10's — lower
-> `KEEPALIVE_AFTER_MS` and the floor together, or give ALERT its own smaller floor since it is the
-> one purpose that does not silence-fill.
+- **Real time, per stream.** Each voice stream (call, Siri, alert, nav) has its own RTP-timestamp jitter buffer
+  (`VoiceJitterBuffer.kt`): target = SETUP `audioLatencyMs` (absent -> 80 ms, floor 32 ms; 80 on every type
+  100/101 SETUP in cp8); watermark W = max(target + 20, 200) ms; Discard Excess down to W at the
+  buffering->playing transition, on node-pool exhaustion and continuously while playing, re-anchored on the
+  first surviving node, so a trim cuts delay and inserts no silence (`VoiceLatency` KDoc, `targetMs`,
+  `watermarkMs`). Stale audio is dropped, never queued (owner 2026-10-07; OD-8A: no late nav). Inside a stream gaps are concealed with
+  silence and, after a dry buffer, writes re-buffer silence at the period cadence (stock R14
+  `AirPlayUtils.c:1052-1056`, `:1199-1206`). A stream lives from its BEGIN to its END (v2 control frames); a
+  3 s no-AU stall infers a missing END.
+- **Device buffer = stock's per-usage value** (`SD:CarPlayAudioManager.java:227-268`): CALL 32, ASSISTANT 128,
+  ALERT 48, NAV 48 ms (`VoiceLatency.deviceBufferMs`), floored at `getMinBufferSize` (logged `FLOORED … (U1)`),
+  `setStartThresholdInFrames` = that buffer, free space primed with silence before `play()`. One writer per
+  track (its purpose worker, 8 ms period, `WRITE_NON_BLOCKING`), writing only what the track has room for
+  (written - playback head vs device buffer) and pulling the jitter buffer for exactly that room, so a write
+  never blocks and never retries. Unwritten audio is accounted at its playout time (played / suppressed /
+  refused_lost, per stream in the END line). End to end = jitter target + device buffer (`PurposeEngine.prime`).
+- **Start-transient exemption.** After `play()` the HAL bus takes ~140-400 ms to start pulling (cp12). Until the
+  head first moves no trim happens (bounded at W + 500 ms, `START_STALL_CAP_MS`); what built up becomes an
+  allowance, paid back only by dropping silent AUs (`VoiceJitterBuffer.holdTrims` / `deviceStarted` /
+  `silenceCatchUp`), so first words are delayed, not cut. iOS streams silent AUs at realtime through idle
+  and paused voice streams, so loudness (`LOUD_PEAK` 800, ~-32 dBFS) is only a classifier for that
+  catch-up and for the stats; it gates nothing else. Observed (rc2 nav, 04:48:20): excess 11, excess loud 0,
+  silent catch-up 9.
+- **URGENT_AUDIO.** `VoiceLatency.VOICE_THREADS_URGENT_AUDIO` (default true) raises the voice workers and the
+  `:9003` reader to `THREAD_PRIORITY_URGENT_AUDIO` (`VoiceRouter.raisePriority`), as `MicUplink`'s capture already
+  is. Origin: a perf review saw a nav worker runnable-not-running for 97.5 ms at nice 0 against a 48 ms
+  device buffer; no before/after CPU measurement exists. The review notes are not in the tree.
+- **Focus.** CALL, ASSISTANT and ALERT request focus through a fresh epoch-stamped listener per request
+  (`FocusPort` in `VoiceRouter`, `FocusSlot.kt`); AAOS `CarAudioFocus` keys on listener identity, so one
+  listener per request is required. CALL/ALERT focus is kept until phone 1->0 while a call is up; ASSISTANT
+  is handed over to a Siri-placed call.
+  The phone entity of iOS's `modesChanged` (`VoiceStreams.ctrlCall`, set by `VoiceRouter`) is the in-call signal; in the 2026-10-06 call
+  capture (n=1) `phone=1` arrived 1.0 s before the telephony SETUP and `phone=0` 0.25 s after its TEARDOWN. **NAV requests none** (OD-8C = YES, as stock,
+  `SD:CarPlayAudioManager.java:748-750`; bench T1/T3 from a scratch capture, `/tmp/ccpa_sess/stock_runtime`,
+  not in the tree, cited in the `NavTest` KDoc) and plays live from BEGIN to END. NAV during a call or Siri is
+  PLAY_LIVE (OD-8D; the phone's maneuver tone over a call); `NAV_DURING_VOICE=DROP` remains only as a
+  non-default safety net (`VoiceLatency.NAV_DURING_VOICE`).
+- **Ducking.** Media follows `duckAudio` / `unduckAudio` (volume dB, durationMs; defaults 0.2 / 500 ms) through
+  one VolumeShaper per track: gain = min(voice ramp, focus ramp) (`DuckRamp.kt`). 0.2, not 0.8: a 20 % duck
+  (~2 dB) was reported as "does not duck". Focus `LOSS_TRANSIENT`/`LOSS` pause the media track
+  (`pausedForFocus`), they are not a duck to zero. On unduck media returns to 1.0 at once; the GM platform duck
+  carries the tail (stock T1). `NAV_UNDUCK_HOLD` (software hold at -13.6 dB until the nav stream ends) is OFF
+  by default: the platform duck already runs for gm_ccpa and a hold would stack to ~-30 dB
+  (`VoiceLatency.NAV_UNDUCK_HOLD`). This app's own NAV/CALL/Siri focus requests also reach the MEDIA listener as a
+  loss or duck; that is the mechanism, not a bug.
+- **Duck lift (owner 2026-10-08).** When the nav track's head first advances (bus1 active), our software duck
+  lifts over 100 ms (`NAV_DUCK_LIFT_RAMP_MS`) so media sits at the platform duck alone (~-14..-19 dB) instead
+  of ~-30 dB: `PurposeEngine.liftForBus`, `NAV_DUCK_LIFT_ON_BUS`. rc2: lift 286 ms and 313 ms
+  after `duckAudio`, platform `ducking -18.70dB` (cp12 04:48:16, 04:48:46).
+- **Siri and the knob.** Media is PAUSED, not ducked, while Siri is live (§3): `VoiceRouter.assistantTick` ->
+  `AacPlayer.setAssistantSpeaking`; edges come from the ASSISTANT stream's BEGIN..END plus the speech-mode START
+  edge, not a quiet timer.
+- **Alert** -> `USAGE_NOTIFICATION_RINGTONE` (bus3, OD-7C). Unexercised on the truck.
+- **Permanent media-focus loss.** `AacPlayer.reclaimFocus` retries only on a resume intent (MediaSession play,
+  new screen, or the surviving screen back at the front: `CarPlayActivity.onResume` ->
+  `AacPlayer.onScreenReturned`) or a phone-side resume (`FocusReclaimRule.kt`; a phone already paused when the
+  loss landed counts), not just because media keeps flowing. The loss also takes MainAudio from the phone like
+  stock (OD-9C, `MainAudioHandover.kt`; `events.rs` Take {resource 2, type 1, priority 500, take 500,
+  borrow 100} / Untake {2, 2}; JNI `nativeTakeMainAudio` / `nativeReleaseMainAudio`) and gives it back on focus
+  GAIN. Unknown until bench (plan B-MED-9): whether iOS pauses on the take, and whether HID PLAY alone resumes.
 
 ### Decoding the voice seam
 
-`:9003` carries **raw AAC-ELD access units**, not ADTS — there is no self-describing header, so
-`MediaCodec` needs a hand-built `csd-0`. `VoiceRouter.eldCsd()` builds it from the encoder's real
-AudioSpecificConfig, recorded in `ocbm/docs/ops/05_AUDITS.md (was docs/50:88-96`:)
+`:9003` carries raw AAC-ELD access units, not ADTS, so `MediaCodec` needs a hand-built `csd-0`
+(`VoiceRouter.eldCsd`) from the encoder's real AudioSpecificConfig
+(`docs/ops/05_AUDITS.md`, "eld-codec ELD-SBR ASC"):
 
 ```
-csd-0 = f8 f0 31 2c 00 bc 00     // AAC-ELD, SBR enabled by fdk auto-mode, frameLength 480
+csd-0 = f8 f0 31 2c 00 bc 00     // 16 kHz mono: AAC-ELD, SBR enabled by fdk auto-mode, frameLength 480
 ```
 
-**Not** the `f8f03000` the older docs claimed. This is the one thing the macOS host never had to
-solve — it hardcodes `mFramesPerPacket` per codec instead, which `MediaCodec` will not accept.
+This 7-byte value is `ELD_CSD_16K_MONO`; `eldCsd` returns it for 16 kHz mono only and synthesises the ASC for
+every other rate/channel pair (for example 48 kHz mono, self-checked in `VoiceRouter` against `F8 E6 30 00`). The
+macOS host hardcodes `mFramesPerPacket` per codec instead, which `MediaCodec` will not accept.
 
 ---
 
-## 3. Playback mechanics — implemented, per `carlink_native_personal`-derived rules
+## 3. Playback mechanics
 
-Every rule below is a device-proven GM behaviour, intended to be applied in both `VoiceRouter.Sink`
-and `AacPlayer`. **CORRECTED 2026-09-09: rules 2, 3 and 7 were audited against the actual code.
-Rules 2 and 3 diverge between the two sinks (rule 3 is still an open code defect). Rule 7 was
-`VoiceRouter.Sink`-only when audited and was fixed in `AacPlayer` the same day. See each rule.**
+Device-proven GM behaviours shared by `AacPlayer` and the voice tracks.
 
-1. **48 kHz everywhere, no `PERFORMANCE_MODE_LOW_LATENCY`.** `AUDIO_OUTPUT_FLAG_FAST` is denied to
-   third-party apps on this unit (`createTrack_l(8): AUDIO_OUTPUT_FLAG_FAST denied by server`), so low
-   latency mode buys nothing and can add jitter. Not AOSP-documented.
-2. **Buffer sizing differs per caller.** `VoiceRouter.Sink.configure()` uses
-   `maxOf(minBuf * 4, <bytes for TRACK_BUFFER_MIN_MS at the negotiated rate>)`, where
-   `TRACK_BUFFER_MIN_MS = 2 * KEEPALIVE_PERIOD_MS` = 400 ms — so `getMinBufferSize() × 4` is only a
-   FLOOR under a rate-derived 400 ms minimum (the code's own comment records that the old rate-blind
-   `maxOf(minBuf, 4096) * 4` was too small at 16 kHz mono). `AacPlayer.buildTrack()` uses
-   `maxOf(getMinBufferSize(), 8192) × 2` — half the multiple, floored at 8192 bytes, no time-derived
-   minimum. Neither path "prefills" PCM before calling `play()`; both start the track playing as soon
-   as it is built and let the codec feed it from empty.
-   **CORRECTED 2026-10-07 (plan v5.8 V1b) for the voice half:** the 400 ms floor, `TRACK_BUFFER_MIN_MS`
-   and `Sink.configure()` are gone. A voice sink's track is sized to the stock per-usage device buffer
-   (SD:CarPlayAudioManager.java:227-268 — CALL 32 ms, ASSISTANT 128, ALERT 48, NAV 48), floored at
-   `getMinBufferSize` (logged as `FLOORED … (U1)` when the floor wins), with
-   `setStartThresholdInFrames` = that buffer. The voice track IS primed now: at each output start the
-   free device buffer is written with silence before `play()`, so the device then pulls the stream's
-   jitter buffer at its own pace — end to end = jitter target (audioLatencyMs, 80 ms in cp8) + device
-   buffer. See `VoiceStreams.kt` (`PurposeEngine.prime`). The media rule below is unchanged.
-   **MEASURED 2026-09-09: the media sizing is too small.** `[aac ] stopping — 843 frames played,
-   0 dropped (no track), 6 underruns`. There is no DEEP_BUFFER mixPort on this unit (§1), so that
-   buffer is the only cushion media has. `maxOf(minBuf, 8192) * 2` is 85–160 ms at 48 k stereo,
-   **smaller than the phone's own ~200 ms delivery pause** — and because AudioFlinger will not mix a
-   fresh `MODE_STREAM` track until its buffer has filled once, that depth IS the initial lead, which
-   is why 5 of the 6 underruns fall in the first 9 s. Tracked as A8, **implemented at
-   750 ms 2026-09-10** (`AacPlayer.TRACK_BUFFER_MS`). Two expected side effects a future capture
-   reader must NOT chase as faults: ~750 ms to first sound per stream start (AudioFlinger's
-   `Track::isReady` needs `framesReady >= bufferSizeInFrames`, and `addTrack_l` re-arms FILLING on
-   every re-add, including a `play()` after a `pause()`), and one benign
-   `AudioFlinger: BUFFER TIMEOUT` + `AudioTrack: restartIfDisabled` pair per stream start, because
-   this unit's fill grace measures ~450 ms and the restart resumes the fill with contents intact.
-   Also measured while sizing it: **the phone starts a media stream at roughly realtime with no
-   pre-roll burst**, so the lead over the DAC at stream start equals the track buffer depth exactly
-   and the only thing that grows it afterwards is an audible underrun — which is why
-   `getMinBufferSize` multiples can never be the right rule here.
-   **Read the "843 frames played" figure with care — it was inflated.** `AudioTrack.write` in
-   blocking mode becomes NON-blocking on a paused track and returns a short count; `AacPlayer.feed`
-   tested only `w < 0`, so a short write still incremented `framesDecoded`. The 500-frame checkpoint
-   printed at 22:55:49.252 *while media was paused for the assistant*. **Sized precisely 2026-09-10
-   from the `[rust]` stream lines: ~240 frames (~5 s), not the ~170 first estimated** — iOS ended
-   stream 102 at 22:55:39.596, 17 ms after the focus pause, and started a new one at 47.179, 5.1 s
-   before the track resumed at 52.295. Counter fixed 2026-09-10; a session now prints
-   `N frames played, D discarded (paused), …` so the two can never be conflated again.
+1. **48 kHz everywhere, no `PERFORMANCE_MODE_LOW_LATENCY`.** `AUDIO_OUTPUT_FLAG_FAST` is denied to third-party
+   apps on this unit (`createTrack_l(8): AUDIO_OUTPUT_FLAG_FAST denied by server`), so low-latency mode buys
+   nothing and can add jitter. Not AOSP-documented.
+2. **Buffer sizing.** Voice: §2 (stock device buffer). Media: `AacPlayer.TRACK_BUFFER_MS` = 750, floored at
+   2 x `getMinBufferSize`. Rationale: a 2026-09-09 session with an 85-160 ms buffer logged `[aac ] stopping — 843 frames
+   played, 0 dropped (no track), 6 underruns`, 5 of 6 in the first 9 s; that is smaller than the phone's ~200 ms
+   delivery pause. AudioFlinger will not mix a fresh `MODE_STREAM` track until its
+   buffer has filled once (`Track::isReady`: `framesReady >= bufferSizeInFrames`), so that depth is the initial
+   lead. The phone starts a media stream at roughly realtime with no pre-roll burst, so the lead equals the
+   track buffer exactly and only an audible underrun grows it. Expected side effects, not faults: ~750 ms to
+   first sound per stream start (`addTrack_l` re-arms FILLING on every re-add, including `play()` after
+   `pause()`), and one benign `AudioFlinger: BUFFER TIMEOUT` + `AudioTrack: restartIfDisabled` pair per stream
+   start (this unit's fill grace measures ~450 ms; the restart resumes the fill with contents intact).
+   Frame accounting: `AudioTrack.write` in blocking mode becomes non-blocking on a paused track, so a session
+   prints `N frames played, D discarded (paused), …`; the 2026-09-09 "843 played" figure included ~240 frames
+   (~5 s) discarded while paused (iOS ended stream 102 at 22:55:39.596 and started a new one at 47.179, 5.1 s
+   before the track resumed at 52.295).
+3. **Writes.** Voice: `WRITE_NON_BLOCKING`, room-bounded (§2). Media: a deliberate blocking write
+   (`AacPlayer.feed`; KDoc "parked in the blocking `write()`") so `pause()`, not a socket close, unblocks the
+   consume thread. Native `AudioTrack::obtainBuffer` forces non-blocking whenever the track is not
+   `STATE_ACTIVE`, so during a hold `feed` keeps being re-entered at the phone's delivery rate and the PCM is
+   discarded, not queued; only the single in-flight write at `pause()` is interrupted. Hence
+   `reclaimFocus` retries on its `FOCUS_RETRY_MS` cadence while the phone still delivers; it gets no attempts
+   when the phone ends the stream (as it does for a Siri turn) and the thread parks in the seam `read()`.
+4. **Silence-fill keeps the volume group.** AAOS picks the volume group from active players; a track that
+   stops surrenders it and the volume keys jump elsewhere. A voice track therefore never stops between its
+   stream's BEGIN and END (§2 gap concealment).
+5. **Pause/release before `abandonAudioFocusRequest()`** at teardown, so AAOS sees no active player of that
+   usage at abandon time. `AacPlayer.stop()`: `running=false` -> `pause()` -> `flush()` -> (release the primed
+   track if the seam never connected) -> `abandonFocus()` last; with a live consumer the track's
+   `stop()`/`release()` still happen later on the consume thread (deliberate, see the KDoc on `stop()`). Not
+   truck-verified.
 
-   **Correction to the threading model this rule and `AacPlayer.stop()`'s KDoc both assumed.** Both
-   said the consume thread "parks in the blocking `write()`" during a hold. It does not: native
-   `AudioTrack::obtainBuffer` forces non-blocking whenever `mState != STATE_ACTIVE`, so `feed` keeps
-   being re-entered at the phone's delivery rate and the PCM is *discarded*, not queued. Only the
-   single in-flight write at the moment of `pause()` is ever interrupted. Consequence worth keeping,
-   because it inverts an earlier note: `AacPlayer.reclaimFocus()` **does** retry on its
-   `FOCUS_RETRY_MS` cadence while the phone is still delivering. The case where it gets no attempts
-   is when the phone *ends the stream* — which is exactly what it does for a Siri turn — and the
-   thread parks in the seam `read()` instead.
-3. **`WRITE_NON_BLOCKING`, but the two callers diverge on retry, and neither retries a residual
-   write.** `VoiceRouter.Sink.feed()` writes with `WRITE_NON_BLOCKING`; the
-   `if (w == 0) { ausDropped.incrementAndGet(); break }` branch in its write loop counts the AU as
-   dropped and moves on — it does **not** retry next pass. (The neighbouring `w < 0` branch is a
-   different thing: the `ERROR_DEAD_OBJECT` track rebuild.) `AacPlayer.feed()`'s media write does not
-   pass `WRITE_NON_BLOCKING` at all; it is a deliberate **blocking** write, per the code's own KDoc in
-   `AacPlayer.kt` (search "parked in the blocking `write()`")
-   that a blocking write is required there so `pause()` (not a socket close) is what unblocks a
-   consume thread parked in it. **Open code defect (2026-09-09):** the documented intent — a short or
-   zero-length write retried on the next pass rather than silently dropped — is not what either sink
-   does today; `VoiceRouter.Sink` drops, and `AacPlayer` never uses non-blocking writes in the first
-   place. Needs a follow-up code fix, not just a doc correction.
-   **MEASURED 2026-09-09: `[voice] stopping — 249 AUs routed, 42 dropped` — 17 % of one Siri turn.
-   But "retry on the next pass" was the WRONG remedy, and this rule's stated intent is hereby
-   retired (2026-09-10).** The `w == 0` branch is the symptom; the cause is rule 5's keep-alive gate
-   double-feeding the track (see rule 5). At 2× realtime **any** buffer fills, a retry queue grows
-   for the whole gap and then drains late, and a blocking write parks the consume thread ~50 % of
-   the time — so all three of the obvious fixes treat the symptom and two make it worse. Fix the
-   gate; after that a **blocking** write is the correct residual, because with input rate == drain
-   rate it parks at most one HAL period (~20 ms), and a `w == 0` then genuinely means "the track is
-   paused by focus loss", where discarding is right. Tracked as A6.
-   **CORRECTED 2026-10-07 (plan v5.8 V1b) for the voice half:** `VoiceRouter.Sink.feed()` no longer
-   exists. The purpose worker writes `WRITE_NON_BLOCKING`, and only as much as the track has room for
-   (written − playback head vs the device buffer); the jitter buffer is pulled for exactly that room,
-   so a write never blocks and never needs a retry. Audio that is not written is never "dropped" — it
-   is accounted at its playout time (played / suppressed / refused_lost, per stream in the END line).
-4. **One `OnAudioFocusChangeListener` instance per usage** (`VoiceRouter.Sink.focusListener`) — AAOS
-   `CarAudioFocus` keys on listener identity, so a shared listener cannot hold focus for two usages.
-   **CORRECTED 2026-10-07 (plan v5.8 V2):** a FRESH listener object per request (VoiceRouter's
-   `FocusPort`), epoch-stamped in `FocusSlot`, for CALL / ASSISTANT / ALERT only. NAV takes no focus
-   (owner OD-8C = YES, stock SD:CarPlayAudioManager.java:748-750; bench T1/T3).
-5. **SUPERSEDED 2026-10-07 (v5.8 V1b): the keep-alive and its loud/AU clocks no longer exist; history follows.** **Silence-fill, not pause, for continuous streams** (`Sink.keepAlive()`). AAOS picks the volume
-   group from *active players*; a track that stops playing surrenders the volume group and hardware
-   volume keys jump elsewhere. Paced on an absolute clock (`nextSilenceAt`, floored) — relative pacing
-   accumulates loop lateness into guaranteed underruns. `ALERT` is a short burst and does pause.
-   **DEFECT, root cause of A6, found 2026-09-10: the gate is on the wrong clock.** `keepAlive` tests
-   `now - lastAudioAt`, and `feed` advances `lastAudioAt` **only inside the `peakExceeds` branch** —
-   so it means "last LOUD frame", not "last AU". iOS does not stop sending during a Siri pause; it
-   streams **silent AUs at realtime** right through it (proved by arithmetic: 249 AUs × 30 ms =
-   7.47 s ≈ the sink's whole 7.22 s life). So for every gap between `KEEPALIVE_AFTER_MS` and
-   `ASSISTANT_HOLD_MS` the sweeper adds 200 ms of silence per 200 ms on top of the stream's own
-   realtime feed — 2× into a 400–640 ms buffer — and the track is full within half a second.
-   **Two clocks are needed:** a new `lastAuAt` (last *delivered* AU) to gate `keepAlive`, and
-   `lastAudioAt` (last *loud* frame) kept for duck, idle and the assistant edge, all of which must
-   go on ignoring iOS's streamed silence. Note `Purpose.idleMs` is on the loud clock too, which is
-   fine for ASSISTANT but suspect for **CALL**: 3 s of far-end silence mid-call would release the
-   sink from `cp-voice-sweep` while `feed` decodes on the consume thread. **Adjudicated 2026-10-06
-   (P5 call): confirmed** — `call: idle 3s — released` three times inside one telephony SETUP→TEARDOWN,
-   each sink rebuilt 249-299 ms later on the next AU (so AUs never stopped). Fix: while iOS's
-   `modesChanged` phone entity is non-zero (`VoiceRouter.ctrlCall`; P5: `phone=1` 1.0 s before the
-   SETUP, `phone=0` 0.25 s after the TEARDOWN, n=1), CALL is dead only when no AU has been
-   *delivered* for its 3 s (`lastAuAt`); with no modes frame yet, or phone=0, the loud-clock rule
-   stands (the idle-telephony focus wedge above), and the phone=1→0 edge pokes the sweep.
-   **Also: `keepAlive` and `feed` write to the same `AudioTrack` from two threads with no lock**
-   (`cp-voice-sweep` and the consume thread), and they overlap in exactly this window.
-   `AudioTrack.write` is not safe for concurrent callers. Needs a `writeLock`.
-   **CORRECTED 2026-10-07 (Q016, plan v5.8):** this race was already closed before v5.8 —
-   `keepAlive` took `Sink.lock` with `tryLock()` and `feed` took it with `lock()`, so the two writes
-   were serialized (the "no lock / needs a writeLock" sentence above was stale). Since v5.8 V1b the
-   question is moot: the keep-alive is removed, and each voice track has exactly one writer, its
-   purpose worker. What replaced the keep-alive: inside a stream the jitter buffer conceals gaps with
-   silence and, after a dry buffer, writes re-buffer silence at the period cadence (stock R14
-   AirPlayUtils.c:1052-1056, :1199-1206), so an ASSISTANT track never stops between Siri's BEGIN and END.
-   The loud/AU-clock idle rules of this item are retired with it (a sink lives from its stream's BEGIN
-   to its END; a 3 s no-AU stall backstop infers a missing END).
-6. **Idle watchdog** (`sweepIdle()`, 1 Hz, per-purpose `idleMs`) — a sink with no audio past its window
-   **SUPERSEDED 2026-10-07 (plan v5.8 V1b):** there is no idle watchdog any more. A voice stream's
-   BEGIN and END come from the receiver (v2 voice tag), the sink lives exactly that long, and its focus
-   follows the V2 stop rules (CALL/ALERT kept until phone 1→0 while a call is up; ASSISTANT handed over
-   to a Siri-placed call). The text below is the pre-v5.8 history.
-   releases: track/codec/focus torn down, volume group freed. This exists because a dropped stop
-   message previously wedged `USAGE_VOICE_COMMUNICATION` as the active volume group for a whole
-   session.
-7. **`pause()`/release before `abandonAudioFocusRequest()`** at sink teardown, so AAOS sees no active
-   player of that usage at abandon time. `VoiceRouter.Sink.release()` follows this order (pause → flush
-   → stop → release, then abandon). **`AacPlayer.stop()` now follows it too: `running=false` → `pause()` → `flush()` → (release the primed track if the
-   seam never connected) → `abandonFocus()` last. CORRECTED 2026-09-09, fixed in source the same day:
-   the audit that morning found `abandonFocus()` called BEFORE `pause()`/`flush()`, so for the window
-   before `pause()` landed the app was still writing PCM at full gain while AAOS had already handed
-   focus to the next owner.** With a live consumer the track's `stop()`/`release()` still happen later
-   on the consume thread (that is deliberate — see the KDoc on `stop()`); by abandon time the track is
-   paused and flushed, which is what AAOS's active-player check sees. **Not truck-verified** — a
-   green build proves compilation only.
+### Siri volume: pause media, do not merely duck it — hardware-confirmed 2026-08-12
 
-### Siri volume: PAUSE media, do not merely duck it — CONFIRMED ON HARDWARE 2026-08-12
+Ducking serves audibility; pausing serves the volume knob. This unit's `CarVolume` priority list is
+`NAVIGATION > CALL > MUSIC > ANNOUNCEMENT > VOICE_COMMAND > CALL_RING > ...`. `VOICE_COMMAND` sits below
+`MUSIC` and a ducked MUSIC track still counts as active, so while media plays the knob targets MUSIC even
+mid-Siri: 117 knob steps, all to group 5 (MUSIC), group 2 never. Focus gain type is not an input (the strings do
+not appear in `CarVolume.java`; calls use the same `GAIN_TRANSIENT` as Siri with the opposite outcome).
 
-Ducking is right for *audibility* and wrong for the *volume knob*; both are needed and are different
-mechanisms.
+The fix: `AacPlayer.setAssistantSpeaking` pauses the media `AudioTrack` for the Siri turn (without `flush()`, so
+buffered media resumes), removing MUSIC from the active set; GM's popup then renders "voice".
 
-This unit's `CarVolume` priority list (V1) is:
-
-```
-NAVIGATION > CALL > MUSIC > ANNOUNCEMENT > VOICE_COMMAND > CALL_RING > ...
-```
-
-`VOICE_COMMAND` sits **below** `MUSIC`, and a *ducked* MUSIC track still counts as active — so while
-any media plays, the volume knob targets MUSIC even mid-Siri, with `USAGE_ASSISTANT` focus held.
-Measured before the fix: **117 knob steps, every one to group 5 (MUSIC); group 2 never touched once.**
-
-Audio-focus gain type is **not** an input — the strings do not appear in `CarVolume.java`, and calls
-use the same `GAIN_TRANSIENT` as Siri with the opposite outcome.
-
-**The fix, verified working:** pause the media `AudioTrack` for the duration of a Siri turn
-(`AacPlayer.setAssistantSpeaking`, driven by `VoiceRouter.assistantTick`), which removes MUSIC from the
-active set and lets `VOICE_COMMAND` win. GM's popup then renders it as "voice". Hold ~4 s past Siri's
-last audio (`ASSISTANT_HOLD_MS`) — a shorter hold lets MUSIC re-enter while the driver is still reaching
-for the dial. Uses `pause()` **without** `flush()` so buffered media resumes instead of dropping audio.
-
-Two things this also settles:
-- **Programmatic group volume is impossible here** — `setGroupVolume` is `@SystemApi` behind
-  `CAR_CONTROL_AUDIO_VOLUME` (`signature|privileged`); this app is debug-signed in `/data/app`. No
-  in-app trim substitutes for it.
-- **Stock GM CarPlay can never reach `VOICE_COMMAND`** — it plays everything through a single
-  `USAGE_UNKNOWN` source, so its Siri is indistinguishable from media.
-
-### Ducking (`AacPlayer.setVoiceDucked` / `setFocusDucked`, `VoiceRouter` energy gate)
-
-> **SUPERSEDED 2026-10-07/08 (v5.8 V3 + owner 2026-10-08) — historical text.** The energy gate, `DUCK_RELEASE_MS`,
-> `setVoiceDucked` and the A7 pumping no longer exist; the duck follows `duckAudio`/`unduckAudio` through one
-> shaper (`DuckRamp.kt`) and our own duck lifts once the nav track plays. The two-source min() idea survived as
-> `DuckComposer` (min of voice ramp and focus ramp). See CURRENT STATE. The "NAV is the case that matters" bullet
-> below is answered: the platform duck runs (`ducking -18.70dB` in cp12) and we no longer stack on it.
-
-**CORRECTED 2026-09-09 (twice). First correction, that morning: the `effective = mediaVolume ×
-min(commandedDuck, focusDuck)` formula this section used to state did not exist in code — `setDucked`
-was one shared `duckGain` boolean written by two callers, last writer wins. Second correction, same
-day, after the fix landed: the min() arbitration is now implemented, with a different shape than the
-old formula described.** Duck **only** the media track. What actually runs:
-
-- Two INDEPENDENT duck sources, each with its own entry point so a caller cannot touch the other's
-  (`AacPlayer.setVoiceDucked` / `AacPlayer.setFocusDucked`; stale line cite, re-anchored 2026-09-10): `setVoiceDucked(Boolean)` is `VoiceRouter`'s energy gate, wired via
-  the `onDuck =` lambda in `CarPlayActivity`; `setFocusDucked(Boolean)` is `AacPlayer`'s own focus listener
-  (`LOSS_TRANSIENT_CAN_DUCK` → true in `AacPlayer.focusListener`, `AUDIOFOCUS_GAIN` → false, and `LOSS` and a
-  fresh focus grant also clear it, since no focus held means no focus-derived duck). Both funnel into
-  one private `setDucked(source, ducked)` (`AacPlayer.setDucked`; stale line cite, re-anchored 2026-09-10) that keeps a flag per source and
-  derives the effective gain as **0.2 if EITHER flag is set, 1.0 only when NEITHER is** — the min() of
-  the two — under the single `duckLock`. `applyGain()` (`:330-332`) re-asserts that effective gain onto
-  any track built mid-duck, under the same lock.
-- **What was wrong before the fix:** with one shared boolean, an `AUDIOFOCUS_GAIN` landing while a nav
-  prompt was still loud restored media to unity over the prompt, and the gate's un-duck at the end of a
-  prompt cancelled a focus duck AAOS had not lifted. The `synchronized(duckLock)` block that already
-  existed fixed a *different*, older race (a non-atomic read-compare-write that could leave
-  `duckGain=1.0` with the hardware at 0.2 and the duck unrecoverable) — it never arbitrated between
-  sources. Both the old race and the new arbitration now live behind the same lock, so the two flags
-  and the gain derived from them change as one atomic state.
-- Idempotence is per source (`VoiceRouter` re-asserts `onDuck(false)` at 1 Hz from its idle sweep);
-  a source edge that does not change the effective gain because the other source still holds is logged
-  as `media duck: <SOURCE> off, gain stays 0.2 (voice=… focus=…)` and not applied, so a capture shows
-  which source is holding the duck.
-- **The two-source arbitration is still not truck-verified** — it is in the working tree but was NOT
-  in the `7c92000` build that produced the 2026-09-09 capture, so that session ran the old single
-  shared boolean. Whether AAOS's `CAN_DUCK`/`GAIN` edges and the energy gate interleave the way the
-  fix assumes remains unobserved.
-- **What the 2026-09-09 capture DID prove: the energy gate pumps.** Inside one Siri turn the media
-  gain went `0.2` (22:55:39.827) → `1.0` (42.208) → `0.2` (43.725) → `1.0` (48.237). `DUCK_RELEASE_MS`
-  is 1500 ms and `sweepIdle` self-throttles to 1 Hz, so ~1.5–2.5 s of quiet un-ducks — and Siri's own
-  pause between hearing the query and speaking the answer routinely exceeds that. This is independent
-  of the arbitration fix and will still be there after it lands. Tracked as A7.
-- **…and the pumping is INAUDIBLE, so do not spend a truck slot on it as such.** Media was paused
-  from 22:55:39.579 (`LOSS_TRANSIENT`, before the Siri sink had even configured) to 52.295, and
-  `setVolume` on a paused track produces no sound. The same holds for CALL, which also takes
-  `GAIN_TRANSIENT` and pauses media. Treat A7's pumping as **log hygiene**.
-- **The bug worth fixing lives in the same method, and it is an ordering one.** `sweepIdle` calls
-  `release()` on dead sinks — which abandons focus, so AAOS posts `AUDIOFOCUS_GAIN` and `AacPlayer`
-  calls `play()` — **before** it evaluates `if (!anyLoud) onDuck(false)`. Today the un-duck happens
-  seconds earlier so the order never shows. With ASSISTANT's hold at 4 s against an `idleMs` of 5 s
-  the two edges are one sweep apart, and sweeps run 1000–1100 ms apart, so a late sweep puts both in
-  the same pass: focus abandoned, GAIN delivered, **media resumes at 0.2** until the sweeper reaches
-  the un-duck microseconds later. Move `onDuck(false)` above the `dead.forEach { … release() }`.
-- **The case that actually matters is NAV, not Siri.** NAV requests `GAIN_TRANSIENT_MAY_DUCK`, so if
-  AAOS answers with `LOSS_TRANSIENT_CAN_DUCK` media is *ducked and still playing* — and then the
-  focus duck masks the energy gate entirely (`gain stays 0.2 (voice=false focus=true)`) and holds
-  media at 0.2 until the NAV sink releases at `idleMs` = **8 s**. If instead GM's `CarAudioFocus`
-  treats NAV and MUSIC as concurrent and ducks in the HAL (`Use hal ducking signals true`), we get no
-  callback at all and the software 0.2 stacks on top of the hardware duck. **Measure this**: time
-  from a nav prompt's last loud frame to `media restored to 1.0`, and whether any
-  `gain stays 0.2 (voice=false focus=true)` line appears.
-- 0.2, not 0.8 — "duck by 20%" (≈2 dB) was reported by users as "does not duck".
-- `LOSS_TRANSIENT`/`LOSS` do **not** duck to 0.0 through `setFocusDucked`. They go through a different
-  mechanism entirely: the focus listener sets `pausedForFocus = true` and fully pauses the media track
-  (the `LOSS_TRANSIENT` / `LOSS` arms of `AacPlayer.focusListener`; stale line cite, re-anchored 2026-09-10), the same pause path Siri uses, not a duck-to-zero gain.
-- Expect to duck yourself through the focus round-trip: this app's own NAV request
-  (`GAIN_TRANSIENT_MAY_DUCK`) and CALL/Siri requests (`GAIN_TRANSIENT`) come back to the MEDIA listener
-  as a loss. That is the mechanism, not a bug.
-- **Duck trigger is energy-gated, not packet-gated** (`VoiceRouter.peakExceeds`, int16 peak ≥ ~800,
-  ≈ −32 dBFS) — iOS streams continuous digital silence on idle voice streams, so a flow-based trigger
-  would duck media permanently from session start.
-
-> ### ⚠ The energy gate should probably not exist at all — A11, filed 2026-09-10
-> Everything in this section reconstructs, from audio samples and timers, state that **iOS is
-> explicitly sending us and we are discarding**. In the 2026-09-09 capture the `modesChanged` plist
-> on the encrypted control channel brackets the Siri turn perfectly: 6 of 6 messages at one payload
-> size fall inside it, 14 of 14 at the other fall outside, it leads the mic gate by 317 ms, and it
-> announces the end **3.27 s before** `assistantTick`'s inference and **5.2 s before** media actually
-> resumed. The payload already reaches Kotlin — `:9004` → `MetadataSeam` → `CarPlayActivity.onCommandPlist`
-> — which drops it because it only implements `requestViewArea`. Its own KDoc names `modesChanged`
-> and `duckAudio` as ignored. Two further explicit signals are also arriving unused: `0x4155`
-> CallStateUpdate on the iAP2 tunnel, and NowPlaying `playbackStatus`, which `NowPlayingState`
-> already parses for the media card while `AacPlayer` infers play/pause from seam traffic.
->
-> If A11 lands, the assistant edge, the duck trigger and most of the per-purpose idle windows become
-> control-plane driven and the energy gate degrades to a fallback for a phone that does not send the
-> mode. **A6's buffer/lock/write fixes and A8's sizing fixes are orthogonal and still needed** — they
-> are about how PCM reaches the HAL, not about when a turn starts. A7 and A10's *triggers* are
-> superseded. Decode one plist of each size before building on this; the bracket is a size
-> correlation, not yet a parse.
-
-### Latency classes
-
-The iPhone delivers media in bursts ahead of realtime (~750 ms fast, then ~200 ms pause) and voice at
-realtime. Media uses a deep buffer (~1 s) with staged pre-roll; voice uses ~150–300 ms rings with no
-pre-roll — `carlink_native_personal`'s 750 ms media / 300 ms nav split reached the same conclusion
-independently.
-**CORRECTED 2026-10-07 (plan v5.8 V1b):** voice no longer uses a 150–300 ms ring. Each voice stream
-has its own RTP-timestamp jitter buffer (`VoiceJitterBuffer.kt`): target = the SETUP's
-`audioLatencyMs` (80 ms on every type-100/101 SETUP in cp8; absent → 80, clamped ≥ 32), start = first
-packet's receive time + target, Discard Excess DOWN TO W = max(target + 20, 200) ms at the
-buffering→playing transition, at node-pool exhaustion and — owner's real-time direction — whenever it
-exceeds W while playing, re-anchored on the first SURVIVING node so a trim cuts delay instead of
-inserting silence. Then the stock per-usage device buffer (rule 2). Stale audio is dropped, never
-queued (owner 2026-10-07; OD-8A).
+- Programmatic group volume is impossible: `setGroupVolume` is `@SystemApi` behind `CAR_CONTROL_AUDIO_VOLUME`
+  (`signature|privileged`) and this app is debug-signed in `/data/app`.
+- Stock GM CarPlay can never reach `VOICE_COMMAND`: it plays everything through one `USAGE_UNKNOWN` source.
 
 ---
 
-## 3a. FIXED — media stayed silent 12 s after a voice/call turn
+## 4. Microphone uplink
 
-**Owner-observed on the truck 2026-09-04; device-measured and fixed 2026-09-08 (`b8e8736`). Truck
-re-measurement not yet recorded.** When a phone call or Siri prompt ended, the `Voice` track
-(`VoiceRouter`) stayed active and the media `AudioTrack` (`AacPlayer`) stayed silent before recovering
-on its own. Reported as 10–20 s; measured at **12.0 s** on gminfo37:
+`MicUplink` connects eagerly to `127.0.0.1:9112` (the same socket carries the capture gate and
+the outbound PCM; a data-triggered connect would deadlock). It gates on the control line, never on downlink
+activity: the receiver writes `uplink on <rate> <ch>\n` when iOS SETUPs type 100 with `input=true` and
+`uplink off\n` at teardown. Siri wants the mic before any downlink audio arrives, so an activity gate would clip
+the onset.
 
-```
-21:25:55.940 [voice] assistant done — media resumes
-21:25:55.940 [aac  ] media paused for the assistant      <- same millisecond
-21:26:07.918 [voice] siri: idle 15s — released (focus + volume group freed)
-21:26:07.919 [aac  ] media focus LOSS_TRANSIENT -> GAIN
-21:26:07.932 [aac  ] media resumed after focus gain
-```
+- **Send:** `mic <len>\n` + `<len>` bytes S16LE PCM at the gated rate/channels. The Rust side does RTP framing,
+  encryption with the stream input key and the byte-order swap.
+- **Capture:** `AudioRecord(VOICE_COMMUNICATION, 16000, MONO, PCM_16BIT, minBufferSize x 3)`, 20 ms chunks,
+  dedicated thread at `URGENT_AUDIO`.
+- **Manifest:** `RECORD_AUDIO` + `FOREGROUND_SERVICE_MICROPHONE`, granted at install (`-g`).
+- **Errors:** a non-positive `AudioRecord.read` (including `ERROR_DEAD_OBJECT`) ends that capture; nothing is
+  retried in place; the next `uplink on` re-arms (`MicUplink.captureLoop`).
 
-**Cause: two clocks, and only one of them freed the focus.** `assistantTick` declares Siri done after
-`ASSISTANT_HOLD_MS` (4 s) of quiet and clears `pausedForAssistant`, but audio focus is abandoned ONLY by
-`Sink.release()`, which `sweepIdle` calls at `Purpose.idleMs` — 15 s for `ASSISTANT`. In between, the
-sink still held `AUDIOFOCUS_GAIN_TRANSIENT`, `AacPlayer` stayed in `LOSS_TRANSIENT` with
-`pausedForFocus` set, and media could not resume. It came back on the focus edge, one millisecond after
-the sweep — never on the assistant edge. This is NOT the `reclaimFocus()` fault (§6 A-track / `12`
-Phase 8), which covers the *permanent* `AUDIOFOCUS_LOSS` hang.
+### Build
 
-**Fix:** `ASSISTANT.idleMs` is now `ASSISTANT_HOLD_MS` + one sweep period, so the focus hold ends just
-after the edge that says Siri is finished — closing the gap to ~1 s. `keepAlive` is bounded at
-`ASSISTANT_HOLD_MS` for the same reason: past that edge MUSIC outranks `VOICE_COMMAND` in `CarVolume`'s
-priority list, so silence-filling cannot win the knob and only keeps a would-be-idle player active. Cost
-is a codec rebuild if Siri thinks for longer than the window — ~130 ms of added latency that drops
-nothing, since `configure()` runs synchronously ahead of the feed for the same AU.
-
-**Rejected alternative, recorded so it is not re-proposed:** decoupling focus lifetime from sink lifetime
-(abandon focus on the assistant edge, keep the track). An adversarial review showed it needs
-pause-before-abandon to honour the device-derived rule at `Sink.release`, plus a `focusState` reset on
-re-request or `keepAlive` dies permanently for that sink, and it locks in both `Sink` and `AacPlayer` —
-for about two seconds more than two constants buy. Measure before spending that.
-
-The same review found a race these constants ACTIVATE, closed in the same commit: `applyPauseState` is
-check-then-act across two threads (assistant edge on `cp-voice-sweep`, focus callback on the main
-looper), and the fix moves those edges from ~12 s apart to ~1 s. `AacPlayer` is now `@Synchronized` on
-`setAssistantSpeaking` with the three `pausedForFocus` writes under the same monitor.
-
----
-
-## 4. Microphone uplink — WORKS on the truck (owner-confirmed 2026-09-04)
-
-**Truck result (2026-09-04):** the mic uplink works end to end. CarPlay raises the AAOS mic-in-use
-indicator when it requests the mic and it clears cleanly on release; there is no GM AAOS mic volume/gain
-control (none is expected).
-
-
-`MicUplink.kt` (204 lines) connects eagerly to `127.0.0.1:9112` (the same socket carries the capture
-gate and the outbound PCM — a data-triggered connect would deadlock). Gates on the control line, never
-on downlink activity: the receiver writes `uplink on <rate> <ch>\n` when iOS SETUPs type 100 with
-`input=true` and `uplink off\n` at teardown — Siri wants the mic before any downlink audio arrives, so
-an activity-based gate would clip the onset.
-
-- **Send**: `mic <len>\n` + `<len>` bytes S16LE PCM at the gated rate/channels. The Rust side does RTP
-  framing, encryption with the stream input key, and the byte-order swap.
-- **Capture**: `AudioRecord(VOICE_COMMUNICATION, 16000, MONO, PCM_16BIT, minBufferSize × 3)`, 20 ms
-  chunks, dedicated thread at `URGENT_AUDIO`.
-- **Manifest**: `RECORD_AUDIO` + `FOREGROUND_SERVICE_MICROPHONE`, granted at install (`-g`).
-- **`ERROR_DEAD_OBJECT` is recoverable** — recreate in place, cap retries, guard against a recreate
-  completing after `stop()` timed out (otherwise holds the Intel SST HAL input stream open forever).
-
-### Build — DONE (2026-08-12)
-
-`mic-uplink-eld` is enabled by default (`native/carplay-jni/Cargo.toml`, opt-out for the separate arm64
-Pi build) and libfdk-aac 2.0.3 is cross-built for `x86_64-linux-android`. Verified by the same string
-test that previously proved it absent: the shipped `.so` contains the enabled arm's `ELD encoder open
-failed` string and no longer contains the `` `mic-uplink-eld` not built `` bail-out.
-
-Recipe, for when it has to be rebuilt:
+`mic-uplink-eld` is enabled by default (`native/carplay-jni/Cargo.toml`; opt-out for the separate arm64 Pi
+build) with libfdk-aac 2.0.3 cross-built for `x86_64-linux-android`. `tools/build_apk.sh` exports `FDK_AAC_PREFIX` and
+fails fast if the archive is missing. Rebuild recipe:
 
 ```bash
+# from the repo root; scratchpad/ is gitignored
 NDK=$ANDROID_HOME/ndk/30.0.15729638/toolchains/llvm/prebuilt/darwin-x86_64/bin
-cd ocbm/scratchpad/fdk && tar xzf fdk-aac-2.0.3.tar.gz -C src-android --strip-components=1
+cd scratchpad/fdk && tar xzf fdk-aac-2.0.3.tar.gz -C src-android --strip-components=1
 cd src-android && ./configure --host=x86_64-linux-android \
   --prefix=../install-android-x86_64 --disable-shared --enable-static --with-pic \
   CC="$NDK/x86_64-linux-android32-clang" CXX="$NDK/x86_64-linux-android32-clang++" \
@@ -627,131 +283,83 @@ cd src-android && ./configure --host=x86_64-linux-android \
 make -j8 && make install
 ```
 
-**The one trap:** fdk-aac 2.0.3 includes AOSP's `<log/log.h>` under `__ANDROID__`, purely to call
-`android_errorWriteLog()` from two CVE-hardening bounds checks in `libSBRdec/src/lpp_tran.cpp`. That
-header ships with the platform tree, not the NDK, so a plain NDK build fails there.
-`scratchpad/fdk/stub/log/log.h` is a no-op stand-in — the bounds checks still run and clamp; only the
-platform telemetry call is neutered, which is correct for a third-party app.
-
-`build_apk.sh` exports `FDK_AAC_PREFIX` and fails fast if the archive is missing. Note the separate `06`
-§5d trap still applies: build `receiver` from its own directory, or workspace feature unification drags
-`eld-codec` in elsewhere.
+The trap: fdk-aac 2.0.3 includes AOSP's `<log/log.h>` under `__ANDROID__` for `android_errorWriteLog()` in two
+CVE-hardening bounds checks in `libSBRdec/src/lpp_tran.cpp`. That header ships with the platform tree, not the
+NDK. `scratchpad/fdk/stub/log/log.h` is a no-op stand-in; the bounds checks still run and clamp. Also build
+`receiver` from its own directory, or workspace feature unification drags `eld-codec` in elsewhere
+(`06_BRINGUP_RUNBOOK.md` §6.3, "The `eld-codec` trap").
 
 ---
 
-## 5. Advertise-vs-implement
+## 5. Advertise vs implement
 
-`/info` advertises **8 audio formats and 4 microphone input formats**. Backing:
+`/info` advertises 8 audio formats and 4 microphone input formats.
 
-- **Output formats**: an unbacked output format produces silence, not teardown — `audioFormats` is a
-  capability array iOS SETUPs against, and this app answers with a real bound `dataPort` regardless, so
-  the negotiation stays well-formed (`05` §8 rule 9). Both observed `-16720` kills in this project
-  (`cornerMasks`, `hevc`) were SETUP `enabledFeatures` tokens, not `audioFormats` entries.
-- **Input formats**: of the four advertised `audioInputFormats`, all four can now arm — entry 1
-  (`compatibility` PCM 16 kHz mono) and the three AAC-ELD entries, now that `mic-uplink-eld` is built
-  (§4). Before that build, only entry 1 could arm; that historical asymmetry no longer applies. None of
-  the four has been exercised end to end on the truck.
-- **`mainBuffered` is OUT OF SCOPE for this project, deliberately** — still true, not built. It buys
-  resilience to a WiFi hiccup on media (receiver-side buffer filled faster than realtime), genuinely
-  valuable for 5 GHz to a moving vehicle, but implementing it means a buffered-stream handler plus a
-  `FLUSHBUFFERED` verb. Until it exists it must not be advertised: if iOS moves media to a buffered
-  stream and this app omits `mainBuffered`, **media goes silent**. Every stock Apple Simulator YAML
-  template sets `enablesMainBufferedAudio: true`, so it can be armed by accident — check before copying
-  a template `/info`.
-- **Device-verified formats**: `pcm_16k_mono`, `pcm_48k_stereo`, `aac_lc_48k_stereo` (media),
-  `aac_eld_16k_mono` — the last one upgraded 2026-09-09 from "Siri media-pause path only" to real
-  decoded Siri audio content (`[voice] siri: AAC-ELD 16000Hz 1ch -> AudioTrack(usage=16)`).
-  Everything else in `/info` is now backed by code but not yet proven on hardware.
-- **Every one of them decodes in SOFTWARE.** This head unit ships no hardware audio codec at all —
-  see [`01_FINDINGS.md`](01_FINDINGS.md) §5, corrected 2026-09-09. Both media and Siri were observed
-  on `c2.android.aac.decoder`. Budget CPU accordingly: there is no offload path (§1) and no
-  hardware fallback to switch to.
+- **Output formats.** An unbacked output format produces silence, not teardown: `audioFormats` is a capability
+  array iOS SETUPs against and the app answers with a real bound `dataPort`, so negotiation stays well-formed
+  (`05_SESSION_FLOW.md` §8 rule 9). Both observed `-16720` kills (`cornerMasks`, `hevc`) were SETUP `enabledFeatures` tokens,
+  not `audioFormats` entries.
+- **Input formats.** All four can arm: entry 1 (`compatibility` PCM 16 kHz mono) and the three AAC-ELD entries
+  (`mic-uplink-eld`, §4). None has been exercised end to end on the truck.
+- **`mainBuffered` is out of scope, deliberately.** It buys resilience to a Wi-Fi hiccup (receiver-side buffer
+  filled faster than realtime) but needs a buffered-stream handler plus a `FLUSHBUFFERED` verb. Until it exists
+  it must not be advertised: if iOS moves media to a buffered stream and the app omits `mainBuffered`, media
+  goes silent. Every stock Apple Simulator YAML template sets `enablesMainBufferedAudio: true`; check before
+  copying a template `/info`.
+- **Device-verified formats:** `pcm_16k_mono`, `pcm_48k_stereo`, `aac_lc_48k_stereo` (media),
+  `aac_eld_16k_mono` (decoded Siri audio, 2026-09-09). Everything else in `/info` is backed by code but not
+  proven on hardware.
+- **All decode in software** (`c2.android.aac.decoder` for media and Siri; [`01_FINDINGS.md`](01_FINDINGS.md)
+  §5). No offload path exists (§1).
 
-### PCM entries (still advertised, unresolved recommendation)
+### PCM `compatibility` entries
 
-**CORRECTED 2026-08-31 — the previous claim that `compatibility`/PCM is wired-only was wrong about
-what the box ADVERTISES.** `preset_wireless_8()` carries two `compatibility` entries unconditionally
-(`pub fn preset_wireless_8`, `ocbm crates/vendor/receiver/src/info.rs`; was at :1008-1035, then
-:1404-1430 — re-anchored to the symbol 2026-09-10): type 100 PCM 16k-mono/48k-stereo and
-type 101 PCM 48k-stereo. There is no transport branch on that list, so they are offered on every
-wireless session.
+`preset_wireless_8()` (`crates/vendor/receiver/src/info.rs`) carries two `compatibility` entries on every
+wireless session: type 100 PCM 16k-mono / 48k-stereo and type 101 PCM 48k-stereo. iOS has never been observed
+to select one: 24 SETUP negotiations in five sessions (2026-08-05, 08-12 x2, 08-18 x2) gave `audioType=media`
+x18, `default` x6, `compatibility` x0. Media rides type 102 -> `:9002` as atype 0.
 
-What remains true is that iOS has never been observed to SELECT one. Across 24 SETUP negotiations in
-five captured sessions (2026-08-05, 08-12 ×2, 08-18 ×2): `audioType=media` ×18, `audioType=default`
-×6, `compatibility` ×0. Media rides type 102 / `audioType=media` / AAC-LC 48k stereo, which the box
-routes to `:9002` as atype 0 — it never reaches VoiceRouter.
+If iOS ever falls back to a `compatibility` PCM stream for media, it arrives on `:9003` as atype 5; this
+receiver has no PCM media sink, so `VoiceLatency.mapping` returns an unsupported mapping and the audio is
+dropped (`VoiceLatency.AT_COMPATIBILITY`). Media would be silent while calls and Siri still work,
+which looks identical to a stuck `AacPlayer` focus hold. The drop is logged at error level
+(`VoiceStreams`, logged on BEGIN): `voice: <label>: <type> + compatibility: no PCM path (explicit decision) — its AUs are
+DROPPED`. No capture exists for the 2026-08-28 session where media was silent while Siri worked, so neither
+this path nor the focus path is confirmed for it.
 
-**The conditional failure this creates.** If iOS ever declines the type-102 AAC-LC stream and falls
-back to a `compatibility` PCM stream for media, that arrives on `:9003` as atype 5. This receiver has
-no PCM media sink, so `VoiceRouter.purposeFor` returns null and the audio is dropped: media silent,
-calls and Siri still audible. That presentation is identical to a stuck `AacPlayer` audio-focus hold,
-and the two are distinguishable only by the log line — which is why the atype-5 drop now logs at
-error level naming the consequence (`VoiceRouter.kt`, `ATYPE_COMPATIBILITY`).
+Two logs settle it on the next session; neither needs a verbose flag:
 
-Unresolved: no capture exists for the 2026-08-28 session where media was reported silent while Siri
-worked, so neither this path nor the audio-focus path is confirmed for it.
-
-**Two greps settle it on the next session, and both halves are unconditional — no verbose flag.**
-
-| Half | Where | Source |
+| Half | Where | Line |
 |---|---|---|
-| Which sink each stream landed on, app side | logcat | the `atype 5 … DROPPED` error above, `VoiceRouter.kt` |
-| The negotiated `audioType` per stream, box side | airplayd stderr → `[box:…]` in logcat | `[session] SETUP phase2 audio({ty}) … audioType={..} -> dataPort {..}` |
-| The sink the box chose per stream | airplayd stderr | `[audio] stream {ty} {codec} -> {label} :{port}` |
+| App side: which sink each stream landed on | logcat | the `DROPPED` error above |
+| Box side: negotiated `audioType` per stream | airplayd stderr -> `[box:…]` in logcat | `[session] SETUP phase2 audio({ty}) … audioType={..} -> dataPort {..}` |
+| Box side: sink chosen per stream | airplayd stderr | `[audio] stream {ty} {codec} → {label} :{port} ({sr}Hz {ch}ch)` |
 
-Box-side lines are bare `eprintln!` in `ocbm crates/vendor/receiver/src/session.rs` (the
-phase-2 line :935, not ~:889 — checked 2026-09-09; :886 is the unrelated ALT-screen(111) line) and
-`spawn_audio`; nothing gates them, and they reach this app's logcat through
-the `CH_FILE` box-log stream. A fourth line dumps the full stream dict for every audio-range type
-(100..=112) but is marked for removal once uplink negotiation is confirmed — do not build a
-procedure on it.
+Both box lines are bare `eprintln!`s in `crates/vendor/receiver/src/session.rs` (the `SETUP phase2 audio(`
+line and `spawn_audio`), ungated, reaching this app's logcat via the `CH_FILE` box-log stream. A fourth line
+dumps the full stream dict for types 100..=112 and is marked for removal; do not build a procedure on it.
 
-Reading: a type-102 / `audioType=media` SETUP with audio still failing points at the audio-focus
-path. No 102 stream but a `compatibility` SETUP points at the atype-5 drop, and the fix would then be
-to route 5 to a PCM media sink rather than dropping it. (2026-10-08: `VoiceLatency.mapping` now makes the drop an explicit decision, "compatibility: no PCM path", `VoiceLatency.kt` `mapping`.)
-[A sentence preceding this fragment was lost in an earlier edit (present already at HEAD); its content is UNKNOWN. The fragment ends: "… link makes iOS find no usable PCM and borrow no MainAudio at all)."] They remain advertised because they
-are part of `preset_wireless_8`, the device-proven-as-a-whole preset, and `audioFormats` is a
-reconnect-only key in `/info` — not a free edit.
+Reading: a type-102 / `audioType=media` SETUP with audio still failing points at the focus path; no 102 stream
+but a `compatibility` SETUP points at the atype-5 drop, and the fix would be a PCM media sink. The entries stay
+advertised because they are part of `preset_wireless_8`, the device-proven-as-a-whole preset, and `audioFormats`
+is a reconnect-only key in `/info`.
 
-> **Do not remove entry 1 without re-verifying the mic path first.** It was the *only* input format
-> that could arm before `mic-uplink-eld` was built (§4); now that AAC-ELD mic encode is compiled, this
-> constraint may have relaxed, but no truck test has confirmed the AAC-ELD mic path actually works
-> end to end. Until that test happens, treat entry 1 as load-bearing.
+Do not remove entry 1 until the AAC-ELD mic path is truck-tested end to end; treat it as load-bearing. Entry 2
+(type 101 `compatibility`, output-only) carries no mic obligation and can be removed in its own change with its
+own truck test; a regression there presents as "no audio at all", so bundle nothing with it.
 
-**Still open**: entry 2 (type 101 `compatibility`, output-only PCM) carries no such mic obligation and
-can be removed in its own change with its own truck test, independent of everything else in this doc —
-a regression there would present as "no audio at all," the same signature as an audio-path regression
-elsewhere, so bundle nothing else with it.
+### `cornerMasks`
 
-### `cornerMasks` — cited here only as a failure-mode example
-
-An Apple design affordance for rounded/irregular display cutouts, irrelevant here (fullscreen video on
-a rectangular panel). Not advertised (`levers::set_cornermasks(false)`). Mentioned only because it is
-one of the two historical `-16720` teardowns and the evidence for which advert class can kill a session
-(`enabledFeatures` tokens, not `audioFormats` entries).
-
----
-
-## 6. Build order — status
-
-| # | Step | Gate | Status |
-|---|---|---|---|
-| **A1** | `atype` in `tag_voice` (`ocbm`, box-side) | Byte arrives on `:9003`, matches SETUP's `audioType` | **Landed** |
-| **A2** | Voice decoder: parse `:9003` tag, `MediaCodec audio/mp4a-latm` with the ELD `csd-0` | Siri audio audible on `bus2_voice_command_out` | **Truck-confirmed 2026-09-04** — Siri audible on `Voice`; media-pause side effect also proven (§3) |
-| **A3** | Per-usage sinks + one focus listener each + silence-fill + watchdog | Call audio on `bus4_call_out`; volume keys follow the active purpose | **Truck-confirmed 2026-09-04** for CALL and NAV routing; the ALERT sink is still unexercised |
-| **A4** | Ducking (energy-gated, 0.2) | A nav prompt ducks music and music returns | **Built**; nav audio routes correctly (2026-09-04) but the duck-and-return interplay is not separately truck-verified |
-| **A5** | Mic: `mic-uplink-eld` feature, then `AudioRecord` + `:9112` client | Siri hears speech; `/info` input formats become honest | **Truck-confirmed 2026-09-04** — works; AAOS mic-in-use indicator raises on request and clears cleanly; no GM mic gain control (expected) |
-
-**Remaining verification** (construction is done): the **alert** sink, **mic-captured speech**, and the
-duck-and-return interplay — each independently testable per §0a and not to be bundled into one changeset
-if it fails. Media, Siri, call and nav routing are owner-confirmed on the truck (2026-09-04).
+An Apple affordance for rounded display cutouts, irrelevant to a rectangular panel and not advertised
+(`levers::set_cornermasks(false)`). Cited only as one of the two historical `-16720` teardowns, evidence that
+`enabledFeatures` tokens, not `audioFormats` entries, are what kills a session.
 
 ---
 
 ## Sources
 
-`carlink_native_personal/app/src/main/kotlin/com/carlink/audio/` (DualStreamAudioManager,
-AudioRingBuffer, MicrophoneCaptureManager) ·
-`ocbm/crates/vendor/receiver/src/{session,forward,uplink,info,stream}.rs` ·
-`ocbm/host/MacHost/carlink_macOS/Audio/` · `ocbm/docs/carplay/06_AV_PIPELINE.md` (audio formats), `docs/50`
-(ELD ASC) · this app's `av/{AacPlayer,VoiceRouter,MicUplink,CarPlayActivity}.kt`, `assets/info.bplist`.
+`carlink_native_personal/app/src/main/kotlin/com/carlink/audio/` (DualStreamAudioManager, AudioRingBuffer,
+MicrophoneCaptureManager) · `ocbm/crates/vendor/receiver/src/{session,forward,uplink,info,stream}.rs` ·
+`ocbm/host/MacHost/carlink_macOS/Audio/` · `ocbm/docs/carplay/06_AV_PIPELINE.md` (audio formats) ·
+`ocbm/docs/ops/05_AUDITS.md` (ELD ASC) · this app's `av/{AacPlayer,VoiceRouter,PurposeEngine,VoiceStreams,MicUplink,CarPlayActivity}.kt`,
+`assets/info.bplist`.

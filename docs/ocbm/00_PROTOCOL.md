@@ -44,7 +44,7 @@ hand in another language:
 | box daemons (Rust) | `crates/ocbm-proto/src/lib.rs` — **canonical** |
 | macOS host app (Swift) | `host/MacHost/carlink_macOS/OCBM/OCBMFraming.swift` |
 | CarlinkAndroid host app (Kotlin, active since 2026-09-18 — see below) | `host/CarlinkAndroid/app/src/main/kotlin/com/carlink/ocbm/OcbmProto.kt` |
-| gm_ccpa client (Kotlin) | `host/gm_ccpa/netprobe_app/app/src/main/java/zeno/gmccpa/ocbm/OcbmProto.kt` — app-owned fork (see below) |
+| gm_ccpa client (Kotlin) | `host/gm_ccpa/app/src/main/java/zeno/gmccpa/ocbm/OcbmProto.kt` — app-owned fork (see below) |
 
 `tools/proto_check.py` verifies all three against the canonical table. Run it before committing a
 protocol change; it takes no arguments, every client is in-tree:
